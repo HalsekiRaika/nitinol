@@ -1,4 +1,6 @@
 use std::marker::PhantomData;
+use std::panic::AssertUnwindSafe;
+use futures::FutureExt;
 use crate::errors::ProjectionError;
 use crate::event::Event;
 use crate::mapping::ResolveMapping;
@@ -6,7 +8,7 @@ use crate::projection::Projection;
 
 #[async_trait::async_trait]
 pub(crate) trait Handler<T: ResolveMapping>: 'static + Sync + Send {
-    async fn apply(&self, actor: &mut Option<T>, payload: Vec<u8>, seq: &mut u64) -> Result<(), ProjectionError>;
+    async fn apply(&self, entity: &mut Option<T>, payload: Vec<u8>, seq: &mut i64) -> Result<(), ProjectionError>;
 }
 
 pub struct ProjectionResolver<T: ResolveMapping, E: Event> {
@@ -24,9 +26,17 @@ impl<T: ResolveMapping, E: Event> Default for ProjectionResolver<T, E> {
 impl<T: ResolveMapping, E: Event> Handler<T> for ProjectionResolver<T, E> 
     where T: Projection<E>
 {
-    async fn apply(&self, actor: &mut Option<T>, payload: Vec<u8>, seq: &mut u64) -> Result<(), ProjectionError> {
+    async fn apply(&self, entity: &mut Option<T>, payload: Vec<u8>, seq: &mut i64) -> Result<(), ProjectionError> {
         let event = E::from_bytes(&payload)?;
-        T::projection(actor, event, seq).await.map_err(|_| ProjectionError::Projection)?;
+        let Some(entity) = entity else {
+            let a = AssertUnwindSafe(T::first(event)).catch_unwind().await
+                .map_err(|_| ProjectionError::Projection)?
+                .map_err(|_| ProjectionError::Projection)?;
+            *entity = Some(a);
+            return Ok(());
+        };
+        T::apply(entity, event).await
+            .map_err(|_| ProjectionError::Projection)?;
         Ok(())
     }
 }

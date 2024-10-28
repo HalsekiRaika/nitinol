@@ -5,6 +5,8 @@ use std::fmt::{Display, Formatter};
 pub enum ProjectionError {
     #[error("Failed projection")]
     Projection,
+    #[error("")]
+    NotCompatible,
     #[error(transparent)]
     Serde(Box<dyn Error + Sync + Send>)
 }
