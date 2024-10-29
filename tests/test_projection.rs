@@ -7,9 +7,9 @@ pub mod store {
 }
 
 use tokio::time::Instant;
-use spectrum::Event;
-use spectrum::identifier::ToEntityId;
-use spectrum::protocol::Projector;
+use spectroscopy::Event;
+use spectroscopy::identifier::ToEntityId;
+use spectroscopy::protocol::Projector;
 pub use self::entity::*;
 pub use self::store::*;
 

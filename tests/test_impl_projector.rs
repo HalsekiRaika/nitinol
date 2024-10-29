@@ -2,9 +2,9 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use spectrum::identifier::EntityId;
-use spectrum::protocol::{Payload, ReadProtocol};
-use spectrum::protocol::errors::ProtocolError;
+use spectroscopy::identifier::EntityId;
+use spectroscopy::protocol::{Payload, ReadProtocol};
+use spectroscopy::protocol::errors::ProtocolError;
 
 #[derive(Debug, Clone)]
 pub struct Row {

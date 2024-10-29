@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use spectrum::errors::{DeserializeError, SerializeError};
-use spectrum::{Event, Projection};
-use spectrum::mapping::{Mapper, ResolveMapping};
+use spectroscopy::errors::{DeserializeError, SerializeError};
+use spectroscopy::{Event, Projection};
+use spectroscopy::mapping::{Mapper, ResolveMapping};
 
 pub struct Counter {
     pub state: u32,
