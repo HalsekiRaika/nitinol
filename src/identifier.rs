@@ -21,6 +21,12 @@ impl Display for EntityId {
     }
 }
 
+impl AsRef<str> for EntityId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
 pub trait IntoEntityId: 'static + Sync + Send {
     fn into_entity_id(self) -> EntityId;
 }

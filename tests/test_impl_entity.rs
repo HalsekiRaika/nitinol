@@ -4,7 +4,7 @@ use spectrum::{Event, Projection};
 use spectrum::mapping::{Mapper, ResolveMapping};
 
 pub struct Counter {
-    state: u32,
+    pub state: u32,
 }
 
 impl ResolveMapping for Counter {
@@ -54,3 +54,6 @@ impl Event for CounterEvent {
         Ok(serde_json::from_slice(bytes)?)
     }
 }
+
+#[test]
+fn main() { /* Compile-Only */}

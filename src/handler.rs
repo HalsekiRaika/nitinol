@@ -26,7 +26,9 @@ impl<T: ResolveMapping, E: Event> Default for ProjectionResolver<T, E> {
 impl<T: ResolveMapping, E: Event> Handler<T> for ProjectionResolver<T, E> 
     where T: Projection<E>
 {
-    async fn apply(&self, entity: &mut Option<T>, payload: Vec<u8>, seq: &mut i64) -> Result<(), ProjectionError> {
+    async fn apply(&self, entity: &mut Option<T>, payload: Vec<u8>, _seq: &mut i64) -> Result<(), ProjectionError> {
+        println!("Applying projection, {_seq}");
+        *_seq += 1;
         let event = E::from_bytes(&payload)?;
         let Some(entity) = entity else {
             let a = AssertUnwindSafe(T::first(event)).catch_unwind().await
@@ -37,6 +39,7 @@ impl<T: ResolveMapping, E: Event> Handler<T> for ProjectionResolver<T, E>
         };
         T::apply(entity, event).await
             .map_err(|_| ProjectionError::Projection)?;
+
         Ok(())
     }
 }

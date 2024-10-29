@@ -27,7 +27,7 @@ impl PartialEq<str> for RegistryKey {
 }
 
 impl<T: ResolveMapping> Mapper<T> {
-    pub fn find_by_key(&self, k: impl AsRef<str>) -> Option<Arc<dyn Handler<T>>> {
+    pub(crate) fn find_by_key(&self, k: impl AsRef<str>) -> Option<Arc<dyn Handler<T>>> {
         self.0.iter()
             .find(|(key, _)| key.1.eq(k.as_ref()))
             .map(|(_, handler)| handler)
