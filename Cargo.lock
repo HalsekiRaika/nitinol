@@ -379,7 +379,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "spectrum"
+name = "spectroscopy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
