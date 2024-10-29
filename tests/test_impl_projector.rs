@@ -66,18 +66,12 @@ impl ReadProtocol for InMemoryEventStore {
             .cloned()
             .filter(|row| row.id.eq(&id.to_string()))
             .filter(|row| start <= row.seq && row.seq <= to)
-            .inspect(|row| println!("{:?}", row))
             .map(|row| Payload {
                 sequence_id: row.seq,
                 registry_key: row.registry_key,
                 bytes: row.bytes
             })
             .collect::<BTreeSet<Payload>>();
-
-        for row in &col {
-            println!("{:?}", row);
-        }
-
         Ok(col)
     }
 }

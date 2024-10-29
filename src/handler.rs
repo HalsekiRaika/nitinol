@@ -27,7 +27,6 @@ impl<T: ResolveMapping, E: Event> Handler<T> for ProjectionResolver<T, E>
     where T: Projection<E>
 {
     async fn apply(&self, entity: &mut Option<T>, payload: Vec<u8>, _seq: &mut i64) -> Result<(), ProjectionError> {
-        println!("Applying projection, {_seq}");
         *_seq += 1;
         let event = E::from_bytes(&payload)?;
         let Some(entity) = entity else {

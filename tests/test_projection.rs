@@ -6,6 +6,7 @@ pub mod store {
     include!(concat!("test_impl_projector.rs"));
 }
 
+use tokio::time::Instant;
 use spectrum::Event;
 use spectrum::identifier::ToEntityId;
 use spectrum::protocol::Projector;
@@ -29,9 +30,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let projector = Projector::new(store);
+
+    let now = Instant::now();
+
     let counter = projector.of::<Counter>(None)
         .projection_to_latest(&"counter-1".to_entity_id())
         .await?;
+
+    let elapsed = now.elapsed();
+    println!("Elapsed: {:?}ms", elapsed.as_micros());
 
     let (counter, seq) = counter.ok_or(anyhow::Error::msg("wtf"))?;
 
