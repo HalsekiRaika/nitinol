@@ -23,7 +23,6 @@ async fn main() -> anyhow::Result<()> {
         CounterEvent::Increased,
         CounterEvent::Decreased,
     ];
-    let mut seq = 0;
     for (seq, event) in events.into_iter().enumerate() {
         store
             .write(
