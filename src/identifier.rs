@@ -1,4 +1,5 @@
-use std::fmt::{Display, Formatter};
+use std::fmt::{Debug, Display, Formatter};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub struct EntityId(Arc<str>);
@@ -15,6 +16,12 @@ impl Clone for EntityId {
     }
 }
 
+impl Debug for EntityId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl Display for EntityId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -24,6 +31,20 @@ impl Display for EntityId {
 impl AsRef<str> for EntityId {
     fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+impl Eq for EntityId {}
+
+impl PartialEq<Self> for EntityId {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl Hash for EntityId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
     }
 }
 

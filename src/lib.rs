@@ -1,13 +1,13 @@
 pub mod errors;
-pub mod mapping;
-mod handler;
 mod fixture;
-pub mod protocol;
+mod handler;
 pub mod identifier;
+pub mod mapping;
+pub mod protocol;
 
-
-mod projection;
+pub mod agent;
 mod event;
+mod projection;
 
-pub use self::projection::*;
 pub use self::event::*;
+pub use self::projection::*;

@@ -1,16 +1,23 @@
 use std::cmp::Ordering;
 
-
 pub mod errors;
 mod read;
 
 pub use self::read::*;
 
+/// Basic format of the data to be saved.
 #[derive(Debug, Clone)]
 pub struct Payload {
+    /// Unique sequence value at a specific Entity
     pub sequence_id: i64,
+    /// Unique id for each data format used in [`ResolveMapping`](crate::mapping::ResolveMapping)
     pub registry_key: String,
-    pub bytes: Vec<u8>
+    /// Unique sequence value across the storage to be stored.
+    ///
+    /// For [Optimistic Locking](https://en.wikipedia.org/wiki/Optimistic_concurrency_control).
+    pub version: i64,
+    /// Data body in binary format
+    pub bytes: Vec<u8>,
 }
 
 impl Eq for Payload {}
@@ -32,4 +39,3 @@ impl Ord for Payload {
         self.sequence_id.cmp(&other.sequence_id)
     }
 }
-

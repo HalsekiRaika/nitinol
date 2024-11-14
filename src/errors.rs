@@ -8,7 +8,7 @@ pub enum ProjectionError {
     #[error("")]
     NotCompatible,
     #[error(transparent)]
-    Serde(Box<dyn Error + Sync + Send>)
+    Serde(Box<dyn Error + Sync + Send>),
 }
 
 impl From<SerializeError> for ProjectionError {
