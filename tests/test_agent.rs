@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 use spectroscopy::errors::{DeserializeError, SerializeError};
 use spectroscopy::mapping::{Mapper, ResolveMapping};
 use spectroscopy::{Event, Projection};
@@ -33,6 +35,7 @@ impl Applicator<CounterEvent> for Counter {
             CounterEvent::Increased => self.state += 1,
             CounterEvent::Decreased => self.state -= 1,
         }
+        tracing::debug!("[Counter] current state: {}", self.state);
     }
 }
 
@@ -56,6 +59,7 @@ impl Projection<CounterEvent> for Counter {
             CounterEvent::Increased => self.state += 1,
             CounterEvent::Decreased => self.state -= 1,
         }
+        tracing::debug!("[Counter] current state: {}", self.state);
         Ok(())
     }
 }
@@ -92,6 +96,12 @@ use spectroscopy::agent::{AgentExecutor, Applicator, Command, Context, Executor,
 
 #[tokio::test]
 async fn spawn_agent() {
+    std::env::set_var("RUST_LOG", "spectroscopy=trace,test_agent=trace");
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_max_level(LevelFilter::TRACE)
+        .init();
+    
     let executor = Executor::default();
 
     let id = "counter-1".to_string();
@@ -99,7 +109,7 @@ async fn spawn_agent() {
         state: 0,
     };
 
-    let agent = executor.spawn(id, counter).await.unwrap();
+    let agent = executor.spawn(id, counter, 0).await.unwrap();
     
     let cmd1 = CounterCommand::Increase;
     let cmd2 = CounterCommand::Decrease;

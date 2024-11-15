@@ -6,6 +6,7 @@ pub mod handler;
 pub mod lifecycle;
 mod publisher;
 mod registry;
+pub mod extension;
 
 pub use self::applicator::*;
 pub use self::publisher::*;
