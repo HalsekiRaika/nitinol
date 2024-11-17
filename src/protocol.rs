@@ -2,8 +2,10 @@ use std::cmp::Ordering;
 
 pub mod errors;
 mod read;
+mod write;
 
 pub use self::read::*;
+pub use self::write::*;
 
 /// Basic format of the data to be saved.
 #[derive(Debug, Clone)]

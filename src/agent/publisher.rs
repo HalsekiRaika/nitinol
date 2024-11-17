@@ -38,7 +38,8 @@ where
 #[cfg(test)]
 mod test {
     #![allow(unused)]
-
+    
+    use std::sync::Arc;
     use super::Publisher;
     use crate::agent::{Command, Context};
     use crate::errors::{DeserializeError, SerializeError};
@@ -93,7 +94,7 @@ mod test {
         ) -> Result<Self::Event, Self::Rejection> {
             match command {
                 UserCommand::ChangeName { to } => {
-                    if to.len() >= 8 && self.name.eq(&to) {
+                    if to.len() >= 8 || self.name.eq(&to) {
                         return Err(PublishError::Violation);
                     }
 
@@ -105,21 +106,35 @@ mod test {
 
     #[tokio::test]
     async fn publish() {
-        let mut ctx = Context { sequence: 0 };
+        let mut ctx = Context { sequence: 0, extension: Arc::new(Default::default()) };
         let user = User {
             id: "aaa".to_string(),
             name: "test man".to_string(),
         };
         let cmd = UserCommand::ChangeName {
-            to: "testing man".to_string(),
+            to: "t man".to_string(),
         };
         let event = user.publish(cmd, &mut ctx).await.unwrap();
 
         assert_eq!(
             event,
             UserEvent::ChangedName {
-                changed: "testing man".to_string()
+                changed: "t man".to_string()
             }
         );
+    }
+    
+    #[should_panic]
+    #[tokio::test]
+    async fn publish_panic() {
+        let mut ctx = Context { sequence: 0, extension: Arc::new(Default::default()) };
+        let user = User {
+            id: "aaa".to_string(),
+            name: "test man".to_string(),
+        };
+        let cmd = UserCommand::ChangeName {
+            to: "test man".to_string(),
+        };
+        let event = user.publish(cmd, &mut ctx).await.unwrap();
     }
 }

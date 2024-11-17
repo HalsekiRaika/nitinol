@@ -23,6 +23,8 @@ where
     async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), AgentError> {
         self.oneshot
             .send(entity.apply(self.event, ctx).await)
-            .map_err(|_| AgentError::ChannelDropped)
+            .map_err(|_| AgentError::ChannelDropped)?;
+        ctx.sequence += 1;
+        Ok(())
     }
 }
