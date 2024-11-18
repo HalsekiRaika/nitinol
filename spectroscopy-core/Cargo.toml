@@ -1,0 +1,14 @@
+[package]
+name = "spectroscopy-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["markers", "futures-util"]
+markers = []
+
+[dependencies]
+async-trait = "^0.1"
+thiserror = "^2"
+serde = "^1"
+futures-util = { version = "^0.3", features = ["std"], default-features = false, optional = true }
