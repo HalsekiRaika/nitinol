@@ -16,6 +16,12 @@ pub struct Projector {
 }
 
 impl Projector {
+    pub fn new(reader: ReadProtocol) -> Self {
+        Self { reader }
+    }
+}
+
+impl Projector {
     pub async fn projection_to_latest<T: ResolveMapping>(
         &self, 
         id: impl Into<String>, 
@@ -61,7 +67,8 @@ async fn patch_load<T: ResolveMapping>(
                 bytes: payload.bytes,
                 refs,
             })
-        }).collect()
+        })
+        .collect()
 }
 
 async fn patch<T: ResolveMapping>(

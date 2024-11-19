@@ -1273,6 +1273,12 @@ dependencies = [
 [[package]]
 name = "spectroscopy-agent"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "spectroscopy-core",
+ "thiserror 2.0.0",
+ "tokio",
+]
 
 [[package]]
 name = "spectroscopy-core"
