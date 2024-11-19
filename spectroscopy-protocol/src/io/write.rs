@@ -7,7 +7,7 @@ use crate::Payload;
 
 #[async_trait]
 pub trait Writer: 'static + Sync + Send {
-    async fn write(&self, payload: Payload) -> Result<(), ProtocolError>;
+    async fn write(&self, aggregate_id: &str, payload: Payload) -> Result<(), ProtocolError>;
 }
 
 pub struct WriteProtocol {
@@ -31,10 +31,10 @@ impl WriteProtocol {
         Self { writer: Arc::new(provider) }
     }
     
-    pub async fn write<E: Event>(&self, event: &E, seq: i64) -> Result<(), ProtocolError> {
+    pub async fn write<E: Event>(&self, aggregate_id: &str, event: &E, seq: i64) -> Result<(), ProtocolError> {
         let event = event.as_bytes().map_err(|e| ProtocolError::Write(Box::new(e)))?;
         self.writer
-            .write(Payload {
+            .write(aggregate_id, Payload {
                 sequence_id: seq,
                 registry_key: E::REGISTRY_KEY.to_string(),
                 bytes: event,

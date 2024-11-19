@@ -8,9 +8,11 @@ pub struct OptLock<T: ?Sized> {
     cell: UnsafeCell<T>
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ErrorKind {
+    #[error("Blocked by Writer.")]
     Blocked,
+    #[error("Version information does not match")]
     MismatchedVersion
 }
 

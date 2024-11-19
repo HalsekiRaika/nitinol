@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+thiserror = "^2"
+
 spectroscopy-core = { path = "../spectroscopy-core" }
+spectroscopy-protocol = { path = "../spectroscopy-protocol" }

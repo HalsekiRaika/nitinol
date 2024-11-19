@@ -4,6 +4,8 @@ use std::fmt::{Display, Formatter};
 #[cfg(feature = "default")]
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectionError {
+    #[error("Errors occurred in external protocols.")]
+    Protocol(#[source] Box<dyn Error + Sync + Send>),
     #[error("Failed projection")]
     Projection(#[from] Box<dyn Error + Sync + Send>),
     #[error(transparent)]

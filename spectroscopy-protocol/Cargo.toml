@@ -14,7 +14,9 @@ spectroscopy-core = { path = "../spectroscopy-core", features = ["markers"], def
 async-trait = "^0.1"
 thiserror = "^2"
 tokio = { version = "^1", features = ["sync"], default-features = false, optional = true }
-sqlx = { version = "^0.8", features = [], optional = true }
+sqlx = { version = "^0.8", features = ["migrate", "macros"], optional = true }
+
+tracing = "^0.1"
 
 [dev-dependencies]
 tokio = { version = "^1", features = ["sync", "rt-multi-thread", "macros", "time"] }

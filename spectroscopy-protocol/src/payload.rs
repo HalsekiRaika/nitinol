@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 
 /// Basic format of the data to be saved.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct Payload {
     /// Unique sequence value at a specific Entity
     pub sequence_id: i64,

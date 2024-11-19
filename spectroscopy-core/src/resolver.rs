@@ -5,7 +5,7 @@ use crate::projection::Projection;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
-use self::projection::{PatchHandler, ProjectionResolver};
+pub use self::projection::*;
 
 pub trait ResolveMapping: 'static + Sync + Send + Sized {
     fn mapping(mapper: &mut Mapper<Self>);
