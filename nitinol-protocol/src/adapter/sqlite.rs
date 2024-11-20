@@ -16,8 +16,12 @@ impl Clone for SqliteEventStore {
 }
 
 impl SqliteEventStore {
-    pub fn new(pool: Pool<Sqlite>) -> Self {
-        Self { pool }
+    pub async fn setup(pool: Pool<Sqlite>) -> Result<Self, ProtocolError> {
+        sqlx::migrate!("./migrations/sqlite")
+            .run(&pool)
+            .await
+            .map_err(|e| ProtocolError::Write(Box::new(e)))?;
+        Ok(Self { pool })
     }
 }
 
