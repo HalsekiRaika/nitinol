@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 use async_trait::async_trait;
-use spectroscopy_core::event::Event;
+use nitinol_core::event::Event;
 use crate::errors::ProtocolError;
 use crate::Payload;
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use spectroscopy_core::resolver::ResolveMapping;
+use nitinol_core::resolver::ResolveMapping;
 use crate::any::{AnyRef, InvalidCast};
 use crate::identifier::EntityId;
 use crate::Ref;

@@ -1,9 +1,9 @@
 use std::any::Any;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
-use spectroscopy_core::command::Command;
-use spectroscopy_core::event::Event;
-use spectroscopy_core::resolver::ResolveMapping;
+use nitinol_core::command::Command;
+use nitinol_core::event::Event;
+use nitinol_core::resolver::ResolveMapping;
 use crate::channel::{ApplicativeHandler, Applier, PublishHandler};
 use crate::errors::AgentError;
 use crate::{Applicator, Publisher};

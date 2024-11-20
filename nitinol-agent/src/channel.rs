@@ -5,7 +5,7 @@ pub use self::applicator::*;
 pub use self::publisher::*;
 
 use async_trait::async_trait;
-use spectroscopy_core::resolver::ResolveMapping;
+use nitinol_core::resolver::ResolveMapping;
 use crate::Context;
 use crate::errors::AgentError;
 

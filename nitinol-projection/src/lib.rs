@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
-use spectroscopy_core::errors::ProjectionError;
-use spectroscopy_core::resolver::{Mapper, ResolveMapping};
-use spectroscopy_protocol::io::ReadProtocol;
-use spectroscopy_protocol::Payload;
-use crate::errors::NotCompatible;
+use nitinol_core::errors::ProjectionError;
+use nitinol_core::resolver::{Mapper, ResolveMapping};
+use nitinol_protocol::io::ReadProtocol;
+use nitinol_protocol::Payload;
+use crate::errors::{FailedProjection, NotCompatible};
 use crate::fixtures::{Fixture, FixtureParts};
 
 pub mod errors;
@@ -26,7 +26,7 @@ impl Projector {
         &self, 
         id: impl Into<String>, 
         entity: impl Into<Option<(T, i64)>>
-    ) -> Result<T, ProjectionError> {
+    ) -> Result<(T, i64), ProjectionError> {
         let id = id.into();
         
         let mut mapping = Mapper::default();
@@ -38,14 +38,16 @@ impl Projector {
                     .map_err(|e| ProjectionError::Protocol(Box::new(e)))?;
                 let parts = patch_load(&mapping, journal).await
                     .map_err(|e| ProjectionError::Projection(Box::new(e)))?;
-                patch(None, 0, parts).await
+                patch(None, 0, parts).await?
+                    .ok_or(ProjectionError::Projection(Box::new(FailedProjection { id })))
             }
             Some((entity, seq)) => {
                 let journal = self.reader.read_to_latest(&id, seq).await
                     .map_err(|e| ProjectionError::Protocol(Box::new(e)))?;
                 let parts = patch_load(&mapping, journal).await
                     .map_err(|e| ProjectionError::Projection(Box::new(e)))?;
-                patch(Some(entity), seq, parts).await
+                patch(Some(entity), seq, parts).await?
+                    .ok_or(ProjectionError::Projection(Box::new(FailedProjection { id })))
             }
         }
     }

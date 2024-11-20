@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use spectroscopy_core::errors::ProjectionError;
-use spectroscopy_core::resolver::{PatchHandler, ResolveMapping};
+use nitinol_core::errors::ProjectionError;
+use nitinol_core::resolver::{PatchHandler, ResolveMapping};
 
 pub struct Fixture<T: ResolveMapping> {
     parts: Option<BTreeSet<FixtureParts<T>>>,

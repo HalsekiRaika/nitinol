@@ -1,6 +1,6 @@
 use std::any::{type_name, Any};
 use std::sync::Arc;
-use spectroscopy_core::resolver::ResolveMapping;
+use nitinol_core::resolver::ResolveMapping;
 use super::Ref;
 
 pub trait DynRef: 'static + Sync + Send {

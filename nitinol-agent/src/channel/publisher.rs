@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use tokio::sync::oneshot;
-use spectroscopy_core::command::Command;
-use spectroscopy_core::event::Event;
-use spectroscopy_core::resolver::ResolveMapping;
+use nitinol_core::command::Command;
+use nitinol_core::event::Event;
+use nitinol_core::resolver::ResolveMapping;
 use super::Applier;
 use crate::Context;
 use crate::errors::AgentError;

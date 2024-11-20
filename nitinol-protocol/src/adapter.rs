@@ -1,3 +1,6 @@
-mod inmemory;
-mod sqlite;
-mod errors;
+#[cfg(feature = "inmemory")]
+pub mod inmemory;
+
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
+pub mod errors;

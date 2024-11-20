@@ -1,4 +1,4 @@
-use spectroscopy_core::resolver::ResolveMapping;
+use nitinol_core::resolver::ResolveMapping;
 use crate::channel::Applier;
 use crate::Context;
 use crate::identifier::ToEntityId;
