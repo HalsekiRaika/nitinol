@@ -1,3 +1,3 @@
-# Spectroscopy
+# Nitinol
 
-This library assists in projecting Entity information using Events in EventSourcing.
+An utilities for EventSourcing.
