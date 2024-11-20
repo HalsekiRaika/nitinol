@@ -766,6 +766,60 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitinol"
+version = "0.2.0-alpha"
+dependencies = [
+ "nitinol-agent",
+ "nitinol-core",
+ "nitinol-projection",
+ "nitinol-protocol",
+]
+
+[[package]]
+name = "nitinol-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nitinol-core",
+ "thiserror 2.0.0",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nitinol-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "serde",
+ "thiserror 2.0.0",
+]
+
+[[package]]
+name = "nitinol-projection"
+version = "0.1.0"
+dependencies = [
+ "nitinol-core",
+ "nitinol-protocol",
+ "thiserror 2.0.0",
+]
+
+[[package]]
+name = "nitinol-protocol"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "nitinol-core",
+ "sqlx",
+ "thiserror 2.0.0",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1210,60 +1264,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c5e1a9a646d36c3599cd173a41282daf47c44583ad367b8e6837255952e5c67"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "spectroscopy"
-version = "0.2.0-alpha"
-dependencies = [
- "spectroscopy-agent",
- "spectroscopy-core",
- "spectroscopy-projection",
- "spectroscopy-protocol",
-]
-
-[[package]]
-name = "spectroscopy-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "spectroscopy-core",
- "thiserror 2.0.0",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "spectroscopy-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures-util",
- "serde",
- "thiserror 2.0.0",
-]
-
-[[package]]
-name = "spectroscopy-projection"
-version = "0.1.0"
-dependencies = [
- "spectroscopy-core",
- "spectroscopy-protocol",
- "thiserror 2.0.0",
-]
-
-[[package]]
-name = "spectroscopy-protocol"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "spectroscopy-core",
- "sqlx",
- "thiserror 2.0.0",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

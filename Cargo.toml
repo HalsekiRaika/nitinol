@@ -1,10 +1,10 @@
 [workspace]
 members = [
   ".",
-  "spectroscopy-core",
-  "spectroscopy-protocol",
-  "spectroscopy-agent",
-  "spectroscopy-projection",
+  "nitinol-core",
+  "nitinol-protocol",
+  "nitinol-agent",
+  "nitinol-projection",
 ]
 
 resolver = "2"
@@ -13,30 +13,30 @@ resolver = "2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]
-repository = "https://github.com/HalsekiRaika/spectroscopy"
+repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
 [features]
 agent = []
-sqlite = ["protocol", "spectroscopy-protocol/sqlite"]
-inmemory = ["protocol", "spectroscopy-protocol/inmemory"]
+sqlite = ["protocol", "nitinol-protocol/sqlite"]
+inmemory = ["protocol", "nitinol-protocol/inmemory"]
 protocol = []
 projection = []
 
 [package]
-name = "spectroscopy"
+name = "nitinol"
 version = "0.2.0-alpha"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]
-repository = "https://github.com/HalsekiRaika/spectroscopy"
+repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
 [dependencies]
-spectroscopy-core = { path = "spectroscopy-core" }
-spectroscopy-protocol = { path = "spectroscopy-protocol" }
-spectroscopy-agent = { path = "spectroscopy-agent" }
-spectroscopy-projection = { path = "spectroscopy-projection" }
+nitinol-core = { path = "nitinol-core" }
+nitinol-protocol = { path = "nitinol-protocol" }
+nitinol-agent = { path = "nitinol-agent" }
+nitinol-projection = { path = "nitinol-projection" }
 
 
 [dev-dependencies]
