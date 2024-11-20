@@ -1,13 +1,21 @@
-pub mod errors;
-mod fixture;
-mod handler;
-pub mod identifier;
-pub mod mapping;
-pub mod protocol;
+pub use nitinol_core::event::Event;
+pub use nitinol_core::command::Command;
 
-pub mod agent;
-mod event;
-mod projection;
+#[cfg(feature = "protocol")]
+pub mod protocol {
+    pub use nitinol_protocol::Payload;
+    pub use nitinol_protocol::io;
+    pub use nitinol_protocol::adapter;
+}
 
-pub use self::event::*;
-pub use self::projection::*;
+#[cfg(feature = "agent")]
+pub mod agent {
+    pub use nitinol_agent::any;
+    pub use nitinol_agent::Ref;
+    pub use nitinol_agent::{Applicator, Publisher};
+}
+
+#[cfg(feature = "projection")]
+pub mod projection {
+    pub use nitinol_projection::Projector;
+}

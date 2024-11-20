@@ -1,0 +1,29 @@
+[package]
+name = "nitinol-protocol"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+
+
+[features]
+inmemory = ["tokio"]
+postgres = ["sqlx/postgres"]
+sqlite = ["sqlx/sqlite"]
+
+[dependencies]
+nitinol-core = { path = "../nitinol-core", features = ["markers"], default-features = false }
+
+async-trait = "^0.1"
+thiserror = "^2"
+tokio = { version = "^1", features = ["sync"], default-features = false, optional = true }
+sqlx = { version = "^0.8", features = ["migrate", "macros"], optional = true }
+
+tracing = "^0.1"
+
+[dev-dependencies]
+tokio = { version = "^1", features = ["sync", "rt-multi-thread", "macros", "time"] }
+tracing = "^0.1"
+tracing-subscriber = { version = "^0.3", features = ["env-filter"] }
+futures = "^0.3"
