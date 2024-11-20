@@ -1,13 +1,21 @@
-pub mod errors;
-mod fixture;
-mod handler;
-pub mod identifier;
-pub mod mapping;
-pub mod protocol;
+pub use spectroscopy_core::event::Event;
+pub use spectroscopy_core::command::Command;
 
-pub mod agent;
-mod event;
-mod projection;
+#[cfg(feature = "protocol")]
+pub mod protocol {
+    pub use spectroscopy_protocol::Payload;
+    pub use spectroscopy_protocol::io;
+    pub use spectroscopy_protocol::adapter;
+}
 
-pub use self::event::*;
-pub use self::projection::*;
+#[cfg(feature = "agent")]
+pub mod agent {
+    pub use spectroscopy_agent::any;
+    pub use spectroscopy_agent::Ref;
+    pub use spectroscopy_agent::{Applicator, Publisher};
+}
+
+#[cfg(feature = "projection")]
+pub mod projection {
+    pub use spectroscopy_projection::Projector;
+}

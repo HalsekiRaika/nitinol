@@ -1,6 +1,8 @@
 mod applicator;
+mod publisher;
 
 pub use self::applicator::*;
+pub use self::publisher::*;
 
 use async_trait::async_trait;
 use spectroscopy_core::resolver::ResolveMapping;

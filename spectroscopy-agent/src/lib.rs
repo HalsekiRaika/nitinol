@@ -1,7 +1,11 @@
+pub mod registry;
 pub mod lifecycle;
+pub mod identifier;
 mod channel;
 mod context;
-mod errors;
+pub mod errors;
+mod refs;
 
+pub use self::refs::*;
 pub use self::channel::*;
 pub use self::context::*;

@@ -1,44 +1,21 @@
-use crate::agent::any::AnyAgent;
-use crate::agent::errors::AgentError;
-use crate::agent::Agent;
-use crate::identifier::EntityId;
-use crate::mapping::ResolveMapping;
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use spectroscopy_core::resolver::ResolveMapping;
+use crate::any::{AnyRef, InvalidCast};
+use crate::identifier::EntityId;
+use crate::Ref;
 
 pub struct Registry {
-    registry: Arc<RwLock<HashMap<EntityId, AnyAgent>>>,
+    registry: Arc<RwLock<HashMap<EntityId, AnyRef>>>
 }
 
-impl Debug for Registry {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Registry").field("registry", &"..").finish()
-    }
-}
-
-impl Clone for Registry {
-    fn clone(&self) -> Self {
-        Self {
-            registry: Arc::clone(&self.registry),
-        }
-    }
-}
-
-impl Default for Registry {
-    fn default() -> Self {
-        Self {
-            registry: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-}
 
 impl Registry {
     pub(crate) async fn register<T: ResolveMapping>(
         &self,
         id: EntityId,
-        writer: Agent<T>,
+        writer: Ref<T>,
     ) -> Result<(), RegistryError> {
         let mut lock = self.registry.write().await;
         if lock.iter().any(|(exist, _)| exist.eq(&id)) {
@@ -50,7 +27,7 @@ impl Registry {
         Ok(())
     }
 
-    pub(crate) async fn deregister(&self, id: &EntityId) -> Result<(), RegistryError> {
+    pub async fn deregister(&self, id: &EntityId) -> Result<(), RegistryError> {
         let mut lock = self.registry.write().await;
         if !lock.iter().any(|(exist, _)| exist.eq(id)) {
             return Err(RegistryError::NotFound(id.to_owned()));
@@ -61,10 +38,8 @@ impl Registry {
         Ok(())
     }
 
-    pub async fn find<T: ResolveMapping>(
-        &self,
-        id: &EntityId,
-    ) -> Result<Option<Agent<T>>, AgentError> {
+    #[rustfmt::skip]
+    pub async fn find<T: ResolveMapping>(&self, id: &EntityId) -> Result<Option<Ref<T>>, InvalidCast> {
         let lock = self.registry.read().await;
         lock.iter()
             .find(|(dest, _)| dest.eq(&id))
@@ -80,4 +55,18 @@ pub enum RegistryError {
     AlreadyExist(EntityId),
     #[error("Not found Agent {0}")]
     NotFound(EntityId),
+}
+
+impl Clone for Registry {
+    fn clone(&self) -> Self {
+        Self { registry: Arc::clone(&self.registry) }
+    }
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self {
+            registry: Arc::new(RwLock::new(HashMap::new()))
+        }
+    }
 }

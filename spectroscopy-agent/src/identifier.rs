@@ -62,7 +62,7 @@ impl<T: ToString + Sync + Send + 'static> IntoEntityId for T {
     }
 }
 
-impl<T: ToString + Sync + Send + 'static> ToEntityId for T {
+impl<T: ToString + Sync + Send + 'static + ?Sized> ToEntityId for T {
     fn to_entity_id(&self) -> EntityId {
         EntityId::new(self.to_string())
     }
