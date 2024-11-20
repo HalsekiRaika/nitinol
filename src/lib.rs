@@ -19,3 +19,10 @@ pub mod agent {
 pub mod projection {
     pub use nitinol_projection::Projector;
 }
+
+pub mod errors {
+    pub use nitinol_core::errors::*;
+    pub use nitinol_agent::errors::*;
+    pub use nitinol_protocol::errors::*;
+    pub use nitinol_projection::errors::*;
+}
