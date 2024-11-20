@@ -12,6 +12,7 @@ pub mod protocol {
 pub mod agent {
     pub use nitinol_agent::any;
     pub use nitinol_agent::Ref;
+    pub use nitinol_agent::Context;
     pub use nitinol_agent::{Applicator, Publisher};
 }
 
