@@ -35,6 +35,7 @@ impl Writer for InMemoryEventStore {
     async fn write(&self, aggregate_id: &str, payload: Payload) -> Result<(), ProtocolError> {
         let guard = self.journal.read().await;
         if !guard.contains_key(aggregate_id) { 
+            drop(guard);
             let mut guard = self.journal.write().await;
             let mut init = BTreeSet::new();
             init.insert(Row {
@@ -103,7 +104,7 @@ impl Reader for InMemoryEventStore {
             match lock.read().await {
                 Ok(guard) => {
                     let found = guard.iter()
-                        .filter(|row| from >= row.seq && row.seq <= to)
+                        .filter(|row| from <= row.seq && row.seq <= to)
                         .cloned()
                         .collect::<BTreeSet<_>>();
                     match guard.sync().await {
