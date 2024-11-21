@@ -1,3 +1,9 @@
 pub struct Context {
-    // Todo: Fill in the fields
+    pub(crate) sequence: i64,
+}
+
+impl Context {
+    pub fn sequence(&self) -> i64 {
+        self.sequence
+    }
 }
