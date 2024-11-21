@@ -18,6 +18,7 @@ pub mod agent {
 
 #[cfg(feature = "projection")]
 pub mod projection {
+    pub use nitinol_core::projection;
     pub use nitinol_projection::Projector;
 }
 
