@@ -23,6 +23,11 @@ pub async fn run<T: ResolveMapping>(
             if let Err(e) = rx.apply(&mut entity, &mut context).await {
                 tracing::error!("{e}");
             }
+            
+            if !context.is_active() { 
+                tracing::warn!("lifecycle ended.");
+                break;
+            }
         }
     });
     
