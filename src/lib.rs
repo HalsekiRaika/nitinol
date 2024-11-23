@@ -16,7 +16,7 @@ pub mod protocol {
 pub mod process {
     pub use nitinol_process::any;
     pub use nitinol_process::Ref;
-    pub use nitinol_process::Context;
+    pub use nitinol_process::{Context, ProcessContext};
     pub use nitinol_process::Process;
     pub use nitinol_process::{Applicator, Publisher};
 }
