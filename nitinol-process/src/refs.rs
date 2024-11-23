@@ -3,9 +3,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use nitinol_core::command::Command;
 use nitinol_core::event::Event;
-use crate::channel::{ApplicativeHandler, NoCallBackApplicativeHandler, ProcessApplier, PublishHandler};
-use crate::errors::AgentError;
-use crate::{Applicator, Process, Publisher};
+use crate::channel::{ApplicativeHandler, NoCallBackApplicativeHandler, ProcessApplier, PublishHandler, TryApplicativeHandler};
+use crate::errors::ProcessError;
+use crate::{Applicator, Process, Publisher, TryApplicator};
 use self::any::DynRef;
 
 pub mod any;
@@ -18,7 +18,7 @@ pub struct Ref<T: Process> {
 
 impl<T: Process> Ref<T> {
     #[rustfmt::skip]
-    pub async fn publish<C: Command>(&self, command: C) -> Result<Result<T::Event, T::Rejection>, AgentError>
+    pub async fn publish<C: Command>(&self, command: C) -> Result<Result<T::Event, T::Rejection>, ProcessError>
     where
         T: Publisher<C>,
     {
@@ -28,30 +28,42 @@ impl<T: Process> Ref<T> {
                 command,
                 oneshot: tx,
             }))
-            .map_err(|_| AgentError::ChannelDropped)?;
+            .map_err(|_| ProcessError::ChannelDropped)?;
 
-        rx.await.map_err(|_| AgentError::ChannelDropped)
+        rx.await.map_err(|_| ProcessError::ChannelDropped)
     }
 
-    pub async fn apply<E: Event>(&self, event: E) -> Result<(), AgentError>
+    pub async fn apply<E: Event>(&self, event: E) -> Result<(), ProcessError>
     where
         T: Applicator<E>,
     {
         let (tx, rx) = oneshot::channel();
         self.channel
             .send(Box::new(ApplicativeHandler { event, oneshot: tx }))
-            .map_err(|_| AgentError::ChannelDropped)?;
+            .map_err(|_| ProcessError::ChannelDropped)?;
 
-        rx.await.map_err(|_| AgentError::ChannelDropped)
+        rx.await.map_err(|_| ProcessError::ChannelDropped)
     }
     
-    pub fn notify<E: Event>(&self, event: E) -> Result<(), AgentError>
+    pub async fn try_apply<E: Event>(&self, event: E) -> Result<Result<(), T::Rejection>, ProcessError>
+    where
+        T: TryApplicator<E>,
+    {
+        let (tx, rx) = oneshot::channel();
+        self.channel
+            .send(Box::new(TryApplicativeHandler { event, oneshot: tx }))
+            .map_err(|_| ProcessError::ChannelDropped)?;
+        
+        rx.await.map_err(|_| ProcessError::ChannelDropped)
+    }
+    
+    pub fn notify<E: Event>(&self, event: E) -> Result<(), ProcessError>
     where 
         T: Applicator<E>
     {
         self.channel
             .send(Box::new(NoCallBackApplicativeHandler { event }))
-            .map_err(|_| AgentError::ChannelDropped)
+            .map_err(|_| ProcessError::ChannelDropped)
     }
 }
 

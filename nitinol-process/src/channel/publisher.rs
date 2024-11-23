@@ -1,5 +1,5 @@
 use super::ProcessApplier;
-use crate::errors::AgentError;
+use crate::errors::ProcessError;
 use crate::{Process, Context};
 use async_trait::async_trait;
 use nitinol_core::command::Command;
@@ -30,9 +30,9 @@ where
         self: Box<Self>,
         entity: &mut T,
         ctx: &mut Context,
-    ) -> Result<(), AgentError> {
+    ) -> Result<(), ProcessError> {
         self.oneshot
             .send(entity.publish(self.command, ctx).await)
-            .map_err(|_| AgentError::ChannelDropped)
+            .map_err(|_| ProcessError::ChannelDropped)
     }
 }

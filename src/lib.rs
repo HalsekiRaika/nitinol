@@ -18,7 +18,7 @@ pub mod process {
     pub use nitinol_process::Ref;
     pub use nitinol_process::{Context, ProcessContext};
     pub use nitinol_process::Process;
-    pub use nitinol_process::{Applicator, Publisher};
+    pub use nitinol_process::{Applicator, Publisher, TryApplicator};
 }
 
 #[cfg(feature = "projection")]

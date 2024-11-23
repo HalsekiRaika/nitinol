@@ -1,5 +1,5 @@
 use super::ProcessApplier;
-use crate::errors::AgentError;
+use crate::errors::ProcessError;
 use crate::{Process, Context};
 use async_trait::async_trait;
 use nitinol_core::event::Event;
@@ -20,10 +20,10 @@ impl<E: Event, T: Process> ProcessApplier<T> for ApplicativeHandler<E>
 where
     T: Applicator<E>,
 {
-    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), AgentError> {
+    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ProcessError> {
         self.oneshot
             .send(entity.apply(self.event, ctx).await)
-            .map_err(|_| AgentError::ChannelDropped)?;
+            .map_err(|_| ProcessError::ChannelDropped)?;
         ctx.sequence += 1;
         Ok(())
     }
@@ -38,8 +38,36 @@ impl<E: Event, T: Process> ProcessApplier<T> for NoCallBackApplicativeHandler<E>
 where
     T: Applicator<E>,
 {
-    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), AgentError> {
+    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ProcessError> {
         entity.apply(self.event, ctx).await;
+        ctx.sequence += 1;
+        Ok(())
+    }
+}
+
+#[async_trait]
+pub trait TryApplicator<E: Event>: 'static + Sync + Send {
+    type Rejection: 'static + Sync + Send;
+    async fn try_apply(&mut self, event: E, ctx: &mut Context) -> Result<(), Self::Rejection>;
+}
+
+pub(crate) struct TryApplicativeHandler<E: Event, T: Process>
+where
+    T: TryApplicator<E>,
+{
+    pub(crate) event: E,
+    pub(crate) oneshot: oneshot::Sender<Result<(), T::Rejection>>,
+}
+
+#[async_trait]
+impl<E: Event, T: Process> ProcessApplier<T> for TryApplicativeHandler<E, T>
+where
+    T: TryApplicator<E>,
+{
+    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ProcessError> {
+        self.oneshot
+            .send(entity.try_apply(self.event, ctx).await)
+            .map_err(|_| ProcessError::ChannelDropped)?;
         ctx.sequence += 1;
         Ok(())
     }

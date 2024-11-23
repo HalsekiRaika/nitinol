@@ -6,9 +6,9 @@ pub use self::publisher::*;
 
 use async_trait::async_trait;
 use crate::{Process, Context};
-use crate::errors::AgentError;
+use crate::errors::ProcessError;
 
 #[async_trait]
 pub trait ProcessApplier<T: Process>: 'static + Sync + Send {
-    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), AgentError>;
+    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ProcessError>;
 }
