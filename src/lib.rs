@@ -1,6 +1,9 @@
 pub use nitinol_core::event::Event;
 pub use nitinol_core::command::Command;
-pub use nitinol_core::resolver::{ResolveMapping, Mapper};
+
+pub mod resolver {
+    pub use nitinol_core::resolver::{ResolveMapping, Mapper};
+}
 
 #[cfg(feature = "protocol")]
 pub mod protocol {
