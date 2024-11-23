@@ -769,21 +769,10 @@ dependencies = [
 name = "nitinol"
 version = "0.2.0-alpha"
 dependencies = [
- "nitinol-agent",
  "nitinol-core",
+ "nitinol-process",
  "nitinol-projection",
  "nitinol-protocol",
-]
-
-[[package]]
-name = "nitinol-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "nitinol-core",
- "thiserror 2.0.0",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -801,7 +790,18 @@ name = "nitinol-executor"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "nitinol-agent",
+ "nitinol-process",
+]
+
+[[package]]
+name = "nitinol-process"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nitinol-core",
+ "thiserror 2.0.0",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

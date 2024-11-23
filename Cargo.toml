@@ -36,7 +36,7 @@ description = "A utilities for event sourcing"
 [dependencies]
 nitinol-core = { path = "nitinol-core" }
 nitinol-protocol = { path = "nitinol-protocol" }
-nitinol-agent = { path = "nitinol-process" }
+nitinol-process = { path = "nitinol-process" }
 nitinol-projection = { path = "nitinol-projection" }
 
 
