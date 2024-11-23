@@ -1,17 +1,16 @@
-use nitinol_core::resolver::ResolveMapping;
-use crate::channel::Applier;
-use crate::Context;
+use crate::channel::ProcessApplier;
+use crate::{Process, Context, ProcessContext};
 use crate::identifier::ToEntityId;
 use crate::refs::Ref;
 use crate::registry::{Registry, RegistryError};
 
-pub async fn run<T: ResolveMapping>(
+pub async fn run<T: Process>(
     id: impl ToEntityId,
     entity: T,
     context: Context,
     registry: &Registry
 ) -> Result<Ref<T>, RegistryError> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Box<dyn Applier<T>>>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Box<dyn ProcessApplier<T>>>();
 
     let refs = Ref { channel: tx };
     registry.register(id.to_entity_id(), refs.clone()).await?;
@@ -24,7 +23,7 @@ pub async fn run<T: ResolveMapping>(
                 tracing::error!("{e}");
             }
             
-            if !context.is_active() { 
+            if !context.is_active() {
                 tracing::warn!("lifecycle ended.");
                 break;
             }

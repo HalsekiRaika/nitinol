@@ -1,7 +1,7 @@
+use super::Ref;
+use crate::Process;
 use std::any::{type_name, Any};
 use std::sync::Arc;
-use nitinol_core::resolver::ResolveMapping;
-use super::Ref;
 
 pub trait DynRef: 'static + Sync + Send {
     fn as_any(&self) -> &dyn Any;
@@ -10,7 +10,7 @@ pub trait DynRef: 'static + Sync + Send {
 pub(crate) struct AnyRef(Arc<dyn DynRef>);
 
 impl AnyRef {
-    pub fn downcast<T: ResolveMapping>(&self) -> Result<Ref<T>, InvalidCast> {
+    pub fn downcast<T: Process>(&self) -> Result<Ref<T>, InvalidCast> {
         self.0.as_any()
             .downcast_ref::<Ref<T>>()
             .cloned()
@@ -24,7 +24,7 @@ impl Clone for AnyRef {
     }
 }
 
-impl<T: ResolveMapping> From<Ref<T>> for AnyRef {
+impl<T: Process> From<Ref<T>> for AnyRef {
     fn from(value: Ref<T>) -> Self {
         Self(Arc::new(value))
     }

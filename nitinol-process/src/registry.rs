@@ -1,10 +1,9 @@
+use crate::any::{AnyRef, InvalidCast};
+use crate::identifier::EntityId;
+use crate::{Process, Ref};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use nitinol_core::resolver::ResolveMapping;
-use crate::any::{AnyRef, InvalidCast};
-use crate::identifier::EntityId;
-use crate::Ref;
 
 pub struct Registry {
     registry: Arc<RwLock<HashMap<EntityId, AnyRef>>>
@@ -12,7 +11,7 @@ pub struct Registry {
 
 
 impl Registry {
-    pub(crate) async fn register<T: ResolveMapping>(
+    pub(crate) async fn register<T: Process>(
         &self,
         id: EntityId,
         writer: Ref<T>,
@@ -39,7 +38,7 @@ impl Registry {
     }
 
     #[rustfmt::skip]
-    pub async fn find<T: ResolveMapping>(&self, id: &EntityId) -> Result<Option<Ref<T>>, InvalidCast> {
+    pub async fn find<T: Process>(&self, id: &EntityId) -> Result<Option<Ref<T>>, InvalidCast> {
         let lock = self.registry.read().await;
         lock.iter()
             .find(|(dest, _)| dest.eq(&id))

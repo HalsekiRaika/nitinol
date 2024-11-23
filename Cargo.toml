@@ -3,8 +3,9 @@ members = [
   ".",
   "nitinol-core",
   "nitinol-protocol",
-  "nitinol-agent",
+  "nitinol-process",
   "nitinol-projection",
+  "nitinol-executor",
 ]
 
 resolver = "2"
@@ -17,7 +18,7 @@ repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
 [features]
-agent = []
+process = []
 sqlite = ["protocol", "nitinol-protocol/sqlite"]
 inmemory = ["protocol", "nitinol-protocol/inmemory"]
 protocol = []
@@ -35,7 +36,7 @@ description = "A utilities for event sourcing"
 [dependencies]
 nitinol-core = { path = "nitinol-core" }
 nitinol-protocol = { path = "nitinol-protocol" }
-nitinol-agent = { path = "nitinol-agent" }
+nitinol-agent = { path = "nitinol-process" }
 nitinol-projection = { path = "nitinol-projection" }
 
 

@@ -3,25 +3,22 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use nitinol_core::command::Command;
 use nitinol_core::event::Event;
-use nitinol_core::resolver::ResolveMapping;
-use crate::channel::{ApplicativeHandler, Applier, PublishHandler};
+use crate::channel::{ApplicativeHandler, NoCallBackApplicativeHandler, ProcessApplier, PublishHandler};
 use crate::errors::AgentError;
-use crate::{Applicator, Publisher};
+use crate::{Applicator, Process, Publisher};
 use self::any::DynRef;
 
 pub mod any;
 
 #[derive(Debug)]
-pub struct Ref<T: ResolveMapping> {
-    pub(crate) channel: UnboundedSender<Box<dyn Applier<T>>>
+pub struct Ref<T: Process> {
+    pub(crate) channel: UnboundedSender<Box<dyn ProcessApplier<T>>>
 }
 
 
-impl<T: ResolveMapping> Ref<T> {
-    pub async fn publish<C: Command>(
-        &self,
-        command: C,
-    ) -> Result<Result<T::Event, T::Rejection>, AgentError>
+impl<T: Process> Ref<T> {
+    #[rustfmt::skip]
+    pub async fn publish<C: Command>(&self, command: C) -> Result<Result<T::Event, T::Rejection>, AgentError>
     where
         T: Publisher<C>,
     {
@@ -47,9 +44,18 @@ impl<T: ResolveMapping> Ref<T> {
 
         rx.await.map_err(|_| AgentError::ChannelDropped)
     }
+    
+    pub fn notify<E: Event>(&self, event: E) -> Result<(), AgentError>
+    where 
+        T: Applicator<E>
+    {
+        self.channel
+            .send(Box::new(NoCallBackApplicativeHandler { event }))
+            .map_err(|_| AgentError::ChannelDropped)
+    }
 }
 
-impl<T: ResolveMapping> Clone for Ref<T> {
+impl<T: Process> Clone for Ref<T> {
     fn clone(&self) -> Self {
         Self { 
             channel: self.channel.clone()
@@ -57,7 +63,7 @@ impl<T: ResolveMapping> Clone for Ref<T> {
     }
 }
 
-impl<T: ResolveMapping> DynRef for Ref<T> {
+impl<T: Process> DynRef for Ref<T> {
     fn as_any(&self) -> &dyn Any {
         self
     }
