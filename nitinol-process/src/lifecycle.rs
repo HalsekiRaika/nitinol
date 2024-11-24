@@ -8,16 +8,19 @@ pub async fn run<T: Process>(
     id: impl ToEntityId,
     entity: T,
     context: Context,
-    registry: &Registry
+    registry: Registry
 ) -> Result<Ref<T>, RegistryError> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Box<dyn ProcessApplier<T>>>();
 
+    let entity_id = id.to_entity_id();
     let refs = Ref { channel: tx };
-    registry.register(id.to_entity_id(), refs.clone()).await?;
+    registry.register(entity_id.clone(), refs.clone()).await?;
     
     tokio::spawn(async move {
+        let id = entity_id;
         let mut entity = entity;
         let mut context = context;
+        let registry = registry;
         while let Some(rx) = rx.recv().await {
             if let Err(e) = rx.apply(&mut entity, &mut context).await {
                 tracing::error!("{e}");
@@ -27,6 +30,10 @@ pub async fn run<T: Process>(
                 tracing::warn!("lifecycle ended.");
                 break;
             }
+        }
+        
+        if let Err(e) = registry.deregister(&id).await {
+            tracing::error!("{e}");
         }
     });
     

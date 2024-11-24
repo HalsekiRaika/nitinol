@@ -15,6 +15,7 @@ pub mod protocol {
 #[cfg(feature = "process")]
 pub mod process {
     pub use nitinol_process::any;
+    pub use nitinol_process::registry;
     pub use nitinol_process::Ref;
     pub use nitinol_process::{Context, ProcessContext};
     pub use nitinol_process::Process;

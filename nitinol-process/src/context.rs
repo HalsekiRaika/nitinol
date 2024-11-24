@@ -13,6 +13,12 @@ pub struct Context {
     pub(crate) registry: Registry
 }
 
+impl Context {
+    pub fn new(sequence: i64, registry: Registry) -> Context {
+        Self { sequence, is_active: AtomicBool::new(true), registry }
+    }
+}
+
 impl ProcessContext for Context {
     fn sequence(&self) -> i64 {
         self.sequence
