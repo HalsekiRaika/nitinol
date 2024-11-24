@@ -5,6 +5,7 @@ pub trait ProcessContext: 'static + Sync + Send {
     fn sequence(&self) -> i64;
     fn is_active(&self) -> bool;
     fn poison_pill(&mut self);
+    fn registry(&self) -> &Registry;
 }
 
 pub struct Context {
@@ -30,5 +31,9 @@ impl ProcessContext for Context {
 
     fn poison_pill(&mut self) {
         self.is_active.store(false, Ordering::SeqCst);
+    }
+    
+    fn registry(&self) -> &Registry {
+        &self.registry
     }
 }
