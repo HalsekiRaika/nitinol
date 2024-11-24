@@ -1,9 +1,17 @@
 use std::any::Any;
+use std::error::Error;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use nitinol_core::command::Command;
 use nitinol_core::event::Event;
-use crate::channel::{ApplicativeHandler, NoCallBackApplicativeHandler, ProcessApplier, PublishHandler, TryApplicativeHandler};
+use crate::channel::{
+    ProcessApplier,
+    PublishHandler,
+    ApplicativeHandler,
+    TryApplicativeHandler,
+    NoCallBackApplicativeHandler,
+    NoCallBackTryApplicativeHandler,
+};
 use crate::errors::ProcessError;
 use crate::{Applicator, Process, Publisher, TryApplicator};
 use self::any::DynRef;
@@ -63,6 +71,16 @@ impl<T: Process> Ref<T> {
     {
         self.channel
             .send(Box::new(NoCallBackApplicativeHandler { event }))
+            .map_err(|_| ProcessError::ChannelDropped)
+    }
+    
+    pub fn entrust<E: Event>(&self, event: E) -> Result<(), ProcessError> 
+    where 
+        T: TryApplicator<E>,
+        T::Rejection: Error
+    {
+        self.channel
+            .send(Box::new(NoCallBackTryApplicativeHandler { event }))
             .map_err(|_| ProcessError::ChannelDropped)
     }
 }

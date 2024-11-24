@@ -1,3 +1,4 @@
+use std::error::Error;
 use super::ProcessApplier;
 use crate::errors::ProcessError;
 use crate::{Process, Context};
@@ -68,6 +69,25 @@ where
         self.oneshot
             .send(entity.try_apply(self.event, ctx).await)
             .map_err(|_| ProcessError::ChannelDropped)?;
+        ctx.sequence += 1;
+        Ok(())
+    }
+}
+
+pub(crate) struct NoCallBackTryApplicativeHandler<E: Event> {
+    pub(crate) event: E
+}
+
+#[async_trait]
+impl<E: Event, T: Process> ProcessApplier<T> for NoCallBackTryApplicativeHandler<E> 
+where 
+    T: TryApplicator<E>,
+    T::Rejection: Error
+{
+    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ProcessError> {
+        if let Err(e) = entity.try_apply(self.event, ctx).await { 
+            tracing::error!("{}", e);
+        }
         ctx.sequence += 1;
         Ok(())
     }
