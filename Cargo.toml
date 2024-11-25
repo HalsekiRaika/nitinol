@@ -2,9 +2,10 @@
 members = [
   ".",
   "nitinol-core",
-  "nitinol-protocol",
   "nitinol-process",
+  "nitinol-protocol",
   "nitinol-projection",
+  "nitinol-persistence",
 ]
 
 resolver = "2"

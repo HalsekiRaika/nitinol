@@ -786,6 +786,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitinol-persistence"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nitinol-core",
+ "nitinol-process",
+ "nitinol-protocol",
+]
+
+[[package]]
 name = "nitinol-process"
 version = "0.1.0"
 dependencies = [
