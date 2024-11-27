@@ -9,6 +9,7 @@ description.workspace = true
 
 [dependencies]
 async-trait = "^0.1"
+tracing = "^0.1"
 
 nitinol-core = { path = "../nitinol-core" }
 nitinol-process = { path = "../nitinol-process" }
