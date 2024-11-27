@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::extension::Extensions;
 
 pub struct Registry {
     registry: Arc<RwLock<HashMap<EntityId, AnyRef>>>
@@ -13,14 +14,14 @@ pub struct Registry {
 
 #[async_trait]
 pub trait ProcessSystem: 'static + Sync + Send {
-    async fn spawn<T: Process>(&self, id: impl ToEntityId, entity: T, seq: i64) -> Result<Ref<T>, RegistryError>;
+    async fn spawn<T: Process>(&self, id: impl ToEntityId, entity: T, seq: i64, ext: Extensions) -> Result<Ref<T>, RegistryError>;
     async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Ref<T>>, InvalidCast>;
 }
 
 #[async_trait]
 impl ProcessSystem for Registry {
-    async fn spawn<T: Process>(&self, id: impl ToEntityId, entity: T, seq: i64) -> Result<Ref<T>, RegistryError> {
-        lifecycle::run(id, entity, Context::new(seq, self.clone()), self.clone()).await
+    async fn spawn<T: Process>(&self, id: impl ToEntityId, entity: T, seq: i64, ext: Extensions) -> Result<Ref<T>, RegistryError> {
+        lifecycle::run(id, entity, Context::new(seq, self.clone(), ext), self.clone()).await
     }
     
     async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Ref<T>>, InvalidCast> {

@@ -11,5 +11,9 @@ async-trait = "^0.1"
 thiserror = "^2"
 
 tokio = { version = "^1", features = ["sync", "rt-multi-thread"], default-features = false }
+async-channel = "^2"
 tracing = "0.1"
 nitinol-core = { path = "../nitinol-core" }
+
+[dev-dependencies]
+tokio = { version = "^1", features = ["time", "macros"] }
