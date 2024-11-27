@@ -2,6 +2,7 @@
 members = [
   ".",
   "nitinol-core",
+  "nitinol-executor",
   "nitinol-process",
   "nitinol-protocol",
   "nitinol-projection",
@@ -19,6 +20,8 @@ description = "A utilities for event sourcing"
 
 [features]
 process = []
+process-ext = ["process"]
+persistence = ["process", "process-ext", "protocol"]
 sqlite = ["protocol", "nitinol-protocol/sqlite"]
 inmemory = ["protocol", "nitinol-protocol/inmemory"]
 protocol = []
@@ -38,6 +41,7 @@ nitinol-core = { path = "nitinol-core" }
 nitinol-protocol = { path = "nitinol-protocol" }
 nitinol-process = { path = "nitinol-process" }
 nitinol-projection = { path = "nitinol-projection" }
+nitinol-persistence = { path = "nitinol-persistence" }
 
 
 [dev-dependencies]

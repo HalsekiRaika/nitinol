@@ -17,9 +17,20 @@ pub mod process {
     pub use nitinol_process::any;
     pub use nitinol_process::registry;
     pub use nitinol_process::Ref;
-    pub use nitinol_process::{Context, ProcessContext};
+    pub use nitinol_process::Context;
     pub use nitinol_process::Process;
     pub use nitinol_process::{Applicator, Publisher, TryApplicator};
+
+    #[cfg(feature = "process-ext")]
+    pub mod extension {
+        pub use nitinol_process::extension::*;
+        pub use nitinol_process::FromContextExt;
+    }
+    
+    #[cfg(feature = "persistence")]
+    pub mod persistence {
+        pub use nitinol_persistence::*;
+    }
 }
 
 #[cfg(feature = "projection")]

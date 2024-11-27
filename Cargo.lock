@@ -45,6 +45,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "45862d1c77f2228b9e10bc609d5bc203d86ebc9b87ad8d5d5167a6c9abf739d9"
 
 [[package]]
+name = "async-channel"
+version = "2.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89b47800b0be77592da0afd425cc03468052844aff33b84e33cc696f64e77b6a"
+dependencies = [
+ "concurrent-queue",
+ "event-listener-strategy",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -290,6 +302,16 @@ checksum = "6032be9bd27023a771701cc49f9f053c751055f71efb2e0ae5c15809093675ba"
 dependencies = [
  "concurrent-queue",
  "parking",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "event-listener-strategy"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f214dc438f977e6d4e3500aaa277f5ad94ca83fbbd9b1a15713ce2344ccc5a1"
+dependencies = [
+ "event-listener",
  "pin-project-lite",
 ]
 
@@ -770,6 +792,7 @@ name = "nitinol"
 version = "0.2.0-alpha"
 dependencies = [
  "nitinol-core",
+ "nitinol-persistence",
  "nitinol-process",
  "nitinol-projection",
  "nitinol-protocol",
@@ -786,6 +809,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitinol-executor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nitinol-core",
+ "nitinol-process",
+ "pin-project",
+ "tokio",
+]
+
+[[package]]
 name = "nitinol-persistence"
 version = "0.1.0"
 dependencies = [
@@ -793,12 +827,14 @@ dependencies = [
  "nitinol-core",
  "nitinol-process",
  "nitinol-protocol",
+ "tracing",
 ]
 
 [[package]]
 name = "nitinol-process"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "async-trait",
  "nitinol-core",
  "thiserror 2.0.0",
@@ -968,6 +1004,26 @@ name = "percent-encoding"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
+
+[[package]]
+name = "pin-project"
+version = "1.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be57f64e946e500c8ee36ef6331845d40a93055567ec57e8fae13efd33759b95"
+dependencies = [
+ "pin-project-internal",
+]
+
+[[package]]
+name = "pin-project-internal"
+version = "1.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c0f5fad0874fc7abcd4d750e76917eaebbecaa2c20bde22e1dbeeba8beb758c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "pin-project-lite"
