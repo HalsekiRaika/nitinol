@@ -1,39 +1,48 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::extension::errors::Missing;
+use crate::extension::Extensions;
 use crate::registry::Registry;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-pub trait ProcessContext: 'static + Sync + Send {
-    fn sequence(&self) -> i64;
-    fn is_active(&self) -> bool;
-    fn poison_pill(&mut self);
-    fn registry(&self) -> &Registry;
-}
 
 pub struct Context {
     pub(crate) sequence: i64,
-    pub(crate) is_active: AtomicBool,
-    pub(crate) registry: Registry
+    pub(crate) is_active: Arc<RwLock<bool>>,
+    pub(crate) registry: Registry,
+    pub(crate) extension: Extensions,
 }
 
 impl Context {
-    pub fn new(sequence: i64, registry: Registry) -> Context {
-        Self { sequence, is_active: AtomicBool::new(true), registry }
+    pub fn new(sequence: i64, registry: Registry, extension: Extensions) -> Context {
+        Self { sequence, is_active: Arc::new(RwLock::new(true)), registry, extension }
     }
 }
 
-impl ProcessContext for Context {
-    fn sequence(&self) -> i64 {
+impl Context {
+    pub fn sequence(&self) -> i64 {
         self.sequence
     }
 
-    fn is_active(&self) -> bool {
-        self.is_active.load(Ordering::Relaxed)
+    pub async fn is_active(&self) -> bool {
+        *self.is_active.read().await
     }
 
-    fn poison_pill(&mut self) {
-        self.is_active.store(false, Ordering::SeqCst);
+    pub async fn poison_pill(&self) {
+        let mut guard = self.is_active.write().await;
+        *guard = false;
     }
     
-    fn registry(&self) -> &Registry {
+    pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    pub fn extension(&self) -> &Extensions {
+        &self.extension
+    }
+}
+
+pub trait FromContextExt: 'static + Sync + Send + Clone {
+    fn from_context(ctx: &Context) -> Result<&Self, Missing> {
+        ctx.extension().get::<Self>()
     }
 }

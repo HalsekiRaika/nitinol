@@ -1,5 +1,5 @@
 use crate::channel::ProcessApplier;
-use crate::{Process, Context, ProcessContext};
+use crate::{Process, Context};
 use crate::identifier::ToEntityId;
 use crate::refs::Ref;
 use crate::registry::{Registry, RegistryError};
@@ -26,7 +26,7 @@ pub async fn run<T: Process>(
                 tracing::error!("{e}");
             }
             
-            if !context.is_active() {
+            if !context.is_active().await {
                 tracing::warn!("lifecycle ended.");
                 break;
             }
