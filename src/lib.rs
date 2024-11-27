@@ -1,3 +1,4 @@
+pub use nitinol_core::identifier::*;
 pub use nitinol_core::event::Event;
 pub use nitinol_core::command::Command;
 
