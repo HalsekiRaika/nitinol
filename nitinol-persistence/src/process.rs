@@ -1,7 +1,7 @@
 use crate::extension::PersistenceExtension;
 use async_trait::async_trait;
 use nitinol_core::event::Event;
-use nitinol_process::identifier::ToEntityId;
+use nitinol_core::identifier::ToEntityId;
 use nitinol_process::{Context, FromContextExt, Process};
 
 #[async_trait]
@@ -16,7 +16,7 @@ where
             Err(e) => panic!("{}", e),
         };
 
-        ext.persist(self.aggregate_id(), event, ctx.sequence())
+        ext.persist(&self.aggregate_id(), event, ctx.sequence())
             .await;
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use nitinol_core::errors::ProjectionError;
+use nitinol_core::identifier::ToEntityId;
 use nitinol_core::resolver::{Mapper, ResolveMapping};
 use nitinol_protocol::io::ReadProtocol;
 use nitinol_protocol::Payload;
@@ -24,11 +25,9 @@ impl Projector {
 impl Projector {
     pub async fn projection_to_latest<T: ResolveMapping>(
         &self, 
-        id: impl Into<String>, 
+        id: impl ToEntityId,
         entity: impl Into<Option<(T, i64)>>
     ) -> Result<(T, i64), ProjectionError> {
-        let id = id.into();
-        
         let mut mapping = Mapper::default();
         T::mapping(&mut mapping);
         
@@ -39,7 +38,7 @@ impl Projector {
                 let parts = patch_load(&mapping, journal).await
                     .map_err(|e| ProjectionError::Projection(Box::new(e)))?;
                 patch(None, 0, parts).await?
-                    .ok_or(ProjectionError::Projection(Box::new(FailedProjection { id })))
+                    .ok_or(ProjectionError::Projection(Box::new(FailedProjection { id: id.to_entity_id() })))
             }
             Some((entity, seq)) => {
                 let journal = self.reader.read_to_latest(&id, seq).await
@@ -47,7 +46,7 @@ impl Projector {
                 let parts = patch_load(&mapping, journal).await
                     .map_err(|e| ProjectionError::Projection(Box::new(e)))?;
                 patch(Some(entity), seq, parts).await?
-                    .ok_or(ProjectionError::Projection(Box::new(FailedProjection { id })))
+                    .ok_or(ProjectionError::Projection(Box::new(FailedProjection { id: id.to_entity_id() })))
             }
         }
     }

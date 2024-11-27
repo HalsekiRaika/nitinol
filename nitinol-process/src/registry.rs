@@ -1,5 +1,5 @@
+use nitinol_core::identifier::{EntityId, ToEntityId};
 use crate::any::{AnyRef, InvalidCast};
-use crate::identifier::{EntityId, ToEntityId};
 use crate::{lifecycle, Context, Process, Ref};
 use async_trait::async_trait;
 use std::collections::HashMap;

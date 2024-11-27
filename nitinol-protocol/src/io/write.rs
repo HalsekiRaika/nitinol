@@ -2,12 +2,13 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use async_trait::async_trait;
 use nitinol_core::event::Event;
+use nitinol_core::identifier::{EntityId, ToEntityId};
 use crate::errors::ProtocolError;
 use crate::Payload;
 
 #[async_trait]
 pub trait Writer: 'static + Sync + Send {
-    async fn write(&self, aggregate_id: &str, payload: Payload) -> Result<(), ProtocolError>;
+    async fn write(&self, aggregate_id: EntityId, payload: Payload) -> Result<(), ProtocolError>;
 }
 
 pub struct WriteProtocol {
@@ -31,10 +32,10 @@ impl WriteProtocol {
         Self { writer: Arc::new(provider) }
     }
     
-    pub async fn write<E: Event>(&self, aggregate_id: &str, event: &E, seq: i64) -> Result<(), ProtocolError> {
+    pub async fn write<E: Event>(&self, aggregate_id: &impl ToEntityId, event: &E, seq: i64) -> Result<(), ProtocolError> {
         let event = event.as_bytes().map_err(|e| ProtocolError::Write(Box::new(e)))?;
         self.writer
-            .write(aggregate_id, Payload {
+            .write(aggregate_id.to_entity_id(), Payload {
                 sequence_id: seq,
                 registry_key: E::REGISTRY_KEY.to_string(),
                 bytes: event,

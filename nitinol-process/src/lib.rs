@@ -1,6 +1,5 @@
 pub mod registry;
 pub mod lifecycle;
-pub mod identifier;
 mod channel;
 mod context;
 pub mod errors;

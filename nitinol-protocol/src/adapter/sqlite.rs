@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use async_trait::async_trait;
 use sqlx::{Pool, Sqlite, SqliteConnection};
+use nitinol_core::identifier::EntityId;
 use crate::errors::ProtocolError;
 use crate::io::{Reader, Writer};
 use crate::Payload;
@@ -27,10 +28,10 @@ impl SqliteEventStore {
 
 #[async_trait]
 impl Writer for SqliteEventStore {
-    async fn write(&self, aggregate_id: &str, payload: Payload) -> Result<(), ProtocolError> {
+    async fn write(&self, aggregate_id: EntityId, payload: Payload) -> Result<(), ProtocolError> {
         let mut con = self.pool.acquire().await
             .map_err(|e| ProtocolError::Write(Box::new(e)))?;
-        Internal::write(aggregate_id, payload, &mut con).await
+        Internal::write(aggregate_id.as_ref(), payload, &mut con).await
             .map_err(|e| ProtocolError::Write(Box::new(e)))?;
         Ok(())
     }
@@ -38,18 +39,18 @@ impl Writer for SqliteEventStore {
 
 #[async_trait]
 impl Reader for SqliteEventStore {
-    async fn read(&self, id: &str, seq: i64) -> Result<Payload, ProtocolError> {
+    async fn read(&self, id: EntityId, seq: i64) -> Result<Payload, ProtocolError> {
         let mut con = self.pool.acquire().await
             .map_err(|e| ProtocolError::Read(Box::new(e)))?;
-        let payload = Internal::read(id, seq, &mut con).await
+        let payload = Internal::read(id.as_ref(), seq, &mut con).await
             .map_err(|e| ProtocolError::Read(Box::new(e)))?;
         Ok(payload)
     }
 
-    async fn read_to(&self, id: &str, from: i64, to: i64) -> Result<BTreeSet<Payload>, ProtocolError> {
+    async fn read_to(&self, id: EntityId, from: i64, to: i64) -> Result<BTreeSet<Payload>, ProtocolError> {
         let mut con = self.pool.acquire().await
             .map_err(|e| ProtocolError::Read(Box::new(e)))?;
-        let payload = Internal::read_to(id, from, to, &mut con).await
+        let payload = Internal::read_to(id.as_ref(), from, to, &mut con).await
             .map_err(|e| ProtocolError::Read(Box::new(e)))?;
         Ok(payload)
     }

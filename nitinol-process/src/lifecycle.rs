@@ -1,6 +1,6 @@
+use nitinol_core::identifier::ToEntityId;
 use crate::channel::ProcessApplier;
 use crate::{Process, Context};
-use crate::identifier::ToEntityId;
 use crate::refs::Ref;
 use crate::registry::{Registry, RegistryError};
 

@@ -3,7 +3,7 @@
 pub mod errors;
 
 use nitinol_process::extension::Extensions;
-use nitinol_process::identifier::{EntityId, ToEntityId};
+use nitinol_core::identifier::{EntityId, ToEntityId};
 use nitinol_process::registry::{ProcessSystem, Registry};
 use nitinol_process::Context as ProcessContext;
 use nitinol_process::{Process, Ref};
