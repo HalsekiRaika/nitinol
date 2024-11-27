@@ -3,7 +3,6 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 
-// Todo: Move to `nitinol-core`.
 pub struct EntityId(Arc<str>);
 
 impl EntityId {
