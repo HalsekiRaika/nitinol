@@ -13,7 +13,7 @@ pub struct FailedProjection {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Failed projection. keys:{}")]
+#[error("Failed projection. keys:{keys}")]
 pub struct FailedProjectionWithKey {
     pub keys: String
 }
