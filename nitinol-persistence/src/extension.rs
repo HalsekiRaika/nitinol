@@ -21,12 +21,12 @@ impl PersistenceExtension {
 impl PersistenceExtension {
     pub(crate) async fn persist<E: Event>(
         &self,
-        aggregate_id: &impl ToEntityId,
+        aggregate_id: impl ToEntityId,
         event: &E,
         seq: i64,
     ) {
         loop {
-            match self.ext.write(aggregate_id, event, seq).await {
+            match self.ext.write(aggregate_id.to_entity_id(), event, seq).await {
                 Ok(()) => {
                     break;
                 }

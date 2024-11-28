@@ -28,12 +28,13 @@ impl Projector {
         id: impl ToEntityId,
         entity: impl Into<Option<(T, i64)>>
     ) -> Result<(T, i64), ProjectionError> {
+        let id = id.to_entity_id();
         let mut mapping = Mapper::default();
         T::mapping(&mut mapping);
         
         match entity.into() {
             None => {
-                let journal = self.reader.read_to_latest(&id, 0).await
+                let journal = self.reader.read_to_latest(id.clone(), 0).await
                     .map_err(|e| ProjectionError::Protocol(Box::new(e)))?;
                 let parts = patch_load(&mapping, journal).await
                     .map_err(|e| ProjectionError::Projection(Box::new(e)))?;
@@ -41,7 +42,7 @@ impl Projector {
                     .ok_or(ProjectionError::Projection(Box::new(FailedProjection { id: id.to_entity_id() })))
             }
             Some((entity, seq)) => {
-                let journal = self.reader.read_to_latest(&id, seq).await
+                let journal = self.reader.read_to_latest(id.clone(), seq).await
                     .map_err(|e| ProjectionError::Protocol(Box::new(e)))?;
                 let parts = patch_load(&mapping, journal).await
                     .map_err(|e| ProjectionError::Projection(Box::new(e)))?;

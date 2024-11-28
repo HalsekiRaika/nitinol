@@ -10,7 +10,7 @@ repository = { workspace = true }
 [features]
 inmemory = ["tokio"]
 postgres = ["sqlx/postgres"]
-sqlite = ["sqlx/sqlite"]
+sqlite = ["sqlx/sqlite", "dotenvy"]
 
 [dependencies]
 nitinol-core = { path = "../nitinol-core", features = ["markers"], default-features = false }
@@ -19,6 +19,8 @@ async-trait = "^0.1"
 thiserror = "^2"
 tokio = { version = "^1", features = ["sync"], default-features = false, optional = true }
 sqlx = { version = "^0.8", features = ["migrate", "macros"], optional = true }
+
+dotenvy = { version = "^0.15", optional = true }
 
 tracing = "^0.1"
 

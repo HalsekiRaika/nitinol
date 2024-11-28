@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
+use std::time::Duration;
 use async_trait::async_trait;
 use sqlx::{Pool, Sqlite, SqliteConnection};
+use sqlx::sqlite::SqlitePoolOptions;
 use nitinol_core::identifier::EntityId;
 use crate::errors::ProtocolError;
 use crate::io::{Reader, Writer};
@@ -17,11 +19,33 @@ impl Clone for SqliteEventStore {
 }
 
 impl SqliteEventStore {
-    pub async fn setup(pool: Pool<Sqlite>) -> Result<Self, ProtocolError> {
+    /// Nitinol sets up a Journal Database for storing Events.
+    /// 
+    /// Note: Since run our own migration, we must avoid integrating databases.
+    pub async fn setup(url: impl AsRef<str>) -> Result<Self, ProtocolError> {
+        let pool = SqlitePoolOptions::new()
+            .acquire_timeout(
+                dotenvy::var("NITINOL_JOURNAL_ACQUIRE_TIMEOUT")
+                    .ok()
+                    .and_then(|timeout| timeout.parse::<u64>().ok())
+                    .map(Duration::from_millis)
+                    .unwrap_or(Duration::from_millis(5000))
+            )
+            .max_connections(
+                dotenvy::var("NITINOL_MAX_JOURNAL_CONNECTION")
+                    .ok()
+                    .and_then(|max| max.parse::<u32>().ok())
+                    .unwrap_or(8)
+            )
+            .connect(url.as_ref())
+            .await
+            .map_err(|e| ProtocolError::Setup(Box::new(e)))?;
+        
         sqlx::migrate!("./migrations/sqlite")
             .run(&pool)
             .await
             .map_err(|e| ProtocolError::Write(Box::new(e)))?;
+        
         Ok(Self { pool })
     }
 }

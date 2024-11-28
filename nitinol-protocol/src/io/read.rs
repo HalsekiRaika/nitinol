@@ -42,17 +42,17 @@ impl ReadProtocol {
         }
     }
     
-    pub async fn read<E: Event>(&self, id: &impl ToEntityId, seq: i64) -> Result<E, ProtocolError> {
+    pub async fn read<E: Event>(&self, id: impl ToEntityId, seq: i64) -> Result<E, ProtocolError> {
         let payload = self.reader.read(id.to_entity_id(), seq).await?;
         E::from_bytes(&payload.bytes)
             .map_err(|e| ProtocolError::Read(Box::new(e)))
     }
     
-    pub async fn read_to(&self, id: &impl ToEntityId, from: i64, to: i64) -> Result<BTreeSet<Payload>, ProtocolError> {
+    pub async fn read_to(&self, id: impl ToEntityId, from: i64, to: i64) -> Result<BTreeSet<Payload>, ProtocolError> {
         self.reader.read_to(id.to_entity_id(), from, to).await
     }
     
-    pub async fn read_to_latest(&self, id: &impl ToEntityId, from: i64) -> Result<BTreeSet<Payload>, ProtocolError> {
+    pub async fn read_to_latest(&self, id: impl ToEntityId, from: i64) -> Result<BTreeSet<Payload>, ProtocolError> {
         self.reader.read_to_latest(id.to_entity_id(), from).await
     }
 }

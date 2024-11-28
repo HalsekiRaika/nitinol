@@ -856,6 +856,7 @@ name = "nitinol-protocol"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "dotenvy",
  "futures",
  "nitinol-core",
  "serde",

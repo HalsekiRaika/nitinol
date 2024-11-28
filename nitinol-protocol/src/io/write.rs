@@ -32,7 +32,7 @@ impl WriteProtocol {
         Self { writer: Arc::new(provider) }
     }
     
-    pub async fn write<E: Event>(&self, aggregate_id: &impl ToEntityId, event: &E, seq: i64) -> Result<(), ProtocolError> {
+    pub async fn write<E: Event>(&self, aggregate_id: impl ToEntityId, event: &E, seq: i64) -> Result<(), ProtocolError> {
         let event = event.as_bytes().map_err(|e| ProtocolError::Write(Box::new(e)))?;
         self.writer
             .write(aggregate_id.to_entity_id(), Payload {
