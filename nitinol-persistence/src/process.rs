@@ -16,7 +16,7 @@ where
             Err(e) => panic!("{}", e),
         };
 
-        ext.persist(self.aggregate_id(), event, ctx.sequence() + 1)
+        ext.persist(self.aggregate_id(), event, ctx.sequence())
             .await;
     }
 }
