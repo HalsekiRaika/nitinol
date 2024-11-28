@@ -49,17 +49,17 @@ mod test {
         const REGISTRY_KEY: &'static str = "test-event";
 
         fn as_bytes(&self) -> Result<Vec<u8>, SerializeError> {
-            todo!()
+            unimplemented!()
         }
 
         fn from_bytes(bytes: &[u8]) -> Result<Self, DeserializeError> {
-            todo!()
+            unimplemented!()
         }
     }
 
     impl ResolveMapping for TestProcess {
-        fn mapping(mapper: &mut Mapper<Self>) {
-            todo!()
+        fn mapping(_: &mut Mapper<Self>) {
+            // No-op ;D
         }
     }
     impl Process for TestProcess {}

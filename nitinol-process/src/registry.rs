@@ -36,22 +36,28 @@ impl Registry {
         id: EntityId,
         writer: Ref<T>,
     ) -> Result<(), RegistryError> {
-        let mut lock = self.registry.write().await;
+        let lock = self.registry.read().await;
         if lock.iter().any(|(exist, _)| exist.eq(&id)) {
             return Err(RegistryError::AlreadyExist(id));
         }
 
+        drop(lock); // release lock
+        
+        let mut lock = self.registry.write().await;
         lock.insert(id, writer.into());
 
         Ok(())
     }
 
     pub(crate) async fn deregister(&self, id: &EntityId) -> Result<(), RegistryError> {
-        let mut lock = self.registry.write().await;
+        let lock = self.registry.read().await;
         if !lock.iter().any(|(exist, _)| exist.eq(id)) {
             return Err(RegistryError::NotFound(id.to_owned()));
         }
 
+        drop(lock); // release lock
+
+        let mut lock = self.registry.write().await;
         lock.remove(id);
 
         Ok(())
