@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
+use std::str::FromStr;
 use std::time::Duration;
 use async_trait::async_trait;
 use sqlx::{Pool, Sqlite, SqliteConnection};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use nitinol_core::identifier::EntityId;
 use crate::errors::ProtocolError;
 use crate::io::{Reader, Writer};
@@ -23,6 +24,10 @@ impl SqliteEventStore {
     ///
     /// Note: Since run our own migration, we must avoid integrating databases.
     pub async fn setup(url: impl AsRef<str>) -> Result<Self, ProtocolError> {
+        let opts = SqliteConnectOptions::from_str(url.as_ref())
+            .map_err(|e| ProtocolError::Setup(Box::new(e)))?
+            .create_if_missing(true);
+        
         let pool = SqlitePoolOptions::new()
             .acquire_timeout(
                 dotenvy::var("NITINOL_JOURNAL_ACQUIRE_TIMEOUT")
@@ -37,7 +42,7 @@ impl SqliteEventStore {
                     .and_then(|max| max.parse::<u32>().ok())
                     .unwrap_or(8)
             )
-            .connect(url.as_ref())
+            .connect_with(opts)
             .await
             .map_err(|e| ProtocolError::Setup(Box::new(e)))?;
 
