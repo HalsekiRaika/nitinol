@@ -20,7 +20,7 @@ impl Clone for SqliteEventStore {
 
 impl SqliteEventStore {
     /// Nitinol sets up a Journal Database for storing Events.
-    /// 
+    ///
     /// Note: Since run our own migration, we must avoid integrating databases.
     pub async fn setup(url: impl AsRef<str>) -> Result<Self, ProtocolError> {
         let pool = SqlitePoolOptions::new()
@@ -40,12 +40,12 @@ impl SqliteEventStore {
             .connect(url.as_ref())
             .await
             .map_err(|e| ProtocolError::Setup(Box::new(e)))?;
-        
+
         sqlx::migrate!("./migrations/sqlite")
             .run(&pool)
             .await
             .map_err(|e| ProtocolError::Write(Box::new(e)))?;
-        
+
         Ok(Self { pool })
     }
 }
