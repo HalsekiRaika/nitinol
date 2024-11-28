@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 use async_trait::async_trait;
+use time::OffsetDateTime;
 use nitinol_core::event::Event;
 use nitinol_core::identifier::{EntityId, ToEntityId};
 use crate::errors::ProtocolError;
@@ -34,11 +35,14 @@ impl WriteProtocol {
     
     pub async fn write<E: Event>(&self, aggregate_id: impl ToEntityId, event: &E, seq: i64) -> Result<(), ProtocolError> {
         let event = event.as_bytes().map_err(|e| ProtocolError::Write(Box::new(e)))?;
+        let aggregate_id = aggregate_id.to_entity_id();
         self.writer
-            .write(aggregate_id.to_entity_id(), Payload {
+            .write(aggregate_id.clone(), Payload {
+                id: aggregate_id.to_string(),
                 sequence_id: seq,
                 registry_key: E::REGISTRY_KEY.to_string(),
                 bytes: event,
+                created_at: OffsetDateTime::now_utc()
             })
             .await
     }

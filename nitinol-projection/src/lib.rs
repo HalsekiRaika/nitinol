@@ -4,7 +4,7 @@ use nitinol_core::identifier::ToEntityId;
 use nitinol_core::resolver::{Mapper, ResolveMapping};
 use nitinol_protocol::io::ReadProtocol;
 use nitinol_protocol::Payload;
-use crate::errors::{FailedProjection, NotCompatible};
+use crate::errors::{FailedProjection, FailedProjectionWithKey, NotCompatible};
 use crate::fixtures::{Fixture, FixtureParts};
 
 pub mod errors;
@@ -50,6 +50,29 @@ impl Projector {
                     .ok_or(ProjectionError::Projection(Box::new(FailedProjection { id: id.to_entity_id() })))
             }
         }
+    }
+    
+    #[rustfmt::skip]
+    pub async fn projection_with_resolved_events<T: ResolveMapping>(&self, base: T) -> Result<(T, i64), ProjectionError> {
+        let mut mapping = Mapper::default();
+        T::mapping(&mut mapping);
+        
+        let mut journal = Vec::new();
+        for key in mapping.registry_keys() {
+            let chunked = self.reader.read_all_by_key(&key).await
+                .map_err(|e| ProjectionError::Protocol(Box::new(e)))?;
+            journal.push(chunked);
+        }
+    
+        let journal = journal.into_iter()
+            .flatten()
+            .collect::<BTreeSet<Payload>>();
+    
+        let parts = patch_load(&mapping, journal).await
+            .map_err(|e| ProjectionError::Projection(Box::new(e)))?;
+    
+        patch(Some(base), 0, parts).await?
+            .ok_or(ProjectionError::Projection(Box::new(FailedProjectionWithKey { keys: mapping.registry_keys().join(", ") })))
     }
 }
 

@@ -83,6 +83,14 @@ impl Reader for SqliteEventStore {
             .map_err(|e| ProtocolError::Read(Box::new(e)))?;
         Ok(payload)
     }
+
+    async fn read_all_by_registry_key(&self, key: &str) -> Result<BTreeSet<Payload>, ProtocolError> {
+        let mut con = self.pool.acquire().await
+            .map_err(|e| ProtocolError::Read(Box::new(e)))?;
+        let payload = Internal::read_all_by_registry_key(key, &mut con).await
+            .map_err(|e| ProtocolError::Read(Box::new(e)))?;
+        Ok(payload)
+    }
 }
 
 struct Internal;
@@ -91,13 +99,14 @@ impl Internal {
     pub async fn write(aggregate_id: &str, payload: Payload, con: &mut SqliteConnection) -> Result<(), sqlx::Error> {
         // language=sqlite
         sqlx::query(r#"
-            INSERT INTO journal(id, sequence_id, registry_key, bytes) 
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO journal(id, sequence_id, registry_key, bytes, created_at) 
+            VALUES ($1, $2, $3, $4, $5)
         "#)
             .bind(aggregate_id)
             .bind(payload.sequence_id)
             .bind(&payload.registry_key)
             .bind(&payload.bytes)
+            .bind(payload.created_at)
             .execute(&mut *con)
             .await?;
         Ok(())
@@ -107,9 +116,11 @@ impl Internal {
         // language=sqlite
         let payload = sqlx::query_as::<_, Payload>(r#"
             SELECT 
+                id,
                 sequence_id, 
                 registry_key, 
-                bytes
+                bytes,
+                created_at
             FROM journal 
             WHERE 
                 id LIKE $1 
@@ -126,9 +137,11 @@ impl Internal {
         // language=sqlite
         let payload = sqlx::query_as::<_, Payload>(r#"
             SELECT 
+                id,
                 sequence_id, 
                 registry_key, 
-                bytes
+                bytes,
+                created_at
             FROM journal 
             WHERE 
                 id LIKE $1 
@@ -145,12 +158,36 @@ impl Internal {
         
         Ok(payload)
     }
+    
+    async fn read_all_by_registry_key(registry_key: &str, con: &mut SqliteConnection) -> Result<BTreeSet<Payload>, sqlx::Error> {
+        // language=sqlite
+        let payload = sqlx::query_as::<_, Payload>(r#"
+            SELECT 
+                id,
+                sequence_id,
+                registry_key,
+                bytes,
+                created_at
+            FROM journal
+            WHERE 
+                registry_key LIKE $1
+        "#)
+            .bind(registry_key)
+            .fetch_all(&mut *con)
+            .await?;
+
+        let payload = payload.into_iter()
+            .collect::<BTreeSet<Payload>>();
+
+        Ok(payload)
+    }
 }
 
 
 #[cfg(test)]
 mod tests {
     use serde::{Deserialize, Serialize};
+    use time::OffsetDateTime;
     use nitinol_core::errors::{DeserializeError, SerializeError};
     use nitinol_core::event::Event;
     use crate::adapter::sqlite::{Internal, SqliteEventStore};
@@ -175,12 +212,14 @@ mod tests {
         }
     }
     
-    impl From<(i64, TestEvent)> for Payload {
-        fn from(value: (i64, TestEvent)) -> Self {
+    impl From<(&'static str, i64, TestEvent)> for Payload {
+        fn from(value: (&str, i64, TestEvent)) -> Self {
             Self {
-                sequence_id: value.0,
+                id: value.0.to_string(),
+                sequence_id: value.1,
                 registry_key: TestEvent::REGISTRY_KEY.to_string(),
-                bytes: value.1.as_bytes().unwrap(),
+                bytes: value.2.as_bytes().unwrap(),
+                created_at: OffsetDateTime::now_utc(),
             }
         }
     }
@@ -188,19 +227,41 @@ mod tests {
     #[tokio::test]
     async fn all_integration() {
         let ev_store = SqliteEventStore::setup("sqlite::memory:").await.unwrap();
-        
-        let id = "TestEntity";
-        
+
         let mut xact = ev_store.pool.begin().await.unwrap();
-        Internal::write(id, Payload::from((0, TestEvent::A)), &mut xact).await.unwrap();
-        Internal::write(id, Payload::from((1, TestEvent::A)), &mut xact).await.unwrap();
-        Internal::write(id, Payload::from((2, TestEvent::B)), &mut xact).await.unwrap();
-        Internal::write(id, Payload::from((3, TestEvent::C)), &mut xact).await.unwrap();
+        
+        let id = "TestEntity-1";
+        Internal::write(id, Payload::from((id, 0, TestEvent::A)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((id, 1, TestEvent::A)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((id, 2, TestEvent::B)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((id, 3, TestEvent::C)), &mut xact).await.unwrap();
+        
+        let id = "TestEntity-2";
+        Internal::write(id, Payload::from((id, 0, TestEvent::A)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((id, 1, TestEvent::A)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((id, 2, TestEvent::B)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((id, 3, TestEvent::C)), &mut xact).await.unwrap();
+
+        let id = "TestEntity-3";
+        Internal::write(id, Payload::from((id, 0, TestEvent::A)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((id, 1, TestEvent::A)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((id, 2, TestEvent::B)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((id, 3, TestEvent::C)), &mut xact).await.unwrap();
+        
         xact.commit().await.unwrap();
         
         let mut acquire = ev_store.pool.acquire().await.unwrap();
         let events = Internal::read_to(id, 0, i64::MAX, &mut acquire).await.unwrap();
-        
-        println!("{:?}", events);
+
+        for event in events {
+            println!("{:?}", event);
+        }
+
+        let mut acquire = ev_store.pool.acquire().await.unwrap();
+        let all = Internal::read_all_by_registry_key(TestEvent::REGISTRY_KEY, &mut acquire).await.unwrap();
+
+        for event in all {
+            println!("{:?}", event);
+        }
     }
 }

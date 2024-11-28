@@ -14,6 +14,7 @@ pub trait Reader: 'static + Sync + Send {
     async fn read_to_latest(&self, id: EntityId, from: i64) -> Result<BTreeSet<Payload>, ProtocolError> {
         self.read_to(id, from, i64::MAX).await
     }
+    async fn read_all_by_registry_key(&self, key: &str) -> Result<BTreeSet<Payload>, ProtocolError>;
 }
 
 
@@ -54,5 +55,13 @@ impl ReadProtocol {
     
     pub async fn read_to_latest(&self, id: impl ToEntityId, from: i64) -> Result<BTreeSet<Payload>, ProtocolError> {
         self.reader.read_to_latest(id.to_entity_id(), from).await
+    }
+    
+    pub async fn read_all_by_event<E: Event>(&self) -> Result<BTreeSet<Payload>, ProtocolError> {
+        self.reader.read_all_by_registry_key(E::REGISTRY_KEY).await
+    }
+    
+    pub async fn read_all_by_key(&self, registry_key: &str) -> Result<BTreeSet<Payload>, ProtocolError> {
+        self.reader.read_all_by_registry_key(registry_key).await
     }
 }

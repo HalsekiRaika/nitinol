@@ -40,9 +40,11 @@ impl Writer for InMemoryEventStore {
             let mut guard = self.journal.write().await;
             let mut init = BTreeSet::new();
             init.insert(Row {
+                id: payload.id,
                 seq: payload.sequence_id,
                 registry_key: payload.registry_key,
                 bytes: payload.bytes,
+                created_at: payload.created_at,
             });
             guard.insert(aggregate_id, OptLock::new(init));
             return Ok(())
@@ -54,9 +56,11 @@ impl Writer for InMemoryEventStore {
             .map_err(|e| ProtocolError::Write(Box::new(e)))?;
         
         lock.insert(Row {
+            id: payload.id,
             seq: payload.sequence_id,
             registry_key: payload.registry_key,
             bytes: payload.bytes,
+            created_at: payload.created_at
         });
         
         Ok(())
@@ -90,9 +94,11 @@ impl Reader for InMemoryEventStore {
         
         found
             .map(|row| Payload {
+                id: row.id,
                 sequence_id: row.seq,
                 registry_key: row.registry_key,
                 bytes: row.bytes,
+                created_at: row.created_at,
             })
             .ok_or(ProtocolError::Read(NotFound { aggregate_id: id.to_string() }.into_boxed()))
     }
@@ -126,11 +132,55 @@ impl Reader for InMemoryEventStore {
         Ok(found
             .into_iter()
             .map(|row| Payload {
+                id: row.id,
                 sequence_id: row.seq,
                 registry_key: row.registry_key,
                 bytes: row.bytes,
+                created_at: row.created_at
             }) 
             .collect())
+    }
+
+    async fn read_all_by_registry_key(&self, key: &str) -> Result<BTreeSet<Payload>, ProtocolError> {
+        let guard = self.journal.read().await;
+        let mut events = Vec::new();
+        for (_, lock) in guard.iter() {
+            let found = loop {
+                match lock.read().await {
+                    Ok(guard) => {
+                        let found = guard.iter()
+                            .filter(|row| row.registry_key.eq(key))
+                            .cloned()
+                            .collect::<BTreeSet<_>>();
+                        match guard.sync().await {
+                            Ok(_) => break found,
+                            Err(e) => {
+                                tracing::error!("{}", e);
+                                continue;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        continue;
+                    }
+                }
+            };
+            events.push(found);
+        }
+        
+        let payloads = events.into_iter()
+            .flatten()
+            .map(|row| Payload {
+                id: row.id,
+                sequence_id: row.seq,
+                registry_key: row.registry_key,
+                bytes: row.bytes,
+                created_at: row.created_at,
+            })
+            .collect::<BTreeSet<Payload>>();
+        
+        Ok(payloads)
     }
 }
 

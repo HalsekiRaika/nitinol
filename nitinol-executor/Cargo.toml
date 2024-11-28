@@ -11,7 +11,7 @@ description.workspace = true
 async-trait = "^0.1"
 pin-project = "^1"
 nitinol-process = { path = "../nitinol-process" }
+nitinol-core = { path = "../nitinol-core" }
 
 [dev-dependencies]
 tokio = { version = "^1", features = ["macros", "time"] }
-nitinol-core = { path = "../nitinol-core" }

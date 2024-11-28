@@ -36,6 +36,13 @@ impl<T: ResolveMapping> Mapper<T> {
             .map(|(_, handler)| handler)
             .cloned()
     }
+    
+    pub fn registry_keys(&self) -> Vec<String> {
+        self.0
+            .keys()
+            .map(|composition| composition.1.to_string())
+            .collect()
+    }
 }
 
 impl<T: ResolveMapping> Mapper<T> {

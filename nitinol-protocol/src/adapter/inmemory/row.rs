@@ -1,10 +1,13 @@
 use std::cmp::Ordering;
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone)]
 pub struct Row {
+    pub id: String,
     pub seq: i64,
     pub registry_key: String,
     pub bytes: Vec<u8>,
+    pub created_at: OffsetDateTime
 }
 
 impl Eq for Row {}
@@ -36,5 +39,7 @@ impl PartialOrd<Self> for Row {
 impl Ord for Row {
     fn cmp(&self, other: &Self) -> Ordering {
         self.seq.cmp(&other.seq)
+            .then_with(|| self.created_at.cmp(&other.created_at))
+            .then_with(|| self.id.cmp(&other.id))
     }
 }

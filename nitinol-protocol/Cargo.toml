@@ -18,7 +18,8 @@ nitinol-core = { path = "../nitinol-core", features = ["markers"], default-featu
 async-trait = "^0.1"
 thiserror = "^2"
 tokio = { version = "^1", features = ["sync"], default-features = false, optional = true }
-sqlx = { version = "^0.8", features = ["migrate", "macros"], optional = true }
+sqlx = { version = "^0.8", features = ["migrate", "macros", "time"], optional = true }
+time = { version = "^0.3", features = [] }
 
 dotenvy = { version = "^0.15", optional = true }
 

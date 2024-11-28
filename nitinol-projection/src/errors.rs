@@ -11,3 +11,9 @@ pub struct NotCompatible {
 pub struct FailedProjection {
     pub id: EntityId
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("Failed projection. keys:{}")]
+pub struct FailedProjectionWithKey {
+    pub keys: String
+}
