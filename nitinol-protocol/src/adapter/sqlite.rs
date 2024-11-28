@@ -106,7 +106,10 @@ impl Internal {
     pub async fn read(id: &str, seq: i64, con: &mut SqliteConnection) -> Result<Payload, sqlx::Error> {
         // language=sqlite
         let payload = sqlx::query_as::<_, Payload>(r#"
-            SELECT (id, sequence_id, registry_key, bytes) 
+            SELECT 
+                sequence_id, 
+                registry_key, 
+                bytes
             FROM journal 
             WHERE 
                 id LIKE $1 
@@ -122,7 +125,10 @@ impl Internal {
     async fn read_to(id: &str, from: i64, to: i64, con: &mut SqliteConnection) -> Result<BTreeSet<Payload>, sqlx::Error> {
         // language=sqlite
         let payload = sqlx::query_as::<_, Payload>(r#"
-            SELECT (id, sequence_id, registry_key, bytes) 
+            SELECT 
+                sequence_id, 
+                registry_key, 
+                bytes
             FROM journal 
             WHERE 
                 id LIKE $1 
@@ -138,5 +144,63 @@ impl Internal {
             .collect::<BTreeSet<Payload>>();
         
         Ok(payload)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use serde::{Deserialize, Serialize};
+    use nitinol_core::errors::{DeserializeError, SerializeError};
+    use nitinol_core::event::Event;
+    use crate::adapter::sqlite::{Internal, SqliteEventStore};
+    use crate::Payload;
+
+    #[derive(Debug, Clone, Deserialize, Serialize)]
+    pub enum TestEvent {
+        A,
+        B,
+        C
+    }
+    
+    impl Event for TestEvent {
+        const REGISTRY_KEY: &'static str = "test-event";
+
+        fn as_bytes(&self) -> Result<Vec<u8>, SerializeError> {
+            Ok(serde_json::to_vec(self)?)
+        }
+
+        fn from_bytes(bytes: &[u8]) -> Result<Self, DeserializeError> {
+            Ok(serde_json::from_slice(bytes)?)
+        }
+    }
+    
+    impl From<(i64, TestEvent)> for Payload {
+        fn from(value: (i64, TestEvent)) -> Self {
+            Self {
+                sequence_id: value.0,
+                registry_key: TestEvent::REGISTRY_KEY.to_string(),
+                bytes: value.1.as_bytes().unwrap(),
+            }
+        }
+    }
+    
+    #[tokio::test]
+    async fn all_integration() {
+        let ev_store = SqliteEventStore::setup("sqlite::memory:").await.unwrap();
+        
+        let id = "TestEntity";
+        
+        let mut xact = ev_store.pool.begin().await.unwrap();
+        Internal::write(id, Payload::from((0, TestEvent::A)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((1, TestEvent::A)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((2, TestEvent::B)), &mut xact).await.unwrap();
+        Internal::write(id, Payload::from((3, TestEvent::C)), &mut xact).await.unwrap();
+        xact.commit().await.unwrap();
+        
+        let mut acquire = ev_store.pool.acquire().await.unwrap();
+        let events = Internal::read_to(id, 0, i64::MAX, &mut acquire).await.unwrap();
+        
+        println!("{:?}", events);
     }
 }
