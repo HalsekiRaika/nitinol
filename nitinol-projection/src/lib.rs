@@ -73,7 +73,7 @@ impl Projector {
             .collect::<BTreeSet<Payload>>();
     
         tracing::debug!("Expand {} payloads", journal.len());
-        tracing::trace!("{journal:#?}");
+        tracing::trace!("{journal:?}");
     
         let parts = patch_load(&mapping, journal).await
             .map_err(|e| ProjectionError::Projection(Box::new(e)))?;

@@ -24,7 +24,7 @@ impl<T: ResolveMapping> Eq for FixtureParts<T> {}
 
 impl<T: ResolveMapping> PartialEq<Self> for FixtureParts<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.seq.eq(&other.seq)
+        self.seq.eq(&other.seq) && self.bytes.eq(&other.bytes)
     }
 }
 
