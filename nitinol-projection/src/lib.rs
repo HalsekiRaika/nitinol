@@ -110,6 +110,7 @@ async fn patch<T: ResolveMapping>(
 ) -> Result<Option<(T, i64)>, ProjectionError> {
     let fixture = Fixture::new(Some(parts));
 
+    tracing::trace!(seq = sequence, "Patching entity with fixture");
     fixture.apply(&mut entity, &mut sequence).await?;
 
     Ok(entity.map(|entity| (entity, sequence)))
