@@ -876,6 +876,7 @@ dependencies = [
  "nitinol-core",
  "nitinol-protocol",
  "thiserror 2.0.0",
+ "tracing",
 ]
 
 [[package]]

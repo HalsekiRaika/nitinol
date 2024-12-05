@@ -32,7 +32,7 @@ impl Projector {
         let mut mapping = Mapper::default();
         T::mapping(&mut mapping);
         
-        match entity.into() {
+        let replay = match entity.into() {
             None => {
                 let journal = self.reader.read_to_latest(id.clone(), 0).await
                     .map_err(|e| ProjectionError::Protocol(Box::new(e)))?;
@@ -49,7 +49,10 @@ impl Projector {
                 patch(Some(entity), seq, parts).await?
                     .ok_or(ProjectionError::Projection(Box::new(FailedProjection { id: id.to_entity_id() })))
             }
-        }
+        }?;
+        
+        tracing::info!("Replay Successful reading events: {}", replay.1);
+        Ok(replay)
     }
     
     #[rustfmt::skip]
@@ -61,12 +64,16 @@ impl Projector {
         for key in mapping.registry_keys() {
             let chunked = self.reader.read_all_by_key(&key).await
                 .map_err(|e| ProjectionError::Protocol(Box::new(e)))?;
+            tracing::info!("Read {} payloads for key: {}", chunked.len(), key);
             journal.push(chunked);
         }
-    
+
         let journal = journal.into_iter()
             .flatten()
             .collect::<BTreeSet<Payload>>();
+    
+        tracing::debug!("Expand {} payloads", journal.len());
+        tracing::trace!("{journal:#?}");
     
         let parts = patch_load(&mapping, journal).await
             .map_err(|e| ProjectionError::Projection(Box::new(e)))?;

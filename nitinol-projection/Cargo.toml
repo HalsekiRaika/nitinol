@@ -9,5 +9,7 @@ repository = { workspace = true }
 [dependencies]
 thiserror = "^2"
 
+tracing = { version = "^0.1" }
+
 nitinol-core = { path = "../nitinol-core" }
 nitinol-protocol = { path = "../nitinol-protocol" }
