@@ -847,6 +847,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitinol-macro"
+version = "0.1.0"
+dependencies = [
+ "nitinol-core",
+ "nitinol-process",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "nitinol-persistence"
 version = "0.1.0"
 dependencies = [

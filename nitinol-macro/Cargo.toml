@@ -1,0 +1,20 @@
+[package]
+name = "nitinol-macro"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "^1"
+quote = "^1"
+syn = { version = "^2", features = ["full"] }
+
+[dev-dependencies]
+nitinol-core = { path = "../nitinol-core" }
+nitinol-process = { path = "../nitinol-process" }

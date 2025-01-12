@@ -3,6 +3,7 @@ members = [
   ".",
   "nitinol-core",
   "nitinol-executor",
+  "nitinol-macro",
   "nitinol-process",
   "nitinol-protocol",
   "nitinol-projection",
