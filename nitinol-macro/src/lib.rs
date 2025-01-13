@@ -1,4 +1,5 @@
 use proc_macro::TokenStream;
+use darling::FromDeriveInput;
 use quote::quote;
 
 #[proc_macro_derive(Command)]
@@ -13,22 +14,58 @@ pub fn derive_command(input: TokenStream) -> TokenStream {
     token.into()
 }
 
-#[proc_macro_derive(Event)]
+#[derive(FromDeriveInput)]
+#[darling(attributes(persist))]
+struct PersistAttribute {
+    #[darling(default)]
+    key: String,
+    enc: String,
+    dec: String
+}
+
+#[proc_macro_derive(Event, attributes(persist))]
 pub fn derive_event(input: TokenStream) -> TokenStream {
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    let attr = match PersistAttribute::from_derive_input(&input) {
+        Ok(v) => v,
+        Err(e) => return e.write_errors().into()
+    };
     let input_name = &input.ident;
+    
+    let key = if attr.key.is_empty() {
+        to_kebab_case(&input_name.to_string())
+    } else {
+        attr.key
+    };
+    
+    let enc = syn::parse_str::<syn::Expr>(&attr.enc).unwrap();
+    let dec = syn::parse_str::<syn::Expr>(&attr.dec).unwrap();
     
     let token = quote! {
         impl nitinol_core::event::Event for #input_name {
-            const REGISTRY_KEY: &'static str = #input_name;
-            fn as_bytes(&self) -> Result<Vec<u8>, SerializeError> {
-                
+            const REGISTRY_KEY: &'static str = #key;
+            fn as_bytes(&self) -> Result<Vec<u8>, nitinol_core::errors::SerializeError> {
+                Ok(#enc(self)?)
             }
-            fn from_bytes(bytes: &[u8]) -> Result<Self, DeserializeError> {
-                
+            fn from_bytes(bytes: &[u8]) -> Result<Self, nitinol_core::errors::DeserializeError> {
+                Ok(#dec(bytes)?)
             }
         }
     };
     
     token.into()
+}
+
+fn to_kebab_case(input: &str) -> String {
+    input.chars().fold(String::new(), |mut acc, c| {
+        if c.is_uppercase() {
+            if !acc.is_empty() {
+                acc.push('-');
+            }
+            acc.push(c.to_ascii_lowercase());
+        } else {
+            acc.push(c);
+        }
+        acc
+    })
 }

@@ -2,8 +2,10 @@ pub use nitinol_core::identifier::*;
 pub use nitinol_core::event::Event;
 pub use nitinol_core::command::Command;
 
-pub mod resolver {
-    pub use nitinol_core::resolver::{ResolveMapping, Mapper};
+#[cfg(feature = "macro")]
+pub mod macros {
+    pub use nitinol_macro::Event;
+    pub use nitinol_macro::Command;
 }
 
 #[cfg(feature = "protocol")]
@@ -30,7 +32,8 @@ pub mod process {
     
     #[cfg(feature = "persistence")]
     pub mod persistence {
-        pub use nitinol_persistence::*;
+        pub use nitinol_persistence::process::*;
+        pub use nitinol_persistence::extension::PersistenceExtension;
     }
 }
 
@@ -38,6 +41,11 @@ pub mod process {
 pub mod projection {
     pub use nitinol_core::projection::*;
     pub use nitinol_projection::Projector;
+}
+
+#[cfg(feature = "projection")]
+pub mod resolver {
+    pub use nitinol_core::resolver::{ResolveMapping, Mapper};
 }
 
 pub mod errors {

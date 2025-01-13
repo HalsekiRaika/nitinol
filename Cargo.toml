@@ -20,6 +20,7 @@ repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
 [features]
+macro = []
 process = []
 process-ext = ["process"]
 persistence = ["process", "process-ext", "protocol"]
@@ -39,6 +40,7 @@ description = "A utilities for event sourcing"
 
 [dependencies]
 nitinol-core = { path = "nitinol-core" }
+nitinol-macro = { path = "nitinol-macro" }
 nitinol-protocol = { path = "nitinol-protocol" }
 nitinol-process = { path = "nitinol-process" }
 nitinol-projection = { path = "nitinol-projection" }
@@ -46,3 +48,11 @@ nitinol-persistence = { path = "nitinol-persistence" }
 
 
 [dev-dependencies]
+nitinol = { path = ".", features = ["macro", "process", "persistence", "projection", "inmemory"] }
+
+async-trait = "^0.1"
+
+serde = { version = "^1", features = ["derive"] }
+serde_json = "^1"
+
+tokio = { version = "^1", features = ["macros", "rt-multi-thread"] }
