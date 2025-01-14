@@ -43,7 +43,7 @@ pub mod projection {
     pub use nitinol_projection::Projector;
 }
 
-#[cfg(feature = "projection")]
+#[cfg(any(feature = "process", feature = "projection"))]
 pub mod resolver {
     pub use nitinol_core::resolver::{ResolveMapping, Mapper};
 }
