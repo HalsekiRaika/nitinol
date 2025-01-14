@@ -8,7 +8,7 @@ pub fn derive_command(input: TokenStream) -> TokenStream {
     let input_name = &input.ident;
     
     let token = quote! {
-        impl nitinol_core::command::Command for #input_name {}
+        impl nitinol::Command for #input_name {}
     };
     
     token.into()
@@ -42,12 +42,12 @@ pub fn derive_event(input: TokenStream) -> TokenStream {
     let dec = syn::parse_str::<syn::Expr>(&attr.dec).unwrap();
     
     let token = quote! {
-        impl nitinol_core::event::Event for #input_name {
+        impl nitinol::Event for #input_name {
             const REGISTRY_KEY: &'static str = #key;
-            fn as_bytes(&self) -> Result<Vec<u8>, nitinol_core::errors::SerializeError> {
+            fn as_bytes(&self) -> Result<Vec<u8>, nitinol::errors::SerializeError> {
                 Ok(#enc(self)?)
             }
-            fn from_bytes(bytes: &[u8]) -> Result<Self, nitinol_core::errors::DeserializeError> {
+            fn from_bytes(bytes: &[u8]) -> Result<Self, nitinol::errors::DeserializeError> {
                 Ok(#dec(bytes)?)
             }
         }

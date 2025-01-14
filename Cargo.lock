@@ -904,7 +904,7 @@ name = "nitinol-macro"
 version = "0.1.0"
 dependencies = [
  "darling",
- "nitinol-core",
+ "nitinol",
  "quote",
  "serde",
  "serde_json",
