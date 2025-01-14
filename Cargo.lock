@@ -905,7 +905,6 @@ version = "0.1.0"
 dependencies = [
  "darling",
  "nitinol-core",
- "nitinol-process",
  "quote",
  "serde",
  "serde_json",
