@@ -37,9 +37,9 @@ where
         &self,
         entity: &mut Option<T>,
         payload: Vec<u8>,
-        _seq: &mut i64,
+        seq: &mut i64,
     ) -> Result<(), ProjectionError> {
-        *_seq += 1;
+        *seq += 1;
         let event = E::from_bytes(&payload)?;
         let Some(entity) = entity else {
             let a = AssertUnwindSafe(T::first(event))
