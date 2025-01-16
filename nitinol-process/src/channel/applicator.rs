@@ -1,10 +1,10 @@
 use std::error::Error;
 use super::ProcessApplier;
-use crate::errors::ProcessError;
 use crate::{Process, Context};
 use async_trait::async_trait;
 use nitinol_core::event::Event;
 use tokio::sync::oneshot;
+use crate::errors::ChannelDropped;
 
 #[async_trait]
 pub trait Applicator<E: Event>: 'static + Sync + Send {
@@ -21,10 +21,10 @@ impl<E: Event, T: Process> ProcessApplier<T> for ApplicativeHandler<E>
 where
     T: Applicator<E>,
 {
-    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ProcessError> {
+    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ChannelDropped> {
         self.oneshot
             .send(entity.apply(self.event, ctx).await)
-            .map_err(|_| ProcessError::ChannelDropped)?;
+            .map_err(|_| ChannelDropped)?;
         ctx.sequence += 1;
         Ok(())
     }
@@ -39,7 +39,7 @@ impl<E: Event, T: Process> ProcessApplier<T> for NoCallBackApplicativeHandler<E>
 where
     T: Applicator<E>,
 {
-    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ProcessError> {
+    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ChannelDropped> {
         entity.apply(self.event, ctx).await;
         ctx.sequence += 1;
         Ok(())
@@ -65,10 +65,10 @@ impl<E: Event, T: Process> ProcessApplier<T> for TryApplicativeHandler<E, T>
 where
     T: TryApplicator<E>,
 {
-    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ProcessError> {
+    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ChannelDropped> {
         self.oneshot
             .send(entity.try_apply(self.event, ctx).await)
-            .map_err(|_| ProcessError::ChannelDropped)?;
+            .map_err(|_| ChannelDropped)?;
         ctx.sequence += 1;
         Ok(())
     }
@@ -84,7 +84,7 @@ where
     T: TryApplicator<E>,
     T::Rejection: Error
 {
-    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ProcessError> {
+    async fn apply(self: Box<Self>, entity: &mut T, ctx: &mut Context) -> Result<(), ChannelDropped> {
         if let Err(e) = entity.try_apply(self.event, ctx).await { 
             tracing::error!("{}", e);
         }
