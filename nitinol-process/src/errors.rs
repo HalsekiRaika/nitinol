@@ -1,4 +1,3 @@
-use std::error::Error;
 use nitinol_core::identifier::EntityId;
 
 #[derive(Debug, thiserror::Error)]
@@ -8,7 +7,7 @@ pub struct ChannelDropped;
 #[derive(Debug, thiserror::Error)]
 #[error("Invalid cast to {to}")]
 pub struct InvalidCast {
-    to: &'static str
+    pub to: &'static str
 }
 
 #[derive(Debug, thiserror::Error)]
