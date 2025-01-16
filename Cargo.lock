@@ -858,7 +858,6 @@ dependencies = [
  "nitinol-protocol",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
 ]
 
