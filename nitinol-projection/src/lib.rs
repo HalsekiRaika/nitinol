@@ -12,17 +12,17 @@ pub mod errors;
 mod fixtures;
 
 #[derive(Debug, Clone)]
-pub struct Projector {
+pub struct EventProjector {
     reader: ReadProtocol
 }
 
-impl Projector {
+impl EventProjector {
     pub fn new(reader: ReadProtocol) -> Self {
         Self { reader }
     }
 }
 
-impl Projector {
+impl EventProjector {
     pub async fn projection_to_latest<T: ResolveMapping>(
         &self, 
         id: impl ToEntityId,
