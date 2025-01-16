@@ -1,10 +1,12 @@
 mod projection;
 
-use crate::event::Event;
-use crate::projection::Projection;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use crate::event::Event;
+use crate::projection::Projection;
+
 pub use self::projection::*;
 
 pub trait ResolveMapping: 'static + Sync + Send + Sized {
