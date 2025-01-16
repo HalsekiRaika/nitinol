@@ -2,6 +2,7 @@ use super::Ref;
 use crate::Process;
 use std::any::{type_name, Any};
 use std::sync::Arc;
+use crate::errors::InvalidCast;
 
 pub trait DynRef: 'static + Sync + Send {
     fn as_any(&self) -> &dyn Any;
@@ -28,10 +29,4 @@ impl<T: Process> From<Ref<T>> for AnyRef {
     fn from(value: Ref<T>) -> Self {
         Self(Arc::new(value))
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("Invalid cast to {to}")]
-pub struct InvalidCast {
-    to: &'static str
 }

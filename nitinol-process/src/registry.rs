@@ -1,58 +1,54 @@
-use nitinol_core::identifier::{EntityId, ToEntityId};
-use crate::any::{AnyRef, InvalidCast};
-use crate::{lifecycle, Context, Process, Ref};
-use async_trait::async_trait;
 use std::collections::HashMap;
-use std::error::Error;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use crate::extension::Extensions;
 
-pub struct Registry {
+use nitinol_core::identifier::{EntityId, ToEntityId};
+use tokio::sync::RwLock;
+
+use crate::any::AnyRef;
+use crate::extension::Extensions;
+use crate::errors::{AlreadyExist, NotFound, InvalidCast};
+use crate::{lifecycle, Context, Process, Ref};
+
+pub struct ProcessRegistry {
     registry: Arc<RwLock<HashMap<EntityId, AnyRef>>>
 }
 
-#[async_trait]
-pub trait ProcessSystem: 'static + Sync + Send {
-    async fn spawn<T: Process>(&self, id: impl ToEntityId, entity: T, seq: i64, ext: Extensions) -> Result<Ref<T>, RegistryError>;
-    async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Ref<T>>, InvalidCast>;
-}
-
-#[async_trait]
-impl ProcessSystem for Registry {
-    async fn spawn<T: Process>(&self, id: impl ToEntityId, entity: T, seq: i64, ext: Extensions) -> Result<Ref<T>, RegistryError> {
+impl ProcessRegistry {
+    pub async fn spawn<T: Process>(&self, id: impl ToEntityId, entity: T, seq: i64, ext: Extensions) -> Result<Ref<T>, AlreadyExist> {
         lifecycle::run(id, entity, Context::new(seq, self.clone(), ext), self.clone()).await
     }
-    
-    async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Ref<T>>, InvalidCast> {
-        self.find::<T>(&id.to_entity_id()).await
+
+    pub async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Ref<T>>, InvalidCast> {
+        self.track::<T>(&id.to_entity_id()).await
     }
 }
 
 
-impl Registry {
+impl ProcessRegistry {
     pub(crate) async fn register<T: Process>(
         &self,
         id: EntityId,
         writer: Ref<T>,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<(), AlreadyExist> {
         let lock = self.registry.read().await;
         if lock.iter().any(|(exist, _)| exist.eq(&id)) {
-            return Err(RegistryError::AlreadyExist(id));
+            return Err(AlreadyExist(id));
         }
 
         drop(lock); // release lock
         
         let mut lock = self.registry.write().await;
-        lock.insert(id, writer.into());
+        lock.insert(id.clone(), writer.into());
 
+        tracing::info!("Registered: {}", id);
+        
         Ok(())
     }
 
-    pub(crate) async fn deregister(&self, id: &EntityId) -> Result<(), RegistryError> {
+    pub(crate) async fn deregister(&self, id: &EntityId) -> Result<(), NotFound> {
         let lock = self.registry.read().await;
         if !lock.iter().any(|(exist, _)| exist.eq(id)) {
-            return Err(RegistryError::NotFound(id.to_owned()));
+            return Err(NotFound(id.to_owned()));
         }
 
         drop(lock); // release lock
@@ -60,11 +56,13 @@ impl Registry {
         let mut lock = self.registry.write().await;
         lock.remove(id);
 
+        tracing::info!("Deregistered: {}", id);
+        
         Ok(())
     }
 
     #[rustfmt::skip]
-    pub(crate) async fn find<T: Process>(&self, id: &EntityId) -> Result<Option<Ref<T>>, InvalidCast> {
+    pub(crate) async fn track<T: Process>(&self, id: &EntityId) -> Result<Option<Ref<T>>, InvalidCast> {
         let lock = self.registry.read().await;
         lock.iter()
             .find(|(dest, _)| dest.eq(&id))
@@ -74,23 +72,13 @@ impl Registry {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum RegistryError {
-    #[error("Already registered {0}")]
-    AlreadyExist(EntityId),
-    #[error("Not found Agent {0}")]
-    NotFound(EntityId),
-    #[error(transparent)]
-    TrySpawn(Box<dyn Error + Sync + Send>)
-}
-
-impl Clone for Registry {
+impl Clone for ProcessRegistry {
     fn clone(&self) -> Self {
         Self { registry: Arc::clone(&self.registry) }
     }
 }
 
-impl Default for Registry {
+impl Default for ProcessRegistry {
     fn default() -> Self {
         Self {
             registry: Arc::new(RwLock::new(HashMap::new()))

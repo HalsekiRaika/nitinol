@@ -1,15 +1,16 @@
 use nitinol_core::identifier::ToEntityId;
 use crate::channel::ProcessApplier;
 use crate::{Process, Context};
+use crate::errors::AlreadyExist;
 use crate::refs::Ref;
-use crate::registry::{Registry, RegistryError};
+use crate::registry::ProcessRegistry;
 
 pub async fn run<T: Process>(
     id: impl ToEntityId,
     entity: T,
     context: Context,
-    registry: Registry
-) -> Result<Ref<T>, RegistryError> {
+    registry: ProcessRegistry
+) -> Result<Ref<T>, AlreadyExist> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Box<dyn ProcessApplier<T>>>();
 
     let entity_id = id.to_entity_id();

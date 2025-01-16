@@ -1,6 +1,6 @@
 use crate::extension::errors::Missing;
 use crate::extension::Extensions;
-use crate::registry::Registry;
+use crate::registry::ProcessRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -8,12 +8,12 @@ use tokio::sync::RwLock;
 pub struct Context {
     pub(crate) sequence: i64,
     pub(crate) is_active: Arc<RwLock<bool>>,
-    pub(crate) registry: Registry,
+    pub(crate) registry: ProcessRegistry,
     pub(crate) extension: Extensions,
 }
 
 impl Context {
-    pub fn new(sequence: i64, registry: Registry, extension: Extensions) -> Context {
+    pub fn new(sequence: i64, registry: ProcessRegistry, extension: Extensions) -> Context {
         Self { sequence, is_active: Arc::new(RwLock::new(true)), registry, extension }
     }
 }
@@ -32,7 +32,7 @@ impl Context {
         *guard = false;
     }
     
-    pub fn registry(&self) -> &Registry {
+    pub fn registry(&self) -> &ProcessRegistry {
         &self.registry
     }
 

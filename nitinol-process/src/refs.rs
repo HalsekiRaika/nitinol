@@ -12,7 +12,7 @@ use crate::channel::{
     NoCallBackApplicativeHandler,
     NoCallBackTryApplicativeHandler,
 };
-use crate::errors::ProcessError;
+use crate::errors::ChannelDropped;
 use crate::{Applicator, Process, Publisher, TryApplicator};
 use self::any::DynRef;
 
@@ -26,7 +26,7 @@ pub struct Ref<T: Process> {
 
 impl<T: Process> Ref<T> {
     #[rustfmt::skip]
-    pub async fn publish<C: Command>(&self, command: C) -> Result<Result<T::Event, T::Rejection>, ProcessError>
+    pub async fn publish<C: Command>(&self, command: C) -> Result<Result<T::Event, T::Rejection>, ChannelDropped>
     where
         T: Publisher<C>,
     {
@@ -36,52 +36,52 @@ impl<T: Process> Ref<T> {
                 command,
                 oneshot: tx,
             }))
-            .map_err(|_| ProcessError::ChannelDropped)?;
+            .map_err(|_| ChannelDropped)?;
 
-        rx.await.map_err(|_| ProcessError::ChannelDropped)
+        rx.await.map_err(|_| ChannelDropped)
     }
 
-    pub async fn apply<E: Event>(&self, event: E) -> Result<(), ProcessError>
+    pub async fn apply<E: Event>(&self, event: E) -> Result<(), ChannelDropped>
     where
         T: Applicator<E>,
     {
         let (tx, rx) = oneshot::channel();
         self.channel
             .send(Box::new(ApplicativeHandler { event, oneshot: tx }))
-            .map_err(|_| ProcessError::ChannelDropped)?;
+            .map_err(|_| ChannelDropped)?;
 
-        rx.await.map_err(|_| ProcessError::ChannelDropped)
+        rx.await.map_err(|_| ChannelDropped)
     }
     
-    pub async fn try_apply<E: Event>(&self, event: E) -> Result<Result<(), T::Rejection>, ProcessError>
+    pub async fn try_apply<E: Event>(&self, event: E) -> Result<Result<(), T::Rejection>, ChannelDropped>
     where
         T: TryApplicator<E>,
     {
         let (tx, rx) = oneshot::channel();
         self.channel
             .send(Box::new(TryApplicativeHandler { event, oneshot: tx }))
-            .map_err(|_| ProcessError::ChannelDropped)?;
+            .map_err(|_| ChannelDropped)?;
         
-        rx.await.map_err(|_| ProcessError::ChannelDropped)
+        rx.await.map_err(|_| ChannelDropped)
     }
     
-    pub fn notify<E: Event>(&self, event: E) -> Result<(), ProcessError>
+    pub fn notify<E: Event>(&self, event: E) -> Result<(), ChannelDropped>
     where 
         T: Applicator<E>
     {
         self.channel
             .send(Box::new(NoCallBackApplicativeHandler { event }))
-            .map_err(|_| ProcessError::ChannelDropped)
+            .map_err(|_| ChannelDropped)
     }
     
-    pub fn entrust<E: Event>(&self, event: E) -> Result<(), ProcessError> 
+    pub fn entrust<E: Event>(&self, event: E) -> Result<(), ChannelDropped> 
     where 
         T: TryApplicator<E>,
         T::Rejection: Error
     {
         self.channel
             .send(Box::new(NoCallBackTryApplicativeHandler { event }))
-            .map_err(|_| ProcessError::ChannelDropped)
+            .map_err(|_| ChannelDropped)
     }
 }
 
