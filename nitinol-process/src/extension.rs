@@ -19,6 +19,12 @@ impl Clone for Extensions {
     }
 }
 
+impl Default for Extensions {
+    fn default() -> Self {
+        Self { ext: Arc::new(HashMap::new()) }
+    }
+}
+
 impl Extensions {
     pub fn builder() -> Installer {
         Installer::default()

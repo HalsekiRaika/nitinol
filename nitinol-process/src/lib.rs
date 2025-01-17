@@ -1,4 +1,4 @@
-pub mod registry;
+pub(crate) mod registry;
 pub mod lifecycle;
 mod channel;
 mod context;
@@ -7,6 +7,7 @@ mod refs;
 mod process;
 pub mod extension;
 pub mod queue;
+pub mod manager;
 
 pub use self::channel::*;
 pub use self::context::*;

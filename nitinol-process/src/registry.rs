@@ -1,28 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nitinol_core::identifier::{EntityId, ToEntityId};
 use tokio::sync::RwLock;
+use nitinol_core::identifier::EntityId;
 
 use crate::any::AnyRef;
-use crate::extension::Extensions;
 use crate::errors::{AlreadyExist, NotFound, InvalidCast};
-use crate::{lifecycle, Context, Process, Ref};
+use crate::{Process, Ref};
 
 pub struct ProcessRegistry {
     registry: Arc<RwLock<HashMap<EntityId, AnyRef>>>
 }
-
-impl ProcessRegistry {
-    pub async fn spawn<T: Process>(&self, id: impl ToEntityId, entity: T, seq: i64, ext: Extensions) -> Result<Ref<T>, AlreadyExist> {
-        lifecycle::run(id, entity, Context::new(seq, self.clone(), ext), self.clone()).await
-    }
-
-    pub async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Ref<T>>, InvalidCast> {
-        self.track::<T>(&id.to_entity_id()).await
-    }
-}
-
 
 impl ProcessRegistry {
     pub(crate) async fn register<T: Process>(

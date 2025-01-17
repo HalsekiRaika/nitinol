@@ -878,6 +878,7 @@ dependencies = [
  "async-trait",
  "nitinol-core",
  "nitinol-process",
+ "nitinol-projection",
  "pin-project",
  "tokio",
 ]

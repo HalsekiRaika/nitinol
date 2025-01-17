@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use nitinol::process::manager::ProcessManager;
 use nitinol::process::{Applicator, Context, Publisher, Process};
 use nitinol::macros::{Command, Event};
-use nitinol_process::extension::Extensions;
-use nitinol_process::registry::ProcessRegistry;
 
 #[derive(Debug, Clone, Command)]
 pub enum DomainCommand {
@@ -53,10 +52,10 @@ impl Applicator<DomainEvent> for Aggregate {
 
 #[tokio::test]
 async fn main() -> Result<(), anyhow::Error> {
-    let registry = ProcessRegistry::default();
-    let extension = Extensions::builder().build();
+    let system = ProcessManager::default();
+    
     let aggregate = Aggregate { name: "name".to_string() };
-    let refs = registry.spawn("aggregate", aggregate, 0, extension).await?;
+    let refs = system.spawn("aggregate", aggregate, 0).await?;
     
     let ev = refs.publish(DomainCommand::ChangeName { new: "new name".to_string() }).await??;
     refs.apply(ev).await?;
