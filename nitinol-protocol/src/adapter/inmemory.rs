@@ -105,8 +105,9 @@ impl Reader for InMemoryEventStore {
 
     async fn read_to(&self, id: EntityId, from: i64, to: i64) -> Result<BTreeSet<Payload>, ProtocolError> {
         let guard = self.journal.read().await;
-        let lock = guard.get(&id)
-            .ok_or(ProtocolError::Read(NotFound { aggregate_id: id.to_string() }.into_boxed()))?;
+        let Some(lock) = guard.get(&id) else {
+            return Ok(BTreeSet::new());
+        };
         let found = loop {
             match lock.read().await {
                 Ok(guard) => {
