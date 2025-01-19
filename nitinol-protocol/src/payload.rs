@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 use time::OffsetDateTime;
+use nitinol_core::errors::DeserializeError;
+use nitinol_core::event::Event;
 
 /// Basic format of the data to be saved.
 #[derive(Debug, Clone)]
@@ -15,6 +17,12 @@ pub struct Payload {
     pub bytes: Vec<u8>,
     /// Time the Event was generated
     pub created_at: OffsetDateTime
+}
+
+impl Payload {
+    pub fn to_event<E: Event>(&self) -> Result<E, DeserializeError> {
+        E::from_bytes(&self.bytes)
+    }
 }
 
 impl Eq for Payload {}
