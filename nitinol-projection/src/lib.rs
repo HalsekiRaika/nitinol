@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use nitinol_core::errors::ProjectionError;
 use nitinol_core::identifier::ToEntityId;
 use nitinol_core::resolver::{Mapper, ResolveMapping};
-use nitinol_protocol::io::ReadProtocol;
+use nitinol_protocol::io::{ReadProtocol, Reader};
 use nitinol_protocol::Payload;
 use crate::errors::{FailedProjection, FailedProjectionWithKey, NotCompatible};
 use crate::fixtures::{Fixture, FixtureParts};
@@ -17,8 +17,8 @@ pub struct EventProjector {
 }
 
 impl EventProjector {
-    pub fn new(reader: ReadProtocol) -> Self {
-        Self { reader }
+    pub fn new(reader: impl Reader) -> Self {
+        Self { reader: ReadProtocol::new(reader) }
     }
 }
 
