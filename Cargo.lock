@@ -872,6 +872,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitinol-eventstream"
+version = "0.1.0"
+
+[[package]]
 name = "nitinol-macro"
 version = "0.1.0"
 dependencies = [
