@@ -1,27 +1,31 @@
+use self::errors::*;
 use std::any::{self, Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
-use self::errors::*;
 
 /// It is a kind of DI Container shared within the [`Context`](crate::Context) that each Process has.
-/// 
+///
 /// Behaves roughly the same as [`Extension` of `http` crate](https://docs.rs/http/1.1.0/http/struct.Extensions.html).
-/// 
-/// This container uses **dynamic dispatching**, 
+///
+/// This container uses **dynamic dispatching**,
 /// so processes such as extracting contents are resolved at runtime.
 pub struct Extensions {
-    ext: Arc<HashMap<TypeId, Box<dyn Any + Sync + Send>>>
+    ext: Arc<HashMap<TypeId, Box<dyn Any + Sync + Send>>>,
 }
 
 impl Clone for Extensions {
     fn clone(&self) -> Self {
-        Self { ext: Arc::clone(&self.ext) }
+        Self {
+            ext: Arc::clone(&self.ext),
+        }
     }
 }
 
 impl Default for Extensions {
     fn default() -> Self {
-        Self { ext: Arc::new(HashMap::new()) }
+        Self {
+            ext: Arc::new(HashMap::new()),
+        }
     }
 }
 
@@ -31,22 +35,32 @@ impl Extensions {
     }
 
     pub fn get<T>(&self) -> Result<&T, Missing>
-    where T: Clone + Sync + Send + 'static
+    where
+        T: Sync + Send + 'static,
     {
-        self.ext.get(&TypeId::of::<T>())
+        self.ext
+            .get(&TypeId::of::<T>())
             .and_then(|ext| ext.downcast_ref::<T>())
             .ok_or(Missing(any::type_name::<T>()))
+    }
+
+    pub fn get_owned<T>(&self) -> Result<T, Missing>
+    where
+        T: Clone + Sync + Send + 'static,
+    {
+        self.get().cloned()
     }
 }
 
 #[derive(Default)]
 pub struct Installer {
-    ext: HashMap<TypeId, Box<dyn Any + Sync + Send>>
+    ext: HashMap<TypeId, Box<dyn Any + Sync + Send>>,
 }
 
 impl Installer {
     pub fn install<T>(&mut self, ext: T) -> Result<&mut Self, AlreadyInstalled>
-    where T: Clone + Sync + Send + 'static
+    where
+        T: Sync + Send + 'static,
     {
         let id = TypeId::of::<T>();
         if self.ext.contains_key(&id) {
@@ -55,23 +69,23 @@ impl Installer {
         self.ext.insert(id, Box::new(ext));
         Ok(self)
     }
-    
+
     pub fn build(self) -> Extensions {
-        Extensions { ext: Arc::new(self.ext) }
+        Extensions {
+            ext: Arc::new(self.ext),
+        }
     }
 }
-
 
 pub mod errors {
     #[derive(Debug, thiserror::Error)]
     #[error("`extension = {0}` was already installed.")]
     pub struct AlreadyInstalled(pub &'static str);
-    
+
     #[derive(Debug, thiserror::Error)]
     #[error("`extension = {0}` is not install.")]
     pub struct Missing(pub &'static str);
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -79,7 +93,7 @@ mod tests {
 
     #[derive(Debug, Clone, Eq, PartialEq)]
     struct TestModule;
-    
+
     #[test]
     fn module_install_and_get() {
         let mut ext = Extensions::builder();
@@ -88,7 +102,7 @@ mod tests {
         let module = ext.get::<TestModule>().unwrap();
         assert_eq!(&TestModule, module);
     }
-    
+
     #[test]
     #[should_panic]
     fn module_install_failure_on_module_already_installed() {
@@ -96,7 +110,7 @@ mod tests {
         ext.install(TestModule).unwrap();
         ext.install(TestModule).unwrap(); // PANIC
     }
-    
+
     #[test]
     #[should_panic]
     fn module_get_failure_on_missing_module() {

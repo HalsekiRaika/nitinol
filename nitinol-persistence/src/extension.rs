@@ -1,5 +1,5 @@
 use nitinol_core::event::Event;
-use nitinol_core::identifier::ToEntityId;
+use nitinol_core::identifier::{EntityId, ToEntityId};
 use nitinol_process::FromContextExt;
 use nitinol_protocol::io::{WriteProtocol, Writer};
 
@@ -19,17 +19,10 @@ impl PersistenceExtension {
 }
 
 impl PersistenceExtension {
-    pub(crate) async fn persist<E: Event>(
-        &self,
-        aggregate_id: impl ToEntityId,
-        event: &E,
-        seq: i64,
-    ) {
+    pub(crate) async fn persist<E: Event>(&self, id: EntityId, event: &E, seq: i64) {
         loop {
-            match self.ext.write(aggregate_id.to_entity_id(), event, seq).await {
-                Ok(()) => {
-                    break;
-                }
+            match self.ext.write(id.clone(), event, seq).await {
+                Ok(()) => break,
                 Err(e) => {
                     tracing::error!("on failure persist caused reason `{e}`");
                     continue;
