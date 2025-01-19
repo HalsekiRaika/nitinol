@@ -1,7 +1,7 @@
 use crate::extension::PersistenceExtension;
 use async_trait::async_trait;
 use nitinol_core::event::Event;
-use nitinol_core::identifier::{EntityId, ToEntityId};
+use nitinol_core::identifier::EntityId;
 use nitinol_process::{Context, FromContextExt, Process};
 
 #[async_trait]
