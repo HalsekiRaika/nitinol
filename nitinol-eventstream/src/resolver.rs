@@ -22,11 +22,12 @@ impl<S> Default for DecodeMapping<S> {
 }
 
 impl<S> DecodeMapping<S> {
-    pub fn register<E: Event>(&mut self) 
+    pub fn register<E: Event>(&mut self) -> &mut Self 
     where
         S: EventSubscriber<E>
     {
         self.map.insert(E::REGISTRY_KEY.to_string(), Arc::new(SubscribeResolver::default()));
+        self
     }
 }
 
