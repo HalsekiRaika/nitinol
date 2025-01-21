@@ -15,6 +15,7 @@
       <sourceFolder url="file://$MODULE_DIR$/nitinol-macro/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/nitinol-macro/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/nitinol-eventstream/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/nitinol-eventstream/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
