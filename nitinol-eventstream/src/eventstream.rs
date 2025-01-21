@@ -1,5 +1,5 @@
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::broadcast::Sender as BroadcastSender;
+use tokio::sync::broadcast::{self, Sender as BroadcastSender, Receiver as BroadcastReceiver, Receiver};
 use nitinol_core::event::Event;
 use nitinol_core::identifier::EntityId;
 use nitinol_protocol::Payload;
@@ -13,9 +13,22 @@ pub struct EventStream {
 
 impl Default for EventStream {
     fn default() -> Self {
-        Self {
-            root: BroadcastSender::new(256),
-        }
+        Self::new()
+    }
+}
+
+impl EventStream {
+    fn new() -> Self {
+        let (root, dead_letter) = broadcast::channel(256);
+       
+        tokio::spawn(async move { 
+            let mut dead_letter: Receiver<Payload> = dead_letter;
+            while let Ok(payload) = dead_letter.recv().await { 
+                tracing::trace!("Streamed event {}#{}", payload.id, payload.registry_key);
+            }
+        });
+        
+        Self { root }
     }
 }
 
