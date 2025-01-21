@@ -42,7 +42,7 @@ impl EventStream {
                         if let Some((_, handler)) = mapping.map.iter().find(|(id, _)| id.eq(&&payload.registry_key)) {
                             handler.apply(&mut subscriber, &payload.bytes).await;
                         } else {
-                            tracing::error!("No handler found for event: {}#{}", payload.id, payload.registry_key);
+                            tracing::warn!("No handler found for event: {}#{}", payload.id, payload.registry_key);
                         }
                     }
                     Err(RecvError::Closed) => {
