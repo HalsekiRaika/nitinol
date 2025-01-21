@@ -23,14 +23,14 @@ impl EventStream {
     pub async fn publish<E: Event>(&self, id: EntityId, seq: i64, event: &E) {
         self.root.send(Payload::new(id, seq, event).unwrap()).unwrap();
     }
-    
+
     pub async fn subscribe<S: SubscriptionMapper>(&self, subscribe: S) {
         let mut mapping = DecodeMapping::default();
         S::mapping(&mut mapping);
-        
-        
+
+
         let subscribe_rx = self.root.subscribe();
-        
+
         tokio::spawn(async move {
             let mapping = mapping;
             let mut subscriber = subscribe;

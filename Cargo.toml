@@ -21,6 +21,7 @@ description = "A utilities for event sourcing"
 
 [features]
 macro = []
+eventstream = ["process"]
 process = []
 process-ext = ["process"]
 persistence = ["process", "process-ext", "protocol"]
@@ -40,6 +41,7 @@ description = "A utilities for event sourcing"
 
 [dependencies]
 nitinol-core = { path = "nitinol-core" }
+nitinol-eventstream = { path = "nitinol-eventstream" }
 nitinol-macro = { path = "nitinol-macro" }
 nitinol-protocol = { path = "nitinol-protocol" }
 nitinol-process = { path = "nitinol-process" }

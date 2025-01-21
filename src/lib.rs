@@ -8,6 +8,13 @@ pub mod macros {
     pub use nitinol_macro::Command;
 }
 
+#[cfg(feature = "eventstream")]
+pub mod eventstream {
+    pub use nitinol_eventstream::eventstream::EventStream;
+    pub use nitinol_eventstream::resolver;
+    pub use nitinol_eventstream::subscriber::EventSubscriber;
+}
+
 #[cfg(feature = "protocol")]
 pub mod protocol {
     pub use nitinol_protocol::Payload;
@@ -34,6 +41,12 @@ pub mod process {
     pub mod persistence {
         pub use nitinol_persistence::process::*;
         pub use nitinol_persistence::extension::PersistenceExtension;
+    }
+    
+    #[cfg(feature = "eventstream")]
+    pub mod eventstream {
+        pub use nitinol_eventstream::extension::EventStreamExtension;
+        pub use nitinol_eventstream::extension::WithStreamPublisher;
     }
 }
 

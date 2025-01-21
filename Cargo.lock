@@ -851,6 +851,7 @@ dependencies = [
  "async-trait",
  "nitinol",
  "nitinol-core",
+ "nitinol-eventstream",
  "nitinol-macro",
  "nitinol-persistence",
  "nitinol-process",
