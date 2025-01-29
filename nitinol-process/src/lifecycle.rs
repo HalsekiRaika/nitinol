@@ -22,6 +22,9 @@ pub async fn run<T: Process>(
         let mut entity = entity;
         let mut context = context;
         let registry = registry;
+        
+        entity.start(&mut context).await;
+        
         while let Some(rx) = rx.recv().await {
             if let Err(e) = rx.apply(&mut entity, &mut context).await {
                 tracing::error!("{e}");
@@ -36,6 +39,8 @@ pub async fn run<T: Process>(
         if let Err(e) = registry.deregister(&id).await {
             tracing::error!("{e}");
         }
+        
+        entity.stop(&mut context).await;
     });
     
     Ok(refs)
