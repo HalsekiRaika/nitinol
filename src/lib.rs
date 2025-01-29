@@ -47,6 +47,7 @@ pub mod process {
     pub mod eventstream {
         pub use nitinol_eventstream::extension::EventStreamExtension;
         pub use nitinol_eventstream::extension::WithStreamPublisher;
+        pub use nitinol_eventstream::extension::WithEventSubscriber;
     }
 }
 

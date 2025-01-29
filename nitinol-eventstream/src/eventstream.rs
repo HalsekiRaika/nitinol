@@ -75,7 +75,7 @@ impl EventStream {
         let subscribe_rx = self.root.subscribe();
         tokio::spawn(async move {
             let mut subscribe_rx = subscribe_rx;
-
+            let resolver = resolver;
             loop {
                 match subscribe_rx.recv().await {
                     Ok(payload) => {

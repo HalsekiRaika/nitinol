@@ -1,12 +1,13 @@
-use nitinol_process::{Context, FromContextExt};
-use nitinol_process::extension::errors::Missing;
-use crate::eventstream::EventStream;
-
 mod publisher;
 mod subscriber;
 
 pub use self::publisher::*;
 pub use self::subscriber::*;
+
+use nitinol_process::{Context, FromContextExt};
+use nitinol_process::extension::errors::Missing;
+
+use crate::eventstream::EventStream;
 
 #[derive(Clone)]
 pub struct EventStreamExtension(pub(crate) EventStream);
