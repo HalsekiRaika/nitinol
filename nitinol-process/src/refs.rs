@@ -4,14 +4,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use nitinol_core::command::Command;
 use nitinol_core::event::Event;
-use crate::channel::{
-    ProcessApplier,
-    PublishHandler,
-    ApplicativeHandler,
-    TryApplicativeHandler,
-    NoCallBackApplicativeHandler,
-    NoCallBackTryApplicativeHandler,
-};
+use crate::channel::{ProcessApplier, PublishHandler, ApplicativeHandler, TryApplicativeHandler, NoCallBackApplicativeHandler, NoCallBackTryApplicativeHandler, EmployHandler};
 use crate::errors::ChannelDropped;
 use crate::{Applicator, Process, Publisher, TryApplicator};
 use self::any::DynRef;
@@ -82,6 +75,19 @@ impl<T: Process> Ref<T> {
         self.channel
             .send(Box::new(NoCallBackTryApplicativeHandler { event }))
             .map_err(|_| ChannelDropped)
+    }
+    
+    pub async fn employ<C: Command>(&self, cmd: C) -> Result<Result<(), T::Rejection>, ChannelDropped>
+    where
+        T: Publisher<C>,
+        T: Applicator<<T as Publisher<C>>::Event>,
+    {
+        let (tx, rx) = oneshot::channel();
+        self.channel
+            .send(Box::new(EmployHandler { command: cmd, channel: tx }))
+            .map_err(|_| ChannelDropped)?;
+        
+        rx.await.map_err(|_| ChannelDropped)
     }
 }
 

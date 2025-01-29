@@ -3,8 +3,10 @@ use nitinol_process::extension::errors::Missing;
 use crate::eventstream::EventStream;
 
 mod publisher;
+mod subscriber;
 
 pub use self::publisher::*;
+pub use self::subscriber::*;
 
 #[derive(Clone)]
 pub struct EventStreamExtension(pub(crate) EventStream);
