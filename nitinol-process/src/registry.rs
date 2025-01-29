@@ -50,7 +50,7 @@ impl ProcessRegistry {
     }
 
     #[rustfmt::skip]
-    pub(crate) async fn track<T: Process>(&self, id: &EntityId) -> Result<Option<Ref<T>>, InvalidCast> {
+    pub async fn find<T: Process>(&self, id: &EntityId) -> Result<Option<Ref<T>>, InvalidCast> {
         let lock = self.registry.read().await;
         lock.iter()
             .find(|(dest, _)| dest.eq(&id))

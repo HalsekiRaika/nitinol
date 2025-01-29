@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
 use time::OffsetDateTime;
-use nitinol_core::errors::DeserializeError;
+use nitinol_core::errors::{DeserializeError, SerializeError};
 use nitinol_core::event::Event;
+use nitinol_core::identifier::EntityId;
 
 /// Basic format of the data to be saved.
 #[derive(Debug, Clone)]
@@ -20,6 +21,16 @@ pub struct Payload {
 }
 
 impl Payload {
+    pub fn new<E: Event>(aggregate_id: EntityId, seq: i64, event: &E) -> Result<Self, SerializeError> {
+        Ok(Self {
+            id: aggregate_id.to_string(),
+            sequence_id: seq,
+            registry_key: E::REGISTRY_KEY.to_string(),
+            bytes: event.as_bytes()?,
+            created_at: OffsetDateTime::now_utc()
+        })
+    }
+    
     pub fn to_event<E: Event>(&self) -> Result<E, DeserializeError> {
         E::from_bytes(&self.bytes)
     }

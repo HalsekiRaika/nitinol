@@ -851,6 +851,7 @@ dependencies = [
  "async-trait",
  "nitinol",
  "nitinol-core",
+ "nitinol-eventstream",
  "nitinol-macro",
  "nitinol-persistence",
  "nitinol-process",
@@ -869,6 +870,23 @@ dependencies = [
  "futures-util",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "nitinol-eventstream"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nitinol",
+ "nitinol-core",
+ "nitinol-process",
+ "nitinol-projection",
+ "nitinol-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -5,7 +5,7 @@ use crate::{lifecycle, Context, Process, Ref};
 use crate::errors::{AlreadyExist, InvalidCast};
 use crate::registry::ProcessRegistry;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ProcessManager {
     extension: Extensions,
     registry: ProcessRegistry
@@ -28,15 +28,6 @@ impl ProcessManager {
     }
 
     pub async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Ref<T>>, InvalidCast> {
-        self.registry.track::<T>(&id.to_entity_id()).await
-    }
-}
-
-impl Default for ProcessManager {
-    fn default() -> Self {
-        Self {
-            extension: Extensions::default(),
-            registry: ProcessRegistry::default()
-        }
+        self.registry.find::<T>(&id.to_entity_id()).await
     }
 }
