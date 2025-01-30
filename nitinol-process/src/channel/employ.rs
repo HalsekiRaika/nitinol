@@ -23,6 +23,7 @@ where
         match entity.publish(self.command, ctx).await {
             Ok(event) => {
                 entity.apply(event, ctx).await;
+                ctx.sequence += 1;
                 self.channel.send(Ok(())).map_err(|_| ChannelDropped)
             }
             Err(rejection) => {
