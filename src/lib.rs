@@ -60,7 +60,13 @@ pub mod projection {
 
 pub mod errors {
     pub use nitinol_core::errors::*;
+    
+    #[cfg(feature = "process")]
     pub use nitinol_process::errors::*;
+    
+    #[cfg(feature = "protocol")]
     pub use nitinol_protocol::errors::*;
+    
+    #[cfg(feature = "projection")]
     pub use nitinol_projection::errors::*;
 }

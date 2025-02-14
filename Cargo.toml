@@ -20,15 +20,15 @@ repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
 [features]
-macro = []
-eventstream = ["process"]
-process = []
+macro = ["nitinol-macro"]
+process = ["nitinol-process"]
 process-ext = ["process"]
-persistence = ["process", "process-ext", "protocol"]
+eventstream = ["process", "nitinol-eventstream"]
+protocol = ["nitinol-protocol"]
 sqlite = ["protocol", "nitinol-protocol/sqlite"]
 inmemory = ["protocol", "nitinol-protocol/inmemory"]
-protocol = []
-projection = []
+persistence = ["process", "process-ext", "protocol", "nitinol-persistence"]
+projection = ["nitinol-projection"]
 
 [package]
 name = "nitinol"
@@ -41,12 +41,12 @@ description = "A utilities for event sourcing"
 
 [dependencies]
 nitinol-core = { path = "nitinol-core" }
-nitinol-eventstream = { path = "nitinol-eventstream" }
-nitinol-macro = { path = "nitinol-macro" }
-nitinol-protocol = { path = "nitinol-protocol" }
-nitinol-process = { path = "nitinol-process" }
-nitinol-projection = { path = "nitinol-projection" }
-nitinol-persistence = { path = "nitinol-persistence" }
+nitinol-eventstream = { path = "nitinol-eventstream", optional = true }
+nitinol-macro = { path = "nitinol-macro", optional = true }
+nitinol-protocol = { path = "nitinol-protocol", optional = true }
+nitinol-process = { path = "nitinol-process", optional = true }
+nitinol-projection = { path = "nitinol-projection", optional = true }
+nitinol-persistence = { path = "nitinol-persistence", optional = true }
 
 
 [dev-dependencies]
