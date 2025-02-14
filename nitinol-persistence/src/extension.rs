@@ -1,5 +1,5 @@
 use nitinol_core::event::Event;
-use nitinol_core::identifier::{EntityId, ToEntityId};
+use nitinol_core::identifier::EntityId;
 use nitinol_process::FromContextExt;
 use nitinol_protocol::io::{WriteProtocol, Writer};
 
