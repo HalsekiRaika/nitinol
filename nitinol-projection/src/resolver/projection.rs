@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures_util::FutureExt;
 use nitinol_core::event::Event;
 
-use crate::errors::{ProjectionError, UnimplementedError};
+use crate::errors::ProjectionError;
 use crate::projection::Projection;
 use crate::resolver::ResolveMapping;
 
@@ -29,31 +29,39 @@ impl<T: ResolveMapping, E: Event> Default for ProjectionResolver<T, E> {
     }
 }
 
+#[rustfmt::skip]
 #[async_trait]
 impl<T: ResolveMapping, E: Event> PatchHandler<T> for ProjectionResolver<T, E>
 where
     T: Projection<E>,
 {
-    async fn apply(
-        &self,
-        entity: &mut Option<T>,
-        payload: Vec<u8>,
-        seq: &mut i64,
-    ) -> Result<(), ProjectionError> {
+    async fn apply(&self, entity: &mut Option<T>, payload: Vec<u8>, seq: &mut i64) -> Result<(), ProjectionError> {
         *seq += 1;
         let event = E::from_bytes(&payload)?;
         let Some(entity) = entity else {
-            let a = AssertUnwindSafe(T::first(event))
+            let first = match AssertUnwindSafe(T::first(event))
                 .catch_unwind()
                 .await
-                .map_err(|_| ProjectionError::Projection(Box::new(UnimplementedError)))?
-                .map_err(|e| ProjectionError::Projection(Box::new(e)))?;
-            *entity = Some(a);
+                .map_err(|_| ProjectionError::FirstFormation)?
+            {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!("First formation failed: {:?}", e);
+                    return Err(ProjectionError::ApplyEvent {
+                        backtrace: format!("{:?}", e),
+                    });
+                },
+            };
+            *entity = Some(first);
             return Ok(());
         };
-        T::apply(entity, event)
-            .await
-            .map_err(|e| ProjectionError::Projection(Box::new(e)))?;
+        
+        if let Err(e) = T::apply(entity, event).await {
+            tracing::error!("Projection failed: {:?}", e);
+            return Err(ProjectionError::ApplyEvent {
+                backtrace: format!("{:?}", e),
+            });
+        }
         
         Ok(())
     }

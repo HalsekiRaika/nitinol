@@ -1,9 +1,21 @@
-use nitinol_core::identifier::EntityId;
-
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectionError {
     #[error("Failed to read protocol. {0}")]
-    Protocol(Box<dyn std::error::Error + Send + Sync>),
+    Protocol(#[from] nitinol_protocol::errors::ProtocolError),
+    
+    #[error(transparent)]
+    NotCompatible(#[from] NotCompatible),
+    
+    #[error("First formation is not implemented.")]
+    FirstFormation,
+    
+    #[error(transparent)]
+    DeserializeEvent(#[from] nitinol_core::errors::DeserializeError),
+    
+    #[error("An error occurred while applying the event. {backtrace}")]
+    ApplyEvent {
+        backtrace: String
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -16,16 +28,4 @@ pub enum RejectProjection {
 #[error("There are data incompatible with Mapping. key:{key}")]
 pub struct NotCompatible {
     pub key: String
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("Failed projection. entity:{id}")]
-pub struct FailedProjection {
-    pub id: EntityId
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("Failed projection. keys:{keys}")]
-pub struct FailedProjectionWithKey {
-    pub keys: String
 }

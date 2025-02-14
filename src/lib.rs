@@ -53,11 +53,9 @@ pub mod process {
 
 #[cfg(feature = "projection")]
 pub mod projection {
-    pub use nitinol_core::projection::*;
-    pub use nitinol_projection::EventProjector;
-    pub mod resolver {
-        pub use nitinol_core::resolver::{ResolveMapping, Mapper};
-    }
+    pub use nitinol_projection::projection::*;
+    pub use nitinol_projection::projector;
+    pub use nitinol_projection::resolver;
 }
 
 pub mod errors {

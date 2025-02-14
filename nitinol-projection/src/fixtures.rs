@@ -1,17 +1,9 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+
+use crate::errors::ProjectionError;
 use crate::resolver::{PatchHandler, ResolveMapping};
-
-pub struct Fixture<T: ResolveMapping> {
-    parts: Option<BTreeSet<FixtureParts<T>>>,
-}
-
-impl<T: ResolveMapping> Fixture<T> {
-    pub fn new(parts: Option<BTreeSet<FixtureParts<T>>>) -> Fixture<T> {
-        Self { parts }
-    }
-}
 
 pub struct FixtureParts<T: ResolveMapping> {
     pub(crate) seq: i64,
@@ -38,6 +30,17 @@ impl<T: ResolveMapping> Ord for FixtureParts<T> {
         self.seq
             .cmp(&other.seq)
             .then_with(|| self.bytes.cmp(&other.bytes))
+    }
+}
+
+// Todo: Add a snapshot handler
+pub struct Fixture<T: ResolveMapping> {
+    parts: Option<BTreeSet<FixtureParts<T>>>,
+}
+
+impl<T: ResolveMapping> Fixture<T> {
+    pub fn new(parts: Option<BTreeSet<FixtureParts<T>>>) -> Fixture<T> {
+        Self { parts }
     }
 }
 
