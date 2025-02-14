@@ -1,46 +1,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-#[cfg(feature = "default")]
-#[derive(Debug, thiserror::Error)]
-pub enum ProjectionError {
-    #[error("Errors occurred in external protocols.")]
-    Protocol(#[source] Box<dyn Error + Sync + Send>),
-    #[error("Failed projection")]
-    Projection(#[from] Box<dyn Error + Sync + Send>),
-    #[error(transparent)]
-    Serde(Box<dyn Error + Sync + Send>),
-}
-
-#[cfg(feature = "default")]
-impl From<SerializeError> for ProjectionError {
-    fn from(value: SerializeError) -> Self {
-        Self::Serde(value.0)
-    }
-}
-
-#[cfg(feature = "default")]
-impl From<DeserializeError> for ProjectionError {
-    fn from(value: DeserializeError) -> Self {
-        Self::Serde(value.0)
-    }
-}
-
-#[cfg(feature = "default")]
-#[derive(Debug)]
-pub(crate) struct UnimplementedError;
-
-
-#[cfg(feature = "default")]
-impl Display for UnimplementedError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Unimplemented")
-    }
-}
-
-#[cfg(feature = "default")]
-impl Error for UnimplementedError {}
-
 
 #[cfg(feature = "markers")]
 #[derive(Debug)]

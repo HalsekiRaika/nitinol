@@ -1,8 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use nitinol_core::errors::ProjectionError;
-use nitinol_core::resolver::{PatchHandler, ResolveMapping};
+use crate::resolver::{PatchHandler, ResolveMapping};
 
 pub struct Fixture<T: ResolveMapping> {
     parts: Option<BTreeSet<FixtureParts<T>>>,
@@ -17,7 +16,7 @@ impl<T: ResolveMapping> Fixture<T> {
 pub struct FixtureParts<T: ResolveMapping> {
     pub(crate) seq: i64,
     pub(crate) bytes: Vec<u8>,
-    pub(crate) refs: Arc<dyn PatchHandler<T>>,
+    pub(crate) patcher: Arc<dyn PatchHandler<T>>,
 }
 
 impl<T: ResolveMapping> Eq for FixtureParts<T> {}
@@ -49,7 +48,7 @@ impl<T: ResolveMapping> Fixture<T> {
         };
 
         for fixture in fixture_parts.into_iter() {
-            fixture.refs.apply(entity, fixture.bytes, seq).await?;
+            fixture.patcher.apply(entity, fixture.bytes, seq).await?;
         }
 
         Ok(())

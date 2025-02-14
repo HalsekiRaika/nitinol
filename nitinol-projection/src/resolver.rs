@@ -3,8 +3,7 @@ mod projection;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-use crate::event::Event;
+use nitinol_core::event::Event;
 use crate::projection::Projection;
 
 pub use self::projection::*;

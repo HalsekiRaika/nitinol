@@ -1,14 +1,15 @@
 use std::collections::BTreeSet;
-use nitinol_core::errors::ProjectionError;
 use nitinol_core::identifier::ToEntityId;
-use nitinol_core::resolver::{Mapper, ResolveMapping};
 use nitinol_protocol::io::{ReadProtocol, Reader};
 use nitinol_protocol::Payload;
-use crate::errors::{FailedProjection, FailedProjectionWithKey, NotCompatible};
+use crate::errors::{FailedProjection, FailedProjectionWithKey, NotCompatible, ProjectionError};
 use crate::fixtures::{Fixture, FixtureParts};
+use crate::resolver::{Mapper, ResolveMapping};
 
 pub mod errors;
+pub mod projection;
 
+mod resolver;
 mod fixtures;
 
 #[derive(Debug, Clone)]
@@ -97,7 +98,7 @@ async fn patch_load<T: ResolveMapping>(
             Ok(FixtureParts {
                 seq: payload.sequence_id,
                 bytes: payload.bytes,
-                refs,
+                patcher: refs,
             })
         })
         .collect()

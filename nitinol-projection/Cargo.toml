@@ -7,7 +7,9 @@ authors = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
+async-trait = "^0.1"
 thiserror = "^2"
+futures-util = { version = "^0.3", features = ["std"], default-features = false }
 
 tracing = { version = "^0.1" }
 

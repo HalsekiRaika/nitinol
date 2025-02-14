@@ -1,12 +1,13 @@
-use crate::errors::{ProjectionError, UnimplementedError};
-use crate::event::Event;
-use crate::projection::Projection;
-use crate::resolver::ResolveMapping;
-use async_trait::async_trait;
-use futures_util::FutureExt;
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 
+use async_trait::async_trait;
+use futures_util::FutureExt;
+use nitinol_core::event::Event;
+
+use crate::errors::{ProjectionError, UnimplementedError};
+use crate::projection::Projection;
+use crate::resolver::ResolveMapping;
 
 #[rustfmt::skip]
 #[async_trait]
