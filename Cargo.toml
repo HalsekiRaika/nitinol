@@ -2,6 +2,7 @@
 members = [
   ".",
   "nitinol-core",
+  "nitinol-resolver",
   "nitinol-eventstream",
   "nitinol-macro",
   "nitinol-process",
