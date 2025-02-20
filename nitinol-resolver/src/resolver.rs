@@ -1,9 +1,11 @@
-use crate::errors::ResolveError;
-use crate::mapping::ResolveMapping;
-use async_trait::async_trait;
-use nitinol_core::event::Event;
 use std::fmt::{Debug, Display};
 use std::marker::PhantomData;
+
+use async_trait::async_trait;
+use nitinol_core::event::Event;
+
+use crate::errors::ResolveError;
+use crate::mapping::ResolveMapping;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ResolveType {
@@ -15,11 +17,11 @@ impl ResolveType {
     pub const fn new(event: &'static str, handler: &'static str) -> Self {
         Self { event, handler }
     }
-    
+
     pub fn event(&self) -> &'static str {
         self.event
     }
-    
+
     pub fn handler(&self) -> &'static str {
         self.handler
     }

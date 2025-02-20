@@ -1,10 +1,12 @@
-use crate::resolver::{ResolveHandler, ResolveType, Resolver, TypedResolver};
-use nitinol_core::event::Event;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// ResolveMapping is a trait that defines the mapping of event types to their respective handlers. 
-/// 
+use nitinol_core::event::Event;
+
+use crate::resolver::{ResolveHandler, ResolveType, Resolver, TypedResolver};
+
+/// ResolveMapping is a trait that defines the mapping of event types to their respective handlers.
+///
 /// ## Example
 /// ```rust
 /// # use async_trait::async_trait;
@@ -12,7 +14,7 @@ use std::sync::Arc;
 /// # use nitinol_core::errors::{DeserializeError, SerializeError};
 /// # use nitinol_core::event::Event;
 /// # use nitinol_resolver::resolver::ResolveHandler;
-/// # 
+/// #
 /// # pub struct Entity;
 /// #
 /// # #[derive(Debug, Deserialize, Serialize)]
@@ -32,7 +34,7 @@ use std::sync::Arc;
 /// # pub struct Subscribe;
 /// #
 /// # #[async_trait]
-/// # pub trait SubscribeHandler<E: Event>: 'static + Sync + Send + Sized { 
+/// # pub trait SubscribeHandler<E: Event>: 'static + Sync + Send + Sized {
 /// #     type Rejection: std::fmt::Debug + Sync + Send + 'static;
 /// #     async fn on(&mut self, event: E) -> Result<(), Self::Rejection>;
 /// # }
@@ -57,7 +59,7 @@ use std::sync::Arc;
 /// # }
 /// #
 /// use nitinol_resolver::mapping::{Mapper, ResolveMapping};
-/// 
+///
 /// #[async_trait]
 /// impl SubscribeHandler<EntityEvent> for Entity {
 ///     type Rejection = String;
@@ -66,11 +68,11 @@ use std::sync::Arc;
 ///         Ok(())
 ///     }
 /// }
-/// 
+///
 /// impl ResolveMapping for Entity {
 ///     fn mapping(mapper: &mut Mapper<Self>) {
 ///         // Register the event type and its handler
-///         // This `Subscribe` shown as an example points out a compile error, 
+///         // This `Subscribe` shown as an example points out a compile error,
 ///         // if the above `SubscribeHandler` is not implemented for the Entity type.
 ///         mapper.register::<EntityEvent, Subscribe>();
 ///     }
@@ -95,9 +97,10 @@ impl<T: ResolveMapping> Mapper<T> {
         );
         self
     }
-    
+
     pub fn find(&self, mut f: impl FnMut(&ResolveType) -> bool) -> Option<Arc<dyn Resolver<T>>> {
-        self.map.iter()
+        self.map
+            .iter()
             .find(|(key, _)| f(key))
             .map(|(_, handler)| handler)
             .cloned()
