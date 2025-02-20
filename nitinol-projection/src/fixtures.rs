@@ -1,14 +1,15 @@
+use crate::errors::ProjectionError;
+use nitinol_resolver::mapping::ResolveMapping;
+use nitinol_resolver::resolver::Resolver;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::errors::ProjectionError;
-use crate::resolver::{PatchHandler, ResolveMapping};
-
 pub struct FixtureParts<T: ResolveMapping> {
     pub(crate) seq: i64,
+    pub(crate) created_at: time::OffsetDateTime,
     pub(crate) bytes: Vec<u8>,
-    pub(crate) patcher: Arc<dyn PatchHandler<T>>,
+    pub(crate) patcher: Arc<dyn Resolver<T>>,
 }
 
 impl<T: ResolveMapping> Eq for FixtureParts<T> {}
@@ -29,7 +30,7 @@ impl<T: ResolveMapping> Ord for FixtureParts<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.seq
             .cmp(&other.seq)
-            .then_with(|| self.bytes.cmp(&other.bytes))
+            .then_with(|| self.created_at.cmp(&other.created_at))
     }
 }
 
@@ -51,7 +52,8 @@ impl<T: ResolveMapping> Fixture<T> {
         };
 
         for fixture in fixture_parts.into_iter() {
-            fixture.patcher.apply(entity, fixture.bytes, seq).await?;
+            fixture.patcher.resolve(entity, &fixture.bytes).await?;
+            *seq += 1;
         }
 
         Ok(())
