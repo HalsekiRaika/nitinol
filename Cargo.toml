@@ -2,6 +2,7 @@
 members = [
   ".",
   "nitinol-core",
+  "nitinol-resolver",
   "nitinol-eventstream",
   "nitinol-macro",
   "nitinol-process",
@@ -23,12 +24,12 @@ description = "A utilities for event sourcing"
 macro = ["nitinol-macro"]
 process = ["nitinol-process"]
 process-ext = ["process"]
-eventstream = ["process", "nitinol-eventstream"]
+eventstream = ["process", "nitinol-eventstream", "nitinol-resolver"]
 protocol = ["nitinol-protocol"]
 sqlite = ["protocol", "nitinol-protocol/sqlite"]
 inmemory = ["protocol", "nitinol-protocol/inmemory"]
 persistence = ["process", "process-ext", "protocol", "nitinol-persistence"]
-projection = ["nitinol-projection"]
+projection = ["nitinol-projection", "nitinol-resolver"]
 
 [package]
 name = "nitinol"
@@ -47,7 +48,7 @@ nitinol-protocol = { path = "nitinol-protocol", optional = true }
 nitinol-process = { path = "nitinol-process", optional = true }
 nitinol-projection = { path = "nitinol-projection", optional = true }
 nitinol-persistence = { path = "nitinol-persistence", optional = true }
-
+nitinol-resolver = { path = "nitinol-resolver", optional = true }
 
 [dev-dependencies]
 nitinol = { path = ".", features = ["macro", "process", "persistence", "projection", "inmemory"] }
@@ -59,3 +60,6 @@ serde_json = "^1"
 anyhow = "^1"
 
 tokio = { version = "^1", features = ["macros", "rt-multi-thread"] }
+
+tracing = "^0.1"
+tracing-subscriber = { version = "^0.3", features = ["env-filter"] }

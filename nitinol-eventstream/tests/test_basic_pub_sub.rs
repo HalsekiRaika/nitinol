@@ -1,12 +1,14 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use nitinol::macros::Event;
 use nitinol_core::identifier::ToEntityId;
 use nitinol_eventstream::eventstream::EventStream;
-use nitinol_eventstream::resolver::{DecodeMapping, SubscriptionMapper};
+use nitinol_eventstream::resolver::Subscribe;
 use nitinol_eventstream::subscriber::EventSubscriber;
+use nitinol_resolver::mapping::{Mapper, ResolveMapping};
 
 #[derive(Debug, Clone, Event, Deserialize, Serialize)]
 #[persist(enc = "serde_json::to_vec", dec = "serde_json::from_slice")]
@@ -23,9 +25,9 @@ async fn test_activate_eventstream() {
 
 pub struct TestSubscriber;
 
-impl SubscriptionMapper for TestSubscriber {
-    fn mapping(mapping: &mut DecodeMapping<Self>) {
-        mapping.register::<DomainEvent>();
+impl ResolveMapping for TestSubscriber {
+    fn mapping(mapper: &mut Mapper<Self>) {
+        mapper.register::<DomainEvent, Subscribe>();
     }
 }
 
@@ -42,9 +44,11 @@ impl EventSubscriber<DomainEvent> for TestSubscriber {
 
 #[tokio::test]
 async fn test_subscribe() {
-    std::env::set_var("RUST_LOG", "trace");
-    tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).init();
-
+    tracing_subscriber::registry()
+        .with(EnvFilter::new("trace"))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+    
     let stream = EventStream::default();
     stream.subscribe(TestSubscriber).await;
     stream.publish("publisher_1".to_entity_id(), 1, &DomainEvent::Signal2).await;

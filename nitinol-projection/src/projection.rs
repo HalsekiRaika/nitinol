@@ -1,6 +1,6 @@
-use std::fmt::Debug;
 use async_trait::async_trait;
 use nitinol_core::event::Event;
+use std::fmt::Debug;
 
 #[async_trait]
 pub trait Projection<E: Event>: 'static + Sync + Send + Sized {
