@@ -23,8 +23,8 @@ impl ProcessManager {
         })
     }
 
-    pub async fn spawn<T: Process>(&self, id: impl ToEntityId, entity: T, seq: i64) -> Result<Ref<T>, AlreadyExist> {
-        lifecycle::run(id, entity, Context::new(seq, self.registry.clone(), self.extension.clone()), self.registry.clone()).await
+    pub async fn spawn<T: Process>(&self, entity: T, seq: i64) -> Result<Ref<T>, AlreadyExist> {
+        lifecycle::run(entity.aggregate_id(), entity, Context::new(seq, self.registry.clone(), self.extension.clone()), self.registry.clone()).await
     }
 
     pub async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Ref<T>>, InvalidCast> {
