@@ -51,6 +51,11 @@ pub mod process {
     }
 }
 
+#[cfg(any(feature = "projection", feature = "eventstream"))]
+pub mod resolver {
+    pub use nitinol_resolver::*;
+}
+
 #[cfg(feature = "projection")]
 pub mod projection {
     pub use nitinol_projection::projection::*;
