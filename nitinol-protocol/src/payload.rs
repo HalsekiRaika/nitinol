@@ -1,11 +1,12 @@
 use std::cmp::Ordering;
+use std::fmt::{Debug, Formatter};
 use time::OffsetDateTime;
 use nitinol_core::errors::{DeserializeError, SerializeError};
 use nitinol_core::event::Event;
 use nitinol_core::identifier::EntityId;
 
 /// Basic format of the data to be saved.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct Payload {
     /// Aggregate entity identifier
@@ -33,6 +34,17 @@ impl Payload {
     
     pub fn to_event<E: Event>(&self) -> Result<E, DeserializeError> {
         E::from_bytes(&self.bytes)
+    }
+}
+
+impl Debug for Payload {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(format!("Payload#{}", self.registry_key).as_str())
+            .field("id", &self.id)
+            .field("sequence", &self.sequence_id)
+            .field("bytes", &format!("<{} bytes>", self.bytes.len()))
+            .field("created_at", &self.created_at)
+            .finish()
     }
 }
 
