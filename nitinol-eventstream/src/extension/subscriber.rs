@@ -15,8 +15,7 @@ where
 {
     type Command: TryFrom<E> + Command;
     
-    fn aggregate_id(&self) -> EntityId;
-    
+    #[tracing::instrument(skip_all, fields(id = %self.aggregate_id()))]
     async fn subscribe(&self, ctx: &mut Context) {
         let Ok(ext) = EventStreamExtension::from_context(ctx) else {
             panic!("`EventStreamExtension` not installed in context");
