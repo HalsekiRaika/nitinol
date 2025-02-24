@@ -5,6 +5,6 @@ use nitinol_core::event::Event;
 
 #[async_trait]
 pub trait EventSubscriber<E: Event>: 'static + Sync + Send {
-    type Error: Debug;
+    type Error: Debug + Sync + Send + 'static;
     async fn on(&mut self, event: E) -> Result<(), Self::Error>;
 }
