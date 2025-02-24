@@ -1,20 +1,24 @@
+mod status;
+
+pub use status::*;
+
 use crate::extension::errors::Missing;
 use crate::extension::Extensions;
 use crate::registry::ProcessRegistry;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use crate::{Process, Ref};
 
+use nitinol_core::identifier::EntityId;
 
 pub struct Context {
     pub(crate) sequence: i64,
-    pub(crate) is_active: Arc<RwLock<bool>>,
+    pub(crate) status: Status,
     pub(crate) registry: ProcessRegistry,
     pub(crate) extension: Extensions,
 }
 
 impl Context {
     pub fn new(sequence: i64, registry: ProcessRegistry, extension: Extensions) -> Context {
-        Self { sequence, is_active: Arc::new(RwLock::new(true)), registry, extension }
+        Self { sequence, status: Status::new(true), registry, extension }
     }
 }
 
@@ -22,18 +26,25 @@ impl Context {
     pub fn sequence(&self) -> i64 {
         self.sequence
     }
+    
+    pub fn status(&self) -> &Status {
+        &self.status
+    }
 
     pub async fn is_active(&self) -> bool {
-        *self.is_active.read().await
+        self.status.is_active().await
     }
 
     pub async fn poison_pill(&self) {
-        let mut guard = self.is_active.write().await;
-        *guard = false;
+        self.status.poison_pill().await;
     }
     
     pub fn registry(&self) -> &ProcessRegistry {
         &self.registry
+    }
+    
+    pub async fn find<T: Process>(&self, id: &EntityId) -> Option<Ref<T>> {
+        self.registry.find::<T>(id).await.unwrap()
     }
 
     pub fn extension(&self) -> &Extensions {
