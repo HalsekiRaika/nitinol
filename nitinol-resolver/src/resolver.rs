@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use nitinol_core::event::Event;
 
 use crate::errors::ResolveError;
-use crate::mapping::ResolveMapping;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ResolveType {
@@ -40,6 +39,13 @@ pub trait ResolveHandler<E: Event, T>: 'static + Sync + Send {
     async fn apply(entity: &mut Option<T>, event: E) -> Result<(), Self::Error>;
 }
 
+pub trait ResolverType<T> 
+where 
+    Self: Resolver<T>
+{
+    const RESOLVE_TYPE: &'static str;
+}
+
 #[async_trait]
 pub trait Resolver<T>: 'static + Sync + Send {
     async fn resolve(&self, entity: &mut Option<T>, payload: &[u8]) -> Result<(), ResolveError>;
@@ -62,8 +68,9 @@ impl<E: Event, T, H: ResolveHandler<E, T>> Default for TypedResolver<E, T, H> {
 }
 
 #[async_trait]
-impl<E: Event, T: ResolveMapping, H> Resolver<T> for TypedResolver<E, T, H>
+impl<E: Event, T, H> Resolver<T> for TypedResolver<E, T, H>
 where
+    T: 'static + Sync + Send,
     H: ResolveHandler<E, T>,
 {
     async fn resolve(&self, entity: &mut Option<T>, payload: &[u8]) -> Result<(), ResolveError> {

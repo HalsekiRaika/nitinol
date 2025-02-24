@@ -1,9 +1,12 @@
+#[cfg(feature = "process")]
+pub mod process;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use nitinol_core::event::Event;
 
-use crate::resolver::{ResolveHandler, ResolveType, Resolver, TypedResolver};
+use crate::resolver::{ResolveHandler, ResolveType, Resolver, ResolverType, TypedResolver};
 
 /// ResolveMapping is a trait that defines the mapping of event types to their respective handlers.
 ///
@@ -82,11 +85,14 @@ pub trait ResolveMapping: 'static + Sync + Send + Sized {
     fn mapping(mapper: &mut Mapper<Self>);
 }
 
-pub struct Mapper<T: ResolveMapping> {
+pub struct Mapper<T> {
     map: HashMap<ResolveType, Arc<dyn Resolver<T>>>,
 }
 
-impl<T: ResolveMapping> Mapper<T> {
+impl<T> Mapper<T> 
+where
+    T: 'static + Sync + Send,
+{
     pub fn register<E: Event, H>(&mut self) -> &mut Self
     where
         H: ResolveHandler<E, T>,
@@ -94,6 +100,17 @@ impl<T: ResolveMapping> Mapper<T> {
         self.map.insert(
             ResolveType::new(E::REGISTRY_KEY, H::HANDLER_TYPE),
             Arc::new(TypedResolver::<E, T, H>::default()),
+        );
+        self
+    }
+    
+    pub fn register_with<E: Event, R>(&mut self, resolver: R) -> &mut Self 
+    where
+        R: ResolverType<T>
+    {
+        self.map.insert(
+            ResolveType::new(E::REGISTRY_KEY, R::RESOLVE_TYPE),
+            Arc::new(resolver),
         );
         self
     }
@@ -105,9 +122,17 @@ impl<T: ResolveMapping> Mapper<T> {
             .map(|(_, handler)| handler)
             .cloned()
     }
+    
+    pub fn filter(self, mut f: impl FnMut(&ResolveType) -> bool) -> Self {
+        Self {
+            map: self.map.into_iter()
+                .filter(|(key, _)| f(key))
+                .collect(),
+        }
+    }
 }
 
-impl<T: ResolveMapping> Default for Mapper<T> {
+impl<T> Default for Mapper<T> {
     fn default() -> Self {
         Self {
             map: HashMap::default(),

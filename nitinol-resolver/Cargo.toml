@@ -7,12 +7,17 @@ authors.workspace = true
 repository.workspace = true
 description.workspace = true
 
+[features]
+process = ["nitinol-process"]
+
 [dependencies]
 async-trait = "^0.1"
 thiserror = "^2.0"
 
 tracing = "^0.1"
 nitinol-core = { path = "../nitinol-core" }
+
+nitinol-process = { path = "../nitinol-process", optional = true }
 
 [dev-dependencies]
 serde = { version = "^1", features = ["derive"] }
