@@ -1,0 +1,1 @@
+// Todo: Add error kind for write protocol.
