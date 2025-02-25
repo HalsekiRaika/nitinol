@@ -22,7 +22,6 @@ pub mod eventstream {
 pub mod protocol {
     pub use nitinol_protocol::Payload;
     pub use nitinol_protocol::io;
-    pub use nitinol_protocol::adapter;
 }
 
 #[cfg(feature = "process")]
