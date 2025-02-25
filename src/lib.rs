@@ -3,7 +3,10 @@ pub use nitinol_core::event::Event;
 pub use nitinol_core::command::Command;
 
 #[cfg(feature = "macro")]
-pub mod macros {
+pub use self::macros::*;
+
+#[cfg(feature = "macro")]
+mod macros {
     pub use nitinol_macro::Event;
     pub use nitinol_macro::Command;
 }

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use nitinol::macros::Event;
+use nitinol::Event;
 use nitinol_core::identifier::ToEntityId;
 use nitinol_eventstream::eventstream::EventStream;
 use nitinol_eventstream::resolver::Subscribe;

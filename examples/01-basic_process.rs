@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use nitinol::{EntityId, ToEntityId};
-use nitinol::macros::{Command, Event};
+use nitinol::{Command, Event};
 use nitinol::process::manager::ProcessManager;
 use nitinol::process::{Applicator, Context, Process, Publisher};
 use serde::{Deserialize, Serialize};

@@ -5,7 +5,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
-use nitinol::macros::{Command, Event};
+use nitinol::{Command, Event};
 use nitinol_core::identifier::{EntityId, ToEntityId};
 use nitinol_eventstream::eventstream::EventStream;
 use nitinol_eventstream::extension::resolver::SubscribeProcess;
