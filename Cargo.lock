@@ -8,7 +8,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.2.0-alpha",
+ "nitinol 0.3.0-beta.1",
  "serde",
  "serde_json",
  "tokio",
@@ -96,7 +96,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.2.0-alpha",
+ "nitinol 0.3.0-beta.1",
  "nitinol-inmemory-adaptor",
  "serde",
  "serde_json",
@@ -887,6 +887,15 @@ dependencies = [
 [[package]]
 name = "nitinol"
 version = "0.2.0-alpha"
+source = "git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f#2cb8f29a42605119d62e41030fbf62793ef4481f"
+dependencies = [
+ "nitinol-core 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f)",
+ "nitinol-protocol 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f)",
+]
+
+[[package]]
+name = "nitinol"
+version = "0.3.0-beta.1"
 dependencies = [
  "nitinol-core 0.1.0",
  "nitinol-eventstream",
@@ -896,15 +905,6 @@ dependencies = [
  "nitinol-projection",
  "nitinol-protocol 0.1.0",
  "nitinol-resolver",
-]
-
-[[package]]
-name = "nitinol"
-version = "0.2.0-alpha"
-source = "git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f#2cb8f29a42605119d62e41030fbf62793ef4481f"
-dependencies = [
- "nitinol-core 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f)",
- "nitinol-protocol 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f)",
 ]
 
 [[package]]
@@ -934,7 +934,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.2.0-alpha",
+ "nitinol 0.3.0-beta.1",
  "nitinol-core 0.1.0",
  "nitinol-process",
  "nitinol-protocol 0.1.0",
@@ -953,7 +953,7 @@ version = "0.1.0"
 source = "git+https://github.com/HalsekiRaika/nitinol-inmemory-adaptor.git#f1fa299dba37c90fa1418f5c0deb87027681fb8d"
 dependencies = [
  "async-trait",
- "nitinol 0.2.0-alpha (git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f)",
+ "nitinol 0.2.0-alpha",
  "thiserror",
  "tokio",
  "tracing",
@@ -964,7 +964,7 @@ name = "nitinol-macro"
 version = "0.1.0"
 dependencies = [
  "darling",
- "nitinol 0.2.0-alpha",
+ "nitinol 0.3.0-beta.1",
  "quote",
  "serde",
  "serde_json",
