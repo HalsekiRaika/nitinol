@@ -1,14 +1,12 @@
 [workspace]
 members = [
   ".",
-  "nitinol-core",
-  "nitinol-resolver",
-  "nitinol-eventstream",
-  "nitinol-macro",
-  "nitinol-process",
-  "nitinol-protocol",
-  "nitinol-projection",
-  "nitinol-persistence",
+  "nitinol-*",
+  "examples/*"
+]
+default-members = [
+  ".",
+  "nitinol-*"
 ]
 
 resolver = "2"
@@ -34,7 +32,7 @@ projection = ["nitinol-projection", "nitinol-resolver"]
 
 [package]
 name = "nitinol"
-version = "0.2.0-alpha"
+version = "0.3.0-beta.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]
@@ -50,17 +48,3 @@ nitinol-process = { path = "nitinol-process", optional = true }
 nitinol-projection = { path = "nitinol-projection", optional = true }
 nitinol-persistence = { path = "nitinol-persistence", optional = true }
 nitinol-resolver = { path = "nitinol-resolver", optional = true }
-
-[dev-dependencies]
-nitinol = { path = ".", features = ["macro", "process", "persistence", "projection", "inmemory"] }
-
-async-trait = "^0.1"
-
-serde = { version = "^1", features = ["derive"] }
-serde_json = "^1"
-anyhow = "^1"
-
-tokio = { version = "^1", features = ["macros", "rt-multi-thread"] }
-
-tracing = "^0.1"
-tracing-subscriber = { version = "^0.3", features = ["env-filter"] }

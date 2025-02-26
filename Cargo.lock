@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "a-basic-process"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nitinol 0.3.0-beta.1",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -75,6 +89,21 @@ name = "autocfg"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ace50bade8e6234aa140d9a2f552bbee1db4d353f69b8217bc503490fc1a9f26"
+
+[[package]]
+name = "b-persistence-process"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nitinol 0.3.0-beta.1",
+ "nitinol-inmemory-adaptor",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "backtrace"
@@ -858,23 +887,24 @@ dependencies = [
 [[package]]
 name = "nitinol"
 version = "0.2.0-alpha"
+source = "git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f#2cb8f29a42605119d62e41030fbf62793ef4481f"
 dependencies = [
- "anyhow",
- "async-trait",
- "nitinol",
- "nitinol-core",
+ "nitinol-core 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f)",
+ "nitinol-protocol 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f)",
+]
+
+[[package]]
+name = "nitinol"
+version = "0.3.0-beta.1"
+dependencies = [
+ "nitinol-core 0.1.0",
  "nitinol-eventstream",
  "nitinol-macro",
  "nitinol-persistence",
  "nitinol-process",
  "nitinol-projection",
- "nitinol-protocol",
+ "nitinol-protocol 0.1.0",
  "nitinol-resolver",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -888,15 +918,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitinol-core"
+version = "0.1.0"
+source = "git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f#2cb8f29a42605119d62e41030fbf62793ef4481f"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "nitinol-eventstream"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol",
- "nitinol-core",
+ "nitinol 0.3.0-beta.1",
+ "nitinol-core 0.1.0",
  "nitinol-process",
- "nitinol-protocol",
+ "nitinol-protocol 0.1.0",
  "nitinol-resolver",
  "serde",
  "serde_json",
@@ -907,11 +948,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitinol-inmemory-adaptor"
+version = "0.1.0"
+source = "git+https://github.com/HalsekiRaika/nitinol-inmemory-adaptor.git#f1fa299dba37c90fa1418f5c0deb87027681fb8d"
+dependencies = [
+ "async-trait",
+ "nitinol 0.2.0-alpha",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nitinol-macro"
 version = "0.1.0"
 dependencies = [
  "darling",
- "nitinol",
+ "nitinol 0.3.0-beta.1",
  "quote",
  "serde",
  "serde_json",
@@ -923,9 +976,9 @@ name = "nitinol-persistence"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "nitinol-core",
+ "nitinol-core 0.1.0",
  "nitinol-process",
- "nitinol-protocol",
+ "nitinol-protocol 0.1.0",
  "tracing",
 ]
 
@@ -935,7 +988,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "async-trait",
- "nitinol-core",
+ "nitinol-core 0.1.0",
  "thiserror",
  "tokio",
  "tracing",
@@ -947,8 +1000,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
- "nitinol-core",
- "nitinol-protocol",
+ "nitinol-core 0.1.0",
+ "nitinol-protocol 0.1.0",
  "nitinol-resolver",
  "thiserror",
  "time",
@@ -962,8 +1015,8 @@ dependencies = [
  "async-trait",
  "dotenvy",
  "futures",
- "nitinol-core",
- "nitinol-protocol",
+ "nitinol-core 0.1.0",
+ "nitinol-protocol 0.1.0",
  "serde",
  "serde_json",
  "sqlx",
@@ -975,11 +1028,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitinol-protocol"
+version = "0.1.0"
+source = "git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f#2cb8f29a42605119d62e41030fbf62793ef4481f"
+dependencies = [
+ "async-trait",
+ "nitinol-core 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?rev=2cb8f29a42605119d62e41030fbf62793ef4481f)",
+ "thiserror",
+ "time",
+ "tracing",
+]
+
+[[package]]
 name = "nitinol-resolver"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "nitinol-core",
+ "nitinol-core 0.1.0",
  "nitinol-process",
  "serde",
  "serde_json",
