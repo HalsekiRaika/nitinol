@@ -1,0 +1,22 @@
+[package]
+name = "a-basic-process"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description.workspace = true
+
+[dependencies]
+nitinol = { path = "../..", features = ["process", "macro"] }
+
+async-trait = "^0.1"
+
+serde = { version = "^1", features = ["derive"] }
+serde_json = "^1"
+
+anyhow = "^1"
+
+tokio = { version = "^1", default-features = false, features = ["rt-multi-thread", "macros"] }
+tracing = "^0.1"
+tracing-subscriber = { version = "^0.3", features = ["env-filter"] }

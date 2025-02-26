@@ -1,12 +1,11 @@
 use async_trait::async_trait;
-use nitinol::{EntityId, ToEntityId};
-use nitinol::{Command, Event};
-use nitinol::process::manager::ProcessManager;
-use nitinol::process::{Applicator, Context, Process, Publisher};
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
+use nitinol::{Command, EntityId, Event, ToEntityId};
+use nitinol::process::{Applicator, Context, Process, Publisher};
+use nitinol::process::manager::ProcessManager;
 
 #[derive(Debug, Clone, Command)]
 pub enum DomainCommand {
