@@ -18,7 +18,7 @@ impl Status {
         *self.0.read().await
     }
 
-    pub async fn poison_pill(&self) {
+    pub async fn poison(&self) {
         let mut guard = self.0.write().await;
         *guard = false;
     }

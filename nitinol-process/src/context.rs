@@ -35,8 +35,8 @@ impl Context {
         self.status.is_active().await
     }
 
-    pub async fn poison_pill(&self) {
-        self.status.poison_pill().await;
+    pub async fn poison(&self) {
+        self.status.poison().await;
     }
     
     pub fn registry(&self) -> &ProcessRegistry {
