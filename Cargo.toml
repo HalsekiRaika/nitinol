@@ -32,7 +32,7 @@ projection = ["nitinol-projection", "nitinol-resolver"]
 
 [package]
 name = "nitinol"
-version = "0.3.0-beta.1"
+version = "0.3.1-beta.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]
