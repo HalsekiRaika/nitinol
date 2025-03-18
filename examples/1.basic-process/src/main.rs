@@ -66,7 +66,7 @@ impl Applicator<DomainEvent> for Aggregate {
                 self.name = new;
             }
             DomainEvent::Deleted => {
-                ctx.poison_pill().await;
+                ctx.poison().await;
             }
         }
         tracing::debug!("current state: {:?}", self);
