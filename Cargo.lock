@@ -3,20 +3,6 @@
 version = 4
 
 [[package]]
-name = "a-basic-process"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "nitinol 0.3.1-beta.1",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -118,28 +104,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 
 [[package]]
-name = "basic-persistence-process-inmemory"
+name = "basic-process"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.3.0-beta.1",
- "nitinol-inmemory-adaptor",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "basic-persistence-process-sqlite"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "nitinol 0.3.0-beta.1",
- "nitinol-sqlite-adaptor",
+ "nitinol 0.3.1-beta.1",
  "serde",
  "serde_json",
  "tokio",
@@ -1244,6 +1214,36 @@ name = "percent-encoding"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
+
+[[package]]
+name = "persistence-process-inmemory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nitinol 0.3.0-beta.1",
+ "nitinol-inmemory-adaptor",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "persistence-process-sqlite"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "nitinol 0.3.0-beta.1",
+ "nitinol-sqlite-adaptor",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "pin-project-lite"
