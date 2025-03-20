@@ -5,7 +5,7 @@ pub use status::*;
 use crate::extension::errors::Missing;
 use crate::extension::Extensions;
 use crate::registry::ProcessRegistry;
-use crate::{Process, Ref};
+use crate::{Process, Receptor};
 
 use nitinol_core::identifier::EntityId;
 
@@ -43,7 +43,7 @@ impl Context {
         &self.registry
     }
     
-    pub async fn find<T: Process>(&self, id: &EntityId) -> Option<Ref<T>> {
+    pub async fn find<T: Process>(&self, id: &EntityId) -> Option<Receptor<T>> {
         self.registry.find::<T>(id).await.unwrap()
     }
 

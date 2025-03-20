@@ -10,7 +10,7 @@ use nitinol_core::identifier::{EntityId, ToEntityId};
 use nitinol_eventstream::eventstream::EventStream;
 use nitinol_eventstream::extension::resolver::SubscribeProcess;
 use nitinol_eventstream::extension::{EventStreamExtension, WithEventSubscriber, WithStreamPublisher};
-use nitinol_process::{Applicator, Context, Process, Publisher, Ref};
+use nitinol_process::{EventApplicator, Context, Process, CommandHandler, Receptor};
 use nitinol_process::manager::ProcessManager;
 use nitinol_resolver::mapping::Mapper;
 use nitinol_resolver::mapping::process::WithResolveMapping;
@@ -61,7 +61,7 @@ impl Process for TestProcess {
 }
 
 impl WithResolveMapping for TestProcess {
-    fn mapping(mapper: &mut Mapper<Self>, myself: Ref<Self>) {
+    fn mapping(mapper: &mut Mapper<Self>, myself: Receptor<Self>) {
         mapper
             .register_with::<AnotherTestEvent, _>(SubscribeProcess::new(myself.clone()));
     }
@@ -72,12 +72,12 @@ impl WithEventSubscriber<TestEvent> for TestProcess {
 }
 
 #[async_trait]
-impl Publisher<TestCommand> for TestProcess {
+impl CommandHandler<TestCommand> for TestProcess {
     type Event = TestEvent;
     type Rejection = anyhow::Error;
     
     #[tracing::instrument(skip_all, name = "TestProcess::publish", fields(id = %self.aggregate_id()))]
-    async fn publish(&self, cmd: TestCommand, _: &mut Context) -> Result<Self::Event, Self::Rejection> {
+    async fn handle(&self, cmd: TestCommand, _: &mut Context) -> Result<Self::Event, Self::Rejection> {
         tracing::debug!("Publish event, {:?}", cmd);
         Ok(TestEvent(cmd.0))
     }
@@ -85,7 +85,7 @@ impl Publisher<TestCommand> for TestProcess {
 
 
 #[async_trait]
-impl Applicator<TestEvent> for TestProcess {
+impl EventApplicator<TestEvent> for TestProcess {
     #[tracing::instrument(skip_all, name = "TestProcess::apply", fields(id = %self.aggregate_id()))]
     async fn apply(&mut self, event: TestEvent, _: &mut Context) {
         tracing::debug!("Apply event: {:?}", event);
@@ -106,19 +106,19 @@ impl Process for AnotherTestProcess {
 impl WithStreamPublisher for AnotherTestProcess {}
 
 #[async_trait]
-impl Publisher<AnotherTestCommand> for AnotherTestProcess {
+impl CommandHandler<AnotherTestCommand> for AnotherTestProcess {
     type Event = AnotherTestEvent;
     type Rejection = anyhow::Error;
     
     #[tracing::instrument(skip_all, name = "AnotherTestProcess::publish", fields(id = %self.aggregate_id()))]
-    async fn publish(&self, command: AnotherTestCommand, _: &mut Context) -> Result<Self::Event, Self::Rejection> {
+    async fn handle(&self, command: AnotherTestCommand, _: &mut Context) -> Result<Self::Event, Self::Rejection> {
         tracing::debug!("Publish event, {:?}", command);
         Ok(AnotherTestEvent(command.0))
     }
 }
 
 #[async_trait]
-impl Applicator<AnotherTestEvent> for AnotherTestProcess {
+impl EventApplicator<AnotherTestEvent> for AnotherTestProcess {
     #[tracing::instrument(skip_all, name = "AnotherTestProcess::apply", fields(id = %self.aggregate_id()))]
     async fn apply(&mut self, event: AnotherTestEvent, ctx: &mut Context) {
         tracing::debug!("Apply event: {:?}", event);
@@ -182,9 +182,9 @@ async fn subscribe_event_from_process() -> anyhow::Result<()> {
     // Publisher
     let refs = system.spawn(AnotherTestProcess { id: Uuid::new_v4() }, 0).await?;
     
-    refs.employ(AnotherTestCommand(Uuid::new_v4())).await??;
-    refs.employ(AnotherTestCommand(Uuid::new_v4())).await??;
-    refs.employ(AnotherTestCommand(Uuid::new_v4())).await??;
+    refs.entrust(AnotherTestCommand(Uuid::new_v4())).await?;
+    refs.entrust(AnotherTestCommand(Uuid::new_v4())).await?;
+    refs.entrust(AnotherTestCommand(Uuid::new_v4())).await?;
     
     tokio::time::sleep(Duration::from_secs(3)).await;
     

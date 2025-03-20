@@ -1,5 +1,5 @@
 use crate::mapping::Mapper;
-use nitinol_process::{Process, Ref};
+use nitinol_process::{Process, Receptor};
 
 /// Trait for resolving extension handlers for entity in process.
 /// 
@@ -8,5 +8,5 @@ pub trait WithResolveMapping: 'static + Sync + Send + Sized
 where
     Self: Process
 {
-    fn mapping(mapper: &mut Mapper<Self>, myself: Ref<Self>);
+    fn mapping(mapper: &mut Mapper<Self>, myself: Receptor<Self>);
 }
