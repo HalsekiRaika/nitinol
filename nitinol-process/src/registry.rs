@@ -6,7 +6,7 @@ use nitinol_core::identifier::EntityId;
 
 use crate::any::AnyRef;
 use crate::errors::{AlreadyExist, NotFound, InvalidCast};
-use crate::{Process, Ref};
+use crate::{Process, Receptor};
 
 pub struct ProcessRegistry {
     registry: Arc<RwLock<HashMap<EntityId, AnyRef>>>
@@ -16,7 +16,7 @@ impl ProcessRegistry {
     pub(crate) async fn register<T: Process>(
         &self,
         id: EntityId,
-        writer: Ref<T>,
+        writer: Receptor<T>,
     ) -> Result<(), AlreadyExist> {
         let lock = self.registry.read().await;
         if lock.iter().any(|(exist, _)| exist.eq(&id)) {
@@ -28,7 +28,7 @@ impl ProcessRegistry {
         let mut lock = self.registry.write().await;
         lock.insert(id.clone(), writer.into());
 
-        tracing::info!("Registered: {}", id);
+        tracing::info!(name: "Registry", "Registered: {}", id);
         
         Ok(())
     }
@@ -44,13 +44,13 @@ impl ProcessRegistry {
         let mut lock = self.registry.write().await;
         lock.remove(id);
 
-        tracing::info!("Deregistered: {}", id);
+        tracing::info!(name: "Registry", "Deregistered: {}", id);
         
         Ok(())
     }
 
     #[rustfmt::skip]
-    pub async fn find<T: Process>(&self, id: &EntityId) -> Result<Option<Ref<T>>, InvalidCast> {
+    pub async fn find<T: Process>(&self, id: &EntityId) -> Result<Option<Receptor<T>>, InvalidCast> {
         let lock = self.registry.read().await;
         lock.iter()
             .find(|(dest, _)| dest.eq(&id))

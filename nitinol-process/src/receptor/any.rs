@@ -1,4 +1,4 @@
-use super::Ref;
+use super::Receptor;
 use crate::Process;
 use std::any::{type_name, Any};
 use std::sync::Arc;
@@ -11,9 +11,9 @@ pub trait DynRef: 'static + Sync + Send {
 pub(crate) struct AnyRef(Arc<dyn DynRef>);
 
 impl AnyRef {
-    pub fn downcast<T: Process>(&self) -> Result<Ref<T>, InvalidCast> {
+    pub fn downcast<T: Process>(&self) -> Result<Receptor<T>, InvalidCast> {
         self.0.as_any()
-            .downcast_ref::<Ref<T>>()
+            .downcast_ref::<Receptor<T>>()
             .cloned()
             .ok_or(InvalidCast { to: type_name::<T>() })
     }
@@ -25,8 +25,8 @@ impl Clone for AnyRef {
     }
 }
 
-impl<T: Process> From<Ref<T>> for AnyRef {
-    fn from(value: Ref<T>) -> Self {
+impl<T: Process> From<Receptor<T>> for AnyRef {
+    fn from(value: Receptor<T>) -> Self {
         Self(Arc::new(value))
     }
 }

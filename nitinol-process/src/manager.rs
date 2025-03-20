@@ -1,7 +1,7 @@
 use nitinol_core::identifier::ToEntityId;
 use crate::extension::{Extensions, Installer};
 use crate::extension::errors::AlreadyInstalled;
-use crate::{lifecycle, Context, Process, Ref};
+use crate::{lifecycle, Context, Process, Receptor};
 use crate::errors::{AlreadyExist, InvalidCast};
 use crate::registry::ProcessRegistry;
 
@@ -23,11 +23,11 @@ impl ProcessManager {
         })
     }
 
-    pub async fn spawn<T: Process>(&self, entity: T, seq: i64) -> Result<Ref<T>, AlreadyExist> {
+    pub async fn spawn<T: Process>(&self, entity: T, seq: i64) -> Result<Receptor<T>, AlreadyExist> {
         lifecycle::run(entity.aggregate_id(), entity, Context::new(seq, self.registry.clone(), self.extension.clone()), self.registry.clone()).await
     }
 
-    pub async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Ref<T>>, InvalidCast> {
+    pub async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Receptor<T>>, InvalidCast> {
         self.registry.find::<T>(&id.to_entity_id()).await
     }
 }

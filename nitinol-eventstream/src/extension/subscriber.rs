@@ -2,7 +2,7 @@ use crate::extension::EventStreamExtension;
 use async_trait::async_trait;
 use nitinol_core::command::Command;
 use nitinol_core::event::Event;
-use nitinol_process::{Applicator, Context, FromContextExt, Publisher};
+use nitinol_process::{EventApplicator, Context, FromContextExt, CommandHandler};
 use std::fmt::Debug;
 use nitinol_resolver::mapping::Mapper;
 use nitinol_resolver::mapping::process::WithResolveMapping;
@@ -11,8 +11,8 @@ use nitinol_resolver::mapping::process::WithResolveMapping;
 pub trait WithEventSubscriber<E: Event>: 'static + Sync + Send
 where
     Self: WithResolveMapping
-        + Publisher<<Self as WithEventSubscriber<E>>::Command, Rejection: Debug>
-        + Applicator<Self::Event>,
+        + CommandHandler<<Self as WithEventSubscriber<E>>::Command, Rejection: Debug>
+        + EventApplicator<Self::Event>,
 {
     type Command: TryFrom<E, Error: Debug> + Command;
     
@@ -41,7 +41,7 @@ pub mod resolver {
     
     use async_trait::async_trait;
     use nitinol_core::event::Event;
-    use nitinol_process::Ref;
+    use nitinol_process::Receptor;
     use nitinol_resolver::errors::ResolveError;
     use nitinol_resolver::resolver::{Resolver, ResolverType};
     
@@ -51,11 +51,11 @@ pub mod resolver {
     
     pub struct SubscribeProcess<E: Event, S: WithEventSubscriber<E>> {
         _event: PhantomData<E>,
-        subscriber: Ref<S>,
+        subscriber: Receptor<S>,
     }
     
     impl<E: Event, S: WithEventSubscriber<E>> SubscribeProcess<E, S> {
-        pub fn new(subscriber: Ref<S>) -> Self {
+        pub fn new(subscriber: Receptor<S>) -> Self {
             Self {
                 _event: Default::default(),
                 subscriber,
@@ -84,14 +84,8 @@ pub mod resolver {
                 }),
             };
             
-            match self.subscriber.employ(command).await {
-                Ok(Ok(_)) => {}
-                Err(e) => {
-                    tracing::error!("{:?}", e);
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("{:?}", e);
-                }
+            if let Err(e) = self.subscriber.entrust(command).await {
+                tracing::error!("{:?}", e);
             }
             Ok(())
         }

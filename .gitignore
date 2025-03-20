@@ -3,5 +3,4 @@
 *.db
 *.db-shm
 *.db-wal
-/.idea/sqldialects.xml
 /.idea

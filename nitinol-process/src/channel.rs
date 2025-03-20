@@ -1,12 +1,13 @@
-mod applicator;
-mod publisher;
-mod employ;
+mod event;
+mod command;
+mod forget;
 
-pub use self::applicator::*;
-pub use self::publisher::*;
-pub use self::employ::*;
+pub use self::event::*;
+pub use self::command::*;
+pub use self::forget::*;
 
 use async_trait::async_trait;
+
 use crate::{Process, Context};
 use crate::errors::ChannelDropped;
 

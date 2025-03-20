@@ -28,10 +28,10 @@ pub mod protocol {
 pub mod process {
     pub use nitinol_process::any;
     pub use nitinol_process::manager;
-    pub use nitinol_process::Ref;
+    pub use nitinol_process::Receptor;
     pub use nitinol_process::Context;
     pub use nitinol_process::Process;
-    pub use nitinol_process::{Applicator, Publisher, TryApplicator};
+    pub use nitinol_process::{EventApplicator, CommandHandler, TryEventApplicator};
 
     #[cfg(feature = "process-ext")]
     pub mod extension {
