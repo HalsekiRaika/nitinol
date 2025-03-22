@@ -21,7 +21,6 @@ description = "A utilities for event sourcing"
 [features]
 macro = ["nitinol-macro"]
 process = ["nitinol-process"]
-process-ext = ["process"]
 eventstream = ["process", "nitinol-eventstream", "nitinol-resolver"]
 protocol = ["nitinol-protocol"]
 protocol-sqlx = ["protocol", "nitinol-protocol/sqlx"]
