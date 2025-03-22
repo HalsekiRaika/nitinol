@@ -5,7 +5,6 @@ mod context;
 pub mod errors;
 mod receptor;
 mod process;
-pub mod extension;
 pub mod queue;
 pub mod manager;
 

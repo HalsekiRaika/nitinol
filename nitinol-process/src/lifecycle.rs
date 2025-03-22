@@ -8,13 +8,16 @@ use crate::registry::ProcessRegistry;
 pub async fn run<T: Process>(
     id: impl ToEntityId,
     entity: T,
-    context: Context,
+    start_seq: i64,
     registry: ProcessRegistry
 ) -> Result<Receptor<T>, AlreadyExist> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Box<dyn ProcessApplier<T>>>();
 
     let entity_id = id.to_entity_id();
     let refs = Receptor { channel: tx };
+    
+    let context = Context::new(start_seq, registry.clone());
+    
     registry.register(entity_id.clone(), refs.clone()).await?;
     
     tokio::spawn(async move {
