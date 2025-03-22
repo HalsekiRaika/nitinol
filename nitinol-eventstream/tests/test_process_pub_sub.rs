@@ -206,5 +206,7 @@ async fn not_installed_eventstream() {
     let refs = system.spawn(AnotherTestProcess { id: Uuid::new_v4() }, 0).await.unwrap();
     
     let ev = refs.handle(AnotherTestCommand(Uuid::new_v4())).await.unwrap().unwrap();
+    
+    // panic here
     refs.apply(ev).await.unwrap();
 }
