@@ -1,8 +1,7 @@
-use crate::extension::EventStreamExtension;
 use async_trait::async_trait;
 use nitinol_core::command::Command;
 use nitinol_core::event::Event;
-use nitinol_process::{EventApplicator, Context, FromContextExt, CommandHandler};
+use nitinol_process::{EventApplicator, Context, CommandHandler};
 use std::fmt::Debug;
 use nitinol_resolver::mapping::Mapper;
 use nitinol_resolver::mapping::process::WithResolveMapping;
@@ -18,10 +17,6 @@ where
     
     #[tracing::instrument(skip_all, fields(id = %self.aggregate_id()))]
     async fn subscribe(&self, ctx: &mut Context) {
-        let Ok(ext) = EventStreamExtension::from_context(ctx) else {
-            panic!("`EventStreamExtension` not installed in context");
-        };
-        
         let Some(refs) = self.as_ref_self(ctx).await else {
             panic!("`Process=[{}]` not found in registry", self.aggregate_id());
         };
@@ -29,7 +24,9 @@ where
         let mut mapping: Mapper<Self> = Mapper::default();
         Self::mapping(&mut mapping, refs);
         
-        ext.0.process_subscribe(mapping, ctx.status().clone()).await;
+        crate::global::get_event_stream()
+            .subscribe_in_process(mapping, ctx.status().clone())
+            .await;
         
         tracing::debug!("subscribe start.")
     }

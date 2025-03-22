@@ -5,7 +5,7 @@ use nitinol_core::identifier::EntityId;
 use nitinol_process::Status;
 use nitinol_protocol::Payload;
 use nitinol_resolver::mapping::{Mapper, ResolveMapping};
-use crate::extension::WithEventSubscriber;
+use crate::process::WithEventSubscriber;
 
 #[derive(Clone)]
 pub struct EventStream {
@@ -71,8 +71,8 @@ impl EventStream {
         });
     }
     
-    pub(crate) async fn process_subscribe<E: Event, P: WithEventSubscriber<E>>(&self, mapping: Mapper<P>, status: Status) {
-        let mapping = mapping.filter(|key| key.handler().eq(crate::extension::resolver::RESOLVE_TYPE));
+    pub(crate) async fn subscribe_in_process<E: Event, P: WithEventSubscriber<E>>(&self, mapping: Mapper<P>, status: Status) {
+        let mapping = mapping.filter(|key| key.handler().eq(crate::process::resolver::RESOLVE_TYPE));
         let rx = self.root.subscribe();
         tokio::spawn(async move {
             let mut rx = rx;
