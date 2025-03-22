@@ -42,14 +42,12 @@ pub mod process {
     #[cfg(feature = "persistence")]
     pub mod persistence {
         pub use nitinol_persistence::process::*;
-        pub use nitinol_persistence::extension::PersistenceExtension;
     }
     
     #[cfg(feature = "eventstream")]
     pub mod eventstream {
-        pub use nitinol_eventstream::extension::EventStreamExtension;
-        pub use nitinol_eventstream::extension::WithStreamPublisher;
-        pub use nitinol_eventstream::extension::WithEventSubscriber;
+        pub use nitinol_eventstream::process::WithStreamPublisher;
+        pub use nitinol_eventstream::process::WithEventSubscriber;
     }
 }
 
