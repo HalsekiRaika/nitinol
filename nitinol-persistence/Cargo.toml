@@ -7,6 +7,9 @@ authors.workspace = true
 repository.workspace = true
 description.workspace = true
 
+[features]
+global = []
+
 [dependencies]
 async-trait = "^0.1"
 tracing = "^0.1"

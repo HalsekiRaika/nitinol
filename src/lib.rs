@@ -32,24 +32,16 @@ pub mod process {
     pub use nitinol_process::Context;
     pub use nitinol_process::Process;
     pub use nitinol_process::{EventApplicator, CommandHandler, TryEventApplicator};
-
-    #[cfg(feature = "process-ext")]
-    pub mod extension {
-        pub use nitinol_process::extension::*;
-        pub use nitinol_process::FromContextExt;
-    }
     
     #[cfg(feature = "persistence")]
     pub mod persistence {
         pub use nitinol_persistence::process::*;
-        pub use nitinol_persistence::extension::PersistenceExtension;
     }
     
     #[cfg(feature = "eventstream")]
     pub mod eventstream {
-        pub use nitinol_eventstream::extension::EventStreamExtension;
-        pub use nitinol_eventstream::extension::WithStreamPublisher;
-        pub use nitinol_eventstream::extension::WithEventSubscriber;
+        pub use nitinol_eventstream::process::WithStreamPublisher;
+        pub use nitinol_eventstream::process::WithEventSubscriber;
     }
 }
 

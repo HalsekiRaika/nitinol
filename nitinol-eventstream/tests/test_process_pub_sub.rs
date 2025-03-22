@@ -8,8 +8,8 @@ use uuid::Uuid;
 use nitinol::{Command, Event};
 use nitinol_core::identifier::{EntityId, ToEntityId};
 use nitinol_eventstream::eventstream::EventStream;
-use nitinol_eventstream::extension::resolver::SubscribeProcess;
-use nitinol_eventstream::extension::{EventStreamExtension, WithEventSubscriber, WithStreamPublisher};
+use nitinol_eventstream::process::resolver::SubscribeProcess;
+use nitinol_eventstream::process::{WithEventSubscriber, WithStreamPublisher};
 use nitinol_process::{EventApplicator, Context, Process, CommandHandler, Receptor};
 use nitinol_process::manager::ProcessManager;
 use nitinol_resolver::mapping::Mapper;
@@ -103,7 +103,6 @@ impl Process for AnotherTestProcess {
     }
 }
 
-impl WithStreamPublisher for AnotherTestProcess {}
 
 #[async_trait]
 impl CommandHandler<AnotherTestCommand> for AnotherTestProcess {
@@ -122,7 +121,7 @@ impl EventApplicator<AnotherTestEvent> for AnotherTestProcess {
     #[tracing::instrument(skip_all, name = "AnotherTestProcess::apply", fields(id = %self.aggregate_id()))]
     async fn apply(&mut self, event: AnotherTestEvent, ctx: &mut Context) {
         tracing::debug!("Apply event: {:?}", event);
-        WithStreamPublisher::publish(self, &event, ctx).await;
+        self.publish(&event, ctx).await;
     }
 }
 
@@ -133,11 +132,12 @@ async fn subscribe_event_from_root() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
     
+    
     let eventstream = EventStream::default();
     
-    let system = ProcessManager::with_extension(|ext| {
-        ext.install(EventStreamExtension::new(eventstream.clone()))
-    })?;
+    nitinol_eventstream::init_eventstream(eventstream.clone());
+    
+    let system = ProcessManager::default();
     
     // Subscribers
     system.spawn(TestProcess { id: Uuid::new_v4() }, 0).await?;
@@ -170,9 +170,9 @@ async fn subscribe_event_from_process() -> anyhow::Result<()> {
     
     let eventstream = EventStream::default();
     
-    let system = ProcessManager::with_extension(|ext| {
-        ext.install(EventStreamExtension::new(eventstream.clone()))
-    })?;
+    nitinol_eventstream::init_eventstream(eventstream.clone());
+    
+    let system = ProcessManager::default();
     
     // Subscribers
     system.spawn(TestProcess { id: Uuid::new_v4() }, 0).await?;
@@ -189,4 +189,24 @@ async fn subscribe_event_from_process() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_secs(3)).await;
     
     Ok(())
+}
+
+#[tokio::test]
+#[should_panic]
+async fn not_installed_eventstream() {
+    tracing_subscriber::registry()
+        .with(EnvFilter::new("trace"))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+    
+    let system = ProcessManager::default();
+    
+    system.spawn(TestProcess { id: Uuid::new_v4() }, 0).await.unwrap();
+    
+    let refs = system.spawn(AnotherTestProcess { id: Uuid::new_v4() }, 0).await.unwrap();
+    
+    let ev = refs.handle(AnotherTestCommand(Uuid::new_v4())).await.unwrap().unwrap();
+    
+    // panic here
+    refs.apply(ev).await.unwrap();
 }
