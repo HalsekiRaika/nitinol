@@ -7,13 +7,14 @@ authors = { workspace = true }
 repository = { workspace = true }
 
 [dependencies]
-async-trait = "^0.1"
-thiserror = "^2"
+thiserror = { workspace = true }
+async-trait = { workspace = true }
 
-tokio = { version = "^1", features = ["sync", "rt-multi-thread"], default-features = false }
+tokio = { workspace = true, features = ["sync", "rt-multi-thread"] }
 
 tracing = "0.1"
-nitinol-core = { path = "../nitinol-core" }
+
+nitinol-core = { version = "=1", path = "../nitinol-core" }
 
 [dev-dependencies]
 tokio = { version = "^1", features = ["time", "macros"] }
