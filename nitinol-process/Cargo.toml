@@ -12,7 +12,7 @@ async-trait = { workspace = true }
 
 tokio = { workspace = true, features = ["sync", "rt-multi-thread"] }
 
-tracing = "0.1"
+tracing = { workspace = true }
 
 nitinol-core = { version = "=1", path = "../nitinol-core" }
 
