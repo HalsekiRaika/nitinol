@@ -32,7 +32,7 @@ pub fn derive_event(input: TokenStream) -> TokenStream {
     };
     let input_name = &input.ident;
     
-    let key = if attr.key.is_empty() {
+    let event_type = if attr.key.is_empty() {
         to_kebab_case(&input_name.to_string())
     } else {
         attr.key
@@ -43,7 +43,7 @@ pub fn derive_event(input: TokenStream) -> TokenStream {
     
     let token = quote! {
         impl nitinol::Event for #input_name {
-            const REGISTRY_KEY: &'static str = #key;
+            const EVENT_TYPE: &'static str = #event_type;
             fn as_bytes(&self) -> Result<Vec<u8>, nitinol::errors::SerializeError> {
                 Ok(#enc(self)?)
             }

@@ -18,6 +18,9 @@ authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]
 repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
+[workspace.dependencies]
+thiserror = "^2"
+
 [features]
 macro = ["nitinol-macro"]
 process = ["nitinol-process"]
@@ -29,7 +32,7 @@ projection = ["nitinol-projection", "nitinol-resolver"]
 
 [package]
 name = "nitinol"
-version = "0.3.1-beta.1"
+version = "0.4.0-beta.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]

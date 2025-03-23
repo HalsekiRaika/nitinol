@@ -40,7 +40,7 @@ impl WriteProtocol {
             .write(aggregate_id.clone(), Payload {
                 id: aggregate_id.to_string(),
                 sequence_id: seq,
-                registry_key: E::REGISTRY_KEY.to_string(),
+                registry_key: E::EVENT_TYPE.to_string(),
                 bytes: event,
                 created_at: OffsetDateTime::now_utc()
             })

@@ -24,7 +24,7 @@ use crate::resolver::{ResolveHandler, ResolveType, Resolver, ResolverType, Typed
 /// # pub enum EntityEvent {}
 /// #
 /// # impl Event for EntityEvent {
-/// #     const REGISTRY_KEY: &'static str = "entity-event";
+/// #     const EVENT_TYPE: &'static str = "entity-event";
 /// #
 /// #     fn as_bytes(&self) -> Result<Vec<u8>, SerializeError> {
 /// #         Ok(serde_json::to_vec(self)?)
@@ -98,7 +98,7 @@ where
         H: ResolveHandler<E, T>,
     {
         self.map.insert(
-            ResolveType::new(E::REGISTRY_KEY, H::HANDLER_TYPE),
+            ResolveType::new(E::EVENT_TYPE, H::HANDLER_TYPE),
             Arc::new(TypedResolver::<E, T, H>::default()),
         );
         self
@@ -109,7 +109,7 @@ where
         R: ResolverType<T>
     {
         self.map.insert(
-            ResolveType::new(E::REGISTRY_KEY, R::RESOLVE_TYPE),
+            ResolveType::new(E::EVENT_TYPE, R::RESOLVE_TYPE),
             Arc::new(resolver),
         );
         self
