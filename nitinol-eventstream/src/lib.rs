@@ -7,4 +7,4 @@ mod global;
 pub use self::global::init_eventstream;
 
 #[cfg(feature = "global")]
-pub use self::global::get_global_eventstream;
+pub use self::global::get_event_stream;
