@@ -2,7 +2,12 @@ use std::fmt::{Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-
+/// Low clone cost identifier that provides a common identification feature within Nitinol.
+/// 
+/// It is a wrapper around `Arc<str>`.
+/// 
+/// If Display is implemented, 
+/// [`ToEntityId::to_entity_id`] and [`IntoEntityId::into_entity_id`] are automatically derived.
 pub struct EntityId(Arc<str>);
 
 impl EntityId {
