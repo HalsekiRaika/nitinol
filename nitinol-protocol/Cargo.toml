@@ -1,6 +1,7 @@
 [package]
 name = "nitinol-protocol"
 version = "0.1.0"
+description = "A library for Nitinol that defined method of accessing serialized events and databases."
 edition = { workspace = true }
 license = { workspace = true }
 authors = { workspace = true }
