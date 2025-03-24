@@ -1,19 +1,20 @@
 [package]
 name = "nitinol-persistence"
 version = "0.1.0"
+description = "Extension library for `nitinol-process` to persist Events using `nitinol-protocol`"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description.workspace = true
 
 [features]
 global = []
 
 [dependencies]
-async-trait = "^0.1"
-tracing = "^0.1"
+async-trait = { workspace = true }
 
-nitinol-core = { path = "../nitinol-core" }
-nitinol-process = { path = "../nitinol-process" }
-nitinol-protocol = { path = "../nitinol-protocol" }
+tracing = { workspace = true }
+
+nitinol-core = { version = "1.0.0", path = "../nitinol-core" }
+nitinol-process = { version = "0.1.0", path = "../nitinol-process" }
+nitinol-protocol = { version = "0.1.0", path = "../nitinol-protocol" }
