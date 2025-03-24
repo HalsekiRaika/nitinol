@@ -8,9 +8,15 @@ repository = { workspace = true }
 
 
 [dependencies]
-nitinol-core = { path = "../nitinol-core" }
+nitinol-core = { version = "1.0.0", path = "../nitinol-core" }
 
-async-trait = "^0.1"
 thiserror = { workspace = true }
-sqlx = { version = "^0.8", features = ["migrate", "macros", "time"], optional = true }
-time = { version = "^0.3", features = [] }
+async-trait = { workspace = true }
+time = { workspace = true }
+
+# Optional dependencies specific to this crate
+[dependencies.sqlx]
+optional = true
+version = "^0.8"
+default-features = false
+features = ["migrate", "macros", "time"]

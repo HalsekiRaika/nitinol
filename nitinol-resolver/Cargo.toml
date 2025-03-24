@@ -1,23 +1,23 @@
 [package]
 name = "nitinol-resolver"
 version = "0.1.0"
+description = "Library for Nitinol to abstract how to process Events to Entity"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description.workspace = true
 
 [features]
 process = ["nitinol-process"]
 
 [dependencies]
-async-trait = "^0.1"
-thiserror = "^2.0"
+thiserror = { workspace = true }
+async-trait = { workspace = true }
 
-tracing = "^0.1"
-nitinol-core = { path = "../nitinol-core" }
+tracing = { workspace = true }
 
-nitinol-process = { path = "../nitinol-process", optional = true }
+nitinol-core = { version = "1.0.0", path = "../nitinol-core" }
+nitinol-process = { version = "0.1.0", path = "../nitinol-process", optional = true }
 
 [dev-dependencies]
 serde = { version = "^1", features = ["derive"] }
