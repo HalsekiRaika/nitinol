@@ -13,7 +13,7 @@ nitinol-core = { version = "1.0.0", path = "../nitinol-core" }
 
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-time = { workspace = true }
+time = { workspace = true, features = ["std"] }
 
 # Optional dependencies specific to this crate
 [dependencies.sqlx]
