@@ -4,9 +4,10 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use nitinol::{Command, EntityId, Event, ToEntityId};
-use nitinol::process::{Applicator, Context, Process, Publisher};
+use nitinol::process::{CommandHandler, Context, EventApplicator, Process};
 use nitinol::process::manager::ProcessManager;
-use nitinol::process::persistence::{PersistenceExtension, WithPersistence};
+use nitinol::process::persistence::WithPersistence;
+use nitinol::process::persistence::writer::EventWriter;
 use nitinol_inmemory_adaptor::store::InMemoryEventStore;
 
 #[derive(Debug, Clone, Command)]
@@ -27,6 +28,7 @@ pub struct Aggregate {
     name: String
 }
 
+//noinspection DuplicatedCode
 #[async_trait]
 impl Process for Aggregate {
     fn aggregate_id(&self) -> EntityId {
@@ -42,15 +44,14 @@ impl Process for Aggregate {
     }
 }
 
-impl WithPersistence for Aggregate {}
-
+//noinspection DuplicatedCode
 #[async_trait]
-impl Publisher<DomainCommand> for Aggregate {
+impl CommandHandler<DomainCommand> for Aggregate {
     type Event = DomainEvent;
     type Rejection = anyhow::Error;
     
     #[tracing::instrument(skip_all)]
-    async fn publish(&self, command: DomainCommand, _: &mut Context) -> Result<Self::Event, Self::Rejection> {
+    async fn handle(&self, command: DomainCommand, _: &mut Context) -> Result<Self::Event, Self::Rejection> {
         let ev = match command {
             DomainCommand::ChangeName { new } => DomainEvent::ChangedName { new },
             DomainCommand::Delete => DomainEvent::Deleted,
@@ -60,8 +61,9 @@ impl Publisher<DomainCommand> for Aggregate {
     }
 }
 
+//noinspection DuplicatedCode
 #[async_trait]
-impl Applicator<DomainEvent> for Aggregate {
+impl EventApplicator<DomainEvent> for Aggregate {
     #[tracing::instrument(skip_all)]
     async fn apply(&mut self, event: DomainEvent, ctx: &mut Context) {
         self.persist(&event, ctx).await;
@@ -72,7 +74,7 @@ impl Applicator<DomainEvent> for Aggregate {
                 self.name = new;
             }
             DomainEvent::Deleted => {
-                ctx.poison_pill().await;
+                ctx.poison().await;
             }
         }
         tracing::debug!("current state: {:?}", self);
@@ -89,17 +91,18 @@ async fn main() -> Result<(), anyhow::Error> {
     
     let eventstore = InMemoryEventStore::default();
     
-    let system = ProcessManager::with_extension(|ext| {
-        ext.install(PersistenceExtension::new(eventstore))
-    })?;
+    let writer = EventWriter::new(eventstore).set_retry(5);
+    nitinol::setup::set_writer(writer);
+    
+    let system = ProcessManager::default();
     
     let aggregate = Aggregate { name: "name".to_string() };
     let refs = system.spawn(aggregate, 0).await?;
     
-    let ev = refs.publish(DomainCommand::ChangeName { new: "new name".to_string() }).await??;
+    let ev = refs.handle(DomainCommand::ChangeName { new: "new name".to_string() }).await??;
     refs.apply(ev).await?;
     
-    let ev = refs.publish(DomainCommand::Delete).await??;
+    let ev = refs.handle(DomainCommand::Delete).await??;
     refs.apply(ev).await?;
     Ok(())
 }

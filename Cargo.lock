@@ -39,18 +39,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcfed56ad506cb2c684a14971b8861fdc3baaaae314b9e5f9bb532cbe3ba7a4f"
 
 [[package]]
-name = "async-channel"
-version = "2.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89b47800b0be77592da0afd425cc03468052844aff33b84e33cc696f64e77b6a"
-dependencies = [
- "concurrent-queue",
- "event-listener-strategy",
- "futures-core",
- "pin-project-lite",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.88"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -274,9 +262,9 @@ dependencies = [
 
 [[package]]
 name = "deranged"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c9e6a11ca8224451684bc0d7d5a7adbf8f2fd6887261a1cfc3c0432f9d4068e"
+checksum = "28cfac68e08048ae1883171632c2aef3ebc555621ae56fbccce1cbf22dd7f058"
 dependencies = [
  "powerfmt",
 ]
@@ -354,16 +342,6 @@ checksum = "3492acde4c3fc54c845eaab3eed8bd00c7a7d881f78bfc801e43a93dec1331ae"
 dependencies = [
  "concurrent-queue",
  "parking",
- "pin-project-lite",
-]
-
-[[package]]
-name = "event-listener-strategy"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c3e4e0dd3673c1139bf041f3008816d9cf2946bbfac2945c09e523b8d7b05b2"
-dependencies = [
- "event-listener",
  "pin-project-lite",
 ]
 
@@ -792,9 +770,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.26"
+version = "0.4.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30bde2b3dc3671ae49d8e2e9f044c7c005836e7a023ee57cffa25ab82764bb9e"
+checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "matchers"
@@ -843,30 +821,6 @@ dependencies = [
 
 [[package]]
 name = "nitinol"
-version = "0.3.0-beta.1"
-source = "git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1#8f60c2cbd06f03031589845901fa2ad0b6845fdb"
-dependencies = [
- "nitinol-core 0.1.0",
- "nitinol-macro 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1)",
- "nitinol-persistence 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1)",
- "nitinol-process 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1)",
- "nitinol-protocol 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1)",
-]
-
-[[package]]
-name = "nitinol"
-version = "0.4.0-beta.1"
-source = "git+https://github.com/HalsekiRaika/nitinol#7585bf77c528db9f79ac4f9330a3e68e45d79622"
-dependencies = [
- "nitinol-core 1.0.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "nitinol-macro 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "nitinol-persistence 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "nitinol-process 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "nitinol-protocol 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
-]
-
-[[package]]
-name = "nitinol"
 version = "0.4.1"
 dependencies = [
  "nitinol-core 1.0.0",
@@ -880,14 +834,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "nitinol-core"
-version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1#8f60c2cbd06f03031589845901fa2ad0b6845fdb"
+name = "nitinol"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "354381d8c62e9bb1a9f4d2d5a525a95d3ab8d2799f444c10c6042524f3728ed2"
 dependencies = [
- "async-trait",
- "futures-util",
- "serde",
- "thiserror",
+ "nitinol-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-macro 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-persistence 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-process 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-protocol 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -901,7 +857,8 @@ dependencies = [
 [[package]]
 name = "nitinol-core"
 version = "1.0.0"
-source = "git+https://github.com/HalsekiRaika/nitinol#7585bf77c528db9f79ac4f9330a3e68e45d79622"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbae2db121ffd178160555c598812557ef1f6f50fdb581cdc2a82bdc1aefc008"
 dependencies = [
  "serde",
  "thiserror",
@@ -929,10 +886,12 @@ dependencies = [
 [[package]]
 name = "nitinol-inmemory-adaptor"
 version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol-inmemory-adaptor.git#c6b5fcc51e11d107a71dc1e48beb86ce75d88125"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee85421baca2d473dba4eba1036b22a0b0162c9ebbb0c24ed7aaa69fff818f5e"
 dependencies = [
  "async-trait",
- "nitinol 0.3.0-beta.1",
+ "nitinol-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-protocol 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
  "tokio",
  "tracing",
@@ -953,45 +912,12 @@ dependencies = [
 [[package]]
 name = "nitinol-macro"
 version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1#8f60c2cbd06f03031589845901fa2ad0b6845fdb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8252658842028739421a9182061922bb196097b707f4f05f6daae31103a4e7fb"
 dependencies = [
  "darling",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "nitinol-macro"
-version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol#7585bf77c528db9f79ac4f9330a3e68e45d79622"
-dependencies = [
- "darling",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "nitinol-persistence"
-version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1#8f60c2cbd06f03031589845901fa2ad0b6845fdb"
-dependencies = [
- "async-trait",
- "nitinol-core 0.1.0",
- "nitinol-process 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1)",
- "nitinol-protocol 0.1.0 (git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1)",
- "tracing",
-]
-
-[[package]]
-name = "nitinol-persistence"
-version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol#7585bf77c528db9f79ac4f9330a3e68e45d79622"
-dependencies = [
- "async-trait",
- "nitinol-core 1.0.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "nitinol-process 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "nitinol-protocol 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "tracing",
 ]
 
 [[package]]
@@ -1006,28 +932,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "nitinol-process"
-version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1#8f60c2cbd06f03031589845901fa2ad0b6845fdb"
+name = "nitinol-persistence"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e451507de9cb3a8244739c4a5b6621677af6e60bc330a3a26c44ec656df4f113"
 dependencies = [
- "async-channel",
  "async-trait",
- "nitinol-core 0.1.0",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "nitinol-process"
-version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol#7585bf77c528db9f79ac4f9330a3e68e45d79622"
-dependencies = [
- "async-channel",
- "async-trait",
- "nitinol-core 1.0.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "thiserror",
- "tokio",
+ "nitinol-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-process 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-protocol 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tracing",
 ]
 
@@ -1037,6 +950,19 @@ version = "0.1.1"
 dependencies = [
  "async-trait",
  "nitinol-core 1.0.0",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nitinol-process"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "207a82887aa3750f2473af3e5588de118a721957862d3dcc9b384f9c994d0275"
+dependencies = [
+ "async-trait",
+ "nitinol-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror",
  "tokio",
  "tracing",
@@ -1070,23 +996,12 @@ dependencies = [
 [[package]]
 name = "nitinol-protocol"
 version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1#8f60c2cbd06f03031589845901fa2ad0b6845fdb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a50d8f18e4dd42699e889094db87b1227ee3f2d5d065cdc685a982f36955535c"
 dependencies = [
  "async-trait",
- "nitinol-core 0.1.0",
+ "nitinol-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "sqlx",
- "thiserror",
- "time",
- "tracing",
-]
-
-[[package]]
-name = "nitinol-protocol"
-version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol#7585bf77c528db9f79ac4f9330a3e68e45d79622"
-dependencies = [
- "async-trait",
- "nitinol-core 1.0.0 (git+https://github.com/HalsekiRaika/nitinol)",
  "thiserror",
  "time",
 ]
@@ -1107,12 +1022,15 @@ dependencies = [
 [[package]]
 name = "nitinol-sqlite-adaptor"
 version = "0.1.0"
-source = "git+https://github.com/HalsekiRaika/nitinol-sqlite-adaptor.git#e92c9c096f794ea284098c50ec7df1bb6e960948"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7b8b9e4b945b45921f9bd658780c753854bd49270b105f592fef5c33d16b089"
 dependencies = [
  "async-trait",
  "dotenvy",
- "nitinol 0.3.0-beta.1",
+ "nitinol-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-protocol 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "sqlx",
+ "tracing",
 ]
 
 [[package]]
@@ -1249,7 +1167,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.4.0-beta.1",
+ "nitinol 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nitinol-inmemory-adaptor",
  "serde",
  "serde_json",
@@ -1264,7 +1182,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.3.0-beta.1",
+ "nitinol 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "nitinol-sqlite-adaptor",
  "serde",
  "serde_json",
@@ -1910,9 +1828,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.40"
+version = "0.3.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d9c75b47bdff86fa3334a3db91356b8d7d86a9b839dab7d0bdc5c3d3a077618"
+checksum = "8a7619e19bc266e0f9c5e6686659d394bc57973859340060a69221e57dbc0c40"
 dependencies = [
  "deranged",
  "itoa",
@@ -1931,9 +1849,9 @@ checksum = "c9e9a38711f559d9e3ce1cdb06dd7c5b8ea546bc90052da6d06bb76da74bb07c"
 
 [[package]]
 name = "time-macros"
-version = "0.2.21"
+version = "0.2.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29aa485584182073ed57fd5004aa09c371f021325014694e432313345865fd04"
+checksum = "3526739392ec93fd8b359c8e98514cb3e8e021beb4e5f597b00a0221f8ed8a49"
 dependencies = [
  "num-conv",
  "time-core",
@@ -2171,9 +2089,9 @@ checksum = "b8dad83b4f25e74f184f64c43b150b91efe7647395b42289f38e50566d82855b"
 
 [[package]]
 name = "whoami"
-version = "1.5.2"
+version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "372d5b87f58ec45c384ba03563b03544dc5fadc3983e434b286913f5b4a9bb6d"
+checksum = "6994d13118ab492c3c80c1f81928718159254c53c472bf9ce36f8dae4add02a7"
 dependencies = [
  "redox_syscall",
  "wasite",

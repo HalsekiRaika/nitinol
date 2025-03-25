@@ -8,8 +8,8 @@ repository.workspace = true
 description.workspace = true
 
 [dependencies]
-nitinol = { git = "https://github.com/HalsekiRaika/nitinol", tag = "v0.3.0-beta.1", features = ["process", "macro", "persistence"] }
-nitinol-sqlite-adaptor = { git = "https://github.com/HalsekiRaika/nitinol-sqlite-adaptor.git" }
+nitinol = { version = "0.4.1", features = ["process", "macro", "persistence"] }
+nitinol-sqlite-adaptor = "0.1.0"
 
 async-trait = "^0.1"
 
