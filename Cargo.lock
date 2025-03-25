@@ -109,7 +109,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.4.0-beta.1",
+ "nitinol 0.4.0",
  "serde",
  "serde_json",
  "tokio",
@@ -856,6 +856,18 @@ dependencies = [
 [[package]]
 name = "nitinol"
 version = "0.4.0-beta.1"
+source = "git+https://github.com/HalsekiRaika/nitinol#7585bf77c528db9f79ac4f9330a3e68e45d79622"
+dependencies = [
+ "nitinol-core 1.0.0 (git+https://github.com/HalsekiRaika/nitinol)",
+ "nitinol-macro 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
+ "nitinol-persistence 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
+ "nitinol-process 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
+ "nitinol-protocol 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
+]
+
+[[package]]
+name = "nitinol"
+version = "0.4.0"
 dependencies = [
  "nitinol-core 1.0.0",
  "nitinol-eventstream",
@@ -865,18 +877,6 @@ dependencies = [
  "nitinol-projection",
  "nitinol-protocol 0.1.0",
  "nitinol-resolver",
-]
-
-[[package]]
-name = "nitinol"
-version = "0.4.0-beta.1"
-source = "git+https://github.com/HalsekiRaika/nitinol#7585bf77c528db9f79ac4f9330a3e68e45d79622"
-dependencies = [
- "nitinol-core 1.0.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "nitinol-macro 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "nitinol-persistence 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "nitinol-process 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
- "nitinol-protocol 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
 ]
 
 [[package]]
@@ -913,7 +913,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.4.0-beta.1",
+ "nitinol 0.4.0",
  "nitinol-core 1.0.0",
  "nitinol-process 0.1.0",
  "nitinol-protocol 0.1.0",
@@ -943,7 +943,7 @@ name = "nitinol-macro"
 version = "0.1.0"
 dependencies = [
  "darling",
- "nitinol 0.4.0-beta.1",
+ "nitinol 0.4.0",
  "quote",
  "serde",
  "serde_json",
@@ -1249,7 +1249,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.4.0-beta.1 (git+https://github.com/HalsekiRaika/nitinol)",
+ "nitinol 0.4.0-beta.1",
  "nitinol-inmemory-adaptor",
  "serde",
  "serde_json",

@@ -37,7 +37,7 @@ projection = ["nitinol-projection", "nitinol-resolver"]
 
 [package]
 name = "nitinol"
-version = "0.4.0-beta.1"
+version = "0.4.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]
@@ -45,11 +45,11 @@ repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
 [dependencies]
-nitinol-core = { path = "nitinol-core" }
-nitinol-eventstream = { path = "nitinol-eventstream", optional = true }
-nitinol-macro = { path = "nitinol-macro", optional = true }
-nitinol-protocol = { path = "nitinol-protocol", optional = true }
-nitinol-process = { path = "nitinol-process", optional = true }
-nitinol-projection = { path = "nitinol-projection", optional = true }
-nitinol-persistence = { path = "nitinol-persistence", optional = true }
-nitinol-resolver = { path = "nitinol-resolver", optional = true }
+nitinol-core = { version = "1.0.0", path = "nitinol-core" }
+nitinol-eventstream = { version = "0.1.0", path = "nitinol-eventstream", optional = true }
+nitinol-macro = { version = "0.1.0", path = "nitinol-macro", optional = true }
+nitinol-protocol = { version = "0.1.0", path = "nitinol-protocol", optional = true }
+nitinol-process = { version = "0.1.0", path = "nitinol-process", optional = true }
+nitinol-projection = { version = "0.1.0", path = "nitinol-projection", optional = true }
+nitinol-persistence = { version = "0.1.0", path = "nitinol-persistence", optional = true }
+nitinol-resolver = { version = "0.1.0", path = "nitinol-resolver", optional = true }
