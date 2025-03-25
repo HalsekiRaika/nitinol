@@ -21,6 +21,7 @@ nitinol-protocol = { version = "0.1.0", path = "../nitinol-protocol" }
 nitinol-resolver = { version = "0.1.0", path = "../nitinol-resolver", features = ["process"] }
 
 [dev-dependencies]
+anyhow = "^1"
 uuid = { version = "^1", features = ["v4", "serde"] }
 tokio = { version = "^1", features = ["macros", "rt-multi-thread", "time"] }
 
