@@ -32,6 +32,7 @@ pub fn set_global_projector(install: EventProjector) {
     }
 }
 
+#[allow(unused)]
 pub fn get_global_projector() -> &'static EventProjector {
     if EXISTS.load(Ordering::Acquire) {
         unsafe {
