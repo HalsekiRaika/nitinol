@@ -1,6 +1,6 @@
 [package]
 name = "nitinol-process"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pseudo-actor type process library for Nitinol using green thread of tokio"
 edition = { workspace = true }
 license = { workspace = true }
