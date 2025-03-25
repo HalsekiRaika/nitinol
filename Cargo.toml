@@ -51,5 +51,5 @@ nitinol-macro = { version = "0.1.0", path = "nitinol-macro", optional = true }
 nitinol-protocol = { version = "0.1.0", path = "nitinol-protocol", optional = true }
 nitinol-process = { version = "0.1.1", path = "nitinol-process", optional = true }
 nitinol-projection = { version = "0.1.2", path = "nitinol-projection", optional = true }
-nitinol-persistence = { version = "0.1.0", path = "nitinol-persistence", optional = true }
+nitinol-persistence = { version = "0.1.1", path = "nitinol-persistence", optional = true }
 nitinol-resolver = { version = "0.1.0", path = "nitinol-resolver", optional = true }

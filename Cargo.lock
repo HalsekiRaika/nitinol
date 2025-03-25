@@ -872,7 +872,7 @@ dependencies = [
  "nitinol-core 1.0.0",
  "nitinol-eventstream",
  "nitinol-macro 0.1.0",
- "nitinol-persistence 0.1.0",
+ "nitinol-persistence 0.1.1",
  "nitinol-process 0.1.1",
  "nitinol-projection",
  "nitinol-protocol 0.1.0",
@@ -973,17 +973,6 @@ dependencies = [
 [[package]]
 name = "nitinol-persistence"
 version = "0.1.0"
-dependencies = [
- "async-trait",
- "nitinol-core 1.0.0",
- "nitinol-process 0.1.1",
- "nitinol-protocol 0.1.0",
- "tracing",
-]
-
-[[package]]
-name = "nitinol-persistence"
-version = "0.1.0"
 source = "git+https://github.com/HalsekiRaika/nitinol?tag=v0.3.0-beta.1#8f60c2cbd06f03031589845901fa2ad0b6845fdb"
 dependencies = [
  "async-trait",
@@ -1002,6 +991,17 @@ dependencies = [
  "nitinol-core 1.0.0 (git+https://github.com/HalsekiRaika/nitinol)",
  "nitinol-process 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
  "nitinol-protocol 0.1.0 (git+https://github.com/HalsekiRaika/nitinol)",
+ "tracing",
+]
+
+[[package]]
+name = "nitinol-persistence"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "nitinol-core 1.0.0",
+ "nitinol-process 0.1.1",
+ "nitinol-protocol 0.1.0",
  "tracing",
 ]
 

@@ -47,6 +47,7 @@ pub mod process {
     #[cfg(feature = "persistence")]
     pub mod persistence {
         pub use nitinol_persistence::process::*;
+        pub use nitinol_persistence::writer;
     }
     
     #[cfg(feature = "eventstream")]

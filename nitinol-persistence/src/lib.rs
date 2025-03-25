@@ -1,5 +1,5 @@
 pub mod process;
-mod writer;
+pub mod writer;
 
 mod global;
 
