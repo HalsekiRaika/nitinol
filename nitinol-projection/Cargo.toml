@@ -1,6 +1,6 @@
 [package]
 name = "nitinol-projection"
-version = "0.1.1"
+version = "0.1.2"
 description = "A library for Nitinol to project Events to Entity using nitinol-protocol"
 edition = { workspace = true }
 license = { workspace = true }
