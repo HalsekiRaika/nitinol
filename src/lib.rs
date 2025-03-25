@@ -11,6 +11,17 @@ mod macros {
     pub use nitinol_macro::Command;
 }
 
+pub mod setup {
+    #[cfg(feature = "eventstream")]
+    pub use nitinol_eventstream::init_eventstream;
+    
+    #[cfg(feature = "persistence")]
+    pub use nitinol_persistence::set_writer;
+    
+    #[cfg(feature = "projection")]
+    pub use nitinol_projection::set_global_projector;
+}
+
 #[cfg(feature = "eventstream")]
 pub mod eventstream {
     pub use nitinol_eventstream::eventstream::EventStream;
