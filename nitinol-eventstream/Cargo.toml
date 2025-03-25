@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description.workspace = true
 
 [features]
 global = []
@@ -18,10 +17,10 @@ async-trait = "^0.1"
 
 tracing = "^0.1"
 
-nitinol-core = { path = "../nitinol-core" }
-nitinol-process = { path = "../nitinol-process" }
-nitinol-protocol = { path = "../nitinol-protocol" }
-nitinol-resolver = { path = "../nitinol-resolver", features = ["process"] }
+nitinol-core = { version = "1.0.0", path = "../nitinol-core" }
+nitinol-process = { version = "0.1.0", path = "../nitinol-process" }
+nitinol-protocol = { version = "0.1.0", path = "../nitinol-protocol" }
+nitinol-resolver = { version = "0.1.0", path = "../nitinol-resolver", features = ["process"] }
 
 [dev-dependencies]
 uuid = { version = "^1", features = ["v4", "serde"] }
