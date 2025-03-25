@@ -109,7 +109,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.4.0",
+ "nitinol 0.4.1",
  "serde",
  "serde_json",
  "tokio",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "nitinol"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "nitinol-core 1.0.0",
  "nitinol-eventstream",
@@ -913,7 +913,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.4.0",
+ "nitinol 0.4.1",
  "nitinol-core 1.0.0",
  "nitinol-process 0.1.1",
  "nitinol-protocol 0.1.0",
@@ -943,7 +943,7 @@ name = "nitinol-macro"
 version = "0.1.0"
 dependencies = [
  "darling",
- "nitinol 0.4.0",
+ "nitinol 0.4.1",
  "quote",
  "serde",
  "serde_json",
