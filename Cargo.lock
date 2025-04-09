@@ -97,7 +97,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.4.1",
+ "nitinol 0.4.2",
  "serde",
  "serde_json",
  "tokio",
@@ -822,6 +822,19 @@ dependencies = [
 [[package]]
 name = "nitinol"
 version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "354381d8c62e9bb1a9f4d2d5a525a95d3ab8d2799f444c10c6042524f3728ed2"
+dependencies = [
+ "nitinol-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-macro 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-persistence 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-process 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol-protocol 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "nitinol"
+version = "0.4.2"
 dependencies = [
  "nitinol-core 1.0.0",
  "nitinol-eventstream",
@@ -831,19 +844,6 @@ dependencies = [
  "nitinol-projection",
  "nitinol-protocol 0.1.0",
  "nitinol-resolver",
-]
-
-[[package]]
-name = "nitinol"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "354381d8c62e9bb1a9f4d2d5a525a95d3ab8d2799f444c10c6042524f3728ed2"
-dependencies = [
- "nitinol-core 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nitinol-macro 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "nitinol-persistence 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nitinol-process 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "nitinol-protocol 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -870,7 +870,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.4.1",
+ "nitinol 0.4.2",
  "nitinol-core 1.0.0",
  "nitinol-process 0.1.1",
  "nitinol-protocol 0.1.0",
@@ -902,7 +902,7 @@ name = "nitinol-macro"
 version = "0.1.0"
 dependencies = [
  "darling",
- "nitinol 0.4.1",
+ "nitinol 0.4.2",
  "quote",
  "serde",
  "serde_json",
@@ -1167,7 +1167,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol 0.4.1",
  "nitinol-inmemory-adaptor",
  "serde",
  "serde_json",
@@ -1182,7 +1182,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "nitinol 0.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nitinol 0.4.1",
  "nitinol-sqlite-adaptor",
  "serde",
  "serde_json",
