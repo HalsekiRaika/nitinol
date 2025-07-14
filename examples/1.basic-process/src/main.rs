@@ -76,10 +76,14 @@ impl EventApplicator<DomainEvent> for Aggregate {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(EnvFilter::new("trace"))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+        .with(tracing_subscriber::fmt::layer());
+    
+    #[cfg(tokio_unstable)]
+    let registry = registry.with(console_subscriber::spawn());
+    
+    registry.init();
     
     let system = ProcessManager::default();
     
@@ -91,5 +95,6 @@ async fn main() -> Result<(), anyhow::Error> {
     
     let ev = refs.handle(DomainCommand::Delete).await??;
     refs.apply(ev).await?;
+    
     Ok(())
 }
