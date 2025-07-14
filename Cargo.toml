@@ -27,13 +27,13 @@ futures-util = { version = "^0.3", default-features = false }
 time = { version = "^0.3", default-features = false }
 
 [features]
-macro = ["nitinol-macro"]
-process = ["nitinol-process"]
-eventstream = ["process", "nitinol-eventstream", "nitinol-resolver"]
-protocol = ["nitinol-protocol"]
+macro = ["dep:nitinol-macro"]
+process = ["dep:nitinol-process"]
+eventstream = ["process", "dep:nitinol-eventstream", "dep:nitinol-resolver"]
+protocol = ["dep:nitinol-protocol"]
 protocol-sqlx = ["protocol", "nitinol-protocol/sqlx"]
-persistence = ["process", "protocol", "nitinol-persistence"]
-projection = ["nitinol-projection", "nitinol-resolver"]
+persistence = ["process", "protocol", "dep:nitinol-persistence"]
+projection = ["dep:nitinol-projection", "dep:nitinol-resolver"]
 
 [package]
 name = "nitinol"
