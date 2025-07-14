@@ -18,9 +18,12 @@ pub async fn run<T: Process>(
     
     let context = Context::new(start_seq, registry.clone());
     
+    #[cfg(tokio_unstable)]
+    let named = entity_id.clone();
+    
     registry.register(entity_id.clone(), refs.clone()).await?;
     
-    tokio::spawn(async move {
+    let process = async move {
         let id = entity_id;
         let mut entity = entity;
         let mut context = context;
@@ -44,7 +47,18 @@ pub async fn run<T: Process>(
         }
         
         entity.stop(&mut context).await;
-    });
+    };
+    
+    #[cfg(tokio_unstable)]
+    {
+        let _ = tokio::task::Builder::new()
+            .name(named.as_ref())
+            .spawn(process)
+            .expect("unexpected error occurred from tokio-runtime.");
+    }
+    
+    #[cfg(not(tokio_unstable))]
+    tokio::spawn(process);
     
     Ok(refs)
 }
