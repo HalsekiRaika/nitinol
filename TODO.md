@@ -1,5 +1,8 @@
 - [ ] Merge package `nitinol-eventstream` into `nitinol-process` to simplify the workspace and reduce overhead for users who need both.
 - [ ] Merge package `nitinol-projection` into `nitinol-persistence`.
+- [ ] Move `nitinol-process` to `nitinol-core`.
+  - `nitinol-core` has been used as the core representation for implementing CQRS+ES, but this should be moved to `nitinol-persistence`.
+  - `nitinol-process` has been implemented with the goal of realizing CQRS+ES, but from now on, it will be implemented as a means to handle CQRS+ES.
 - [ ] More simplify `nitinol-process`
   - Provide an API closer to ActorModel (likely akka, protoactor.go) and make the core Pub/Sub intuitive to easily implement CQRS+ES.
 - [ ] Remove `nitinol-resolver`.
