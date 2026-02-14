@@ -1,5 +1,5 @@
 use std::fmt::Debug;
-use super::ProcessApplier;
+use super::TaskApplier;
 use crate::errors::ChannelDropped;
 use crate::{Process, Context};
 use async_trait::async_trait;
@@ -14,7 +14,7 @@ pub trait CommandHandler<C: Command>: 'static + Sync + Send {
     async fn handle(&self, command: C, ctx: &mut Context) -> Result<Self::Event, Self::Rejection>;
 }
 
-pub(crate) struct CommandReceptor<C: Command, T: Process>
+pub(crate) struct CommandHandleTask<C: Command, T: Process>
 where
     T: CommandHandler<C>,
 {
@@ -23,17 +23,14 @@ where
 }
 
 #[async_trait::async_trait]
-impl<C: Command, T: Process> ProcessApplier<T> for CommandReceptor<C, T>
+impl<C: Command, T: Process> TaskApplier<T> for CommandHandleTask<C, T>
 where
     T: CommandHandler<C>,
 {
-    async fn apply(
-        self: Box<Self>,
-        entity: &mut T,
-        ctx: &mut Context,
-    ) -> Result<(), ChannelDropped> {
+    async fn apply(self: Box<Self>, state: &mut T, ctx: &mut Context) -> Result<(), ChannelDropped> {
         self.oneshot
-            .send(entity.handle(self.command, ctx).await)
-            .map_err(|_| ChannelDropped)
+            .send(state.handle(self.command, ctx).await)
+            .map_err(|_| ChannelDropped)?;
+        Ok(())
     }
 }

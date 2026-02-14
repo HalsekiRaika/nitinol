@@ -10,8 +10,9 @@ use nitinol_core::identifier::{EntityId, ToEntityId};
 use nitinol_eventstream::eventstream::EventStream;
 use nitinol_eventstream::process::resolver::SubscribeProcess;
 use nitinol_eventstream::process::{WithEventSubscriber, WithStreamPublisher};
-use nitinol_process::{EventApplicator, Context, Process, CommandHandler, Receptor};
+use nitinol_process::{Context, Process, Receptor};
 use nitinol_process::manager::ProcessManager;
+use nitinol_process::task::{CommandHandler, EventApplicator};
 use nitinol_resolver::mapping::Mapper;
 use nitinol_resolver::mapping::process::WithResolveMapping;
 

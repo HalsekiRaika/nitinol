@@ -75,7 +75,7 @@ use crate::resolver::{ResolveHandler, ResolveType, Resolver, ResolverType, Typed
 /// impl ResolveMapping for Entity {
 ///     fn mapping(mapper: &mut Mapper<Self>) {
 ///         // Register the event type and its handler
-///         // This `Subscribe` shown as an example points out a compile error,
+///         // This `Subscribe` shown as an example points out a compile-error,
 ///         // if the above `SubscribeHandler` is not implemented for the Entity type.
 ///         mapper.register::<EntityEvent, Subscribe>();
 ///     }

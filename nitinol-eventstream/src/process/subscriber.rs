@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use nitinol_core::command::Command;
 use nitinol_core::event::Event;
-use nitinol_process::{EventApplicator, Context, CommandHandler};
+use nitinol_process::Context;
 use std::fmt::Debug;
+use nitinol_process::task::{CommandHandler, EventApplicator};
 use nitinol_resolver::mapping::Mapper;
 use nitinol_resolver::mapping::process::WithResolveMapping;
 

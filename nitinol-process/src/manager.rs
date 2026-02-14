@@ -11,7 +11,7 @@ pub struct ProcessManager {
 
 impl ProcessManager {
     pub async fn spawn<T: Process>(&self, entity: T, start_seq: i64) -> Result<Receptor<T>, AlreadyExist> {
-        lifecycle::run(entity.aggregate_id(), entity, start_seq, self.registry.clone()).await
+        lifecycle::run(entity.aggregate_id(), entity, start_seq, self.registry.clone(), None).await
     }
 
     pub async fn find<T: Process>(&self, id: impl ToEntityId) -> Result<Option<Receptor<T>>, InvalidCast> {

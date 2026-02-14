@@ -1,3 +1,5 @@
+mod v3;
+
 pub mod process;
 pub mod writer;
 

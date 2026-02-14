@@ -42,7 +42,7 @@ pub mod process {
     pub use nitinol_process::Receptor;
     pub use nitinol_process::Context;
     pub use nitinol_process::Process;
-    pub use nitinol_process::{EventApplicator, CommandHandler, TryEventApplicator};
+    pub use nitinol_process::task::{EventApplicator, CommandHandler};
     
     #[cfg(feature = "persistence")]
     pub mod persistence {

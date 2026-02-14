@@ -15,6 +15,8 @@ async-trait = { workspace = true }
 
 tracing = { workspace = true }
 
+thiserror = "^2"
+
 nitinol-core = { version = "1.0.0", path = "../nitinol-core" }
 nitinol-process = { version = "0.1.0", path = "../nitinol-process" }
 nitinol-protocol = { version = "0.1.0", path = "../nitinol-protocol" }

@@ -13,7 +13,7 @@ pub struct Payload {
     pub id: String,
     /// Unique sequence value at a specific Entity
     pub sequence_id: i64,
-    /// Unique id for each data format used in [`ResolveMapping`](nitinol_core::mapping::ResolveMapping)
+    /// Unique id for each data format
     pub registry_key: String,
     /// Data body in binary format
     pub bytes: Vec<u8>,

@@ -11,6 +11,8 @@ repository.workspace = true
 global = []
 
 [dependencies]
+iceoryx2 = "0.8"
+
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt-multi-thread"] }
 tracing = { workspace = true }
