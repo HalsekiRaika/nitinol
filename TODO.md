@@ -1,0 +1,6 @@
+- [ ] Merge package `nitinol-eventstream` into `nitinol-process` to simplify the workspace and reduce overhead for users who need both.
+- [ ] Merge package `nitinol-projection` into `nitinol-persistence`.
+- [ ] More simplify `nitinol-process`
+  - Provide an API closer to ActorModel (likely akka, protoactor.go) and make the core Pub/Sub intuitive to easily implement CQRS+ES.
+- [ ] Remove `nitinol-resolver`.
+  - `nitinol-resolver` is a highly limited API and should be simplified.
