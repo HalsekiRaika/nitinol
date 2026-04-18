@@ -1,14 +1,17 @@
 mod any;
 
 use std::any::Any;
+
 use async_trait::async_trait;
+use tokio::sync::{mpsc, oneshot};
+
 pub use self::any::*;
 
+use crate::error::BoxError;
 use crate::ident::Pid;
 use crate::process::signal::SystemSignal;
-use crate::process::Process;
-use tokio::sync::mpsc;
-use crate::process::task::UserTask;
+use crate::process::task::{AskTask, TellTask, UserTask};
+use crate::process::{Process, Receive};
 
 pub struct ProcessProxy<P> {
     pub(crate) pid: Pid,
@@ -26,6 +29,54 @@ impl<P> Clone for ProcessProxy<P> {
     }
 }
 
+impl<P: Process> ProcessProxy<P> {
+    pub fn pid(&self) -> Pid {
+        self.pid
+    }
+
+    pub async fn tell<M>(&self, msg: M) -> Result<(), BoxError>
+    where
+        P: Receive<M>,
+        M: 'static + Send + Sync,
+    {
+        let task: UserTask<P> = Box::new(TellTask::new(msg));
+        self.user_tx
+            .send(task)
+            .await
+            .map_err(|_| -> BoxError { "process already stopped".into() })
+    }
+
+    pub async fn ask<M>(&self, msg: M) -> Result<<P as Receive<M>>::Response, BoxError>
+    where
+        P: Receive<M>,
+        M: 'static + Send + Sync,
+        <P as Receive<M>>::Response: 'static + Send,
+    {
+        let (tx, rx) = oneshot::channel();
+        let task: UserTask<P> = Box::new(AskTask::new(msg, tx));
+        self.user_tx
+            .send(task)
+            .await
+            .map_err(|_| -> BoxError { "process already stopped".into() })?;
+        rx.await
+            .map_err(|_| -> BoxError { "process dropped reply".into() })?
+    }
+
+    pub async fn stop(&self) -> Result<(), BoxError> {
+        self.sys_tx
+            .send(SystemSignal::Stop)
+            .await
+            .map_err(|_| -> BoxError { "process already stopped".into() })
+    }
+
+    pub async fn poison(&self) -> Result<(), BoxError> {
+        self.sys_tx
+            .send(SystemSignal::Poison)
+            .await
+            .map_err(|_| -> BoxError { "process already stopped".into() })
+    }
+}
+
 #[async_trait]
 impl<P> DynProxy for ProcessProxy<P>
 where
@@ -34,8 +85,11 @@ where
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
-    async fn send_sys_sig(&self, signal: SystemSignal) {
-        self.sys_tx.send(signal).await.unwrap()
+
+    async fn send_sys_sig(&self, signal: SystemSignal) -> Result<(), BoxError> {
+        self.sys_tx
+            .send(signal)
+            .await
+            .map_err(|_| -> BoxError { "process already stopped".into() })
     }
 }

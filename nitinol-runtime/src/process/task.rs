@@ -1,9 +1,57 @@
 use async_trait::async_trait;
-use crate::process::Process;
+use tokio::sync::oneshot;
 
-pub type UserTask<P> = Box<dyn Task<P>>;
+use crate::error::BoxError;
+use crate::process::{Process, Receive};
+
+pub(crate) type UserTask<P> = Box<dyn Task<P>>;
 
 #[async_trait]
-pub trait Task<P: Process>: 'static + Sync + Send {
-    async fn run(self: Box<Self>, state: &mut P) -> Result<(), ()>;
+pub(crate) trait Task<P: Process>: 'static + Sync + Send {
+    async fn run(self: Box<Self>, state: &mut P);
+}
+
+pub(crate) struct TellTask<M> {
+    msg: M,
+}
+
+impl<M> TellTask<M> {
+    pub fn new(msg: M) -> Self {
+        Self { msg }
+    }
+}
+
+#[async_trait]
+impl<P, M> Task<P> for TellTask<M>
+where
+    P: Receive<M>,
+    M: 'static + Send + Sync,
+{
+    async fn run(self: Box<Self>, state: &mut P) {
+        let _ = state.receive(self.msg).await;
+    }
+}
+
+pub(crate) struct AskTask<M, R> {
+    msg: M,
+    reply_tx: oneshot::Sender<Result<R, BoxError>>,
+}
+
+impl<M, R> AskTask<M, R> {
+    pub fn new(msg: M, reply_tx: oneshot::Sender<Result<R, BoxError>>) -> Self {
+        Self { msg, reply_tx }
+    }
+}
+
+#[async_trait]
+impl<P, M> Task<P> for AskTask<M, <P as Receive<M>>::Response>
+where
+    P: Receive<M>,
+    M: 'static + Send + Sync,
+    <P as Receive<M>>::Response: 'static + Send,
+{
+    async fn run(self: Box<Self>, state: &mut P) {
+        let result = state.receive(self.msg).await;
+        let _ = self.reply_tx.send(result);
+    }
 }
