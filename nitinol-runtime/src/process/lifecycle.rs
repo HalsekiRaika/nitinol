@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::ident::{Pid, ProcessName};
 use crate::process::signal::SystemSignal;
 use crate::process::task::UserTask;
-use crate::process::{Process, ProcessProxy, ProcessRegistry};
+use crate::process::{Process, ProcessContext, ProcessProxy, ProcessRegistry};
 
 pub(crate) async fn run<P: Process>(
     process: P,
@@ -36,7 +36,15 @@ pub(crate) async fn run<P: Process>(
         None => format!("process-{}", pid),
     };
 
-    let fut = lifecycle_loop(process, process_name, registry, pid, user_rx, sys_rx, timeout);
+    let fut = lifecycle_loop(
+        process,
+        process_name,
+        registry,
+        pid,
+        user_rx,
+        sys_rx,
+        timeout,
+    );
 
     #[cfg(not(tokio_unstable))]
     tokio::spawn(fut);
@@ -65,6 +73,11 @@ async fn lifecycle_loop<P: Process>(
     let mut user_rx = user_rx;
     let mut sys_rx = sys_rx;
     let mut poisoned = false;
+    
+    let mut ctx = ProcessContext {
+        pid,
+        name: process_name.clone(),
+    };
 
     let timeout_fn = move || match timeout {
         Some(dur) => Either::Left(tokio::time::sleep(dur)),
@@ -75,7 +88,7 @@ async fn lifecycle_loop<P: Process>(
         let timeout = timeout_fn();
     }
 
-    state.on_start().await;
+    state.on_start(&mut ctx).await;
 
     loop {
         tokio::select! {
@@ -92,7 +105,7 @@ async fn lifecycle_loop<P: Process>(
             task = user_rx.recv() => {
                 match task {
                     Some(task) => {
-                        task.run(&mut state).await;
+                        task.run(&mut state, &mut ctx).await;
                         timeout.set(timeout_fn());
                     },
                     None => break,
@@ -105,7 +118,7 @@ async fn lifecycle_loop<P: Process>(
     }
 
     if !poisoned {
-        state.on_stop().await;
+        state.on_stop(&mut ctx).await;
     }
 
     registry.unregister(pid, process_name.as_ref()).await;

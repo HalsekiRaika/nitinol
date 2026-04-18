@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use tokio::sync::oneshot;
 
 use crate::error::BoxError;
-use crate::process::{Process, Receive};
+use crate::process::{Process, ProcessContext, Receive};
 
 pub(crate) type UserTask<P> = Box<dyn Task<P>>;
 
 #[async_trait]
 pub(crate) trait Task<P: Process>: 'static + Sync + Send {
-    async fn run(self: Box<Self>, state: &mut P);
+    async fn run(self: Box<Self>, state: &mut P, ctx: &mut ProcessContext);
 }
 
 pub(crate) struct TellTask<M> {
@@ -27,8 +27,8 @@ where
     P: Receive<M>,
     M: 'static + Send + Sync,
 {
-    async fn run(self: Box<Self>, state: &mut P) {
-        let _ = state.receive(self.msg).await;
+    async fn run(self: Box<Self>, state: &mut P, ctx: &mut ProcessContext) {
+        let _ = state.recv(self.msg, ctx).await;
     }
 }
 
@@ -50,8 +50,8 @@ where
     M: 'static + Send + Sync,
     <P as Receive<M>>::Response: 'static + Send,
 {
-    async fn run(self: Box<Self>, state: &mut P) {
-        let result = state.receive(self.msg).await;
+    async fn run(self: Box<Self>, state: &mut P, ctx: &mut ProcessContext) {
+        let result = state.recv(self.msg, ctx).await;
         let _ = self.reply_tx.send(result);
     }
 }

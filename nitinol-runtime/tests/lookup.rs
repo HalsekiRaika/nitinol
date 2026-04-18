@@ -80,7 +80,7 @@ async fn lookup_returns_none_after_process_stops() {
     let proxy = system.spawn(props).await;
     let pid = proxy.pid();
     wait_for_flag(&started).await;
-    proxy.stop().await.unwrap();
+    proxy.stop().await.expect("stop should succeed");
     wait_for_flag(&stopped).await;
 
     // When: lookup after the process has stopped
@@ -110,14 +110,25 @@ async fn any_proxy_downcast_and_communicate() {
     let pid = proxy.pid();
     wait_for_flag(&started).await;
 
-    let any_proxy = system.lookup(pid).await.unwrap();
-    let typed_proxy = any_proxy.downcast::<TrackedProcess>().unwrap();
+    let any_proxy = system
+        .lookup(pid)
+        .await
+        .expect("process should be registered");
+    let typed_proxy = any_proxy
+        .downcast::<TrackedProcess>()
+        .expect("downcast should succeed");
 
     // When: a message is sent through the downcasted proxy
-    typed_proxy.tell(Increment).await.unwrap();
+    typed_proxy
+        .tell(Increment)
+        .await
+        .expect("tell should succeed");
 
     // Then: the process receives the message (verify via the original proxy)
-    let count = proxy.ask(common::GetCount).await.unwrap();
+    let count = proxy
+        .ask(common::GetCount)
+        .await
+        .expect("ask should succeed");
     assert_eq!(count, 1);
 }
 
@@ -131,10 +142,13 @@ async fn any_proxy_stop_stops_process() {
     wait_for_flag(&started).await;
 
     let pid = _proxy.pid();
-    let any_proxy = system.lookup(pid).await.unwrap();
+    let any_proxy = system
+        .lookup(pid)
+        .await
+        .expect("process should be registered");
 
     // When: stop is called on AnyProxy
-    any_proxy.stop().await.unwrap();
+    any_proxy.stop().await.expect("stop should succeed");
 
     // Then: the process stops (on_stop is called)
     wait_for_flag(&stopped).await;

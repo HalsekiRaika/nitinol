@@ -1,11 +1,15 @@
 use crate::ident::ProcessName;
-use crate::process::{
-    AnyProxy, Process, ProcessProxy, ProcessRegistry, Props,
-};
 use crate::process::run;
+use crate::process::{AnyProxy, Process, ProcessProxy, ProcessRegistry, Props};
 
 pub struct ProcessSystem {
     registry: ProcessRegistry,
+}
+
+impl Default for ProcessSystem {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProcessSystem {

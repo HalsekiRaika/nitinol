@@ -4,8 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::error::BoxError;
-use crate::process::{Process, ProcessProxy};
 use crate::process::signal::SystemSignal;
+use crate::process::{Process, ProcessProxy};
 
 #[async_trait]
 pub(crate) trait DynProxy: 'static + Sync + Send {
@@ -17,12 +17,8 @@ pub(crate) trait DynProxy: 'static + Sync + Send {
 pub struct AnyProxy(Arc<dyn DynProxy>);
 
 impl AnyProxy {
-    pub fn downcast<P: Process>(&self) -> Result<ProcessProxy<P>, ()> {
-        self.0
-            .as_any()
-            .downcast_ref::<ProcessProxy<P>>()
-            .cloned()
-            .ok_or(())
+    pub fn downcast<P: Process>(&self) -> Option<ProcessProxy<P>> {
+        self.0.as_any().downcast_ref::<ProcessProxy<P>>().cloned()
     }
 
     pub async fn stop(&self) -> Result<(), BoxError> {

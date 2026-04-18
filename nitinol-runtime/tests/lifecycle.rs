@@ -31,7 +31,7 @@ async fn stop_calls_on_stop() {
     wait_for_flag(&started).await;
 
     // When: process is stopped
-    proxy.stop().await.unwrap();
+    proxy.stop().await.expect("stop should succeed");
 
     // Then: on_stop is called
     wait_for_flag(&stopped).await;
@@ -47,7 +47,7 @@ async fn poison_skips_on_stop() {
     wait_for_flag(&started).await;
 
     // When: process is poisoned
-    proxy.poison().await.unwrap();
+    proxy.poison().await.expect("poison should succeed");
 
     // Then: on_stop is NOT called
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -62,7 +62,7 @@ async fn stop_on_stopped_process_returns_error() {
     let props = test_props(started.clone(), stopped.clone(), counter);
     let proxy = system.spawn(props).await;
     wait_for_flag(&started).await;
-    proxy.stop().await.unwrap();
+    proxy.stop().await.expect("stop should succeed");
     wait_for_flag(&stopped).await;
     // Allow lifecycle task to fully exit and drop the receiver
     tokio::time::sleep(Duration::from_millis(50)).await;

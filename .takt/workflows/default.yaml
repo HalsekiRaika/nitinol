@@ -49,6 +49,7 @@ steps:
   - name: plan
     edit: false
     persona: planner
+    model: opus
     knowledge: architecture
     provider_options:
       claude:
@@ -77,6 +78,7 @@ steps:
           format: plan
   - name: write_tests
     edit: true
+    model: sonnet
     persona: coder
     policy:
       - coding
@@ -116,6 +118,7 @@ steps:
   - name: implement
     edit: true
     persona: coder
+    model: sonnet
     policy:
       - coding
       - testing
@@ -158,6 +161,7 @@ steps:
     policy:
       - review
       - ai-antipattern
+      - rust-quality
     provider_options:
       claude:
         allowed_tools:
@@ -182,6 +186,7 @@ steps:
     policy:
       - coding
       - testing
+      - rust-quality
     session: refresh
     knowledge:
       - architecture
@@ -234,7 +239,9 @@ steps:
       - name: supervise
         edit: false
         persona: supervisor
-        policy: review
+        policy:
+          - review
+          - rust-quality
         provider_options:
           claude:
             allowed_tools:

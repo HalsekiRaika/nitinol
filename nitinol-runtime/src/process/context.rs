@@ -6,11 +6,11 @@ pub struct ProcessContext {
 }
 
 impl ProcessContext {
-    fn pid(&self) -> Pid {
+    pub fn pid(&self) -> Pid {
         self.pid
     }
-    
-    fn name(&self) -> Option<&ProcessName> {
+
+    pub fn name(&self) -> Option<&ProcessName> {
         self.name.as_ref()
     }
 }

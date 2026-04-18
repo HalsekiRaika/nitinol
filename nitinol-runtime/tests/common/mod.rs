@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nitinol_runtime::process::{Process, Receive};
+use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::{BoxError, Props};
 
 /// Test process that tracks lifecycle events and message counts
@@ -29,12 +29,12 @@ impl TrackedProcess {
 }
 
 impl Process for TrackedProcess {
-    fn on_start(&mut self) -> impl Future<Output = ()> + Send {
+    fn on_start(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
         self.started.store(true, Ordering::SeqCst);
         async {}
     }
 
-    fn on_stop(&mut self) -> impl Future<Output = ()> + Send {
+    fn on_stop(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
         self.stopped.store(true, Ordering::SeqCst);
         async {}
     }
@@ -45,9 +45,9 @@ pub struct Increment;
 
 impl Receive<Increment> for TrackedProcess {
     type Response = ();
-    fn receive(&mut self, _msg: Increment) -> impl Future<Output = Result<(), BoxError>> + Send {
+    async fn recv(&mut self, _msg: Increment, _ctx: &mut ProcessContext) -> Result<(), BoxError> {
         self.counter.fetch_add(1, Ordering::SeqCst);
-        async { Ok(()) }
+        Ok(())
     }
 }
 
@@ -56,9 +56,9 @@ pub struct GetCount;
 
 impl Receive<GetCount> for TrackedProcess {
     type Response = u32;
-    fn receive(&mut self, _msg: GetCount) -> impl Future<Output = Result<u32, BoxError>> + Send {
+    async fn recv(&mut self, _msg: GetCount, _ctx: &mut ProcessContext) -> Result<u32, BoxError> {
         let count = self.counter.load(Ordering::SeqCst);
-        async move { Ok(count) }
+        Ok(count)
     }
 }
 
@@ -67,11 +67,8 @@ pub struct FailingMessage;
 
 impl Receive<FailingMessage> for TrackedProcess {
     type Response = ();
-    fn receive(
-        &mut self,
-        _msg: FailingMessage,
-    ) -> impl Future<Output = Result<(), BoxError>> + Send {
-        async { Err("intentional failure".into()) }
+    async fn recv(&mut self, _msg: FailingMessage, _ctx: &mut ProcessContext) -> Result<(), BoxError> {
+        Err("intentional failure".into())
     }
 }
 
@@ -95,6 +92,8 @@ pub fn test_props(
 
 /// Waits for an AtomicBool flag to become true, with a 5-second timeout.
 /// Panics if the flag does not become true within the timeout.
+// Not all test binaries use this helper; suppress dead_code for those
+#[allow(dead_code)]
 pub async fn wait_for_flag(flag: &AtomicBool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !flag.load(Ordering::SeqCst) {

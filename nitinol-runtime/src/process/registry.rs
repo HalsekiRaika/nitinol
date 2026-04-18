@@ -22,12 +22,7 @@ impl ProcessRegistry {
         }))
     }
 
-    pub async fn register(
-        &self,
-        pid: Pid,
-        proxy: AnyProxy,
-        name: Option<&ProcessName>,
-    ) {
+    pub async fn register(&self, pid: Pid, proxy: AnyProxy, name: Option<&ProcessName>) {
         self.0.processes.write().await.insert(pid, proxy);
         if let Some(name) = name {
             self.0.aliases.write().await.insert(name.clone(), pid);
