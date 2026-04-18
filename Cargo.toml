@@ -19,21 +19,8 @@ repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
 [workspace.dependencies]
-thiserror = "^2"
-async-trait = "^0.1"
-tokio = { version = "^1", default-features = false }
-tracing = "^0.1"
-futures-util = { version = "^0.3", default-features = false }
-time = { version = "^0.3", default-features = false }
 
 [features]
-macro = ["dep:nitinol-macro"]
-process = ["dep:nitinol-process"]
-eventstream = ["process", "dep:nitinol-eventstream", "dep:nitinol-resolver"]
-protocol = ["dep:nitinol-protocol"]
-protocol-sqlx = ["protocol", "nitinol-protocol/sqlx"]
-persistence = ["process", "protocol", "dep:nitinol-persistence"]
-projection = ["dep:nitinol-projection", "dep:nitinol-resolver"]
 
 [package]
 name = "nitinol"
@@ -45,11 +32,3 @@ repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
 [dependencies]
-nitinol-core = { version = "1.0.0", path = "nitinol-core" }
-nitinol-eventstream = { version = "0.1.0", path = "nitinol-eventstream", optional = true }
-nitinol-macro = { version = "0.1.0", path = "nitinol-macro", optional = true }
-nitinol-protocol = { version = "0.1.0", path = "nitinol-protocol", optional = true }
-nitinol-process = { version = "0.1.1", path = "nitinol-process", optional = true }
-nitinol-projection = { version = "0.1.2", path = "nitinol-projection", optional = true }
-nitinol-persistence = { version = "0.1.1", path = "nitinol-persistence", optional = true }
-nitinol-resolver = { version = "0.1.0", path = "nitinol-resolver", optional = true }
