@@ -120,7 +120,7 @@ async fn boxed_clone_shares_inner_value() {
 #[tokio::test]
 async fn spawn_stream_returns_valid_proxy() {
     // Given: a ProcessSystem
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("ss-valid");
 
     // When: a Boxed stream is spawned for the topic
@@ -133,7 +133,7 @@ async fn spawn_stream_returns_valid_proxy() {
 #[tokio::test]
 async fn spawn_stream_duplicate_topic_returns_error() {
     // Given: a stream already registered under "ss-dup"
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("ss-dup");
     system
         .spawn_stream::<Boxed>(topic.clone())
@@ -150,7 +150,7 @@ async fn spawn_stream_duplicate_topic_returns_error() {
 #[tokio::test]
 async fn spawn_stream_different_topics_both_succeed() {
     // Given: a ProcessSystem
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic_a = ProcessName::new("ss-diff-a");
     let topic_b = ProcessName::new("ss-diff-b");
 
@@ -168,7 +168,7 @@ async fn spawn_stream_different_topics_both_succeed() {
 #[tokio::test]
 async fn publish_with_no_subscribers_succeeds() {
     // Given: a stream with no subscribers
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-no-sub");
     let stream = system
         .spawn_stream::<Boxed>(topic)
@@ -185,7 +185,7 @@ async fn publish_with_no_subscribers_succeeds() {
 #[tokio::test]
 async fn publish_delivers_message_to_subscriber() {
     // Given: a stream with one subscriber process
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-deliver");
     let stream = system
         .spawn_stream::<Boxed>(topic)
@@ -210,7 +210,7 @@ async fn publish_delivers_message_to_subscriber() {
 #[tokio::test]
 async fn publish_delivers_to_all_subscribers() {
     // Given: a stream with three subscriber processes
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-multi");
     let stream = system
         .spawn_stream::<Boxed>(topic)
@@ -245,7 +245,7 @@ async fn publish_delivers_to_all_subscribers() {
 #[tokio::test]
 async fn publish_multiple_messages_all_delivered_in_order() {
     // Given: a stream with one subscriber
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-multi-msg");
     let stream = system
         .spawn_stream::<Boxed>(topic)
@@ -274,7 +274,7 @@ async fn publish_multiple_messages_all_delivered_in_order() {
 #[tokio::test]
 async fn stream_lookup_by_name_finds_stream() {
     // Given: a stream registered under a named topic
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-stream");
     let _stream = system
         .spawn_stream::<Boxed>(topic.clone())
@@ -291,7 +291,7 @@ async fn stream_lookup_by_name_finds_stream() {
 #[tokio::test]
 async fn stream_lookup_by_unknown_name_returns_none() {
     // Given: a ProcessSystem with no stream named "ghost-stream"
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let unknown = ProcessName::new("ghost-stream");
 
     // When: lookup by unknown name
@@ -304,7 +304,7 @@ async fn stream_lookup_by_unknown_name_returns_none() {
 #[tokio::test]
 async fn stream_any_proxy_downcasts_to_stream_proxy() {
     // Given: a stream found via lookup
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-cast");
     let _stream = system
         .spawn_stream::<Boxed>(topic.clone())
@@ -326,7 +326,7 @@ async fn stream_any_proxy_downcasts_to_stream_proxy() {
 #[tokio::test]
 async fn stream_downcast_proxy_can_publish() {
     // Given: a stream found via lookup and downcast
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-pub");
     let _stream = system
         .spawn_stream::<Boxed>(topic.clone())
@@ -370,7 +370,7 @@ async fn stream_downcast_proxy_can_publish() {
 #[tokio::test]
 async fn public_api_does_not_require_subscriber_process_type() {
     // Given: only crate-level public API imports (no process::SubscriberProcess)
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("api-surface");
     let stream = system
         .spawn_stream::<Boxed>(topic)
@@ -426,7 +426,7 @@ async fn subscriber_recv_uses_all_parameters() {
         }
     }
 
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("param-check");
     let stream = system
         .spawn_stream::<Boxed>(topic)
@@ -459,7 +459,7 @@ async fn subscriber_recv_uses_all_parameters() {
 #[tokio::test]
 async fn subscriber_trait_and_props_flow_receives_message() {
     // Given: a Subscriber<Boxed> impl spawned via subscriber_props
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("sub-trait-basic");
     let stream = system
         .spawn_stream::<Boxed>(topic)
@@ -488,7 +488,7 @@ async fn subscriber_trait_and_props_flow_receives_message() {
 #[tokio::test]
 async fn subscriber_trait_receives_multiple_publishes() {
     // Given: a Subscriber<Boxed> registered to a stream
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("sub-trait-multi");
     let stream = system
         .spawn_stream::<Boxed>(topic)
@@ -519,7 +519,7 @@ async fn subscriber_trait_receives_multiple_publishes() {
 #[tokio::test]
 async fn mixed_subscriber_types_all_receive_published_message() {
     // Given: a stream with both a ReceivingProcess and a CountingSubscriber registered
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let topic = ProcessName::new("sub-mixed");
     let stream = system
         .spawn_stream::<Boxed>(topic)

@@ -11,7 +11,7 @@ use common::{test_props, tracked_state, wait_for_flag, GetCount, Increment, Trac
 #[tokio::test]
 async fn full_tell_ask_lifecycle_flow() {
     // Given: a spawned process
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped.clone(), counter.clone());
     let proxy = system.spawn(props).await;
@@ -32,7 +32,7 @@ async fn full_tell_ask_lifecycle_flow() {
 #[tokio::test]
 async fn named_process_lookup_and_communicate() {
     // Given: a named process
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped.clone(), counter);
     let name = ProcessName::new("worker");
@@ -63,7 +63,7 @@ async fn named_process_lookup_and_communicate() {
 #[tokio::test]
 async fn multiple_processes_maintain_independent_state() {
     // Given: two independent processes
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started1, stopped1, counter1) = tracked_state();
     let (started2, stopped2, counter2) = tracked_state();
     let props1 = test_props(started1.clone(), stopped1.clone(), counter1);
@@ -98,7 +98,7 @@ async fn multiple_processes_maintain_independent_state() {
 /// referencing any internal trait.
 #[tokio::test]
 async fn any_proxy_public_api_does_not_require_internal_traits() {
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped.clone(), counter);
     let proxy = system.spawn(props).await;

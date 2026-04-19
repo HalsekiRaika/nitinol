@@ -4,6 +4,7 @@ use futures_util::future::Either;
 use tokio::sync::mpsc;
 
 use crate::ident::{Pid, ProcessName};
+use crate::process::dead_letter::DeadLetterRef;
 use crate::process::signal::SystemSignal;
 use crate::process::task::UserTask;
 use crate::process::{Process, ProcessContext, ProcessProxy, ProcessRegistry};
@@ -13,6 +14,7 @@ pub(crate) async fn run<P: Process>(
     process_name: Option<ProcessName>,
     registry: ProcessRegistry,
     timeout: Option<Duration>,
+    dead_letter: Option<DeadLetterRef>,
 ) -> ProcessProxy<P> {
     let (user_tx, user_rx) = mpsc::channel::<UserTask<P>>(32);
     let (sys_tx, sys_rx) = mpsc::channel::<SystemSignal>(32);
@@ -23,6 +25,7 @@ pub(crate) async fn run<P: Process>(
         pid,
         user_tx,
         sys_tx,
+        dead_letter,
     };
 
     let any_proxy = proxy.clone().into();
@@ -73,7 +76,7 @@ async fn lifecycle_loop<P: Process>(
     let mut user_rx = user_rx;
     let mut sys_rx = sys_rx;
     let mut poisoned = false;
-    
+
     let mut ctx = ProcessContext {
         pid,
         name: process_name.clone(),

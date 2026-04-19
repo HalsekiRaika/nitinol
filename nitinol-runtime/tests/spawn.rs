@@ -10,7 +10,7 @@ use common::{test_props, tracked_state, TrackedProcess};
 #[tokio::test]
 async fn spawn_returns_proxy_with_unique_pid() {
     // Given: a ProcessSystem and two sets of Props
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (s1, st1, c1) = tracked_state();
     let (s2, st2, c2) = tracked_state();
     let props1 = test_props(s1, st1, c1);
@@ -27,7 +27,7 @@ async fn spawn_returns_proxy_with_unique_pid() {
 #[tokio::test]
 async fn spawn_named_returns_proxy() {
     // Given: a ProcessSystem and named Props
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started, stopped, counter);
     let name = ProcessName::new("test-process");

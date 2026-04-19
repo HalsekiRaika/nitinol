@@ -1,28 +1,70 @@
 use crate::error::BoxError;
 use crate::ident::ProcessName;
 use crate::process::run;
-use crate::process::{AnyProxy, Process, ProcessProxy, ProcessRegistry, Props, Stream};
+use crate::process::{AnyProxy, Boxed, DeadLetterActor, DeadLetterRef, Process, ProcessProxy, ProcessRegistry, Props, Stream};
+
+/// The well-known topic name for the dead-letter stream.
+const DEAD_LETTERS_TOPIC: &str = "$dead-letters";
+
+/// The well-known process name for the dead-letter actor.
+const DEAD_LETTER_ACTOR_NAME: &str = "$dead-letter";
 
 pub struct ProcessSystem {
     registry: ProcessRegistry,
-}
-
-impl Default for ProcessSystem {
-    fn default() -> Self {
-        Self::new()
-    }
+    dead_letter_ref: DeadLetterRef,
+    dead_letter_stream: ProcessProxy<Stream<Boxed>>,
 }
 
 impl ProcessSystem {
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
+        let registry = ProcessRegistry::new();
+
+        // Spawn the dead-letter stream (no dead-letter routing for itself).
+        let dl_stream_process = Stream::<Boxed>::new();
+        let dl_stream: ProcessProxy<Stream<Boxed>> = run(
+            dl_stream_process,
+            Some(ProcessName::new(DEAD_LETTERS_TOPIC)),
+            registry.clone(),
+            None,
+            None,
+        )
+        .await;
+
+        // Spawn the dead-letter actor (captures the stream proxy; no routing for itself).
+        let dl_actor_process = DeadLetterActor::new(dl_stream.clone());
+        let dl_actor = run(
+            dl_actor_process,
+            Some(ProcessName::new(DEAD_LETTER_ACTOR_NAME)),
+            registry.clone(),
+            None,
+            None,
+        )
+        .await;
+
+        let dead_letter_ref = DeadLetterRef::new(dl_actor.user_tx.clone());
+
         Self {
-            registry: ProcessRegistry::new(),
+            registry,
+            dead_letter_ref,
+            dead_letter_stream: dl_stream,
         }
+    }
+
+    /// Returns a reference to the dead-letter stream proxy.
+    pub fn dead_letter_stream(&self) -> &ProcessProxy<Stream<Boxed>> {
+        &self.dead_letter_stream
     }
 
     pub async fn spawn<P: Process>(&self, props: Props<P>) -> ProcessProxy<P> {
         let process = props.produce();
-        run(process, None, self.registry.clone(), None).await
+        run(
+            process,
+            None,
+            self.registry.clone(),
+            None,
+            Some(self.dead_letter_ref.clone()),
+        )
+        .await
     }
 
     pub async fn spawn_named<P: Process>(
@@ -31,7 +73,14 @@ impl ProcessSystem {
         props: Props<P>,
     ) -> ProcessProxy<P> {
         let process = props.produce();
-        run(process, Some(name), self.registry.clone(), None).await
+        run(
+            process,
+            Some(name),
+            self.registry.clone(),
+            None,
+            Some(self.dead_letter_ref.clone()),
+        )
+        .await
     }
 
     /// Spawn a `Stream<T>` process registered under `topic`.
@@ -45,7 +94,14 @@ impl ProcessSystem {
             return Err(format!("stream topic '{}' already registered", topic).into());
         }
         let process = Stream::new();
-        let proxy = run(process, Some(topic), self.registry.clone(), None).await;
+        let proxy = run(
+            process,
+            Some(topic),
+            self.registry.clone(),
+            None,
+            Some(self.dead_letter_ref.clone()),
+        )
+        .await;
         Ok(proxy)
     }
 

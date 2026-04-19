@@ -10,7 +10,7 @@ use common::{test_props, tracked_state, wait_for_flag, Increment, TrackedProcess
 #[tokio::test]
 async fn lookup_finds_spawned_process() {
     // Given: a spawned process
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped, counter);
     let proxy = system.spawn(props).await;
@@ -27,8 +27,8 @@ async fn lookup_finds_spawned_process() {
 #[tokio::test]
 async fn lookup_returns_none_for_unknown_pid() {
     // Given: a process registered in one system
-    let system1 = ProcessSystem::new();
-    let system2 = ProcessSystem::new();
+    let system1 = ProcessSystem::new().await;
+    let system2 = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started, stopped, counter);
     let proxy = system1.spawn(props).await;
@@ -44,7 +44,7 @@ async fn lookup_returns_none_for_unknown_pid() {
 #[tokio::test]
 async fn lookup_by_name_finds_named_process() {
     // Given: a named process
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped, counter);
     let name = ProcessName::new("named-worker");
@@ -61,7 +61,7 @@ async fn lookup_by_name_finds_named_process() {
 #[tokio::test]
 async fn lookup_by_name_returns_none_for_unknown_name() {
     // Given: a ProcessSystem with no process named "ghost"
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let unknown_name = ProcessName::new("ghost");
 
     // When: lookup by unknown name
@@ -74,7 +74,7 @@ async fn lookup_by_name_returns_none_for_unknown_name() {
 #[tokio::test]
 async fn lookup_returns_none_after_process_stops() {
     // Given: a spawned process that has been stopped
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped.clone(), counter);
     let proxy = system.spawn(props).await;
@@ -103,7 +103,7 @@ async fn lookup_returns_none_after_process_stops() {
 #[tokio::test]
 async fn any_proxy_downcast_and_communicate() {
     // Given: a spawned process looked up via the registry
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped, counter);
     let proxy = system.spawn(props).await;
@@ -135,7 +135,7 @@ async fn any_proxy_downcast_and_communicate() {
 #[tokio::test]
 async fn any_proxy_stop_stops_process() {
     // Given: a spawned process looked up via the registry
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped.clone(), counter);
     let _proxy = system.spawn(props).await;

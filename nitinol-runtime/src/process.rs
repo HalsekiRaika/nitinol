@@ -1,4 +1,5 @@
 mod context;
+mod dead_letter;
 mod lifecycle;
 mod message;
 mod props;
@@ -9,8 +10,17 @@ mod stream;
 mod subscriber;
 pub(crate) mod task;
 
-pub use self::{context::*, message::*, props::*, proxy::*, stream::Stream, subscriber::{Subscriber, subscriber_props}};
+pub use self::{
+    context::*,
+    dead_letter::{DeadLetter, DeadLetterResponse, SuppressDeadLetterLog},
+    message::*,
+    props::*,
+    proxy::*,
+    stream::Stream,
+    subscriber::{Subscriber, subscriber_props},
+};
 
+pub(crate) use self::dead_letter::{DeadLetterActor, DeadLetterRef};
 pub(crate) use self::lifecycle::run;
 pub(crate) use self::registry::*;
 

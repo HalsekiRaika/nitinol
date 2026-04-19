@@ -9,7 +9,7 @@ use common::{test_props, tracked_state, wait_for_flag, FailingMessage, GetCount,
 #[tokio::test]
 async fn tell_delivers_message() {
     // Given: a spawned process with counter at 0
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped, counter);
     let proxy = system.spawn(props).await;
@@ -26,7 +26,7 @@ async fn tell_delivers_message() {
 #[tokio::test]
 async fn tell_to_stopped_process_returns_error() {
     // Given: a process that has been stopped
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped.clone(), counter);
     let proxy = system.spawn(props).await;
@@ -45,7 +45,7 @@ async fn tell_to_stopped_process_returns_error() {
 #[tokio::test]
 async fn ask_returns_response() {
     // Given: a spawned process with counter at 0
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped, counter);
     let proxy = system.spawn(props).await;
@@ -61,7 +61,7 @@ async fn ask_returns_response() {
 #[tokio::test]
 async fn ask_handler_error_returns_ask_error() {
     // Given: a spawned process
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped, counter);
     let proxy = system.spawn(props).await;
@@ -77,7 +77,7 @@ async fn ask_handler_error_returns_ask_error() {
 #[tokio::test]
 async fn ask_to_stopped_process_returns_error() {
     // Given: a process that has been stopped
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped.clone(), counter);
     let proxy = system.spawn(props).await;
@@ -96,7 +96,7 @@ async fn ask_to_stopped_process_returns_error() {
 #[tokio::test]
 async fn multiple_tells_processed_sequentially() {
     // Given: a spawned process with counter at 0
-    let system = ProcessSystem::new();
+    let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped, counter.clone());
     let proxy = system.spawn(props).await;
