@@ -1,6 +1,7 @@
+use crate::error::BoxError;
 use crate::ident::ProcessName;
 use crate::process::run;
-use crate::process::{AnyProxy, Process, ProcessProxy, ProcessRegistry, Props};
+use crate::process::{AnyProxy, Process, ProcessProxy, ProcessRegistry, Props, Stream};
 
 pub struct ProcessSystem {
     registry: ProcessRegistry,
@@ -31,6 +32,21 @@ impl ProcessSystem {
     ) -> ProcessProxy<P> {
         let process = props.produce();
         run(process, Some(name), self.registry.clone(), None).await
+    }
+
+    /// Spawn a `Stream<T>` process registered under `topic`.
+    ///
+    /// Returns an error if a process with the same topic name is already registered.
+    pub async fn spawn_stream<T: 'static + Send + Sync>(
+        &self,
+        topic: ProcessName,
+    ) -> Result<ProcessProxy<Stream<T>>, BoxError> {
+        if self.registry.lookup_by_name(&topic).await.is_some() {
+            return Err(format!("stream topic '{}' already registered", topic).into());
+        }
+        let process = Stream::new();
+        let proxy = run(process, Some(topic), self.registry.clone(), None).await;
+        Ok(proxy)
     }
 
     pub async fn lookup(&self, pid: crate::ident::Pid) -> Option<AnyProxy> {

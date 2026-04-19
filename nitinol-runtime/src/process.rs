@@ -1,12 +1,15 @@
 mod context;
 mod lifecycle;
+mod message;
 mod props;
 mod proxy;
 mod registry;
 mod signal;
+mod stream;
+mod subscriber;
 pub(crate) mod task;
 
-pub use self::{context::*, props::*, proxy::*};
+pub use self::{context::*, message::*, props::*, proxy::*, stream::Stream, subscriber::{Subscriber, subscriber_props}};
 
 pub(crate) use self::lifecycle::run;
 pub(crate) use self::registry::*;
