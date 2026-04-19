@@ -1,13 +1,16 @@
 name: default
 description: テスト先行開発ワークフロー（計画 → テスト作成 → 実装 → AIアンチパターンレビュー → 並列レビュー → 完了）
+
 workflow_config:
   provider_options:
     codex:
       network_access: true
     opencode:
       network_access: true
+
 max_steps: 30
 initial_step: plan
+
 loop_monitors:
   - cycle:
       - ai_review
@@ -76,6 +79,8 @@ steps:
       report:
         - name: plan.md
           format: plan
+
+  # テスト
   - name: write_tests
     edit: true
     model: sonnet
@@ -115,6 +120,8 @@ steps:
       report:
         - name: test-report.md
           format: test-report
+
+  # 実装
   - name: implement
     edit: true
     persona: coder
@@ -155,6 +162,8 @@ steps:
           format: coder-scope
         - name: coder-decisions.md
           format: coder-decisions
+
+  # AI Anti-Pattern Review
   - name: ai_review
     edit: false
     persona: ai-antipattern-reviewer
@@ -180,13 +189,15 @@ steps:
       report:
         - name: ai-review.md
           format: ai-review
+
+  # Fixer
   - name: ai_fix
     edit: true
     persona: coder
     policy:
       - coding
       - testing
-      - rust-quality
+      - rust-coding
     session: refresh
     knowledge:
       - architecture
@@ -211,6 +222,8 @@ steps:
         next: reviewers
       - condition: 修正を進行できない
         next: reviewers
+
+  # レビュー
   - name: reviewers
     parallel:
       - name: arch-review
@@ -267,11 +280,14 @@ steps:
         next: COMPLETE
       - condition: any("needs_fix", "要求未達成、テスト失敗、ビルドエラー")
         next: fix
+
+  # Fixer
   - name: fix
     edit: true
     persona: coder
     policy:
       - coding
+      - rust-coding
       - testing
     knowledge:
       - architecture
