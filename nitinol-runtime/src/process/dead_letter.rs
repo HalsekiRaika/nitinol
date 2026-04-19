@@ -45,7 +45,7 @@ impl<T> FallbackValue for SuppressProbe<T> {
 /// Returns `true` when type `M` implements `SuppressDeadLetterLog`.
 /// Must be called at a monomorphisation site where `M` is concrete.
 pub(crate) fn suppress_log<M>() -> bool {
-    (&SuppressProbe::<M>(PhantomData)).value()
+    SuppressProbe::<M>(PhantomData).value()
 }
 
 // -- Public domain types ------------------------------------------------------
