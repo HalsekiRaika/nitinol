@@ -167,10 +167,11 @@ steps:
   - name: ai_review
     edit: false
     persona: ai-antipattern-reviewer
+    model: opus
     policy:
       - review
       - ai-antipattern
-      - rust-quality
+      - rust-review
     provider_options:
       claude:
         allowed_tools:
@@ -194,6 +195,7 @@ steps:
   - name: ai_fix
     edit: true
     persona: coder
+    model: sonnet
     policy:
       - coding
       - testing
@@ -226,12 +228,14 @@ steps:
   # レビュー
   - name: reviewers
     parallel:
+      # アーキテクチャ
       - name: arch-review
         edit: false
         persona: architecture-reviewer
+        model: opus
         policy:
           - review
-          - rust-quality
+          - rust-review
         knowledge: architecture
         provider_options:
           claude:
@@ -249,12 +253,14 @@ steps:
           report:
             - name: architect-review.md
               format: architecture-review
+      # 監督
       - name: supervise
         edit: false
         persona: supervisor
+        model: opus
         policy:
           - review
-          - rust-quality
+          - rust-review
         provider_options:
           claude:
             allowed_tools:
@@ -285,6 +291,7 @@ steps:
   - name: fix
     edit: true
     persona: coder
+    model: sonnet
     policy:
       - coding
       - rust-coding
