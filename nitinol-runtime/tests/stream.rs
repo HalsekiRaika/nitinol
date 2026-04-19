@@ -73,7 +73,7 @@ async fn common_types_satisfy_message_bound() {
     assert_message(42u32);
     assert_message(String::from("hello"));
     assert_message(true);
-    assert_message(3.14f64);
+    assert_message(3.10f64);
 }
 
 #[tokio::test]
