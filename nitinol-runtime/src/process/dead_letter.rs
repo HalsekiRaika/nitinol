@@ -88,17 +88,17 @@ pub(crate) struct DeadLetterEnvelope {
 
 /// Cloneable handle for routing undeliverable messages to `DeadLetterActor`.
 #[derive(Clone)]
-pub(crate) struct DeadLetterRef {
-    tx: mpsc::Sender<UserTask<DeadLetterActor>>,
+pub(crate) struct DeadLetterProxy {
+    tx: mpsc::Sender<UserTask<DeadLetterProcess>>,
 }
 
-impl DeadLetterRef {
-    pub(crate) fn new(tx: mpsc::Sender<UserTask<DeadLetterActor>>) -> Self {
+impl DeadLetterProxy {
+    pub(crate) fn new(tx: mpsc::Sender<UserTask<DeadLetterProcess>>) -> Self {
         Self { tx }
     }
 
     pub(crate) async fn send(&self, envelope: DeadLetterEnvelope) {
-        let task: UserTask<DeadLetterActor> =
+        let task: UserTask<DeadLetterProcess> =
             Box::new(TellTask::new(DeadLetterEnvelopeMsg(envelope)));
         // Ignore send error: if the actor is stopped, dead-letter routing silently
         // drops the envelope rather than blocking the caller.
@@ -110,13 +110,13 @@ impl DeadLetterRef {
 
 struct DeadLetterEnvelopeMsg(DeadLetterEnvelope);
 
-pub(crate) struct DeadLetterActor {
+pub(crate) struct DeadLetterProcess {
     stream: ProcessProxy<Stream<Boxed>>,
     throttle: LogThrottle,
     registry: ProcessRegistry,
 }
 
-impl DeadLetterActor {
+impl DeadLetterProcess {
     pub(crate) fn new(stream: ProcessProxy<Stream<Boxed>>, registry: ProcessRegistry) -> Self {
         Self {
             stream,
@@ -126,9 +126,9 @@ impl DeadLetterActor {
     }
 }
 
-impl Process for DeadLetterActor {}
+impl Process for DeadLetterProcess {}
 
-impl Receive<DeadLetterEnvelopeMsg> for DeadLetterActor {
+impl Receive<DeadLetterEnvelopeMsg> for DeadLetterProcess {
     type Response = ();
 
     async fn recv(

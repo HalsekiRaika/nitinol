@@ -1,7 +1,7 @@
 use crate::error::BoxError;
 use crate::ident::ProcessName;
 use crate::process::run;
-use crate::process::{AnyProxy, Boxed, DeadLetterActor, DeadLetterRef, Process, ProcessProxy, ProcessRegistry, Props, Stream};
+use crate::process::{AnyProxy, Boxed, DeadLetterProcess, DeadLetterProxy, Process, ProcessProxy, ProcessRegistry, Props, Stream};
 
 /// The well-known topic name for the dead-letter stream.
 const DEAD_LETTERS_TOPIC: &str = "$dead-letters";
@@ -11,7 +11,7 @@ const DEAD_LETTER_ACTOR_NAME: &str = "$dead-letter";
 
 pub struct ProcessSystem {
     registry: ProcessRegistry,
-    dead_letter_ref: DeadLetterRef,
+    dead_letter_ref: DeadLetterProxy,
     dead_letter_stream: ProcessProxy<Stream<Boxed>>,
 }
 
@@ -32,7 +32,7 @@ impl ProcessSystem {
         .await;
 
         // Spawn the dead-letter actor (captures the stream proxy and registry).
-        let dl_actor_process = DeadLetterActor::new(dl_stream.clone(), registry.clone());
+        let dl_actor_process = DeadLetterProcess::new(dl_stream.clone(), registry.clone());
         let dl_actor = run(
             dl_actor_process,
             Some(ProcessName::new(DEAD_LETTER_ACTOR_NAME)),
@@ -43,7 +43,7 @@ impl ProcessSystem {
         )
         .await;
 
-        let dead_letter_ref = DeadLetterRef::new(dl_actor.user_tx.clone());
+        let dead_letter_ref = DeadLetterProxy::new(dl_actor.user_tx.clone());
 
         Self {
             registry,

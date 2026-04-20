@@ -5,7 +5,7 @@ use futures_util::future::Either;
 use tokio::sync::mpsc;
 
 use crate::ident::{Pid, ProcessName};
-use crate::process::dead_letter::DeadLetterRef;
+use crate::process::dead_letter::DeadLetterProxy;
 use crate::process::props::SupervisionStrategy;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
@@ -19,7 +19,7 @@ pub(crate) async fn run<P: Process>(
     process_name: Option<ProcessName>,
     registry: ProcessRegistry,
     timeout: Option<Duration>,
-    dead_letter: Option<DeadLetterRef>,
+    dead_letter: Option<DeadLetterProxy>,
     supervision: Option<SupervisionConfig<P>>,
 ) -> ProcessProxy<P> {
     let (user_tx, user_rx) = mpsc::channel::<UserTask<P>>(32);
@@ -72,6 +72,7 @@ pub(crate) async fn run<P: Process>(
     proxy
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn lifecycle_loop<P: Process>(
     process: P,
     process_name: Option<ProcessName>,
@@ -81,7 +82,7 @@ async fn lifecycle_loop<P: Process>(
     sys_tx: mpsc::Sender<SystemSignal>,
     sys_rx: mpsc::Receiver<SystemSignal>,
     timeout: Option<Duration>,
-    dead_letter: Option<DeadLetterRef>,
+    dead_letter: Option<DeadLetterProxy>,
     supervision: Option<SupervisionConfig<P>>,
 ) {
     let mut state = process;

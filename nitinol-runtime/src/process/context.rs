@@ -3,7 +3,7 @@ use std::any::TypeId;
 use tokio::sync::mpsc;
 
 use crate::ident::{Pid, ProcessName};
-use crate::process::dead_letter::{DeadLetterEnvelope, DeadLetterRef};
+use crate::process::dead_letter::{DeadLetterEnvelope, DeadLetterProxy};
 use crate::process::message::Boxed;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
@@ -14,7 +14,7 @@ pub struct ProcessContext {
     pub(crate) name: Option<ProcessName>,
     pub(crate) registry: ProcessRegistry,
     pub(crate) sys_tx: mpsc::Sender<SystemSignal>,
-    pub(crate) dead_letter: Option<DeadLetterRef>,
+    pub(crate) dead_letter: Option<DeadLetterProxy>,
 }
 
 impl ProcessContext {

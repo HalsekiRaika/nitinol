@@ -9,7 +9,7 @@ pub use self::any::*;
 
 use crate::error::BoxError;
 use crate::ident::Pid;
-use crate::process::dead_letter::{suppress_log, DeadLetterRef, DeadLetterResponse};
+use crate::process::dead_letter::{suppress_log, DeadLetterProxy, DeadLetterResponse};
 use crate::process::signal::SystemSignal;
 use crate::process::task::{AskTask, TellTask, UserTask};
 use crate::process::{Process, Receive};
@@ -18,7 +18,7 @@ pub struct ProcessProxy<P> {
     pub(crate) pid: Pid,
     pub(crate) user_tx: mpsc::Sender<UserTask<P>>,
     pub(crate) sys_tx: mpsc::Sender<SystemSignal>,
-    pub(crate) dead_letter: Option<DeadLetterRef>,
+    pub(crate) dead_letter: Option<DeadLetterProxy>,
 }
 
 impl<P> Clone for ProcessProxy<P> {

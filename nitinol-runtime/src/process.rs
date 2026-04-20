@@ -23,7 +23,7 @@ pub use self::{
     watch::{Terminated, TerminatedReason},
 };
 
-pub(crate) use self::dead_letter::{DeadLetterActor, DeadLetterRef};
+pub(crate) use self::dead_letter::{DeadLetterProcess, DeadLetterProxy};
 pub(crate) use self::lifecycle::run;
 pub(crate) use self::registry::*;
 
