@@ -13,7 +13,7 @@ pub(crate) type UserTask<P> = Box<dyn Task<P>>;
 
 #[async_trait]
 pub(crate) trait Task<P: Process>: 'static + Sync + Send {
-    async fn run(self: Box<Self>, state: &mut P, ctx: &mut ProcessContext);
+    async fn run(self: Box<Self>, state: &mut P, ctx: &mut ProcessContext) -> Result<(), BoxError>;
     fn into_dead_letter_envelope(
         self: Box<Self>,
         destination: Pid,
@@ -53,8 +53,8 @@ where
     P: Receive<M>,
     M: 'static + Send + Sync,
 {
-    async fn run(self: Box<Self>, state: &mut P, ctx: &mut ProcessContext) {
-        let _ = state.recv(self.msg, ctx).await;
+    async fn run(self: Box<Self>, state: &mut P, ctx: &mut ProcessContext) -> Result<(), BoxError> {
+        state.recv(self.msg, ctx).await.map(|_| ())
     }
 
     fn into_dead_letter_envelope(
@@ -85,9 +85,16 @@ where
     M: 'static + Send + Sync,
     <P as Receive<M>>::Response: 'static + Send,
 {
-    async fn run(self: Box<Self>, state: &mut P, ctx: &mut ProcessContext) {
+    async fn run(self: Box<Self>, state: &mut P, ctx: &mut ProcessContext) -> Result<(), BoxError> {
         let result = state.recv(self.msg, ctx).await;
+        let failed = result.is_err();
         let _ = self.reply_tx.send(result);
+        // Propagate failure to the lifecycle loop for supervision.
+        if failed {
+            Err("handler returned error".into())
+        } else {
+            Ok(())
+        }
     }
 
     fn into_dead_letter_envelope(

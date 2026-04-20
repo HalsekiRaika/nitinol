@@ -8,7 +8,9 @@ mod registry;
 mod signal;
 mod stream;
 mod subscriber;
+pub(crate) mod supervision;
 pub(crate) mod task;
+pub(crate) mod watch;
 
 pub use self::{
     context::*,
@@ -18,6 +20,7 @@ pub use self::{
     proxy::*,
     stream::Stream,
     subscriber::{Subscriber, subscriber_props},
+    watch::{Terminated, TerminatedReason},
 };
 
 pub(crate) use self::dead_letter::{DeadLetterActor, DeadLetterRef};
@@ -34,6 +37,13 @@ pub trait Process: 'static + Sync + Send {
         async {}
     }
     fn on_stop(&mut self, ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+    fn on_terminated(
+        &mut self,
+        terminated: Terminated,
+        ctx: &mut ProcessContext,
+    ) -> impl Future<Output = ()> + Send {
         async {}
     }
 }

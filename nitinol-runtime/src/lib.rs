@@ -6,6 +6,6 @@ mod system;
 pub use self::error::BoxError;
 pub use self::process::{
     Boxed, DeadLetter, DeadLetterResponse, Message, Props, Stream, Subscriber,
-    SupervisionStrategy, SuppressDeadLetterLog, subscriber_props,
+    SupervisionStrategy, SuppressDeadLetterLog, Terminated, TerminatedReason, subscriber_props,
 };
 pub use self::system::ProcessSystem;

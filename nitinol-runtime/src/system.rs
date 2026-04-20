@@ -27,15 +27,17 @@ impl ProcessSystem {
             registry.clone(),
             None,
             None,
+            None,
         )
         .await;
 
-        // Spawn the dead-letter actor (captures the stream proxy; no routing for itself).
-        let dl_actor_process = DeadLetterActor::new(dl_stream.clone());
+        // Spawn the dead-letter actor (captures the stream proxy and registry).
+        let dl_actor_process = DeadLetterActor::new(dl_stream.clone(), registry.clone());
         let dl_actor = run(
             dl_actor_process,
             Some(ProcessName::new(DEAD_LETTER_ACTOR_NAME)),
             registry.clone(),
+            None,
             None,
             None,
         )
@@ -56,13 +58,14 @@ impl ProcessSystem {
     }
 
     pub async fn spawn<P: Process>(&self, props: Props<P>) -> ProcessProxy<P> {
-        let process = props.produce();
+        let (process, supervision) = props.into_parts();
         run(
             process,
             None,
             self.registry.clone(),
             None,
             Some(self.dead_letter_ref.clone()),
+            Some(supervision),
         )
         .await
     }
@@ -72,13 +75,14 @@ impl ProcessSystem {
         name: ProcessName,
         props: Props<P>,
     ) -> ProcessProxy<P> {
-        let process = props.produce();
+        let (process, supervision) = props.into_parts();
         run(
             process,
             Some(name),
             self.registry.clone(),
             None,
             Some(self.dead_letter_ref.clone()),
+            Some(supervision),
         )
         .await
     }
@@ -100,6 +104,7 @@ impl ProcessSystem {
             self.registry.clone(),
             None,
             Some(self.dead_letter_ref.clone()),
+            None,
         )
         .await;
         Ok(proxy)

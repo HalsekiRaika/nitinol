@@ -24,6 +24,10 @@ impl AnyProxy {
     pub async fn stop(&self) -> Result<(), BoxError> {
         self.0.send_sys_sig(SystemSignal::Stop).await
     }
+
+    pub(crate) async fn send_system_signal(&self, signal: SystemSignal) -> Result<(), BoxError> {
+        self.0.send_sys_sig(signal).await
+    }
 }
 
 impl<P: Process> From<ProcessProxy<P>> for AnyProxy {

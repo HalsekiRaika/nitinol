@@ -8,9 +8,12 @@ use tokio::sync::mpsc;
 use crate::error::BoxError;
 use crate::ident::Pid;
 use crate::process::message::Boxed;
-use crate::process::task::{TellTask, UserTask};
-use crate::process::{Process, ProcessContext, ProcessProxy, Receive};
+use crate::process::registry::ProcessRegistry;
+use crate::process::signal::SystemSignal;
 use crate::process::stream::Stream;
+use crate::process::task::{TellTask, UserTask};
+use crate::process::watch::{TerminatedReason, WatchRequest};
+use crate::process::{Process, ProcessContext, ProcessProxy, Receive};
 
 // -- Public marker trait -------------------------------------------------------
 
@@ -110,13 +113,15 @@ struct DeadLetterEnvelopeMsg(DeadLetterEnvelope);
 pub(crate) struct DeadLetterActor {
     stream: ProcessProxy<Stream<Boxed>>,
     throttle: LogThrottle,
+    registry: ProcessRegistry,
 }
 
 impl DeadLetterActor {
-    pub(crate) fn new(stream: ProcessProxy<Stream<Boxed>>) -> Self {
+    pub(crate) fn new(stream: ProcessProxy<Stream<Boxed>>, registry: ProcessRegistry) -> Self {
         Self {
             stream,
             throttle: LogThrottle::new(),
+            registry,
         }
     }
 }
@@ -141,12 +146,37 @@ impl Receive<DeadLetterEnvelopeMsg> for DeadLetterActor {
                 envelope.destination,
             );
         }
+
+        // Detect WatchRequest before consuming the envelope message.
+        // Extract Copy PIDs to avoid holding the downcast ref across await points.
+        let watch_pair: Option<(Pid, Pid)> =
+            if envelope.message_type_id == TypeId::of::<WatchRequest>() {
+                envelope
+                    .message
+                    .downcast_ref::<WatchRequest>()
+                    .map(|req| (req.watched, req.watcher))
+            } else {
+                None
+            };
+
         let dead_letter = DeadLetter {
             destination: envelope.destination,
             message: envelope.message,
             sender: envelope.sender,
         };
         let _ = self.stream.publish(dead_letter).await;
+
+        if let Some((watched, watcher)) = watch_pair {
+            if let Some(proxy) = self.registry.lookup(watcher).await {
+                let _ = proxy
+                    .send_system_signal(SystemSignal::Terminated {
+                        who: watched,
+                        why: TerminatedReason::NotFound,
+                    })
+                    .await;
+            }
+        }
+
         Ok(())
     }
 }

@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::process::supervision::SupervisionConfig;
 use crate::process::Process;
 
 pub struct Props<P: Process> {
@@ -20,8 +21,20 @@ impl<P: Process> Props<P> {
         self
     }
 
-    pub(crate) fn produce(&self) -> P {
-        (self.producer)()
+    /// Produce the initial process instance and a `SupervisionConfig` for lifecycle management.
+    pub(crate) fn into_parts(self) -> (P, SupervisionConfig<P>) {
+        if let SupervisionStrategy::Restart { within, .. } = &self.supervision_strategy {
+            assert!(
+                !within.is_zero(),
+                "SupervisionStrategy::Restart requires `within` > 0"
+            );
+        }
+        let initial = (self.producer)();
+        let config = SupervisionConfig {
+            producer: self.producer,
+            strategy: self.supervision_strategy,
+        };
+        (initial, config)
     }
 }
 
