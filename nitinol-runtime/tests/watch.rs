@@ -9,11 +9,9 @@ use tokio::sync::Mutex;
 
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{BoxError, ProcessSystem, Props, SupervisionStrategy, Terminated, TerminatedReason};
+use nitinol_runtime::{ProcessSystem, Props, SupervisionStrategy, Terminated, TerminatedReason};
 
-use common::wait_for_flag;
-
-// -- Test helpers ------------------------------------------------------------
+use common::{wait_for_flag, TestError};
 
 /// A simple target process that tracks lifecycle events.
 struct TargetProcess {
@@ -51,8 +49,9 @@ struct FailTarget;
 
 impl Receive<FailTarget> for FaultyTarget {
     type Response = ();
-    async fn recv(&mut self, _: FailTarget, _ctx: &mut ProcessContext) -> Result<(), BoxError> {
-        Err("intentional failure".into())
+    type Error = TestError;
+    async fn recv(&mut self, _: FailTarget, _ctx: &mut ProcessContext) -> Result<(), TestError> {
+        Err(TestError("intentional failure".to_string()))
     }
 }
 
@@ -97,7 +96,12 @@ struct Barrier;
 
 impl Receive<WatchPid> for WatcherProcess {
     type Response = ();
-    async fn recv(&mut self, msg: WatchPid, ctx: &mut ProcessContext) -> Result<(), BoxError> {
+    type Error = std::convert::Infallible;
+    async fn recv(
+        &mut self,
+        msg: WatchPid,
+        ctx: &mut ProcessContext,
+    ) -> Result<(), std::convert::Infallible> {
         ctx.watch(msg.pid).await;
         Ok(())
     }
@@ -105,7 +109,12 @@ impl Receive<WatchPid> for WatcherProcess {
 
 impl Receive<UnwatchPid> for WatcherProcess {
     type Response = ();
-    async fn recv(&mut self, msg: UnwatchPid, ctx: &mut ProcessContext) -> Result<(), BoxError> {
+    type Error = std::convert::Infallible;
+    async fn recv(
+        &mut self,
+        msg: UnwatchPid,
+        ctx: &mut ProcessContext,
+    ) -> Result<(), std::convert::Infallible> {
         ctx.unwatch(msg.pid).await;
         Ok(())
     }
@@ -113,7 +122,12 @@ impl Receive<UnwatchPid> for WatcherProcess {
 
 impl Receive<Barrier> for WatcherProcess {
     type Response = ();
-    async fn recv(&mut self, _: Barrier, _ctx: &mut ProcessContext) -> Result<(), BoxError> {
+    type Error = std::convert::Infallible;
+    async fn recv(
+        &mut self,
+        _: Barrier,
+        _ctx: &mut ProcessContext,
+    ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }
 }
@@ -166,8 +180,6 @@ async fn wait_for_u32(counter: &AtomicU32, expected: u32) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
-
-// -- Watch live process → Terminated{Stopped} --------------------------------
 
 /// Watching a live process and then stopping it delivers Terminated{Stopped}.
 #[tokio::test]
@@ -242,8 +254,6 @@ async fn terminated_who_matches_stopped_process_pid() {
     assert_eq!(terminated.who, pid_a, "Terminated.who must be the stopped process PID");
 }
 
-// -- Watch already-stopped process → Terminated{NotFound} --------------------
-
 /// Watching a process that is already stopped delivers Terminated{NotFound}.
 #[tokio::test]
 async fn watch_already_stopped_process_receives_terminated_not_found() {
@@ -275,8 +285,6 @@ async fn watch_already_stopped_process_receives_terminated_not_found() {
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::NotFound);
 }
-
-// -- Unwatch cancels notification --------------------------------------------
 
 /// After calling unwatch, the watcher does NOT receive Terminated when the target stops.
 #[tokio::test]
@@ -326,8 +334,6 @@ async fn unwatch_cancels_terminated_notification() {
     );
 }
 
-// -- Multiple watchers -------------------------------------------------------
-
 /// All watchers receive Terminated when the target process stops.
 #[tokio::test]
 async fn multiple_watchers_all_receive_terminated() {
@@ -373,8 +379,6 @@ async fn multiple_watchers_all_receive_terminated() {
     assert_eq!(t_b.who, target_pid);
     assert_eq!(t_b.why, TerminatedReason::Stopped);
 }
-
-// -- Restart does NOT send Terminated ----------------------------------------
 
 /// A process restart (not permanent stop) does not send Terminated to watchers.
 /// Only the final permanent stop sends Terminated.
@@ -479,8 +483,6 @@ async fn rate_limit_stop_sends_terminated_to_watchers() {
     assert_eq!(terminated.why, TerminatedReason::Stopped);
 }
 
-// -- Watchers set persists across restarts -----------------------------------
-
 /// A watch registered before a restart remains active across restarts.
 /// The watcher still receives Terminated when the process permanently stops.
 #[tokio::test]
@@ -534,8 +536,6 @@ async fn watch_persists_across_restart() {
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::Stopped);
 }
-
-// -- Type properties ---------------------------------------------------------
 
 /// TerminatedReason implements PartialEq: same variants are equal, different are not.
 #[tokio::test]

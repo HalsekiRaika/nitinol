@@ -7,7 +7,7 @@ use std::sync::Arc;
 /// never need to derive or implement it manually.
 pub trait Message: 'static + Send + Sync {}
 
-impl<T: 'static + Send + Sync> Message for T {}
+impl<T> Message for T where T: 'static + Send + Sync {}
 
 /// Type-erased, cheaply-cloneable message container.
 ///

@@ -7,6 +7,9 @@ authors.workspace = true
 repository.workspace = true
 description.workspace = true
 
+[lints.clippy]
+manual_async_fn = "deny"
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 

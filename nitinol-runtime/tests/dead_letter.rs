@@ -5,16 +5,15 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nitinol_runtime::error::AskError;
 use nitinol_runtime::ident::{Pid, ProcessName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::{
-    BoxError, Boxed, DeadLetter, DeadLetterResponse, Props, ProcessSystem, Stream,
-    Subscriber, SuppressDeadLetterLog, subscriber_props,
+    Boxed, DeadLetter, Props, ProcessSystem, Stream,
+    Subscriber, SuppressDeadLetterLog,
 };
 
 use common::{test_props, tracked_state, wait_for_flag, GetCount, Increment};
-
-// -- Test helpers -----------------------------------------------------------
 
 /// Polls `counter` until it reaches at least `expected`, with a 5-second timeout.
 async fn wait_for_count(counter: &AtomicU32, expected: u32) {
@@ -102,16 +101,15 @@ impl Process for SilentProcess {
 
 impl Receive<SilentMessage> for SilentProcess {
     type Response = ();
+    type Error = std::convert::Infallible;
     async fn recv(
         &mut self,
         _msg: SilentMessage,
         _ctx: &mut ProcessContext,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }
 }
-
-// -- System initialization tests --------------------------------------------
 
 /// ProcessSystem::new() becomes async after Phase 1-3.
 /// This test proves the API compiles and the system is usable.
@@ -170,8 +168,6 @@ async fn dead_letter_stream_downcasts_to_stream_boxed() {
     assert!(result.is_some());
 }
 
-// -- tell → dead-letter stream routing tests --------------------------------
-
 /// A tell to a stopped process is routed to the dead-letter stream.
 /// This crosses proxy.rs → DeadLetterActor → Stream — 3 modules.
 #[tokio::test]
@@ -181,7 +177,7 @@ async fn tell_to_stopped_process_routes_to_dead_letter_stream() {
     let dl_stream = system.dead_letter_stream();
 
     let count = Arc::new(AtomicU32::new(0));
-    let sub_props = subscriber_props({
+    let sub_props = Props::subscriber({
         let count = count.clone();
         move || DeadLetterCountSubscriber { count: count.clone() }
     });
@@ -217,7 +213,7 @@ async fn dead_letter_contains_correct_destination_pid() {
 
     let captured: Arc<tokio::sync::Mutex<Option<Pid>>> =
         Arc::new(tokio::sync::Mutex::new(None));
-    let sub_props = subscriber_props({
+    let sub_props = Props::subscriber({
         let captured = captured.clone();
         move || DeadLetterDestCapture { captured: captured.clone() }
     });
@@ -262,7 +258,7 @@ async fn dead_letter_stream_publishes_dead_letter_type() {
 
     let captured: Arc<tokio::sync::Mutex<Option<Boxed>>> =
         Arc::new(tokio::sync::Mutex::new(None));
-    let sub_props = subscriber_props({
+    let sub_props = Props::subscriber({
         let captured = captured.clone();
         move || DeadLetterRawCapture { captured: captured.clone() }
     });
@@ -306,7 +302,7 @@ async fn multiple_tells_to_stopped_process_all_route_to_dead_letter() {
     let dl_stream = system.dead_letter_stream();
 
     let count = Arc::new(AtomicU32::new(0));
-    let sub_props = subscriber_props({
+    let sub_props = Props::subscriber({
         let count = count.clone();
         move || DeadLetterCountSubscriber { count: count.clone() }
     });
@@ -335,7 +331,7 @@ async fn multiple_tells_to_stopped_process_all_route_to_dead_letter() {
 }
 
 /// An ask to a stopped process also routes the message to the dead-letter stream
-/// (in addition to returning DeadLetterResponse to the caller).
+/// (in addition to returning AskError::DeadLetter to the caller).
 #[tokio::test]
 async fn ask_to_stopped_process_also_routes_to_dead_letter_stream() {
     // Given: a subscriber registered to the dead-letter stream
@@ -343,7 +339,7 @@ async fn ask_to_stopped_process_also_routes_to_dead_letter_stream() {
     let dl_stream = system.dead_letter_stream();
 
     let count = Arc::new(AtomicU32::new(0));
-    let sub_props = subscriber_props({
+    let sub_props = Props::subscriber({
         let count = count.clone();
         move || DeadLetterCountSubscriber { count: count.clone() }
     });
@@ -379,7 +375,7 @@ async fn tell_and_ask_both_route_through_unified_dead_letter_path() {
     let dl_stream = system.dead_letter_stream();
 
     let count = Arc::new(AtomicU32::new(0));
-    let sub_props = subscriber_props({
+    let sub_props = Props::subscriber({
         let count = count.clone();
         move || DeadLetterCountSubscriber { count: count.clone() }
     });
@@ -407,11 +403,9 @@ async fn tell_and_ask_both_route_through_unified_dead_letter_path() {
     assert_eq!(count.load(Ordering::SeqCst), 2);
 }
 
-// -- ask → DeadLetterResponse tests ----------------------------------------
-
-/// An ask to a stopped process returns a DeadLetterResponse error.
+/// An ask to a stopped process returns AskError::DeadLetter (not a generic BoxError).
 #[tokio::test]
-async fn ask_to_stopped_process_returns_dead_letter_response() {
+async fn ask_to_stopped_process_returns_ask_error_dead_letter() {
     // Given: a process that has been stopped
     let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
@@ -425,19 +419,17 @@ async fn ask_to_stopped_process_returns_dead_letter_response() {
     // When: an ask is sent to the stopped process
     let result = proxy.ask(GetCount).await;
 
-    // Then: the error downcasts to DeadLetterResponse (not a generic "process already stopped")
+    // Then: AskError::DeadLetter is returned
     assert!(result.is_err());
-    let err = result.unwrap_err();
-    let dl_response = err.downcast::<DeadLetterResponse>();
-    assert!(
-        dl_response.is_ok(),
-        "error should be DeadLetterResponse, got a different type"
-    );
+    match result.unwrap_err() {
+        AskError::DeadLetter { .. } => {}
+        other => panic!("expected AskError::DeadLetter, got {:?}", other),
+    }
 }
 
-/// The DeadLetterResponse returned by ask contains the destination PID.
+/// The AskError::DeadLetter returned by ask contains the destination PID.
 #[tokio::test]
-async fn dead_letter_response_contains_destination_pid() {
+async fn ask_dead_letter_error_contains_destination_pid() {
     // Given: a stopped process with a known PID
     let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
@@ -450,16 +442,19 @@ async fn dead_letter_response_contains_destination_pid() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: ask is sent and the error is extracted
-    let err = proxy.ask(GetCount).await.unwrap_err();
-    let dl_response = err
-        .downcast::<DeadLetterResponse>()
-        .expect("should be DeadLetterResponse");
+    let result = proxy.ask(GetCount).await;
 
     // Then: the destination PID matches the stopped process
-    assert_eq!(dl_response.destination, expected_pid);
+    match result.expect_err("ask to stopped process should fail") {
+        AskError::DeadLetter { destination } => {
+            assert_eq!(destination, expected_pid);
+        }
+        other => panic!(
+            "expected AskError::DeadLetter {{ destination: {:?} }}, got {:?}",
+            expected_pid, other
+        ),
+    }
 }
-
-// -- SuppressDeadLetterLog tests --------------------------------------------
 
 /// A message type implementing SuppressDeadLetterLog is still published to
 /// the dead-letter stream — only log output is suppressed, not notification.
@@ -470,7 +465,7 @@ async fn suppressed_message_is_still_delivered_to_dead_letter_stream() {
     let dl_stream = system.dead_letter_stream();
 
     let count = Arc::new(AtomicU32::new(0));
-    let sub_props = subscriber_props({
+    let sub_props = Props::subscriber({
         let count = count.clone();
         move || DeadLetterCountSubscriber { count: count.clone() }
     });
@@ -506,8 +501,6 @@ async fn suppressed_message_is_still_delivered_to_dead_letter_stream() {
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
-// -- Log throttle tests ----------------------------------------------------
-
 /// The log throttle suppresses log output for high-volume dead letters,
 /// but stream delivery is never blocked — all messages arrive.
 #[tokio::test]
@@ -517,7 +510,7 @@ async fn log_throttle_does_not_prevent_stream_delivery() {
     let dl_stream = system.dead_letter_stream();
 
     let count = Arc::new(AtomicU32::new(0));
-    let sub_props = subscriber_props({
+    let sub_props = Props::subscriber({
         let count = count.clone();
         move || DeadLetterCountSubscriber { count: count.clone() }
     });

@@ -6,9 +6,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{BoxError, ProcessSystem, Props, SupervisionStrategy};
+use nitinol_runtime::{ProcessSystem, Props, SupervisionStrategy};
 
-// -- Test helpers ------------------------------------------------------------
+use common::TestError;
 
 /// Process that counts on_start and on_stop calls, and fails on demand.
 struct SupervisedProcess {
@@ -33,8 +33,9 @@ struct Fail;
 
 impl Receive<Fail> for SupervisedProcess {
     type Response = ();
-    async fn recv(&mut self, _: Fail, _ctx: &mut ProcessContext) -> Result<(), BoxError> {
-        Err("intentional failure".into())
+    type Error = TestError;
+    async fn recv(&mut self, _: Fail, _ctx: &mut ProcessContext) -> Result<(), TestError> {
+        Err(TestError("intentional failure".to_string()))
     }
 }
 
@@ -43,7 +44,12 @@ struct Ping;
 
 impl Receive<Ping> for SupervisedProcess {
     type Response = ();
-    async fn recv(&mut self, _: Ping, _ctx: &mut ProcessContext) -> Result<(), BoxError> {
+    type Error = std::convert::Infallible;
+    async fn recv(
+        &mut self,
+        _: Ping,
+        _ctx: &mut ProcessContext,
+    ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }
 }
@@ -73,8 +79,6 @@ fn supervised_props(
     props.with_supervision_strategy(strategy);
     props
 }
-
-// -- Stop strategy tests -----------------------------------------------------
 
 /// Stop strategy: a handler failure causes the process to stop cleanly.
 /// on_stop is called exactly once; no restart occurs.
@@ -128,8 +132,6 @@ async fn stop_strategy_failure_unregisters_process() {
     let found = system.lookup(pid).await;
     assert!(found.is_none(), "stopped process should be unregistered");
 }
-
-// -- Restart strategy tests --------------------------------------------------
 
 /// Restart strategy: a handler failure restarts the process (on_start called again).
 #[tokio::test]
@@ -265,8 +267,6 @@ async fn restarted_process_handles_subsequent_messages() {
     assert!(result.is_ok(), "restarted process should handle new messages");
 }
 
-// -- Rate limiting tests -----------------------------------------------------
-
 /// Rate limiting: exceeding max_retries within the window causes the process to stop permanently.
 ///
 /// With max_retries=2:
@@ -386,8 +386,6 @@ async fn restart_at_exact_rate_limit_boundary() {
     assert!(found.is_none(), "process should be unregistered after exceeding rate limit");
 }
 
-// -- Independent process isolation (OneForOne) --------------------------------
-
 /// OneForOne: a failure in one process does not affect sibling processes.
 #[tokio::test]
 async fn failure_in_one_process_does_not_affect_sibling() {
@@ -419,8 +417,6 @@ async fn failure_in_one_process_does_not_affect_sibling() {
     assert_eq!(stop_b.load(Ordering::SeqCst), 0, "sibling should not have been stopped");
 }
 
-// -- cross-validation: Restart within > 0 -------------------------------------
-
 /// Props::into_parts panics when `within` is Duration::ZERO, preventing silent
 /// rate-limit bypass where retain drops all timestamps and the limit is never enforced.
 #[tokio::test]
@@ -439,8 +435,6 @@ async fn restart_strategy_with_zero_within_panics() {
     );
     system.spawn(props).await;
 }
-
-// -- supervision_strategy field visibility (builder pattern) ------------------
 
 /// Props::with_supervision_strategy is a builder method returning &mut Self,
 /// enabling chained configuration.

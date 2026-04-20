@@ -1,21 +1,16 @@
 use std::future::Future;
 use std::marker::PhantomData;
 
-use crate::error::BoxError;
 use crate::process::{Process, ProcessContext, Props, Receive};
-
-// -- User-facing trait ------------------------------------------------------
 
 /// Trait for processes that subscribe to a `Stream<T>`.
 ///
 /// Implement this instead of `Receive<T>` when you want a simpler interface
-/// that receives messages without returning a `Result`.  Wrap the implementor
-/// with `subscriber_props` to obtain spawn-ready `Props`.
+/// that receives messages without returning a `Result`. Wrap the implementor
+/// with `Props::subscriber` to obtain spawn-ready `Props`.
 pub trait Subscriber<T>: 'static + Send + Sync {
     fn recv(&mut self, msg: T, ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send;
 }
-
-// -- Internal wrapper -------------------------------------------------------
 
 /// Internal process that adapts a `Subscriber<T>` into `Process + Receive<T>`.
 pub struct SubscriberProcess<S, T> {
@@ -36,27 +31,35 @@ where
     T: 'static + Send + Sync,
 {
     type Response = ();
-    async fn recv(&mut self, msg: T, ctx: &mut ProcessContext) -> Result<(), BoxError> {
+    type Error = std::convert::Infallible;
+
+    async fn recv(
+        &mut self,
+        msg: T,
+        ctx: &mut ProcessContext,
+    ) -> Result<(), std::convert::Infallible> {
         self.inner.recv(msg, ctx).await;
         Ok(())
     }
 }
 
-// -- Factory helper ---------------------------------------------------------
-
-/// Build `Props` for a `Subscriber<T>` implementor.
-///
-/// The returned `Props` can be passed directly to `ProcessSystem::spawn`.
-/// After spawning, register the resulting proxy with a stream via
-/// `ProcessProxy<Stream<T>>::subscribe(proxy)`.
-pub fn subscriber_props<S, T, F>(factory: F) -> Props<SubscriberProcess<S, T>>
+impl<S, T> Props<SubscriberProcess<S, T>>
 where
     S: Subscriber<T>,
     T: 'static + Send + Sync,
-    F: Fn() -> S + 'static + Send + Sync,
 {
-    Props::new(move || SubscriberProcess {
-        inner: factory(),
-        _marker: PhantomData,
-    })
+    /// Build `Props` for a `Subscriber<T>` implementor.
+    ///
+    /// The returned `Props` can be passed directly to `ProcessSystem::spawn`.
+    /// After spawning, register the resulting proxy with a stream via
+    /// `ProcessProxy<Stream<T>>::subscribe(proxy)`.
+    pub fn subscriber<F>(factory: F) -> Self
+    where
+        F: Fn() -> S + 'static + Send + Sync,
+    {
+        Props::new(move || SubscriberProcess {
+            inner: factory(),
+            _marker: PhantomData,
+        })
+    }
 }

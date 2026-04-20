@@ -4,15 +4,13 @@ use std::future::Future;
 
 use async_trait::async_trait;
 
-use crate::error::BoxError;
+use crate::error::SendError;
 use crate::ident::Pid;
 use crate::process::dead_letter::{suppress_log, DeadLetterEnvelope};
 use crate::process::message::{Boxed, Message};
 use crate::process::task::{TellTask, UserTask};
 use crate::process::watch::Terminated;
 use crate::process::{Process, ProcessContext, ProcessProxy, Receive};
-
-// -- Internal dispatch abstraction ------------------------------------------
 
 /// Object-safe trait for delivering a message to a subscriber process.
 ///
@@ -21,7 +19,7 @@ use crate::process::{Process, ProcessContext, ProcessProxy, Receive};
 #[async_trait]
 pub(crate) trait Dispatcher<T>: 'static + Send + Sync {
     fn pid(&self) -> Pid;
-    async fn dispatch(&self, msg: T) -> Result<(), BoxError>;
+    async fn dispatch(&self, msg: T) -> Result<(), SendError>;
 }
 
 #[async_trait]
@@ -34,7 +32,7 @@ where
         self.pid
     }
 
-    async fn dispatch(&self, msg: T) -> Result<(), BoxError> {
+    async fn dispatch(&self, msg: T) -> Result<(), SendError> {
         // Raw channel send bypasses `tell`'s internal dead-letter routing
         // (which would set sender: None). Stream's recv handles dead-letter
         // routing with the correct sender (Some(stream_pid)).
@@ -42,17 +40,13 @@ where
         self.user_tx
             .send(task)
             .await
-            .map_err(|_| "process already stopped".into())
+            .map_err(|_| SendError)
     }
 }
-
-// -- Internal protocol messages ---------------------------------------------
 
 pub(crate) struct PublishMsg<T>(pub T);
 pub(crate) struct SubscribeMsg<T>(pub Box<dyn Dispatcher<T>>);
 pub(crate) struct UnsubscribeMsg(pub Pid);
-
-// -- Stream process ---------------------------------------------------------
 
 /// A built-in pub/sub process.
 ///
@@ -63,7 +57,10 @@ pub struct Stream<T = Boxed> {
     subscribers: HashMap<Pid, Box<dyn Dispatcher<T>>>,
 }
 
-impl<T: 'static + Send + Sync> Stream<T> {
+impl<T> Stream<T>
+where
+    T: 'static + Send + Sync,
+{
     pub(crate) fn new() -> Self {
         Self {
             subscribers: HashMap::new(),
@@ -71,7 +68,10 @@ impl<T: 'static + Send + Sync> Stream<T> {
     }
 }
 
-impl<T: 'static + Send + Sync> Process for Stream<T> {
+impl<T> Process for Stream<T>
+where
+    T: 'static + Send + Sync,
+{
     /// Remove the terminated subscriber from the list.
     ///
     /// No unwatch needed: the target is already stopped.
@@ -90,13 +90,18 @@ impl<T: 'static + Send + Sync> Process for Stream<T> {
 /// Delivery failure for one subscriber does not abort delivery to the rest.
 /// Failed dispatches are routed to the dead-letter stream with sender set to
 /// this Stream's PID, distinguishing them from direct-tell failures (sender: None).
-impl<T: 'static + Send + Sync + Clone> Receive<PublishMsg<T>> for Stream<T> {
+impl<T> Receive<PublishMsg<T>> for Stream<T>
+where
+    T: 'static + Send + Sync + Clone,
+{
     type Response = ();
+    type Error = std::convert::Infallible;
+
     async fn recv(
         &mut self,
         msg: PublishMsg<T>,
         ctx: &mut ProcessContext,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), std::convert::Infallible> {
         for dispatcher in self.subscribers.values() {
             if dispatcher.dispatch(msg.0.clone()).await.is_err() {
                 if let Some(ref dl) = ctx.dead_letter {
@@ -116,13 +121,18 @@ impl<T: 'static + Send + Sync + Clone> Receive<PublishMsg<T>> for Stream<T> {
 }
 
 /// Register a new subscriber dispatcher and start watching it for termination.
-impl<T: 'static + Send + Sync> Receive<SubscribeMsg<T>> for Stream<T> {
+impl<T> Receive<SubscribeMsg<T>> for Stream<T>
+where
+    T: 'static + Send + Sync,
+{
     type Response = ();
+    type Error = std::convert::Infallible;
+
     async fn recv(
         &mut self,
         msg: SubscribeMsg<T>,
         ctx: &mut ProcessContext,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), std::convert::Infallible> {
         let pid = msg.0.pid();
         self.subscribers.insert(pid, msg.0);
         ctx.watch(pid).await;
@@ -131,13 +141,18 @@ impl<T: 'static + Send + Sync> Receive<SubscribeMsg<T>> for Stream<T> {
 }
 
 /// Remove a subscriber by PID and stop watching it.
-impl<T: 'static + Send + Sync> Receive<UnsubscribeMsg> for Stream<T> {
+impl<T> Receive<UnsubscribeMsg> for Stream<T>
+where
+    T: 'static + Send + Sync,
+{
     type Response = ();
+    type Error = std::convert::Infallible;
+
     async fn recv(
         &mut self,
         msg: UnsubscribeMsg,
         ctx: &mut ProcessContext,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), std::convert::Infallible> {
         if self.subscribers.remove(&msg.0).is_some() {
             ctx.unwatch(msg.0).await;
         }
@@ -145,23 +160,24 @@ impl<T: 'static + Send + Sync> Receive<UnsubscribeMsg> for Stream<T> {
     }
 }
 
-// -- ProcessProxy extensions ------------------------------------------------
-
 impl ProcessProxy<Stream<Boxed>> {
     /// Publish any `Message` value to all subscribers of this stream.
     ///
     /// The value is type-erased into `Boxed` so every subscriber receives
     /// the same zero-copy `Arc` clone.
-    pub async fn publish<M: Message>(&self, msg: M) -> Result<(), BoxError> {
+    pub async fn publish<M: Message>(&self, msg: M) -> Result<(), SendError> {
         self.tell(PublishMsg(Boxed::new(msg))).await
     }
 }
 
-impl<T: 'static + Send + Sync> ProcessProxy<Stream<T>> {
+impl<T> ProcessProxy<Stream<T>>
+where
+    T: 'static + Send + Sync,
+{
     /// Register `proxy` as a subscriber to this stream.
     ///
     /// The proxy's process must implement `Receive<T, Response = ()>`.
-    pub async fn subscribe<P>(&self, proxy: ProcessProxy<P>) -> Result<(), BoxError>
+    pub async fn subscribe<P>(&self, proxy: ProcessProxy<P>) -> Result<(), SendError>
     where
         P: Process + Receive<T, Response = ()>,
     {
@@ -171,7 +187,7 @@ impl<T: 'static + Send + Sync> ProcessProxy<Stream<T>> {
     /// Remove the subscriber identified by `pid` from this stream.
     ///
     /// No-op if `pid` is not currently subscribed.
-    pub async fn unsubscribe(&self, pid: Pid) -> Result<(), BoxError> {
+    pub async fn unsubscribe(&self, pid: Pid) -> Result<(), SendError> {
         self.tell(UnsubscribeMsg(pid)).await
     }
 }

@@ -5,9 +5,12 @@ use std::time::{Duration, Instant};
 
 use nitinol_runtime::ident::{Pid, ProcessName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{BoxError, Boxed, DeadLetter, Message, Props, ProcessSystem, Stream, Subscriber, SupervisionStrategy, subscriber_props};
+use nitinol_runtime::{Boxed, DeadLetter, Message, Props, ProcessSystem, Stream, Subscriber, SupervisionStrategy};
 
-// -- Test helpers -----------------------------------------------------------
+/// Error type for handlers that intentionally fail.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct RecvTestError(String);
 
 /// A process that counts received Boxed messages via shared atomic state.
 struct ReceivingProcess {
@@ -18,11 +21,12 @@ impl Process for ReceivingProcess {}
 
 impl Receive<Boxed> for ReceivingProcess {
     type Response = ();
+    type Error = std::convert::Infallible;
     async fn recv(
         &mut self,
         _msg: Boxed,
         _ctx: &mut ProcessContext,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), std::convert::Infallible> {
         self.count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -61,8 +65,6 @@ async fn wait_for_count(counter: &AtomicU32, expected: u32) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
-
-// -- Message / Boxed type tests ---------------------------------------------
 
 #[tokio::test]
 async fn common_types_satisfy_message_bound() {
@@ -115,8 +117,6 @@ async fn boxed_clone_shares_inner_value() {
     assert_eq!(val2, Some(&99u32));
 }
 
-// -- spawn_stream tests -----------------------------------------------------
-
 #[tokio::test]
 async fn spawn_stream_returns_valid_proxy() {
     // Given: a ProcessSystem
@@ -162,8 +162,6 @@ async fn spawn_stream_different_topics_both_succeed() {
     assert!(result_a.is_ok());
     assert!(result_b.is_ok());
 }
-
-// -- publish tests ----------------------------------------------------------
 
 #[tokio::test]
 async fn publish_with_no_subscribers_succeeds() {
@@ -269,8 +267,6 @@ async fn publish_multiple_messages_all_delivered_in_order() {
     assert_eq!(count.load(Ordering::SeqCst), 3);
 }
 
-// -- lookup tests -----------------------------------------------------------
-
 #[tokio::test]
 async fn stream_lookup_by_name_finds_stream() {
     // Given: a stream registered under a named topic
@@ -357,12 +353,10 @@ async fn stream_downcast_proxy_can_publish() {
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
-// -- Public API surface tests -----------------------------------------------
-
 /// Re-prevention: public-api-leak (ARCH-01)
 ///
 /// This test verifies that the subscriber workflow is fully usable through
-/// crate-level imports only (`Subscriber`, `subscriber_props`), without
+/// crate-level imports only (`Subscriber`, `Props::subscriber`), without
 /// needing to name the internal `SubscriberProcess` adapter type.
 /// If someone accidentally re-exports `SubscriberProcess` via glob and
 /// downstream code starts depending on it, this test documents the intended
@@ -379,9 +373,9 @@ async fn public_api_does_not_require_subscriber_process_type() {
 
     let count = Arc::new(AtomicU32::new(0));
 
-    // When: subscriber_props is used (returns Props<SubscriberProcess<..>>
+    // When: Props::subscriber is used (returns Props<SubscriberProcess<..>>
     // but the caller never names that type)
-    let props = subscriber_props({
+    let props = Props::subscriber({
         let count = count.clone();
         move || CountingSubscriber { count: count.clone() }
     });
@@ -434,7 +428,7 @@ async fn subscriber_recv_uses_all_parameters() {
         .expect("spawn_stream should succeed");
 
     let received = Arc::new(AtomicU32::new(0));
-    let props = subscriber_props({
+    let props = Props::subscriber({
         let received = received.clone();
         move || ParamCheckSubscriber {
             received: received.clone(),
@@ -454,11 +448,9 @@ async fn subscriber_recv_uses_all_parameters() {
     assert_eq!(received.load(Ordering::SeqCst), 5);
 }
 
-// -- Subscriber trait tests -------------------------------------------------
-
 #[tokio::test]
 async fn subscriber_trait_and_props_flow_receives_message() {
-    // Given: a Subscriber<Boxed> impl spawned via subscriber_props
+    // Given: a Subscriber<Boxed> impl spawned via Props::subscriber
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("sub-trait-basic");
     let stream = system
@@ -467,7 +459,7 @@ async fn subscriber_trait_and_props_flow_receives_message() {
         .expect("spawn_stream should succeed");
 
     let count = Arc::new(AtomicU32::new(0));
-    let props = subscriber_props({
+    let props = Props::subscriber({
         let count = count.clone();
         move || CountingSubscriber { count: count.clone() }
     });
@@ -496,7 +488,7 @@ async fn subscriber_trait_receives_multiple_publishes() {
         .expect("spawn_stream should succeed");
 
     let count = Arc::new(AtomicU32::new(0));
-    let props = subscriber_props({
+    let props = Props::subscriber({
         let count = count.clone();
         move || CountingSubscriber { count: count.clone() }
     });
@@ -536,7 +528,7 @@ async fn mixed_subscriber_types_all_receive_published_message() {
         .expect("subscribe direct should succeed");
 
     let count_trait = Arc::new(AtomicU32::new(0));
-    let trait_props = subscriber_props({
+    let trait_props = Props::subscriber({
         let c = count_trait.clone();
         move || CountingSubscriber { count: c.clone() }
     });
@@ -556,8 +548,6 @@ async fn mixed_subscriber_types_all_receive_published_message() {
     assert_eq!(count_trait.load(Ordering::SeqCst), 1);
 }
 
-// -- Subscriber lifecycle helpers ---------------------------------------------
-
 /// A process that counts received messages and records when it is stopped.
 struct StopTrackingReceivingProcess {
     count: Arc<AtomicU32>,
@@ -573,11 +563,12 @@ impl Process for StopTrackingReceivingProcess {
 
 impl Receive<Boxed> for StopTrackingReceivingProcess {
     type Response = ();
+    type Error = std::convert::Infallible;
     async fn recv(
         &mut self,
         _msg: Boxed,
         _ctx: &mut ProcessContext,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), std::convert::Infallible> {
         self.count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -610,13 +601,14 @@ impl Process for FaultyReceivingProcess {
 
 impl Receive<Boxed> for FaultyReceivingProcess {
     type Response = ();
+    type Error = RecvTestError;
     async fn recv(
         &mut self,
         _msg: Boxed,
         _ctx: &mut ProcessContext,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), RecvTestError> {
         if self.fail_next.swap(false, Ordering::SeqCst) {
-            return Err("intentional failure".into());
+            return Err(RecvTestError("intentional failure".to_string()));
         }
         self.count.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -649,8 +641,6 @@ async fn wait_for_flag(flag: &AtomicBool) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
-
-// -- Subscriber lifecycle tests -----------------------------------------------
 
 /// Verifies R1 + R2: when a subscriber process terminates, the stream detects
 /// the Terminated notification (via watch) and auto-removes it from the subscriber
@@ -985,8 +975,6 @@ async fn subscriber_permanently_stopped_by_rate_limit_is_auto_removed_from_strea
     assert_eq!(count.load(Ordering::SeqCst), 0);
 }
 
-// -- Dead-letter routing helpers -----------------------------------------------
-
 /// A subscriber that panics when it receives `KillChannel`, causing its tokio
 /// task to abort without lifecycle cleanup (no on_stop, no unregister, no
 /// Terminated notification to watchers).
@@ -1002,22 +990,24 @@ struct KillChannel;
 
 impl Receive<KillChannel> for ChannelKillerSubscriber {
     type Response = ();
+    type Error = std::convert::Infallible;
     async fn recv(
         &mut self,
         _msg: KillChannel,
         _ctx: &mut ProcessContext,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), std::convert::Infallible> {
         panic!("deliberate channel kill for dead-letter routing test");
     }
 }
 
 impl Receive<Boxed> for ChannelKillerSubscriber {
     type Response = ();
+    type Error = std::convert::Infallible;
     async fn recv(
         &mut self,
         _msg: Boxed,
         _ctx: &mut ProcessContext,
-    ) -> Result<(), BoxError> {
+    ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }
 }
@@ -1105,8 +1095,6 @@ async fn wait_for_capture<T: Clone>(captured: &Arc<tokio::sync::Mutex<Option<T>>
     }
 }
 
-// -- Dead-letter routing from failed publish tests ----------------------------
-
 /// Verifies that publishing to a dead subscriber (channel closed by panic, not
 /// by normal Stop) routes the undeliverable message to the dead-letter stream.
 ///
@@ -1121,7 +1109,7 @@ async fn publish_to_dead_subscriber_routes_to_dead_letter_stream() {
     let dl_stream = system.dead_letter_stream();
 
     let dl_count = Arc::new(AtomicU32::new(0));
-    let dl_sub_props = subscriber_props({
+    let dl_sub_props = Props::subscriber({
         let dl_count = dl_count.clone();
         move || DeadLetterCountSub { count: dl_count.clone() }
     });
@@ -1165,7 +1153,7 @@ async fn dead_letter_from_failed_publish_contains_subscriber_pid() {
     let dl_stream = system.dead_letter_stream();
 
     let captured: Arc<tokio::sync::Mutex<Option<Pid>>> = Arc::new(tokio::sync::Mutex::new(None));
-    let dl_sub_props = subscriber_props({
+    let dl_sub_props = Props::subscriber({
         let captured = captured.clone();
         move || DeadLetterDestinationCapture { captured: captured.clone() }
     });
@@ -1213,7 +1201,7 @@ async fn dead_letter_from_failed_publish_contains_stream_pid_as_sender() {
 
     let captured: Arc<tokio::sync::Mutex<Option<Option<Pid>>>> =
         Arc::new(tokio::sync::Mutex::new(None));
-    let dl_sub_props = subscriber_props({
+    let dl_sub_props = Props::subscriber({
         let captured = captured.clone();
         move || DeadLetterSenderCapture { captured: captured.clone() }
     });
@@ -1260,7 +1248,7 @@ async fn publish_to_dead_subscriber_still_delivers_to_live_subscribers() {
     let dl_stream = system.dead_letter_stream();
 
     let dl_count = Arc::new(AtomicU32::new(0));
-    let dl_sub_props = subscriber_props({
+    let dl_sub_props = Props::subscriber({
         let dl_count = dl_count.clone();
         move || DeadLetterCountSub { count: dl_count.clone() }
     });
@@ -1316,7 +1304,7 @@ async fn failed_publish_generates_exactly_one_dead_letter() {
     let dl_stream = system.dead_letter_stream();
 
     let dl_count = Arc::new(AtomicU32::new(0));
-    let dl_sub_props = subscriber_props({
+    let dl_sub_props = Props::subscriber({
         let dl_count = dl_count.clone();
         move || DeadLetterCountSub { count: dl_count.clone() }
     });

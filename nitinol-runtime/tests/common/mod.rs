@@ -4,7 +4,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{BoxError, Props};
+use nitinol_runtime::Props;
+
+/// Test error type for handlers that intentionally fail.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct TestError(pub String);
 
 /// Test process that tracks lifecycle events and message counts
 /// through shared atomic state.
@@ -45,7 +50,12 @@ pub struct Increment;
 
 impl Receive<Increment> for TrackedProcess {
     type Response = ();
-    async fn recv(&mut self, _msg: Increment, _ctx: &mut ProcessContext) -> Result<(), BoxError> {
+    type Error = std::convert::Infallible;
+    async fn recv(
+        &mut self,
+        _msg: Increment,
+        _ctx: &mut ProcessContext,
+    ) -> Result<(), std::convert::Infallible> {
         self.counter.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -56,7 +66,12 @@ pub struct GetCount;
 
 impl Receive<GetCount> for TrackedProcess {
     type Response = u32;
-    async fn recv(&mut self, _msg: GetCount, _ctx: &mut ProcessContext) -> Result<u32, BoxError> {
+    type Error = std::convert::Infallible;
+    async fn recv(
+        &mut self,
+        _msg: GetCount,
+        _ctx: &mut ProcessContext,
+    ) -> Result<u32, std::convert::Infallible> {
         let count = self.counter.load(Ordering::SeqCst);
         Ok(count)
     }
@@ -67,8 +82,13 @@ pub struct FailingMessage;
 
 impl Receive<FailingMessage> for TrackedProcess {
     type Response = ();
-    async fn recv(&mut self, _msg: FailingMessage, _ctx: &mut ProcessContext) -> Result<(), BoxError> {
-        Err("intentional failure".into())
+    type Error = TestError;
+    async fn recv(
+        &mut self,
+        _msg: FailingMessage,
+        _ctx: &mut ProcessContext,
+    ) -> Result<(), TestError> {
+        Err(TestError("intentional failure".to_string()))
     }
 }
 
