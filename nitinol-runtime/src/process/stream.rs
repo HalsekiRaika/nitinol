@@ -1,3 +1,4 @@
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::future::Future;
 
@@ -5,7 +6,9 @@ use async_trait::async_trait;
 
 use crate::error::BoxError;
 use crate::ident::Pid;
+use crate::process::dead_letter::{suppress_log, DeadLetterEnvelope};
 use crate::process::message::{Boxed, Message};
+use crate::process::task::{TellTask, UserTask};
 use crate::process::watch::Terminated;
 use crate::process::{Process, ProcessContext, ProcessProxy, Receive};
 
@@ -32,7 +35,14 @@ where
     }
 
     async fn dispatch(&self, msg: T) -> Result<(), BoxError> {
-        self.tell(msg).await
+        // Raw channel send bypasses `tell`'s internal dead-letter routing
+        // (which would set sender: None). Stream's recv handles dead-letter
+        // routing with the correct sender (Some(stream_pid)).
+        let task: UserTask<P> = Box::new(TellTask::new(msg));
+        self.user_tx
+            .send(task)
+            .await
+            .map_err(|_| "process already stopped".into())
     }
 }
 
@@ -78,15 +88,28 @@ impl<T: 'static + Send + Sync> Process for Stream<T> {
 /// Broadcast a published message to every subscriber.
 ///
 /// Delivery failure for one subscriber does not abort delivery to the rest.
+/// Failed dispatches are routed to the dead-letter stream with sender set to
+/// this Stream's PID, distinguishing them from direct-tell failures (sender: None).
 impl<T: 'static + Send + Sync + Clone> Receive<PublishMsg<T>> for Stream<T> {
     type Response = ();
     async fn recv(
         &mut self,
         msg: PublishMsg<T>,
-        _ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext,
     ) -> Result<(), BoxError> {
         for dispatcher in self.subscribers.values() {
-            let _ = dispatcher.dispatch(msg.0.clone()).await;
+            if dispatcher.dispatch(msg.0.clone()).await.is_err() {
+                if let Some(ref dl) = ctx.dead_letter {
+                    let envelope = DeadLetterEnvelope {
+                        destination: dispatcher.pid(),
+                        message: Boxed::new(msg.0.clone()),
+                        sender: Some(ctx.pid()),
+                        suppress_log: suppress_log::<T>(),
+                        message_type_id: TypeId::of::<T>(),
+                    };
+                    dl.send(envelope).await;
+                }
+            }
         }
         Ok(())
     }

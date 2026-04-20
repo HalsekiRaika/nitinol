@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nitinol_runtime::ident::ProcessName;
+use nitinol_runtime::ident::{Pid, ProcessName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{BoxError, Boxed, Message, Props, ProcessSystem, Stream, Subscriber, SupervisionStrategy, subscriber_props};
+use nitinol_runtime::{BoxError, Boxed, DeadLetter, Message, Props, ProcessSystem, Stream, Subscriber, SupervisionStrategy, subscriber_props};
 
 // -- Test helpers -----------------------------------------------------------
 
@@ -983,4 +983,375 @@ async fn subscriber_permanently_stopped_by_rate_limit_is_auto_removed_from_strea
     // Then: the subscriber was auto-removed and receives no further messages
     // (count = 0 because all messages either triggered failure or arrived after removal)
     assert_eq!(count.load(Ordering::SeqCst), 0);
+}
+
+// -- Dead-letter routing helpers -----------------------------------------------
+
+/// A subscriber that panics when it receives `KillChannel`, causing its tokio
+/// task to abort without lifecycle cleanup (no on_stop, no unregister, no
+/// Terminated notification to watchers).
+///
+/// This simulates a crashed subscriber: its channel is closed, but it remains
+/// in Stream's subscriber list — exactly the race condition described in the task.
+struct ChannelKillerSubscriber;
+
+impl Process for ChannelKillerSubscriber {}
+
+/// Trigger message that causes `ChannelKillerSubscriber` to panic.
+struct KillChannel;
+
+impl Receive<KillChannel> for ChannelKillerSubscriber {
+    type Response = ();
+    async fn recv(
+        &mut self,
+        _msg: KillChannel,
+        _ctx: &mut ProcessContext,
+    ) -> Result<(), BoxError> {
+        panic!("deliberate channel kill for dead-letter routing test");
+    }
+}
+
+impl Receive<Boxed> for ChannelKillerSubscriber {
+    type Response = ();
+    async fn recv(
+        &mut self,
+        _msg: Boxed,
+        _ctx: &mut ProcessContext,
+    ) -> Result<(), BoxError> {
+        Ok(())
+    }
+}
+
+/// Counts every `Boxed` message received on the dead-letter stream.
+struct DeadLetterCountSub {
+    count: Arc<AtomicU32>,
+}
+
+impl Subscriber<Boxed> for DeadLetterCountSub {
+    fn recv(
+        &mut self,
+        _msg: Boxed,
+        _ctx: &mut ProcessContext,
+    ) -> impl Future<Output = ()> + Send {
+        let count = self.count.clone();
+        async move {
+            count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// Captures `DeadLetter.destination` from the first dead-letter on the stream.
+struct DeadLetterDestinationCapture {
+    captured: Arc<tokio::sync::Mutex<Option<Pid>>>,
+}
+
+impl Subscriber<Boxed> for DeadLetterDestinationCapture {
+    fn recv(
+        &mut self,
+        msg: Boxed,
+        _ctx: &mut ProcessContext,
+    ) -> impl Future<Output = ()> + Send {
+        let captured = self.captured.clone();
+        async move {
+            if let Some(dl) = msg.downcast_ref::<DeadLetter>() {
+                let mut guard = captured.lock().await;
+                if guard.is_none() {
+                    *guard = Some(dl.destination);
+                }
+            }
+        }
+    }
+}
+
+/// Captures `DeadLetter.sender` from the first dead-letter on the stream.
+///
+/// The outer `Option` represents "was anything captured?"; the inner `Option`
+/// is the actual `sender` field of `DeadLetter` (which may itself be `None`).
+struct DeadLetterSenderCapture {
+    captured: Arc<tokio::sync::Mutex<Option<Option<Pid>>>>,
+}
+
+impl Subscriber<Boxed> for DeadLetterSenderCapture {
+    fn recv(
+        &mut self,
+        msg: Boxed,
+        _ctx: &mut ProcessContext,
+    ) -> impl Future<Output = ()> + Send {
+        let captured = self.captured.clone();
+        async move {
+            if let Some(dl) = msg.downcast_ref::<DeadLetter>() {
+                let mut guard = captured.lock().await;
+                if guard.is_none() {
+                    *guard = Some(dl.sender);
+                }
+            }
+        }
+    }
+}
+
+/// Polls `captured` until a value appears, with a 5-second timeout.
+async fn wait_for_capture<T: Clone>(captured: &Arc<tokio::sync::Mutex<Option<T>>>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let guard = captured.lock().await;
+        if let Some(ref val) = *guard {
+            return val.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for dead letter capture"
+        );
+    }
+}
+
+// -- Dead-letter routing from failed publish tests ----------------------------
+
+/// Verifies that publishing to a dead subscriber (channel closed by panic, not
+/// by normal Stop) routes the undeliverable message to the dead-letter stream.
+///
+/// The subscriber panics inside its handler, causing the tokio task to abort
+/// without lifecycle cleanup.  It therefore stays in Stream's subscriber list
+/// while its channel is closed, recreating the race condition described in the
+/// task (Terminated notification arrives after the next publish).
+#[tokio::test]
+async fn publish_to_dead_subscriber_routes_to_dead_letter_stream() {
+    // Given: a counter subscribed to the system dead-letter stream
+    let system = ProcessSystem::new().await;
+    let dl_stream = system.dead_letter_stream();
+
+    let dl_count = Arc::new(AtomicU32::new(0));
+    let dl_sub_props = subscriber_props({
+        let dl_count = dl_count.clone();
+        move || DeadLetterCountSub { count: dl_count.clone() }
+    });
+    let dl_sub_proxy = system.spawn(dl_sub_props).await;
+    dl_stream
+        .subscribe(dl_sub_proxy)
+        .await
+        .expect("subscribe to dead-letter stream should succeed");
+
+    // And: a stream with one subscriber whose channel is killed via panic
+    let topic = ProcessName::new("dl-pub-fail-count");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+
+    let sub_proxy = system.spawn(Props::new(|| ChannelKillerSubscriber)).await;
+    stream
+        .subscribe(sub_proxy.clone())
+        .await
+        .expect("subscribe should succeed");
+
+    // Kill the subscriber's tokio task without triggering lifecycle cleanup
+    let _ = sub_proxy.tell(KillChannel).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // When: a message is published (dispatch to the dead subscriber will fail)
+    stream.publish(42u32).await.expect("publish should succeed");
+
+    // Then: the dead-letter stream receives exactly one notification
+    wait_for_count(&dl_count, 1).await;
+    assert_eq!(dl_count.load(Ordering::SeqCst), 1);
+}
+
+/// Verifies that `DeadLetter.destination` equals the PID of the dead subscriber,
+/// not some other process.
+#[tokio::test]
+async fn dead_letter_from_failed_publish_contains_subscriber_pid() {
+    // Given: a dead-letter subscriber that captures the destination PID
+    let system = ProcessSystem::new().await;
+    let dl_stream = system.dead_letter_stream();
+
+    let captured: Arc<tokio::sync::Mutex<Option<Pid>>> = Arc::new(tokio::sync::Mutex::new(None));
+    let dl_sub_props = subscriber_props({
+        let captured = captured.clone();
+        move || DeadLetterDestinationCapture { captured: captured.clone() }
+    });
+    let dl_sub_proxy = system.spawn(dl_sub_props).await;
+    dl_stream
+        .subscribe(dl_sub_proxy)
+        .await
+        .expect("subscribe to dead-letter stream should succeed");
+
+    // And: a stream with a subscriber whose channel is killed (PID recorded)
+    let topic = ProcessName::new("dl-pub-fail-dest");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+
+    let sub_proxy = system.spawn(Props::new(|| ChannelKillerSubscriber)).await;
+    let expected_subscriber_pid = sub_proxy.pid();
+    stream
+        .subscribe(sub_proxy.clone())
+        .await
+        .expect("subscribe should succeed");
+
+    let _ = sub_proxy.tell(KillChannel).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // When: a message is published
+    stream.publish(42u32).await.expect("publish should succeed");
+
+    // Then: the captured destination matches the dead subscriber's PID
+    let destination = wait_for_capture(&captured).await;
+    assert_eq!(destination, expected_subscriber_pid);
+}
+
+/// Verifies that `DeadLetter.sender` is `Some(stream_pid)` — identifying the
+/// Stream as the source of the undeliverable message, not `None`.
+///
+/// This distinguishes a failed stream publish from a failed direct `tell`
+/// (which sets sender to `None` because no caller context is available).
+#[tokio::test]
+async fn dead_letter_from_failed_publish_contains_stream_pid_as_sender() {
+    // Given: a dead-letter subscriber that captures the sender PID
+    let system = ProcessSystem::new().await;
+    let dl_stream = system.dead_letter_stream();
+
+    let captured: Arc<tokio::sync::Mutex<Option<Option<Pid>>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+    let dl_sub_props = subscriber_props({
+        let captured = captured.clone();
+        move || DeadLetterSenderCapture { captured: captured.clone() }
+    });
+    let dl_sub_proxy = system.spawn(dl_sub_props).await;
+    dl_stream
+        .subscribe(dl_sub_proxy)
+        .await
+        .expect("subscribe to dead-letter stream should succeed");
+
+    // And: a stream with a subscriber whose channel is killed (stream PID recorded)
+    let topic = ProcessName::new("dl-pub-fail-sender");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+    let expected_stream_pid = stream.pid();
+
+    let sub_proxy = system.spawn(Props::new(|| ChannelKillerSubscriber)).await;
+    stream
+        .subscribe(sub_proxy.clone())
+        .await
+        .expect("subscribe should succeed");
+
+    let _ = sub_proxy.tell(KillChannel).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // When: a message is published
+    stream.publish(42u32).await.expect("publish should succeed");
+
+    // Then: the captured sender is Some(stream_pid)
+    let sender = wait_for_capture(&captured).await;
+    assert_eq!(sender, Some(expected_stream_pid));
+}
+
+/// Verifies that a failed dispatch to one dead subscriber does not prevent
+/// delivery to remaining live subscribers.
+///
+/// Broadcast continues to all subscribers; a failed dispatch to one does not
+/// abort the iteration.
+#[tokio::test]
+async fn publish_to_dead_subscriber_still_delivers_to_live_subscribers() {
+    // Given: a dead-letter counter and a stream with one live + one dead subscriber
+    let system = ProcessSystem::new().await;
+    let dl_stream = system.dead_letter_stream();
+
+    let dl_count = Arc::new(AtomicU32::new(0));
+    let dl_sub_props = subscriber_props({
+        let dl_count = dl_count.clone();
+        move || DeadLetterCountSub { count: dl_count.clone() }
+    });
+    let dl_sub_proxy = system.spawn(dl_sub_props).await;
+    dl_stream
+        .subscribe(dl_sub_proxy)
+        .await
+        .expect("subscribe to dead-letter stream should succeed");
+
+    let topic = ProcessName::new("dl-pub-fail-mixed");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+
+    // Live subscriber
+    let live_count = Arc::new(AtomicU32::new(0));
+    let live_proxy = system.spawn(receiving_props(live_count.clone())).await;
+    stream
+        .subscribe(live_proxy)
+        .await
+        .expect("subscribe live should succeed");
+
+    // Dead subscriber (channel killed via panic)
+    let dead_proxy = system.spawn(Props::new(|| ChannelKillerSubscriber)).await;
+    stream
+        .subscribe(dead_proxy.clone())
+        .await
+        .expect("subscribe dead should succeed");
+
+    let _ = dead_proxy.tell(KillChannel).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // When: a message is published
+    stream.publish(99u32).await.expect("publish should succeed");
+
+    // Then: the live subscriber receives the message
+    wait_for_count(&live_count, 1).await;
+    assert_eq!(live_count.load(Ordering::SeqCst), 1);
+
+    // And: exactly one dead-letter notification is sent for the dead subscriber
+    wait_for_count(&dl_count, 1).await;
+    assert_eq!(dl_count.load(Ordering::SeqCst), 1);
+}
+
+/// Regression test: a single failed dispatch generates exactly one dead-letter
+/// notification, not two (which would happen if both `dispatch` and Stream's
+/// `recv` independently routed to dead-letter).
+#[tokio::test]
+async fn failed_publish_generates_exactly_one_dead_letter() {
+    // Given: a dead-letter counter
+    let system = ProcessSystem::new().await;
+    let dl_stream = system.dead_letter_stream();
+
+    let dl_count = Arc::new(AtomicU32::new(0));
+    let dl_sub_props = subscriber_props({
+        let dl_count = dl_count.clone();
+        move || DeadLetterCountSub { count: dl_count.clone() }
+    });
+    let dl_sub_proxy = system.spawn(dl_sub_props).await;
+    dl_stream
+        .subscribe(dl_sub_proxy)
+        .await
+        .expect("subscribe to dead-letter stream should succeed");
+
+    // And: a stream with one dead subscriber
+    let topic = ProcessName::new("dl-pub-fail-once");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+
+    let sub_proxy = system.spawn(Props::new(|| ChannelKillerSubscriber)).await;
+    stream
+        .subscribe(sub_proxy.clone())
+        .await
+        .expect("subscribe should succeed");
+
+    let _ = sub_proxy.tell(KillChannel).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // When: a message is published
+    stream.publish(1u32).await.expect("publish should succeed");
+
+    // Then: exactly one dead-letter notification arrives (no double-routing)
+    wait_for_count(&dl_count, 1).await;
+    // Allow extra time for a potential second notification to arrive
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        dl_count.load(Ordering::SeqCst),
+        1,
+        "exactly one dead-letter expected; double-routing would produce 2"
+    );
 }
