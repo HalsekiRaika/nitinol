@@ -1,11 +1,11 @@
 use std::future::Future;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{BoxError, Boxed, Message, Props, ProcessSystem, Stream, Subscriber, subscriber_props};
+use nitinol_runtime::{BoxError, Boxed, Message, Props, ProcessSystem, Stream, Subscriber, SupervisionStrategy, subscriber_props};
 
 // -- Test helpers -----------------------------------------------------------
 
@@ -554,4 +554,433 @@ async fn mixed_subscriber_types_all_receive_published_message() {
     wait_for_count(&count_trait, 1).await;
     assert_eq!(count_direct.load(Ordering::SeqCst), 1);
     assert_eq!(count_trait.load(Ordering::SeqCst), 1);
+}
+
+// -- Subscriber lifecycle helpers ---------------------------------------------
+
+/// A process that counts received messages and records when it is stopped.
+struct StopTrackingReceivingProcess {
+    count: Arc<AtomicU32>,
+    stopped: Arc<AtomicBool>,
+}
+
+impl Process for StopTrackingReceivingProcess {
+    fn on_stop(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+        self.stopped.store(true, Ordering::SeqCst);
+        async {}
+    }
+}
+
+impl Receive<Boxed> for StopTrackingReceivingProcess {
+    type Response = ();
+    async fn recv(
+        &mut self,
+        _msg: Boxed,
+        _ctx: &mut ProcessContext,
+    ) -> Result<(), BoxError> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn stop_tracking_props(
+    count: Arc<AtomicU32>,
+    stopped: Arc<AtomicBool>,
+) -> Props<StopTrackingReceivingProcess> {
+    Props::new(move || StopTrackingReceivingProcess {
+        count: count.clone(),
+        stopped: stopped.clone(),
+    })
+}
+
+/// A process that can fail on the next `Boxed` message receive when `fail_next`
+/// is set. Counts successful receives and tracks restart count via `start_count`.
+struct FaultyReceivingProcess {
+    count: Arc<AtomicU32>,
+    start_count: Arc<AtomicU32>,
+    fail_next: Arc<AtomicBool>,
+}
+
+impl Process for FaultyReceivingProcess {
+    fn on_start(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+        self.start_count.fetch_add(1, Ordering::SeqCst);
+        async {}
+    }
+}
+
+impl Receive<Boxed> for FaultyReceivingProcess {
+    type Response = ();
+    async fn recv(
+        &mut self,
+        _msg: Boxed,
+        _ctx: &mut ProcessContext,
+    ) -> Result<(), BoxError> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err("intentional failure".into());
+        }
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn faulty_receiving_props(
+    count: Arc<AtomicU32>,
+    start_count: Arc<AtomicU32>,
+    fail_next: Arc<AtomicBool>,
+    strategy: SupervisionStrategy,
+) -> Props<FaultyReceivingProcess> {
+    let mut props = Props::new(move || FaultyReceivingProcess {
+        count: count.clone(),
+        start_count: start_count.clone(),
+        fail_next: fail_next.clone(),
+    });
+    props.with_supervision_strategy(strategy);
+    props
+}
+
+/// Polls a flag until it becomes true, with a 5-second timeout.
+async fn wait_for_flag(flag: &AtomicBool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !flag.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for flag to become true"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+// -- Subscriber lifecycle tests -----------------------------------------------
+
+/// Verifies R1 + R2: when a subscriber process terminates, the stream detects
+/// the Terminated notification (via watch) and auto-removes it from the subscriber
+/// list so that subsequent publishes do not attempt dispatch to the dead process.
+#[tokio::test]
+async fn terminated_subscriber_is_auto_removed_from_stream() {
+    // Given: a stream with one subscriber that tracks its stop event
+    let system = ProcessSystem::new().await;
+    let topic = ProcessName::new("lifecycle-term-1");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+
+    let count = Arc::new(AtomicU32::new(0));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let proxy = system
+        .spawn(stop_tracking_props(count.clone(), stopped.clone()))
+        .await;
+    let stop_handle = proxy.clone();
+    stream
+        .subscribe(proxy)
+        .await
+        .expect("subscribe should succeed");
+
+    // Verify the subscriber is receiving before stopping
+    stream
+        .publish(1u32)
+        .await
+        .expect("initial publish should succeed");
+    wait_for_count(&count, 1).await;
+
+    // When: the subscriber is stopped
+    stop_handle.stop().await.expect("stop should succeed");
+    wait_for_flag(&stopped).await;
+    // Allow the Terminated notification to propagate to stream's on_terminated
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // And: another message is published
+    stream
+        .publish(2u32)
+        .await
+        .expect("second publish should succeed");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Then: the stopped subscriber no longer receives messages
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+/// Verifies R2 partial removal: stopping one of two subscribers removes only
+/// that subscriber; the remaining subscriber continues to receive messages.
+#[tokio::test]
+async fn only_terminated_subscriber_is_removed_remaining_stays_active() {
+    // Given: a stream with two subscribers
+    let system = ProcessSystem::new().await;
+    let topic = ProcessName::new("lifecycle-term-2");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+
+    let count_a = Arc::new(AtomicU32::new(0));
+    let stopped_a = Arc::new(AtomicBool::new(false));
+    let proxy_a = system
+        .spawn(stop_tracking_props(count_a.clone(), stopped_a.clone()))
+        .await;
+    let stop_handle_a = proxy_a.clone();
+    stream
+        .subscribe(proxy_a)
+        .await
+        .expect("subscribe A should succeed");
+
+    let count_b = Arc::new(AtomicU32::new(0));
+    let stopped_b = Arc::new(AtomicBool::new(false));
+    let proxy_b = system
+        .spawn(stop_tracking_props(count_b.clone(), stopped_b.clone()))
+        .await;
+    stream
+        .subscribe(proxy_b)
+        .await
+        .expect("subscribe B should succeed");
+    let _ = stopped_b; // B is not stopped in this test
+
+    // Verify both receive the initial message
+    stream
+        .publish(1u32)
+        .await
+        .expect("initial publish should succeed");
+    wait_for_count(&count_a, 1).await;
+    wait_for_count(&count_b, 1).await;
+
+    // When: subscriber A is stopped
+    stop_handle_a.stop().await.expect("stop A should succeed");
+    wait_for_flag(&stopped_a).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // And: a second message is published
+    stream
+        .publish(2u32)
+        .await
+        .expect("second publish should succeed");
+
+    // Then: subscriber B receives the second message, A does not
+    wait_for_count(&count_b, 2).await;
+    assert_eq!(
+        count_a.load(Ordering::SeqCst),
+        1,
+        "stopped subscriber A should not receive second message"
+    );
+    assert_eq!(
+        count_b.load(Ordering::SeqCst),
+        2,
+        "subscriber B should still receive"
+    );
+}
+
+/// Verifies R4 + R5: a subscriber spawned with Restart supervision that fails
+/// is restarted automatically; the restarted instance continues to receive
+/// messages via the same dispatcher entry in the stream.
+#[tokio::test]
+async fn restarted_subscriber_continues_receiving_messages_after_failure() {
+    // Given: a stream with one subscriber using Restart supervision strategy
+    let system = ProcessSystem::new().await;
+    let topic = ProcessName::new("lifecycle-restart");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+
+    let count = Arc::new(AtomicU32::new(0));
+    let start_count = Arc::new(AtomicU32::new(0));
+    let fail_next = Arc::new(AtomicBool::new(false));
+    let props = faulty_receiving_props(
+        count.clone(),
+        start_count.clone(),
+        fail_next.clone(),
+        SupervisionStrategy::Restart {
+            max_retries: 5,
+            within: Duration::from_secs(10),
+        },
+    );
+    let proxy = system.spawn(props).await;
+    stream
+        .subscribe(proxy)
+        .await
+        .expect("subscribe should succeed");
+    wait_for_count(&start_count, 1).await;
+
+    // When: the subscriber fails (triggering a Restart)
+    fail_next.store(true, Ordering::SeqCst);
+    stream
+        .publish(1u32)
+        .await
+        .expect("fail-trigger publish should succeed");
+    wait_for_count(&start_count, 2).await; // confirmed restart
+
+    // And: a message is published after the restart
+    stream
+        .publish(2u32)
+        .await
+        .expect("post-restart publish should succeed");
+
+    // Then: the restarted subscriber receives the new message
+    wait_for_count(&count, 1).await;
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+/// Verifies R3: after calling unsubscribe with a subscriber's PID, subsequent
+/// publishes are not dispatched to that subscriber.
+#[tokio::test]
+async fn unsubscribed_subscriber_no_longer_receives_messages() {
+    // Given: a stream with one subscriber
+    let system = ProcessSystem::new().await;
+    let topic = ProcessName::new("lifecycle-unsub-1");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+
+    let count = Arc::new(AtomicU32::new(0));
+    let proxy = system.spawn(receiving_props(count.clone())).await;
+    let pid = proxy.pid();
+    stream
+        .subscribe(proxy)
+        .await
+        .expect("subscribe should succeed");
+
+    // Verify the subscriber is receiving before unsubscribing
+    stream
+        .publish(1u32)
+        .await
+        .expect("initial publish should succeed");
+    wait_for_count(&count, 1).await;
+
+    // When: the subscriber is explicitly unsubscribed
+    stream
+        .unsubscribe(pid)
+        .await
+        .expect("unsubscribe should succeed");
+
+    // And: another message is published
+    stream
+        .publish(2u32)
+        .await
+        .expect("second publish should succeed");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Then: the unsubscribed subscriber does not receive the second message
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+/// Verifies R3 partial removal: unsubscribing one of two subscribers removes
+/// only that subscriber; the remaining subscriber continues to receive.
+#[tokio::test]
+async fn only_unsubscribed_subscriber_stops_receiving_other_stays_active() {
+    // Given: a stream with two subscribers
+    let system = ProcessSystem::new().await;
+    let topic = ProcessName::new("lifecycle-unsub-2");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+
+    let count_a = Arc::new(AtomicU32::new(0));
+    let proxy_a = system.spawn(receiving_props(count_a.clone())).await;
+    let pid_a = proxy_a.pid();
+    stream
+        .subscribe(proxy_a)
+        .await
+        .expect("subscribe A should succeed");
+
+    let count_b = Arc::new(AtomicU32::new(0));
+    let proxy_b = system.spawn(receiving_props(count_b.clone())).await;
+    stream
+        .subscribe(proxy_b)
+        .await
+        .expect("subscribe B should succeed");
+
+    // Verify both receive the initial message
+    stream
+        .publish(1u32)
+        .await
+        .expect("initial publish should succeed");
+    wait_for_count(&count_a, 1).await;
+    wait_for_count(&count_b, 1).await;
+
+    // When: subscriber A is unsubscribed
+    stream
+        .unsubscribe(pid_a)
+        .await
+        .expect("unsubscribe A should succeed");
+
+    // And: a second message is published
+    stream
+        .publish(2u32)
+        .await
+        .expect("second publish should succeed");
+
+    // Then: subscriber B receives the second message, A does not
+    wait_for_count(&count_b, 2).await;
+    assert_eq!(
+        count_a.load(Ordering::SeqCst),
+        1,
+        "unsubscribed A should not receive second message"
+    );
+    assert_eq!(
+        count_b.load(Ordering::SeqCst),
+        2,
+        "subscriber B should still receive"
+    );
+}
+
+/// Verifies R2 + rate-limit: when a subscriber exceeds the Restart rate limit
+/// and is permanently stopped, the stream auto-removes it via the Terminated
+/// notification so that subsequent publishes are not dispatched to it.
+#[tokio::test]
+async fn subscriber_permanently_stopped_by_rate_limit_is_auto_removed_from_stream() {
+    // Given: a stream with one subscriber using Restart{max_retries: 1}
+    let system = ProcessSystem::new().await;
+    let topic = ProcessName::new("lifecycle-ratelimit");
+    let stream = system
+        .spawn_stream::<Boxed>(topic)
+        .await
+        .expect("spawn_stream should succeed");
+
+    let count = Arc::new(AtomicU32::new(0));
+    let start_count = Arc::new(AtomicU32::new(0));
+    let fail_next = Arc::new(AtomicBool::new(false));
+    let props = faulty_receiving_props(
+        count.clone(),
+        start_count.clone(),
+        fail_next.clone(),
+        SupervisionStrategy::Restart {
+            max_retries: 1,
+            within: Duration::from_secs(10),
+        },
+    );
+    let proxy = system.spawn(props).await;
+    stream
+        .subscribe(proxy)
+        .await
+        .expect("subscribe should succeed");
+    wait_for_count(&start_count, 1).await;
+
+    // When: the subscriber fails once (within max_retries → restarts)
+    fail_next.store(true, Ordering::SeqCst);
+    stream
+        .publish(1u32)
+        .await
+        .expect("first fail-trigger publish should succeed");
+    wait_for_count(&start_count, 2).await;
+
+    // And: the subscriber fails again (exceeds max_retries → permanent stop)
+    fail_next.store(true, Ordering::SeqCst);
+    stream
+        .publish(2u32)
+        .await
+        .expect("second fail-trigger publish should succeed");
+
+    // Allow the permanent stop and Terminated notification to propagate to stream
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // And: a normal message is published after the subscriber is permanently gone
+    stream
+        .publish(3u32)
+        .await
+        .expect("post-stop publish should succeed");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Then: the subscriber was auto-removed and receives no further messages
+    // (count = 0 because all messages either triggered failure or arrived after removal)
+    assert_eq!(count.load(Ordering::SeqCst), 0);
 }
