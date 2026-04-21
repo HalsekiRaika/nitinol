@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use nitinol_runtime::ident::{Pid, ProcessName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{Boxed, DeadLetter, Message, Props, ProcessSystem, Stream, Subscriber, SupervisionStrategy};
+use nitinol_runtime::{BoxedMessage, DeadLetter, Message, Props, ProcessSystem, Stream, Subscriber, SupervisionStrategy};
 
 /// Error type for handlers that intentionally fail.
 #[derive(Debug, thiserror::Error)]
@@ -19,12 +19,12 @@ struct ReceivingProcess {
 
 impl Process for ReceivingProcess {}
 
-impl Receive<Boxed> for ReceivingProcess {
+impl Receive<BoxedMessage> for ReceivingProcess {
     type Response = ();
     type Error = std::convert::Infallible;
     async fn recv(
         &mut self,
-        _msg: Boxed,
+        _msg: BoxedMessage,
         _ctx: &mut ProcessContext,
     ) -> Result<(), std::convert::Infallible> {
         self.count.fetch_add(1, Ordering::SeqCst);
@@ -41,10 +41,10 @@ struct CountingSubscriber {
     count: Arc<AtomicU32>,
 }
 
-impl Subscriber<Boxed> for CountingSubscriber {
+impl Subscriber<BoxedMessage> for CountingSubscriber {
     fn recv(
         &mut self,
-        _msg: Boxed,
+        _msg: BoxedMessage,
         _ctx: &mut ProcessContext,
     ) -> impl Future<Output = ()> + Send {
         let count = self.count.clone();
@@ -81,7 +81,7 @@ async fn common_types_satisfy_message_bound() {
 #[tokio::test]
 async fn boxed_new_and_downcast_returns_original_value() {
     // Given: a Boxed wrapping a u32
-    let boxed = Boxed::new(42u32);
+    let boxed = BoxedMessage::new(42u32);
 
     // When: downcast to the original type
     let result = boxed.downcast_ref::<u32>();
@@ -93,7 +93,7 @@ async fn boxed_new_and_downcast_returns_original_value() {
 #[tokio::test]
 async fn boxed_downcast_wrong_type_returns_none() {
     // Given: a Boxed wrapping a u32
-    let boxed = Boxed::new(42u32);
+    let boxed = BoxedMessage::new(42u32);
 
     // When: downcast to an incompatible type
     let result = boxed.downcast_ref::<String>();
@@ -105,7 +105,7 @@ async fn boxed_downcast_wrong_type_returns_none() {
 #[tokio::test]
 async fn boxed_clone_shares_inner_value() {
     // Given: a Boxed and its clone (Arc-backed, zero-copy)
-    let boxed = Boxed::new(99u32);
+    let boxed = BoxedMessage::new(99u32);
     let cloned = boxed.clone();
 
     // When: both are downcast to the inner type
@@ -124,7 +124,7 @@ async fn spawn_stream_returns_valid_proxy() {
     let topic = ProcessName::new("ss-valid");
 
     // When: a Boxed stream is spawned for the topic
-    let result = system.spawn_stream::<Boxed>(topic).await;
+    let result = system.spawn_stream::<BoxedMessage>(topic).await;
 
     // Then: a proxy is returned successfully
     assert!(result.is_ok());
@@ -136,12 +136,12 @@ async fn spawn_stream_duplicate_topic_returns_error() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("ss-dup");
     system
-        .spawn_stream::<Boxed>(topic.clone())
+        .spawn_stream::<BoxedMessage>(topic.clone())
         .await
         .expect("first spawn_stream should succeed");
 
     // When: a second stream is spawned with the same topic
-    let result = system.spawn_stream::<Boxed>(topic).await;
+    let result = system.spawn_stream::<BoxedMessage>(topic).await;
 
     // Then: an error is returned (uniqueness constraint violated)
     assert!(result.is_err());
@@ -155,8 +155,8 @@ async fn spawn_stream_different_topics_both_succeed() {
     let topic_b = ProcessName::new("ss-diff-b");
 
     // When: two streams are spawned with different topics
-    let result_a = system.spawn_stream::<Boxed>(topic_a).await;
-    let result_b = system.spawn_stream::<Boxed>(topic_b).await;
+    let result_a = system.spawn_stream::<BoxedMessage>(topic_a).await;
+    let result_b = system.spawn_stream::<BoxedMessage>(topic_b).await;
 
     // Then: both succeed
     assert!(result_a.is_ok());
@@ -169,7 +169,7 @@ async fn publish_with_no_subscribers_succeeds() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-no-sub");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -186,7 +186,7 @@ async fn publish_delivers_message_to_subscriber() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-deliver");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -211,7 +211,7 @@ async fn publish_delivers_to_all_subscribers() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-multi");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -246,7 +246,7 @@ async fn publish_multiple_messages_all_delivered_in_order() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-multi-msg");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -273,7 +273,7 @@ async fn stream_lookup_by_name_finds_stream() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-stream");
     let _stream = system
-        .spawn_stream::<Boxed>(topic.clone())
+        .spawn_stream::<BoxedMessage>(topic.clone())
         .await
         .expect("spawn_stream should succeed");
 
@@ -303,7 +303,7 @@ async fn stream_any_proxy_downcasts_to_stream_proxy() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-cast");
     let _stream = system
-        .spawn_stream::<Boxed>(topic.clone())
+        .spawn_stream::<BoxedMessage>(topic.clone())
         .await
         .expect("spawn_stream should succeed");
 
@@ -313,7 +313,7 @@ async fn stream_any_proxy_downcasts_to_stream_proxy() {
         .expect("lookup should find the stream");
 
     // When: downcast to ProcessProxy<Stream<Boxed>>
-    let result = any.downcast::<Stream<Boxed>>();
+    let result = any.downcast::<Stream<BoxedMessage>>();
 
     // Then: downcast succeeds
     assert!(result.is_some());
@@ -325,7 +325,7 @@ async fn stream_downcast_proxy_can_publish() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-pub");
     let _stream = system
-        .spawn_stream::<Boxed>(topic.clone())
+        .spawn_stream::<BoxedMessage>(topic.clone())
         .await
         .expect("spawn_stream should succeed");
 
@@ -334,7 +334,7 @@ async fn stream_downcast_proxy_can_publish() {
         .await
         .expect("lookup should find the stream");
     let stream = any
-        .downcast::<Stream<Boxed>>()
+        .downcast::<Stream<BoxedMessage>>()
         .expect("downcast should succeed");
 
     let count = Arc::new(AtomicU32::new(0));
@@ -367,7 +367,7 @@ async fn public_api_does_not_require_subscriber_process_type() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("api-surface");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -405,10 +405,10 @@ async fn subscriber_recv_uses_all_parameters() {
         received: Arc<AtomicU32>,
     }
 
-    impl Subscriber<Boxed> for ParamCheckSubscriber {
+    impl Subscriber<BoxedMessage> for ParamCheckSubscriber {
         fn recv(
             &mut self,
-            msg: Boxed,
+            msg: BoxedMessage,
             _ctx: &mut ProcessContext,
         ) -> impl Future<Output = ()> + Send {
             // Use `msg` to prove the parameter is needed
@@ -423,7 +423,7 @@ async fn subscriber_recv_uses_all_parameters() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("param-check");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -454,7 +454,7 @@ async fn subscriber_trait_and_props_flow_receives_message() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("sub-trait-basic");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -483,7 +483,7 @@ async fn subscriber_trait_receives_multiple_publishes() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("sub-trait-multi");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -514,7 +514,7 @@ async fn mixed_subscriber_types_all_receive_published_message() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("sub-mixed");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -561,12 +561,12 @@ impl Process for StopTrackingReceivingProcess {
     }
 }
 
-impl Receive<Boxed> for StopTrackingReceivingProcess {
+impl Receive<BoxedMessage> for StopTrackingReceivingProcess {
     type Response = ();
     type Error = std::convert::Infallible;
     async fn recv(
         &mut self,
-        _msg: Boxed,
+        _msg: BoxedMessage,
         _ctx: &mut ProcessContext,
     ) -> Result<(), std::convert::Infallible> {
         self.count.fetch_add(1, Ordering::SeqCst);
@@ -599,12 +599,12 @@ impl Process for FaultyReceivingProcess {
     }
 }
 
-impl Receive<Boxed> for FaultyReceivingProcess {
+impl Receive<BoxedMessage> for FaultyReceivingProcess {
     type Response = ();
     type Error = RecvTestError;
     async fn recv(
         &mut self,
-        _msg: Boxed,
+        _msg: BoxedMessage,
         _ctx: &mut ProcessContext,
     ) -> Result<(), RecvTestError> {
         if self.fail_next.swap(false, Ordering::SeqCst) {
@@ -651,7 +651,7 @@ async fn terminated_subscriber_is_auto_removed_from_stream() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-term-1");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -698,7 +698,7 @@ async fn only_terminated_subscriber_is_removed_remaining_stays_active() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-term-2");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -766,7 +766,7 @@ async fn restarted_subscriber_continues_receiving_messages_after_failure() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-restart");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -816,7 +816,7 @@ async fn unsubscribed_subscriber_no_longer_receives_messages() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-unsub-1");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -860,7 +860,7 @@ async fn only_unsubscribed_subscriber_stops_receiving_other_stays_active() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-unsub-2");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -922,7 +922,7 @@ async fn subscriber_permanently_stopped_by_rate_limit_is_auto_removed_from_strea
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-ratelimit");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -1000,12 +1000,12 @@ impl Receive<KillChannel> for ChannelKillerSubscriber {
     }
 }
 
-impl Receive<Boxed> for ChannelKillerSubscriber {
+impl Receive<BoxedMessage> for ChannelKillerSubscriber {
     type Response = ();
     type Error = std::convert::Infallible;
     async fn recv(
         &mut self,
-        _msg: Boxed,
+        _msg: BoxedMessage,
         _ctx: &mut ProcessContext,
     ) -> Result<(), std::convert::Infallible> {
         Ok(())
@@ -1017,10 +1017,10 @@ struct DeadLetterCountSub {
     count: Arc<AtomicU32>,
 }
 
-impl Subscriber<Boxed> for DeadLetterCountSub {
+impl Subscriber<BoxedMessage> for DeadLetterCountSub {
     fn recv(
         &mut self,
-        _msg: Boxed,
+        _msg: BoxedMessage,
         _ctx: &mut ProcessContext,
     ) -> impl Future<Output = ()> + Send {
         let count = self.count.clone();
@@ -1035,10 +1035,10 @@ struct DeadLetterDestinationCapture {
     captured: Arc<tokio::sync::Mutex<Option<Pid>>>,
 }
 
-impl Subscriber<Boxed> for DeadLetterDestinationCapture {
+impl Subscriber<BoxedMessage> for DeadLetterDestinationCapture {
     fn recv(
         &mut self,
-        msg: Boxed,
+        msg: BoxedMessage,
         _ctx: &mut ProcessContext,
     ) -> impl Future<Output = ()> + Send {
         let captured = self.captured.clone();
@@ -1061,10 +1061,10 @@ struct DeadLetterSenderCapture {
     captured: Arc<tokio::sync::Mutex<Option<Option<Pid>>>>,
 }
 
-impl Subscriber<Boxed> for DeadLetterSenderCapture {
+impl Subscriber<BoxedMessage> for DeadLetterSenderCapture {
     fn recv(
         &mut self,
-        msg: Boxed,
+        msg: BoxedMessage,
         _ctx: &mut ProcessContext,
     ) -> impl Future<Output = ()> + Send {
         let captured = self.captured.clone();
@@ -1122,7 +1122,7 @@ async fn publish_to_dead_subscriber_routes_to_dead_letter_stream() {
     // And: a stream with one subscriber whose channel is killed via panic
     let topic = ProcessName::new("dl-pub-fail-count");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -1166,7 +1166,7 @@ async fn dead_letter_from_failed_publish_contains_subscriber_pid() {
     // And: a stream with a subscriber whose channel is killed (PID recorded)
     let topic = ProcessName::new("dl-pub-fail-dest");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -1214,7 +1214,7 @@ async fn dead_letter_from_failed_publish_contains_stream_pid_as_sender() {
     // And: a stream with a subscriber whose channel is killed (stream PID recorded)
     let topic = ProcessName::new("dl-pub-fail-sender");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
     let expected_stream_pid = stream.pid();
@@ -1260,7 +1260,7 @@ async fn publish_to_dead_subscriber_still_delivers_to_live_subscribers() {
 
     let topic = ProcessName::new("dl-pub-fail-mixed");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -1317,7 +1317,7 @@ async fn failed_publish_generates_exactly_one_dead_letter() {
     // And: a stream with one dead subscriber
     let topic = ProcessName::new("dl-pub-fail-once");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 

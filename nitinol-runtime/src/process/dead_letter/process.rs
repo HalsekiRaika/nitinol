@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use super::throttle::LogThrottle;
 use super::DeadLetter;
 use crate::ident::Pid;
-use crate::process::message::Boxed;
+use crate::process::message::BoxedMessage;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
 use crate::process::stream::Stream;
@@ -15,7 +15,7 @@ use crate::process::{Process, ProcessContext, ProcessProxy, Receive};
 
 pub(crate) struct DeadLetterEnvelope {
     pub(crate) destination: Pid,
-    pub(crate) message: Boxed,
+    pub(crate) message: BoxedMessage,
     pub(crate) sender: Option<Pid>,
     pub(crate) suppress_log: bool,
     pub(crate) message_type_id: TypeId,
@@ -44,13 +44,13 @@ impl DeadLetterProxy {
 struct DeadLetterEnvelopeMsg(DeadLetterEnvelope);
 
 pub(crate) struct DeadLetterProcess {
-    stream: ProcessProxy<Stream<Boxed>>,
+    stream: ProcessProxy<Stream<BoxedMessage>>,
     throttle: LogThrottle,
     registry: ProcessRegistry,
 }
 
 impl DeadLetterProcess {
-    pub(crate) fn new(stream: ProcessProxy<Stream<Boxed>>, registry: ProcessRegistry) -> Self {
+    pub(crate) fn new(stream: ProcessProxy<Stream<BoxedMessage>>, registry: ProcessRegistry) -> Self {
         Self {
             stream,
             throttle: LogThrottle::new(),

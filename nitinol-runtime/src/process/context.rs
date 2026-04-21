@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::{DeadLetterEnvelope, DeadLetterProxy};
-use crate::process::message::Boxed;
+use crate::process::message::BoxedMessage;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
 use crate::process::watch::{TerminatedReason, WatchRequest};
@@ -30,7 +30,7 @@ impl ProcessContext {
     ///
     /// If the target is alive, a `Watch` signal is sent to its lifecycle loop.
     /// If it is absent from the registry (already stopped), a `WatchRequest` is
-    /// routed through `DeadLetterActor`, which responds with
+    /// routed through `DeadLetterProcess`, which responds with
     /// `Terminated { why: NotFound }`.
     pub async fn watch(&self, target_pid: Pid) {
         match self.registry.lookup(target_pid).await {
@@ -71,7 +71,7 @@ impl ProcessContext {
             Some(dl) => {
                 let envelope = DeadLetterEnvelope {
                     destination: target_pid,
-                    message: Boxed::new(WatchRequest {
+                    message: BoxedMessage::new(WatchRequest {
                         watched: target_pid,
                         watcher: self.pid,
                     }),
@@ -82,7 +82,7 @@ impl ProcessContext {
                 dl.send(envelope).await;
             }
             None => {
-                // No dead-letter actor available; send Terminated directly.
+                // No dead-letter process available; send Terminated directly.
                 let _ = self
                     .sys_tx
                     .send(SystemSignal::Terminated {

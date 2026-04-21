@@ -14,9 +14,9 @@ impl<T> Message for T where T: 'static + Send + Sync {}
 /// Backed by `Arc<dyn Any + Send + Sync>` so cloning is a reference-count
 /// increment rather than a deep copy — ideal for broadcast delivery.
 #[derive(Clone)]
-pub struct Boxed(Arc<dyn Any + Send + Sync>);
+pub struct BoxedMessage(Arc<dyn Any + Send + Sync>);
 
-impl Boxed {
+impl BoxedMessage {
     /// Wrap `value` in a `Boxed` container.
     pub fn new<T: Message>(value: T) -> Self {
         Self(Arc::new(value))

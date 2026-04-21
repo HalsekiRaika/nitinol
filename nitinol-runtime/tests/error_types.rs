@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use nitinol_runtime::error::{AskError, SendError, SpawnError};
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{Boxed, Props, ProcessSystem, Subscriber};
+use nitinol_runtime::{BoxedMessage, Props, ProcessSystem, Subscriber};
 
 use common::{tracked_state, test_props, wait_for_flag, GetCount, Increment};
 
@@ -222,12 +222,12 @@ async fn spawn_stream_duplicate_returns_spawn_error() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("se-dup");
     system
-        .spawn_stream::<Boxed>(topic.clone())
+        .spawn_stream::<BoxedMessage>(topic.clone())
         .await
         .expect("first spawn_stream should succeed");
 
     // When: a second stream is spawned with the same topic
-    let result = system.spawn_stream::<Boxed>(topic).await;
+    let result = system.spawn_stream::<BoxedMessage>(topic).await;
 
     // Then: Err(SpawnError) is returned and error type is statically known
     let err: SpawnError = match result {
@@ -285,14 +285,8 @@ async fn dead_letter_stream_pid_is_accessible() {
 async fn dead_letter_stream_subscribe_succeeds() {
     struct DummySubscriber;
 
-    impl Subscriber<Boxed> for DummySubscriber {
-        fn recv(
-            &mut self,
-            _: Boxed,
-            _: &mut ProcessContext,
-        ) -> impl Future<Output = ()> + Send {
-            async {}
-        }
+    impl Subscriber<BoxedMessage> for DummySubscriber {
+        async fn recv(&mut self, _: BoxedMessage, _: &mut ProcessContext) {}
     }
 
     // Given: a freshly created ProcessSystem
@@ -313,14 +307,8 @@ async fn dead_letter_stream_subscribe_succeeds() {
 async fn dead_letter_stream_unsubscribe_succeeds() {
     struct DummySubscriber;
 
-    impl Subscriber<Boxed> for DummySubscriber {
-        fn recv(
-            &mut self,
-            _: Boxed,
-            _: &mut ProcessContext,
-        ) -> impl Future<Output = ()> + Send {
-            async {}
-        }
+    impl Subscriber<BoxedMessage> for DummySubscriber {
+        async fn recv(&mut self, _: BoxedMessage, _: &mut ProcessContext) {}
     }
 
     // Given: a subscriber already registered to the dead-letter stream
@@ -352,10 +340,10 @@ async fn dead_letter_stream_unsubscribed_subscriber_receives_no_further_events()
         count: Arc<AtomicU32>,
     }
 
-    impl Subscriber<Boxed> for CountingSubscriber {
+    impl Subscriber<BoxedMessage> for CountingSubscriber {
         fn recv(
             &mut self,
-            _: Boxed,
+            _: BoxedMessage,
             _: &mut ProcessContext,
         ) -> impl Future<Output = ()> + Send {
             let count = self.count.clone();
@@ -426,10 +414,10 @@ async fn props_subscriber_creates_working_subscriber() {
         count: Arc<AtomicU32>,
     }
 
-    impl Subscriber<Boxed> for CountingSubscriber {
+    impl Subscriber<BoxedMessage> for CountingSubscriber {
         fn recv(
             &mut self,
-            _: Boxed,
+            _: BoxedMessage,
             _: &mut ProcessContext,
         ) -> impl Future<Output = ()> + Send {
             let count = self.count.clone();
@@ -451,7 +439,7 @@ async fn props_subscriber_creates_working_subscriber() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("props-sub-test");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 
@@ -479,21 +467,15 @@ async fn props_subscriber_creates_working_subscriber() {
 async fn props_subscriber_caller_does_not_name_subscriber_process_type() {
     struct MySubscriber;
 
-    impl Subscriber<Boxed> for MySubscriber {
-        fn recv(
-            &mut self,
-            _: Boxed,
-            _: &mut ProcessContext,
-        ) -> impl Future<Output = ()> + Send {
-            async {}
-        }
+    impl Subscriber<BoxedMessage> for MySubscriber {
+        async fn recv(&mut self, _: BoxedMessage, _: &mut ProcessContext) {}
     }
 
     // Given / When: Props::subscriber is called — the return type is inferred
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("props-sub-type");
     let stream = system
-        .spawn_stream::<Boxed>(topic)
+        .spawn_stream::<BoxedMessage>(topic)
         .await
         .expect("spawn_stream should succeed");
 

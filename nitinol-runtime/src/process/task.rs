@@ -6,7 +6,7 @@ use tokio::sync::oneshot;
 use crate::error::HandlerError;
 use crate::ident::Pid;
 use crate::process::dead_letter::DeadLetterEnvelope;
-use crate::process::message::Boxed;
+use crate::process::message::BoxedMessage;
 use crate::process::{Process, ProcessContext, Receive};
 
 pub(crate) type UserTask<P> = Box<dyn Task<P>>;
@@ -33,7 +33,7 @@ where
 {
     DeadLetterEnvelope {
         destination,
-        message: Boxed::new(msg),
+        message: BoxedMessage::new(msg),
         sender,
         suppress_log,
         message_type_id: TypeId::of::<M>(),

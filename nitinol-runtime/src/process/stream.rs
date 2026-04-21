@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use crate::error::SendError;
 use crate::ident::Pid;
 use crate::process::dead_letter::{suppress_log, DeadLetterEnvelope};
-use crate::process::message::{Boxed, Message};
+use crate::process::message::{BoxedMessage, Message};
 use crate::process::task::{TellTask, UserTask};
 use crate::process::watch::Terminated;
 use crate::process::{Process, ProcessContext, ProcessProxy, Receive};
@@ -53,7 +53,7 @@ pub(crate) struct UnsubscribeMsg(pub Pid);
 /// Topic-scoped: each unique topic name maps to exactly one `Stream` instance
 /// in a `ProcessSystem`. Subscribers are stored as type-erased `Dispatcher<T>`,
 /// keyed by PID for O(1) removal on termination or unsubscribe.
-pub struct Stream<T = Boxed> {
+pub struct Stream<T = BoxedMessage> {
     subscribers: HashMap<Pid, Box<dyn Dispatcher<T>>>,
 }
 
@@ -107,7 +107,7 @@ where
                 if let Some(ref dl) = ctx.dead_letter {
                     let envelope = DeadLetterEnvelope {
                         destination: dispatcher.pid(),
-                        message: Boxed::new(msg.0.clone()),
+                        message: BoxedMessage::new(msg.0.clone()),
                         sender: Some(ctx.pid()),
                         suppress_log: suppress_log::<T>(),
                         message_type_id: TypeId::of::<T>(),
@@ -160,13 +160,13 @@ where
     }
 }
 
-impl ProcessProxy<Stream<Boxed>> {
+impl ProcessProxy<Stream<BoxedMessage>> {
     /// Publish any `Message` value to all subscribers of this stream.
     ///
     /// The value is type-erased into `Boxed` so every subscriber receives
     /// the same zero-copy `Arc` clone.
     pub async fn publish<M: Message>(&self, msg: M) -> Result<(), SendError> {
-        self.tell(PublishMsg(Boxed::new(msg))).await
+        self.tell(PublishMsg(BoxedMessage::new(msg))).await
     }
 }
 

@@ -9,7 +9,7 @@ use nitinol_runtime::error::AskError;
 use nitinol_runtime::ident::{Pid, ProcessName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::{
-    Boxed, DeadLetter, Props, ProcessSystem, Stream,
+    BoxedMessage, DeadLetter, Props, ProcessSystem, Stream,
     Subscriber, SuppressDeadLetterLog,
 };
 
@@ -32,8 +32,8 @@ struct DeadLetterCountSubscriber {
     count: Arc<AtomicU32>,
 }
 
-impl Subscriber<Boxed> for DeadLetterCountSubscriber {
-    fn recv(&mut self, _msg: Boxed, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+impl Subscriber<BoxedMessage> for DeadLetterCountSubscriber {
+    fn recv(&mut self, _msg: BoxedMessage, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
         let count = self.count.clone();
         async move {
             count.fetch_add(1, Ordering::SeqCst);
@@ -46,8 +46,8 @@ struct DeadLetterDestCapture {
     captured: Arc<tokio::sync::Mutex<Option<Pid>>>,
 }
 
-impl Subscriber<Boxed> for DeadLetterDestCapture {
-    fn recv(&mut self, msg: Boxed, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+impl Subscriber<BoxedMessage> for DeadLetterDestCapture {
+    fn recv(&mut self, msg: BoxedMessage, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
         let captured = self.captured.clone();
         async move {
             if let Some(dl) = msg.downcast_ref::<DeadLetter>() {
@@ -62,11 +62,11 @@ impl Subscriber<Boxed> for DeadLetterDestCapture {
 
 /// Captures the raw `Boxed` from the first notification.
 struct DeadLetterRawCapture {
-    captured: Arc<tokio::sync::Mutex<Option<Boxed>>>,
+    captured: Arc<tokio::sync::Mutex<Option<BoxedMessage>>>,
 }
 
-impl Subscriber<Boxed> for DeadLetterRawCapture {
-    fn recv(&mut self, msg: Boxed, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+impl Subscriber<BoxedMessage> for DeadLetterRawCapture {
+    fn recv(&mut self, msg: BoxedMessage, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
         let captured = self.captured.clone();
         async move {
             let mut guard = captured.lock().await;
@@ -162,7 +162,7 @@ async fn dead_letter_stream_downcasts_to_stream_boxed() {
         .expect("$dead-letters should be registered");
 
     // When: downcast to ProcessProxy<Stream<Boxed>>
-    let result = any.downcast::<Stream<Boxed>>();
+    let result = any.downcast::<Stream<BoxedMessage>>();
 
     // Then: downcast succeeds — it is indeed a Stream<Boxed>
     assert!(result.is_some());
@@ -256,7 +256,7 @@ async fn dead_letter_stream_publishes_dead_letter_type() {
     let system = ProcessSystem::new().await;
     let dl_stream = system.dead_letter_stream();
 
-    let captured: Arc<tokio::sync::Mutex<Option<Boxed>>> =
+    let captured: Arc<tokio::sync::Mutex<Option<BoxedMessage>>> =
         Arc::new(tokio::sync::Mutex::new(None));
     let sub_props = Props::subscriber({
         let captured = captured.clone();

@@ -6,7 +6,7 @@ pub(crate) use self::process::{DeadLetterEnvelope, DeadLetterProcess, DeadLetter
 use std::marker::PhantomData;
 
 use crate::ident::Pid;
-use crate::process::message::Boxed;
+use crate::process::message::BoxedMessage;
 
 /// Implementing this trait suppresses dead-letter log output for the type.
 /// Stream notification is NOT suppressed — messages still reach the stream.
@@ -45,7 +45,7 @@ pub(crate) fn suppress_log<M>() -> bool {
 /// A message that could not be delivered to its intended recipient.
 pub struct DeadLetter {
     pub destination: Pid,
-    pub message: Boxed,
+    pub message: BoxedMessage,
     pub sender: Option<Pid>,
 }
 

@@ -2,7 +2,7 @@ use crate::error::{SendError, SpawnError};
 use crate::ident::{Pid, ProcessName};
 use crate::process::run;
 use crate::process::{
-    AnyProxy, Boxed, DeadLetterProcess, DeadLetterProxy, Process, ProcessProxy, ProcessRegistry,
+    AnyProxy, BoxedMessage, DeadLetterProcess, DeadLetterProxy, Process, ProcessProxy, ProcessRegistry,
     Props, Receive, Stream,
 };
 
@@ -16,7 +16,7 @@ const DEAD_LETTER_ACTOR_NAME: &str = "$dead-letter";
 ///
 /// Wraps `ProcessProxy<Stream<Boxed>>` so that the internal proxy type is not
 /// exposed in the public API surface.
-pub struct DeadLetterStream(ProcessProxy<Stream<Boxed>>);
+pub struct DeadLetterStream(ProcessProxy<Stream<BoxedMessage>>);
 
 impl DeadLetterStream {
     pub fn pid(&self) -> Pid {
@@ -25,7 +25,7 @@ impl DeadLetterStream {
 
     pub async fn subscribe<P>(&self, proxy: ProcessProxy<P>) -> Result<(), SendError>
     where
-        P: Process + Receive<Boxed, Response = ()>,
+        P: Process + Receive<BoxedMessage, Response = ()>,
     {
         self.0.subscribe(proxy).await
     }
@@ -46,8 +46,8 @@ impl ProcessSystem {
         let registry = ProcessRegistry::new();
 
         // Spawn the dead-letter stream (no dead-letter routing for itself).
-        let dl_stream_process = Stream::<Boxed>::new();
-        let dl_stream: ProcessProxy<Stream<Boxed>> = run(
+        let dl_stream_process = Stream::<BoxedMessage>::new();
+        let dl_stream: ProcessProxy<Stream<BoxedMessage>> = run(
             dl_stream_process,
             Some(ProcessName::new(DEAD_LETTERS_TOPIC)),
             registry.clone(),
