@@ -16,6 +16,10 @@ dependencies = [
 [[package]]
 name = "basic-process"
 version = "0.1.0"
+dependencies = [
+ "nitinol-runtime",
+ "tokio",
+]
 
 [[package]]
 name = "futures-core"
