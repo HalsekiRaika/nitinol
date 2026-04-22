@@ -16,23 +16,17 @@ impl Counter {
     }
 }
 
+//noinspection DuplicatedCode
 impl Process for Counter {
-    fn on_start(&mut self, ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
-        // Capture by value: `ctx` is dropped here, before the future is returned.
-        // This keeps the returned future `Send` without holding a `&mut ProcessContext` across await.
+    async fn on_start(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
         let count = self.count;
-        async move {
-            println!("[pid={pid}] Counter started (initial count={count})");
-        }
+        println!("[pid={pid}] Counter started (initial count={count})");
     }
 
-    fn on_stop(&mut self, ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
-        // Symmetric capture: ownership of `ctx` ends before the async block runs.
+    async fn on_stop(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
         let count = self.count;
-        async move {
-            println!("[pid={pid}] Counter stopped (final count={count})");
-        }
+        println!("[pid={pid}] Counter stopped (final count={count})");
     }
 }
