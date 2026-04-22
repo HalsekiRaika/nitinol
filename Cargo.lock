@@ -45,6 +45,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "messaging"
+version = "0.1.0"
+dependencies = [
+ "nitinol-runtime",
+ "tokio",
+]
+
+[[package]]
 name = "nitinol"
 version = "0.4.2"
 
