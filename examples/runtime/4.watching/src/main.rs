@@ -18,7 +18,7 @@ async fn main() {
     //
     //   Producer  →watches→  Transformer  →watches→  Collector
     //
-    let collector_proxy = system.spawn(Props::new(|| Collector::new())).await;
+    let collector_proxy = system.spawn(Props::new(Collector::default)).await;
     let collector_pid = collector_proxy.pid();
 
     let transformer_proxy = system

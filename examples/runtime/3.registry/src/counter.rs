@@ -20,13 +20,13 @@ impl Counter {
 impl Process for Counter {
     async fn on_start(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        let count = self.count;
+        let count = &self.count;
         println!("[pid={pid}] Counter started (initial count={count})");
     }
 
     async fn on_stop(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        let count = self.count;
+        let count = &self.count;
         println!("[pid={pid}] Counter stopped (final count={count})");
     }
 }
@@ -40,6 +40,7 @@ pub struct Decrement;
 /// Request-response query: returns the current counter value.
 pub struct GetCount;
 
+// noinspection DuplicatedCode
 impl Receive<Increment> for Counter {
     type Response = ();
     type Error = Infallible;
@@ -50,6 +51,7 @@ impl Receive<Increment> for Counter {
     }
 }
 
+// noinspection DuplicatedCode
 impl Receive<Decrement> for Counter {
     type Response = ();
     type Error = Infallible;
@@ -60,15 +62,12 @@ impl Receive<Decrement> for Counter {
     }
 }
 
+// noinspection DuplicatedCode
 impl Receive<GetCount> for Counter {
     type Response = u32;
     type Error = Infallible;
 
-    async fn recv(
-        &mut self,
-        _msg: GetCount,
-        _ctx: &mut ProcessContext,
-    ) -> Result<u32, Infallible> {
+    async fn recv(&mut self, _msg: GetCount, _ctx: &mut ProcessContext) -> Result<u32, Infallible> {
         Ok(self.count)
     }
 }

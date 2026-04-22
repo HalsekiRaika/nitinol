@@ -6,15 +6,11 @@ use nitinol_runtime::process::{Process, ProcessContext, Receive};
 ///
 /// Demonstrates the simplest participant in a watch-based pipeline — the
 /// downstream end that holds no watch references itself.
+#[derive(Default)]
 pub struct Collector {
     items: Vec<String>,
 }
 
-impl Collector {
-    pub fn new() -> Self {
-        Self { items: Vec::new() }
-    }
-}
 
 impl Process for Collector {
     async fn on_start(&mut self, ctx: &mut ProcessContext) {

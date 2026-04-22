@@ -23,7 +23,7 @@ use watching::transformer::{self, DetachDownstream, Transform, Transformer};
 async fn watch_receives_terminated_stopped() {
     // Given: a Transformer watching a live Collector
     let system = ProcessSystem::new().await;
-    let collector_proxy = system.spawn(Props::new(|| Collector::new())).await;
+    let collector_proxy = system.spawn(Props::new(Collector::default)).await;
     let collector_pid = collector_proxy.pid();
     let transformer_proxy = system
         .spawn(Props::new(move || Transformer::new(collector_pid)))
@@ -52,7 +52,7 @@ async fn watch_receives_terminated_stopped() {
 async fn watch_receives_terminated_not_found() {
     // Given: a Collector that has already been stopped (dead pid)
     let system = ProcessSystem::new().await;
-    let temp = system.spawn(Props::new(|| Collector::new())).await;
+    let temp = system.spawn(Props::new(Collector::default)).await;
     let dead_pid = temp.pid();
     temp.stop().await.ok();
     // Wait for the process to fully deregister from the registry
@@ -83,7 +83,7 @@ async fn watch_receives_terminated_not_found() {
 async fn unwatch_prevents_terminated_notification() {
     // Given: a Transformer that has registered a watch and then cancelled it
     let system = ProcessSystem::new().await;
-    let collector_proxy = system.spawn(Props::new(|| Collector::new())).await;
+    let collector_proxy = system.spawn(Props::new(Collector::default)).await;
     let collector_pid = collector_proxy.pid();
     let transformer_proxy = system
         .spawn(Props::new(move || Transformer::new(collector_pid)))
@@ -118,7 +118,7 @@ async fn unwatch_prevents_terminated_notification() {
 async fn cascade_stop_propagates_through_pipeline() {
     // Given: a full pipeline (Producer →watches→ Transformer →watches→ Collector)
     let system = ProcessSystem::new().await;
-    let collector_proxy = system.spawn(Props::new(|| Collector::new())).await;
+    let collector_proxy = system.spawn(Props::new(Collector::default)).await;
     let collector_pid = collector_proxy.pid();
     let transformer_proxy = system
         .spawn(Props::new(move || Transformer::new(collector_pid)))
@@ -161,7 +161,7 @@ async fn cascade_stop_propagates_through_pipeline() {
 async fn normal_pipeline_data_flow() {
     // Given: a full pipeline with ["hello", "world", "watching"] as source data
     let system = ProcessSystem::new().await;
-    let collector_proxy = system.spawn(Props::new(|| Collector::new())).await;
+    let collector_proxy = system.spawn(Props::new(Collector::default)).await;
     let collector_pid = collector_proxy.pid();
     let transformer_proxy = system
         .spawn(Props::new(move || Transformer::new(collector_pid)))
@@ -213,7 +213,7 @@ async fn producer_returns_none_when_exhausted() {
     let system = ProcessSystem::new().await;
     // Producer watches a downstream pid via on_start; a throwaway Collector serves
     // as a stand-in — the watch/Terminated path is not under test here
-    let dummy = system.spawn(Props::new(|| Collector::new())).await;
+    let dummy = system.spawn(Props::new(Collector::default)).await;
     let dummy_pid = dummy.pid();
     let producer_proxy = system
         .spawn(Props::new(move || {
