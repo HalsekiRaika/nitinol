@@ -4,7 +4,7 @@ pub mod process;
 mod system;
 
 pub use self::process::{
-    BoxedMessage, DeadLetter, Message, Props, Stream, Subscriber,
+    BoxedMessage, DeadLetter, IdleTimeout, Message, Props, Stream, Subscriber,
     SupervisionStrategy, SuppressDeadLetterLog, Terminated, TerminatedReason,
 };
 pub use self::system::{DeadLetterStream, ProcessSystem};

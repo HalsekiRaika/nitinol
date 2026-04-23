@@ -89,6 +89,7 @@ async fn lifecycle_loop<P: Process>(
     let mut user_rx = user_rx;
     let mut sys_rx = sys_rx;
     let mut poisoned = false;
+    let mut timed_out = false;
     let mut watchers: HashSet<Pid> = HashSet::new();
     let mut restart_tracker = RestartTracker::new();
 
@@ -159,6 +160,7 @@ async fn lifecycle_loop<P: Process>(
                 }
             }
             _ = &mut timeout => {
+                timed_out = true;
                 break;
             }
         }
@@ -178,12 +180,18 @@ async fn lifecycle_loop<P: Process>(
         }
     }
 
+    let terminated_reason = if timed_out {
+        TerminatedReason::Timeout
+    } else {
+        TerminatedReason::Stopped
+    };
+
     for watcher_pid in watchers {
         if let Some(proxy) = registry.lookup(watcher_pid).await {
             let _ = proxy
                 .send_system_signal(SystemSignal::Terminated {
                     who: pid,
-                    why: TerminatedReason::Stopped,
+                    why: terminated_reason,
                 })
                 .await;
         }

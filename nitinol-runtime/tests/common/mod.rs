@@ -3,8 +3,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::sync::Mutex;
+
+use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::Props;
+use nitinol_runtime::{IdleTimeout, Props, Terminated};
 
 /// Test error type for handlers that intentionally fail.
 #[derive(Debug, thiserror::Error)]
@@ -120,6 +123,100 @@ pub async fn wait_for_flag(flag: &AtomicBool) {
         assert!(
             Instant::now() < deadline,
             "timed out waiting for flag to become true"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+// ---- Watcher process helpers ----
+// Not all test binaries use these; suppress dead_code for those
+
+/// Watcher process that records the first `Terminated` notification it receives.
+#[allow(dead_code)]
+pub struct WatcherProcess {
+    pub received: Arc<Mutex<Option<Terminated>>>,
+}
+
+/// Tell the watcher to start watching the given PID.
+#[allow(dead_code)]
+pub struct WatchPid {
+    pub pid: Pid,
+}
+
+/// No-op barrier: when the ask returns, the watcher has processed all prior messages.
+#[allow(dead_code)]
+pub struct Barrier;
+
+impl Receive<WatchPid> for WatcherProcess {
+    type Response = ();
+    type Error = std::convert::Infallible;
+    async fn recv(
+        &mut self,
+        msg: WatchPid,
+        ctx: &mut ProcessContext,
+    ) -> Result<(), std::convert::Infallible> {
+        ctx.watch(msg.pid).await;
+        Ok(())
+    }
+}
+
+impl Receive<Barrier> for WatcherProcess {
+    type Response = ();
+    type Error = std::convert::Infallible;
+    async fn recv(
+        &mut self,
+        _: Barrier,
+        _ctx: &mut ProcessContext,
+    ) -> Result<(), std::convert::Infallible> {
+        Ok(())
+    }
+}
+
+impl Process for WatcherProcess {
+    fn on_terminated(
+        &mut self,
+        terminated: Terminated,
+        _ctx: &mut ProcessContext,
+    ) -> impl Future<Output = ()> + Send {
+        let received = self.received.clone();
+        async move {
+            *received.lock().await = Some(terminated);
+        }
+    }
+}
+
+/// Creates `Props<WatcherProcess>` wired to the given shared state.
+///
+/// Pass `IdleTimeout::Persistent` when the watcher must outlive a system that
+/// has a short default idle timeout. Pass `IdleTimeout::Inherit` for tests where
+/// the watcher's lifetime is controlled by the system default or explicit stop.
+#[allow(dead_code)]
+pub fn watcher_props(
+    received: Arc<Mutex<Option<Terminated>>>,
+    idle_timeout: IdleTimeout,
+) -> Props<WatcherProcess> {
+    let mut props = Props::new(move || WatcherProcess {
+        received: received.clone(),
+    });
+    props.with_idle_timeout(idle_timeout);
+    props
+}
+
+/// Polls until `received` is `Some`, with a 5-second timeout.
+/// Panics if no `Terminated` notification arrives within the timeout.
+#[allow(dead_code)]
+pub async fn wait_for_terminated(received: &Arc<Mutex<Option<Terminated>>>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        {
+            let guard = received.lock().await;
+            if guard.is_some() {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Terminated notification"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }

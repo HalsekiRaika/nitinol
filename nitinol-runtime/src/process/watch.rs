@@ -14,6 +14,8 @@ pub enum TerminatedReason {
     Stopped,
     /// The watched process did not exist when `watch()` was called.
     NotFound,
+    /// The process stopped because it was idle for longer than its configured timeout.
+    Timeout,
 }
 
 /// Internal message routed through DeadLetter to trigger `Terminated{NotFound}`.
