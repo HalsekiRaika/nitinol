@@ -10,7 +10,7 @@ use crate::process::{
 const DEAD_LETTERS_TOPIC: &str = "$dead-letters";
 
 /// The well-known process name for the dead-letter actor.
-const DEAD_LETTER_ACTOR_NAME: &str = "$dead-letter";
+const DEAD_LETTER_PROCESS_NAME: &str = "$dead-letter";
 
 /// A handle to the system dead-letter stream with a stable, policy-compliant API.
 ///
@@ -37,7 +37,7 @@ impl DeadLetterStream {
 
 pub struct ProcessSystem {
     registry: ProcessRegistry,
-    dead_letter_ref: DeadLetterProxy,
+    dead_letter_proxy: DeadLetterProxy,
     dead_letter_stream: DeadLetterStream,
 }
 
@@ -62,26 +62,24 @@ impl ProcessSystem {
         // Spawn the dead-letter actor (captures the stream proxy and registry).
         let dl_stream_for_producer = dl_stream.clone();
         let registry_for_producer = registry.clone();
-        let mut dl_actor_props = Props::new(move || {
+        let mut dl_process_props = Props::new(move || {
             DeadLetterProcess::new(dl_stream_for_producer.clone(), registry_for_producer.clone())
         });
-        dl_actor_props.with_supervision_strategy(SupervisionStrategy::Resume);
-        let (dl_actor_process, dl_actor_supervision) = dl_actor_props.into_parts();
-        let dl_actor = run(
-            dl_actor_process,
-            Some(ProcessName::new(DEAD_LETTER_ACTOR_NAME)),
+        dl_process_props.with_supervision_strategy(SupervisionStrategy::Resume);
+        let (dl_process, dl_process_supervision) = dl_process_props.into_parts();
+        let dl_process = run(
+            dl_process,
+            Some(ProcessName::new(DEAD_LETTER_PROCESS_NAME)),
             registry.clone(),
             None,
             None,
-            dl_actor_supervision,
+            dl_process_supervision,
         )
         .await;
-
-        let dead_letter_ref = DeadLetterProxy::new(dl_actor.user_tx.clone());
-
+        
         Self {
             registry,
-            dead_letter_ref,
+            dead_letter_proxy: DeadLetterProxy::new(dl_process.user_tx.clone()),
             dead_letter_stream: DeadLetterStream(dl_stream),
         }
     }
@@ -98,7 +96,7 @@ impl ProcessSystem {
             None,
             self.registry.clone(),
             None,
-            Some(self.dead_letter_ref.clone()),
+            Some(self.dead_letter_proxy.clone()),
             supervision,
         )
         .await
@@ -115,7 +113,7 @@ impl ProcessSystem {
             Some(name),
             self.registry.clone(),
             None,
-            Some(self.dead_letter_ref.clone()),
+            Some(self.dead_letter_proxy.clone()),
             supervision,
         )
         .await
@@ -144,7 +142,7 @@ impl ProcessSystem {
             Some(topic),
             self.registry.clone(),
             None,
-            Some(self.dead_letter_ref.clone()),
+            Some(self.dead_letter_proxy.clone()),
             supervision,
         )
         .await;
