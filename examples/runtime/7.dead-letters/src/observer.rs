@@ -62,31 +62,25 @@ impl Subscriber<BoxedMessage> for DeadLetterObserver {
 pub struct DeadLetterInspector;
 
 impl Subscriber<BoxedMessage> for DeadLetterInspector {
-    fn recv(
-        &mut self,
-        msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
-    ) -> impl Future<Output = ()> + Send {
-        async move {
-            // Two-stage downcast: BoxedMessage → DeadLetter (outer)
-            let Some(dl) = msg.downcast_ref::<DeadLetter>() else {
-                return;
-            };
-            println!("  [inspector] destination: {}", dl.destination);
-            match &dl.sender {
-                Some(pid) => println!("  [inspector] sender: Some({pid})"),
-                None => println!("  [inspector] sender: None (direct tell/ask)"),
-            }
-            // DeadLetter.message → inner type (inner)
-            if dl.message.downcast_ref::<Ping>().is_some() {
-                println!("  [inspector] inner message: Ping");
-            } else if dl.message.downcast_ref::<Query>().is_some() {
-                println!("  [inspector] inner message: Query");
-            } else if dl.message.downcast_ref::<Hush>().is_some() {
-                println!("  [inspector] inner message: Hush (SuppressDeadLetterLog)");
-            } else {
-                println!("  [inspector] inner message: (unknown type)");
-            }
+    async fn recv(&mut self, msg: BoxedMessage, _ctx: &mut ProcessContext) {
+        // Two-stage downcast: BoxedMessage → DeadLetter (outer)
+        let Some(dl) = msg.downcast_ref::<DeadLetter>() else {
+            return;
+        };
+        println!("  [inspector] destination: {}", dl.destination);
+        match &dl.sender {
+            Some(pid) => println!("  [inspector] sender: Some({pid})"),
+            None => println!("  [inspector] sender: None (direct tell/ask)"),
+        }
+        // DeadLetter.message → inner type (inner)
+        if dl.message.downcast_ref::<Ping>().is_some() {
+            println!("  [inspector] inner message: Ping");
+        } else if dl.message.downcast_ref::<Query>().is_some() {
+            println!("  [inspector] inner message: Query");
+        } else if dl.message.downcast_ref::<Hush>().is_some() {
+            println!("  [inspector] inner message: Hush (SuppressDeadLetterLog)");
+        } else {
+            println!("  [inspector] inner message: (unknown type)");
         }
     }
 }

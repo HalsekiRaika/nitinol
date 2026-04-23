@@ -5,27 +5,29 @@
 //!
 //! # Learning objectives
 //!
-//! 1. **1対多のイベント配信基盤**
-//!    `Stream<BoxedMessage>` は publish された値を登録済みの全 subscriber に
-//!    同時配信する。これは CQRS+ES 統合時のドメインイベント配信の原型となる。
+//! 1. **One-to-many event distribution**
+//!    `Stream<BoxedMessage>` broadcasts every published value to all registered
+//!    subscribers simultaneously. This is the foundational pattern for domain
+//!    event distribution in a CQRS+ES architecture.
 //!
-//! 2. **Clone が必要な理由**
-//!    `publish<M: Message>` は `BoxedMessage::new(msg)` でメッセージを
-//!    `Arc<dyn Any>` に包み、各 subscriber に `clone()` して届ける。
-//!    clone は Arc の参照カウントを増やすだけで深いコピーは発生しないが、
-//!    コンパイル時に `T: Clone` が要求されるため `TemperatureReading` は
-//!    `#[derive(Clone)]` が必須である。
+//! 2. **Why Clone is required**
+//!    `publish<M: Message>` wraps the message with `BoxedMessage::new(msg)` into
+//!    an `Arc<dyn Any>` and delivers a `clone()` to each subscriber.
+//!    Cloning only increments the Arc reference count — no deep copy occurs —
+//!    but the compiler requires `T: Clone` at compile time, so
+//!    `TemperatureReading` must derive `#[derive(Clone)]`.
 //!
 //! 3. **Subscriber<T> vs Receive<T>**
 //!    - `AlertSubscriber`: `Subscriber<BoxedMessage>` + `Props::subscriber`
-//!      → 戻り値が `()` でシンプル。ライフサイクルフックなし。
+//!      → returns `()`, simple API with no lifecycle hooks.
 //!    - `DisplaySubscriber`: `Process + Receive<BoxedMessage>` + `Props::new`
-//!      → 戻り値が `Result<(), E>`、`on_start`/`on_stop` フックあり。
+//!      → returns `Result<(), E>`, with `on_start`/`on_stop` lifecycle hooks.
 //!
-//! 4. **Subscriber 停止時の自動クリーンアップ**
-//!    Stream は subscribe 時に `ctx.watch(pid)` でプロセス死活を監視する。
-//!    subscriber が停止すると Terminated 通知が Stream の `on_terminated`
-//!    フックに届き、該当エントリが自動削除される。
+//! 4. **Automatic cleanup on subscriber stop**
+//!    The Stream monitors each subscriber's liveness via `ctx.watch(pid)` at
+//!    subscribe time. When a subscriber stops, a Terminated notification is
+//!    delivered to the Stream's `on_terminated` hook, which automatically
+//!    removes the corresponding entry.
 
 use std::time::Duration;
 

@@ -5,27 +5,27 @@
 //!
 //! # Learning objectives
 //!
-//! 1. **組み込み Dead Letter インフラ**
-//!    `ProcessSystem` は起動時に `$dead-letters` トピックの
-//!    `Stream<BoxedMessage>` を自動で生成する。DLQ を有効にするために
-//!    追加の設定は不要。
+//! 1. **Built-in Dead Letter infrastructure**
+//!    `ProcessSystem` automatically spawns a `Stream<BoxedMessage>` for the
+//!    `$dead-letters` topic at startup. No additional configuration is needed
+//!    to enable the DLQ.
 //!
-//! 2. **Tell/Ask 失敗時の自動ルーティング**
-//!    停止済みプロセスへの `tell` や `ask` が失敗すると、ランタイムは
-//!    そのメッセージを `DeadLetter { destination, message, sender }` に
-//!    包んで DLQ ストリームへ自動配信する。
+//! 2. **Automatic routing on Tell/Ask failure**
+//!    When a `tell` or `ask` to a stopped process fails, the runtime wraps the
+//!    message in a `DeadLetter { destination, message, sender }` and
+//!    automatically publishes it to the DLQ stream.
 //!
-//! 3. **DeadLetter 構造体の検査**
-//!    DLQ ストリームの subscriber は `BoxedMessage` を受け取り、
-//!    `msg.downcast_ref::<DeadLetter>()` で外側を取り出した後、
-//!    `dl.message.downcast_ref::<Ping>()` で内包メッセージを復元できる
-//!    （二段 downcast）。
+//! 3. **Inspecting the DeadLetter struct**
+//!    A DLQ stream subscriber receives a `BoxedMessage` and can unwrap the
+//!    outer layer with `msg.downcast_ref::<DeadLetter>()`, then recover the
+//!    inner message with `dl.message.downcast_ref::<Ping>()` (two-stage
+//!    downcast).
 //!
-//! 4. **SuppressDeadLetterLog マーカー**
-//!    `SuppressDeadLetterLog` を実装した型のメッセージはランタイムが
-//!    ログ出力だけを抑制する。ストリームへの配信は継続する。
-//!    6.streams で学んだ Pub/Sub の仕組みが DLQ の基盤でもあることを
-//!    ここで確認できる。
+//! 4. **SuppressDeadLetterLog marker**
+//!    Messages whose type implements `SuppressDeadLetterLog` cause the runtime
+//!    to suppress only the log output; delivery to the stream continues
+//!    unaffected. This confirms that the Pub/Sub mechanism learned in
+//!    6.streams is also the foundation of the DLQ.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -82,7 +82,7 @@ async fn demo_tell_routes_to_dead_letter_stream() {
         .await
         .expect("subscribe should succeed");
 
-    // Spawn and immediately stop the target so all subsequent messages are undeliverable.
+    // Spawn and immediately stop the target so all later messages are undeliverable.
     let proxy = system.spawn(Props::new(|| TargetProcess)).await;
     let target_pid = proxy.pid();
     proxy.stop().await.expect("stop should succeed");
