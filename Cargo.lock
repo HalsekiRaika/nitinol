@@ -106,6 +106,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "streams"
+version = "0.1.0"
+dependencies = [
+ "nitinol-runtime",
+ "tokio",
+]
+
+[[package]]
 name = "supervision"
 version = "0.1.0"
 dependencies = [
