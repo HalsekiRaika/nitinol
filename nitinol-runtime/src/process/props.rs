@@ -42,6 +42,6 @@ impl<P: Process> Props<P> {
 pub enum SupervisionStrategy {
     Stop,
     Restart { max_retries: u32, within: Duration },
-    /// Ignore the handler error and continue processing subsequent messages.
+    /// Ignore the handler error and continue processing later messages.
     Resume,
 }
