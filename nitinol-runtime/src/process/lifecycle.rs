@@ -20,7 +20,7 @@ pub(crate) async fn run<P: Process>(
     registry: ProcessRegistry,
     timeout: Option<Duration>,
     dead_letter: Option<DeadLetterProxy>,
-    supervision: Option<SupervisionConfig<P>>,
+    supervision: SupervisionConfig<P>,
 ) -> ProcessProxy<P> {
     let (user_tx, user_rx) = mpsc::channel::<UserTask<P>>(32);
     let (sys_tx, sys_rx) = mpsc::channel::<SystemSignal>(32);
@@ -83,7 +83,7 @@ async fn lifecycle_loop<P: Process>(
     sys_rx: mpsc::Receiver<SystemSignal>,
     timeout: Option<Duration>,
     dead_letter: Option<DeadLetterProxy>,
-    supervision: Option<SupervisionConfig<P>>,
+    supervision: SupervisionConfig<P>,
 ) {
     let mut state = process;
     let mut user_rx = user_rx;
@@ -140,16 +140,13 @@ async fn lifecycle_loop<P: Process>(
                         if result.is_ok() {
                             continue;
                         }
-                        let config = match &supervision {
-                            Some(c) => c,
-                            None => continue, // No supervision (built-in processes): ignore handler errors.
-                        };
-                        match &config.strategy {
+                        match &supervision.strategy {
+                            SupervisionStrategy::Resume => continue,
                             SupervisionStrategy::Stop => break,
                             SupervisionStrategy::Restart { max_retries, within } => {
                                 if restart_tracker.should_restart(*max_retries, *within) {
                                     state.on_stop(&mut ctx).await;
-                                    state = (config.producer)();
+                                    state = (supervision.producer)();
                                     state.on_start(&mut ctx).await;
                                     // Loop continues; watchers set is preserved.
                                 } else {

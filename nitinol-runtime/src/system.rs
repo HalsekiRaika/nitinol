@@ -3,7 +3,7 @@ use crate::ident::{Pid, ProcessName};
 use crate::process::run;
 use crate::process::{
     AnyProxy, BoxedMessage, DeadLetterProcess, DeadLetterProxy, Process, ProcessProxy, ProcessRegistry,
-    Props, Receive, Stream,
+    Props, Receive, Stream, SupervisionStrategy,
 };
 
 /// The well-known topic name for the dead-letter stream.
@@ -46,26 +46,34 @@ impl ProcessSystem {
         let registry = ProcessRegistry::new();
 
         // Spawn the dead-letter stream (no dead-letter routing for itself).
-        let dl_stream_process = Stream::<BoxedMessage>::new();
+        let mut dl_stream_props: Props<Stream<BoxedMessage>> = Props::new(Stream::new);
+        dl_stream_props.with_supervision_strategy(SupervisionStrategy::Resume);
+        let (dl_stream_process, dl_stream_supervision) = dl_stream_props.into_parts();
         let dl_stream: ProcessProxy<Stream<BoxedMessage>> = run(
             dl_stream_process,
             Some(ProcessName::new(DEAD_LETTERS_TOPIC)),
             registry.clone(),
             None,
             None,
-            None,
+            dl_stream_supervision,
         )
         .await;
 
         // Spawn the dead-letter actor (captures the stream proxy and registry).
-        let dl_actor_process = DeadLetterProcess::new(dl_stream.clone(), registry.clone());
+        let dl_stream_for_producer = dl_stream.clone();
+        let registry_for_producer = registry.clone();
+        let mut dl_actor_props = Props::new(move || {
+            DeadLetterProcess::new(dl_stream_for_producer.clone(), registry_for_producer.clone())
+        });
+        dl_actor_props.with_supervision_strategy(SupervisionStrategy::Resume);
+        let (dl_actor_process, dl_actor_supervision) = dl_actor_props.into_parts();
         let dl_actor = run(
             dl_actor_process,
             Some(ProcessName::new(DEAD_LETTER_ACTOR_NAME)),
             registry.clone(),
             None,
             None,
-            None,
+            dl_actor_supervision,
         )
         .await;
 
@@ -91,7 +99,7 @@ impl ProcessSystem {
             self.registry.clone(),
             None,
             Some(self.dead_letter_ref.clone()),
-            Some(supervision),
+            supervision,
         )
         .await
     }
@@ -108,7 +116,7 @@ impl ProcessSystem {
             self.registry.clone(),
             None,
             Some(self.dead_letter_ref.clone()),
-            Some(supervision),
+            supervision,
         )
         .await
     }
@@ -128,14 +136,16 @@ impl ProcessSystem {
                 topic: topic.to_string(),
             });
         }
-        let process = Stream::new();
+        let mut stream_props: Props<Stream<T>> = Props::new(Stream::new);
+        stream_props.with_supervision_strategy(SupervisionStrategy::Resume);
+        let (process, supervision) = stream_props.into_parts();
         let proxy = run(
             process,
             Some(topic),
             self.registry.clone(),
             None,
             Some(self.dead_letter_ref.clone()),
-            None,
+            supervision,
         )
         .await;
         Ok(proxy)

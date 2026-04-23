@@ -436,6 +436,119 @@ async fn restart_strategy_with_zero_within_panics() {
     system.spawn(props).await;
 }
 
+/// Resume strategy: a handler failure is ignored and the process continues running.
+/// Subsequent messages are handled normally without any restart.
+#[tokio::test]
+async fn resume_strategy_ignores_handler_error() {
+    // Given: a process with the Resume supervision strategy
+    let system = ProcessSystem::new().await;
+    let start_count = Arc::new(AtomicU32::new(0));
+    let stop_count = Arc::new(AtomicU32::new(0));
+    let props = supervised_props(
+        start_count.clone(),
+        stop_count.clone(),
+        SupervisionStrategy::Resume,
+    );
+    let proxy = system.spawn(props).await;
+    wait_for_count(&start_count, 1).await;
+
+    // When: a failing message is sent
+    let _ = proxy.tell(Fail).await;
+
+    // Then: the process is still alive and handles subsequent messages
+    // (Ping after tell(Fail) is a barrier — if it succeeds, Fail was already processed)
+    let result = proxy.ask(Ping).await;
+    assert!(result.is_ok(), "process should still handle messages after a handler error under Resume");
+}
+
+/// Resume strategy: handler failures do not trigger a restart.
+/// on_start is called exactly once regardless of how many failures occur.
+#[tokio::test]
+async fn resume_strategy_does_not_restart() {
+    // Given: a process with the Resume supervision strategy
+    let system = ProcessSystem::new().await;
+    let start_count = Arc::new(AtomicU32::new(0));
+    let stop_count = Arc::new(AtomicU32::new(0));
+    let props = supervised_props(
+        start_count.clone(),
+        stop_count.clone(),
+        SupervisionStrategy::Resume,
+    );
+    let proxy = system.spawn(props).await;
+    wait_for_count(&start_count, 1).await;
+
+    // When: multiple failing messages are sent
+    let _ = proxy.tell(Fail).await;
+    let _ = proxy.tell(Fail).await;
+    let _ = proxy.tell(Fail).await;
+
+    // Barrier: wait until all Fail messages have been processed
+    let _ = proxy.ask(Ping).await;
+
+    // Then: on_start was called exactly once (no restart occurred)
+    assert_eq!(start_count.load(Ordering::SeqCst), 1, "Resume must not restart on handler error");
+}
+
+/// Resume strategy: on_stop is not called when a handler error occurs.
+/// on_stop is only called when the process is explicitly stopped.
+#[tokio::test]
+async fn resume_strategy_does_not_call_on_stop_on_error() {
+    // Given: a process with the Resume supervision strategy
+    let system = ProcessSystem::new().await;
+    let start_count = Arc::new(AtomicU32::new(0));
+    let stop_count = Arc::new(AtomicU32::new(0));
+    let props = supervised_props(
+        start_count.clone(),
+        stop_count.clone(),
+        SupervisionStrategy::Resume,
+    );
+    let proxy = system.spawn(props).await;
+    wait_for_count(&start_count, 1).await;
+
+    // When: a failing message is sent
+    let _ = proxy.tell(Fail).await;
+
+    // Barrier: ensure Fail has been processed before checking stop_count
+    let _ = proxy.ask(Ping).await;
+
+    // Then: on_stop has NOT been called (error was resumed, not stopped)
+    assert_eq!(stop_count.load(Ordering::SeqCst), 0, "Resume must not call on_stop on handler error");
+
+    // When: the process is explicitly stopped
+    let _ = proxy.stop().await;
+
+    // Then: on_stop is called exactly once (normal shutdown)
+    wait_for_count(&stop_count, 1).await;
+    assert_eq!(stop_count.load(Ordering::SeqCst), 1);
+}
+
+/// Resume strategy: the process remains registered in the registry after a handler failure.
+#[tokio::test]
+async fn resume_strategy_keeps_process_in_registry() {
+    // Given: a process with the Resume supervision strategy
+    let system = ProcessSystem::new().await;
+    let start_count = Arc::new(AtomicU32::new(0));
+    let stop_count = Arc::new(AtomicU32::new(0));
+    let props = supervised_props(
+        start_count.clone(),
+        stop_count.clone(),
+        SupervisionStrategy::Resume,
+    );
+    let proxy = system.spawn(props).await;
+    let pid = proxy.pid();
+    wait_for_count(&start_count, 1).await;
+
+    // When: a failing message is sent
+    let _ = proxy.tell(Fail).await;
+
+    // Barrier: ensure Fail has been processed
+    let _ = proxy.ask(Ping).await;
+
+    // Then: the process is still registered in the registry
+    let found = system.lookup(pid).await;
+    assert!(found.is_some(), "process with Resume strategy must remain in registry after handler error");
+}
+
 /// Props::with_supervision_strategy is a builder method returning &mut Self,
 /// enabling chained configuration.
 #[tokio::test]
