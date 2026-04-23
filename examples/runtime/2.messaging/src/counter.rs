@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::message::{Decrement, GetCount, Increment};
 
-/// A counter process whose state lives inside a spawned tokio task.
+/// A counter-process whose state lives inside a spawned tokio task.
 ///
 /// The only way to read or modify `count` from outside the task is through
 /// the `ProcessProxy` — Tell for writes, Ask for reads.
@@ -34,6 +34,7 @@ impl Process for Counter {
     }
 }
 
+// noinspection DuplicatedCode
 impl Receive<Increment> for Counter {
     type Response = ();
     type Error = Infallible;
@@ -44,6 +45,7 @@ impl Receive<Increment> for Counter {
     }
 }
 
+// noinspection DuplicatedCode
 impl Receive<Decrement> for Counter {
     type Response = ();
     type Error = Infallible;
@@ -54,6 +56,7 @@ impl Receive<Decrement> for Counter {
     }
 }
 
+// noinspection DuplicatedCode
 impl Receive<GetCount> for Counter {
     type Response = u32;
     type Error = Infallible;

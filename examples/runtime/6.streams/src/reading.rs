@@ -1,14 +1,13 @@
 //! Temperature reading message type for the streams example.
 //!
 //! # Why Clone?
-//! `Stream<BoxedMessage>` broadcasts one value to every subscriber. Internally
+//! `Stream<BoxedMessage>` broadcasts one value to every subscriber. Internally, 
 //! `publish` wraps the message in a `BoxedMessage` (`Arc<dyn Any + Send + Sync>`)
 //! and calls `msg.clone()` for each subscriber (see `stream.rs`, `T: Clone`
 //! constraint on `Receive<PublishMsg<T>>`).  The cloning of `BoxedMessage` is
-//! cheap — only the reference count increments — but the compile-time `Clone`
+//! inexpensive — only the reference count increments — but the compile-time `Clone`
 //! requirement on the type-erased inner value is what forces `TemperatureReading`
-//! to derive `Clone`.  Without it the type cannot be published to a multi-
-//! subscriber stream.
+//! to derive `Clone`.  Without it the type cannot be published to a multi-subscriber stream.
 
 /// A temperature measurement published by a sensor to the stream.
 ///

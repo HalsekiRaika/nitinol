@@ -16,6 +16,7 @@ use watching::collector::{Collect, Collector, GetCollected};
 use watching::producer::{Producer, Pull};
 use watching::transformer::{Transform, Transformer};
 
+// noinspection DuplicatedCode
 /// Initialise tracing for this example.
 ///
 /// Without `--features console`:

@@ -38,6 +38,7 @@ use tracing::info;
 
 use supervision::transformer::{DataTransformer, GetSuccessCount, Parse};
 
+// noinspection DuplicatedCode
 /// Initialise tracing for this example.
 ///
 /// Without `--features console`:
@@ -83,6 +84,7 @@ async fn main() {
 
 // ─── Stop strategy ───────────────────────────────────────────────────────────
 
+#[tracing::instrument(name = "demo-stop-strategy")]
 async fn demo_stop_strategy() {
     info!("Stop strategy (default)");
     let system = ProcessSystem::new().await;
@@ -103,6 +105,7 @@ async fn demo_stop_strategy() {
 
 // ─── Restart strategy ────────────────────────────────────────────────────────
 
+#[tracing::instrument(name = "demo-restart-strategy")]
 async fn demo_restart_strategy() {
     info!("Restart strategy (max_retries=2, within=10s)");
     let system = ProcessSystem::new().await;
@@ -134,6 +137,7 @@ async fn demo_restart_strategy() {
 
 // ─── Rate limit exceeded ──────────────────────────────────────────────────────
 
+#[tracing::instrument(name = "demo-rate-limit-exceeded")]
 async fn demo_rate_limit_exceeded() {
     info!("Rate limit exceeded (max_retries=2, within=10s)");
     let system = ProcessSystem::new().await;

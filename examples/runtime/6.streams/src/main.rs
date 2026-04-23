@@ -46,6 +46,7 @@ use streams::display::DisplaySubscriber;
 use streams::reading::TemperatureReading;
 use streams::sensor::{Measure, TemperatureSensor};
 
+// noinspection DuplicatedCode
 /// Initialise tracing for this example.
 ///
 /// Without `--features console`:
@@ -90,7 +91,7 @@ async fn main() {
 }
 
 // ─── Fan-out broadcast ────────────────────────────────────────────────────────
-
+#[tracing::instrument(name = "demo-fanout-broadcast")]
 async fn demo_fanout_broadcast() {
     info!("Fan-out broadcast");
     let system = ProcessSystem::new().await;
@@ -137,7 +138,7 @@ async fn demo_fanout_broadcast() {
 }
 
 // ─── Unsubscribe ─────────────────────────────────────────────────────────────
-
+#[tracing::instrument(name = "demo-unsubscribe")]
 async fn demo_unsubscribe() {
     info!("Unsubscribe");
     let system = ProcessSystem::new().await;
@@ -183,7 +184,7 @@ async fn demo_unsubscribe() {
 }
 
 // ─── Auto-cleanup on subscriber stop ─────────────────────────────────────────
-
+#[tracing::instrument(name = "demo-auto-cleanup")]
 async fn demo_auto_cleanup() {
     info!("Auto-cleanup on subscriber stop");
     let system = ProcessSystem::new().await;

@@ -44,6 +44,7 @@ use dead_letters::message::{Hush, Ping, Query};
 use dead_letters::observer::{DeadLetterInspector, DeadLetterObserver};
 use dead_letters::target::TargetProcess;
 
+// noinspection DuplicatedCode
 /// Initialise tracing for this example.
 ///
 /// Without `--features console`:
@@ -97,7 +98,7 @@ async fn main() {
 }
 
 // ─── Demo 1: Tell routes to dead-letter stream ───────────────────────────────
-
+#[tracing::instrument(name = "tell_routes_to_dead_letter_stream")]
 async fn demo_tell_routes_to_dead_letter_stream() {
     info!("Tell routes to dead-letter stream");
 
@@ -139,7 +140,7 @@ async fn demo_tell_routes_to_dead_letter_stream() {
 }
 
 // ─── Demo 2: Ask returns AskError::DeadLetter and publishes to stream ────────
-
+#[tracing::instrument(name = "ask_returns_dead_letter_error_and_publishes_to_stream")]
 async fn demo_ask_returns_dead_letter_error_and_publishes_to_stream() {
     info!("Ask returns AskError::DeadLetter and publishes to stream");
 
@@ -186,7 +187,7 @@ async fn demo_ask_returns_dead_letter_error_and_publishes_to_stream() {
 }
 
 // ─── Demo 3: SuppressDeadLetterLog still delivers to stream ──────────────────
-
+#[tracing::instrument(name = "suppress_log_marker_still_delivers_to_stream")]
 async fn demo_suppress_log_marker_still_delivers_to_stream() {
     info!("SuppressDeadLetterLog still delivers to stream");
 

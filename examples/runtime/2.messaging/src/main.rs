@@ -15,6 +15,7 @@ use tracing::info;
 use messaging::counter::Counter;
 use messaging::message::{Decrement, GetCount, Increment};
 
+// noinspection DuplicatedCode
 /// Initialise tracing for this example.
 ///
 /// Without `--features console`:

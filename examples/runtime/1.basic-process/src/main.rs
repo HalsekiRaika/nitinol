@@ -14,6 +14,7 @@ use tracing::info;
 
 use basic_process::counter::Counter;
 
+// noinspection DuplicatedCode
 /// Initialise tracing for this example.
 ///
 /// Without `--features console`:

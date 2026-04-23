@@ -24,7 +24,7 @@ use crate::reading::TemperatureReading;
 /// Monitors published readings and counts events that exceed the threshold.
 ///
 /// Demonstrates the `Subscriber<BoxedMessage>` simplified API: no `Result`
-/// return type, no explicit error handling — just handle the message and
+/// return type, no explicit error handling — handle the message and
 /// return.  Contrast with `DisplaySubscriber`, which uses `Receive<BoxedMessage>`
 /// and returns `Result<(), Infallible>`.
 pub struct AlertSubscriber {
@@ -41,23 +41,15 @@ impl AlertSubscriber {
 // ─── Subscriber<BoxedMessage> ─────────────────────────────────────────────────
 
 impl Subscriber<BoxedMessage> for AlertSubscriber {
-    fn recv(
-        &mut self,
-        msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
-    ) -> impl Future<Output = ()> + Send {
-        let alert_count = self.alert_count.clone();
-        let threshold = self.threshold;
-        async move {
-            let Some(reading) = msg.downcast_ref::<TemperatureReading>() else {
-                return;
-            };
-            if reading.celsius > threshold {
-                alert_count.fetch_add(1, Ordering::SeqCst);
-                let sensor = &reading.sensor;
-                let celsius = reading.celsius;
-                info!("[ALERT] sensor={sensor} celsius={celsius:.1} exceeds threshold={threshold:.1}");
-            }
+    async fn recv(&mut self, msg: BoxedMessage, _ctx: &mut ProcessContext) {
+        let Some(reading) = msg.downcast_ref::<TemperatureReading>() else {
+            return;
+        };
+        if reading.celsius > self.threshold {
+            self.alert_count.fetch_add(1, Ordering::SeqCst);
+            let sensor = &reading.sensor;
+            let celsius = reading.celsius;
+            info!("[ALERT] sensor={sensor} celsius={celsius:.1} exceeds threshold={threshold:.1}", threshold = self.threshold);
         }
     }
 }
