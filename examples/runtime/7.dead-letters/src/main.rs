@@ -3,6 +3,12 @@
 //! Run with:
 //!   cargo run -p dead-letters
 //!
+//! To enable tokio-console (opt-in):
+//!   set RUSTFLAGS="--cfg tokio_unstable"
+//!   cargo run --features console -p dead-letters
+//!
+//! RUST_LOG can be set to override the default log level (defaults to `info`).
+//!
 //! # Learning objectives
 //!
 //! 1. **Built-in Dead Letter infrastructure**
@@ -32,10 +38,43 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nitinol_runtime::{Props, ProcessSystem};
+use tracing::info;
 
 use dead_letters::message::{Hush, Ping, Query};
 use dead_letters::observer::{DeadLetterInspector, DeadLetterObserver};
 use dead_letters::target::TargetProcess;
+
+/// Initialise tracing for this example.
+///
+/// Without `--features console`:
+///   Uses `fmt` + `EnvFilter`.  `RUST_LOG` controls the filter level;
+///   defaults to `info` when unset.
+///
+/// With `--features console` (requires `RUSTFLAGS="--cfg tokio_unstable"`):
+///   Adds a `console_subscriber` layer so the process can be inspected with
+///   `tokio-console`.  Run with:
+///     RUSTFLAGS="--cfg tokio_unstable" cargo run -p dead-letters --features console
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    #[cfg(not(feature = "console"))]
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(env_filter)
+        .init();
+
+    #[cfg(feature = "console")]
+    tracing_subscriber::registry()
+        .with(console_subscriber::spawn())
+        .with(fmt::layer())
+        .with(env_filter)
+        .init();
+}
 
 /// Polls `counter` until it reaches at least `expected`, with a 5-second timeout.
 async fn wait_for_count(counter: &AtomicU32, expected: u32) {
@@ -48,7 +87,9 @@ async fn wait_for_count(counter: &AtomicU32, expected: u32) {
 
 #[tokio::main]
 async fn main() {
-    println!("=== Dead Letters Example ===\n");
+    init_tracing();
+
+    info!("Dead Letters Example");
 
     demo_tell_routes_to_dead_letter_stream().await;
     demo_ask_returns_dead_letter_error_and_publishes_to_stream().await;
@@ -58,7 +99,7 @@ async fn main() {
 // ─── Demo 1: Tell routes to dead-letter stream ───────────────────────────────
 
 async fn demo_tell_routes_to_dead_letter_stream() {
-    println!("--- Tell routes to dead-letter stream ---");
+    info!("Tell routes to dead-letter stream");
 
     let system = ProcessSystem::new().await;
     let dl_stream = system.dead_letter_stream();
@@ -88,19 +129,19 @@ async fn demo_tell_routes_to_dead_letter_stream() {
     proxy.stop().await.expect("stop should succeed");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    println!("Sending Ping to stopped process (pid={target_pid})...");
+    info!("Sending Ping to stopped process (pid={target_pid})...");
     let _ = proxy.tell(Ping).await;
 
     // Poll until the observer confirms receipt, up to 5 seconds.
     wait_for_count(&received, 1).await;
 
-    println!("DeadLetter received on stream (destination={target_pid}).\n");
+    info!("DeadLetter received on stream (destination={target_pid}).");
 }
 
 // ─── Demo 2: Ask returns AskError::DeadLetter and publishes to stream ────────
 
 async fn demo_ask_returns_dead_letter_error_and_publishes_to_stream() {
-    println!("--- Ask returns AskError::DeadLetter and publishes to stream ---");
+    info!("Ask returns AskError::DeadLetter and publishes to stream");
 
     let system = ProcessSystem::new().await;
     let dl_stream = system.dead_letter_stream();
@@ -129,24 +170,25 @@ async fn demo_ask_returns_dead_letter_error_and_publishes_to_stream() {
     proxy.stop().await.expect("stop should succeed");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    println!("Asking Query to stopped process (pid={target_pid})...");
+    info!("Asking Query to stopped process (pid={target_pid})...");
     let result = proxy.ask(Query).await;
 
     match result {
-        Err(err) => println!("  ask() returned Err: {err}"),
-        Ok(_) => println!("  ask() unexpectedly succeeded"),
+        Err(err) => info!("  ask() returned Err: {err}"),
+        Ok(_) => info!("  ask() unexpectedly succeeded"),
     }
 
     // ask() also routes to the dead-letter stream.
     wait_for_count(&received, 1).await;
 
-    println!("  stream also received the dead letter (count={}).\n", received.load(Ordering::SeqCst));
+    let count = received.load(Ordering::SeqCst);
+    info!("  stream also received the dead letter (count={count}).");
 }
 
 // ─── Demo 3: SuppressDeadLetterLog still delivers to stream ──────────────────
 
 async fn demo_suppress_log_marker_still_delivers_to_stream() {
-    println!("--- SuppressDeadLetterLog still delivers to stream ---");
+    info!("SuppressDeadLetterLog still delivers to stream");
 
     let system = ProcessSystem::new().await;
     let dl_stream = system.dead_letter_stream();
@@ -175,12 +217,12 @@ async fn demo_suppress_log_marker_still_delivers_to_stream() {
     proxy.stop().await.expect("stop should succeed");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    println!("Sending Hush (SuppressDeadLetterLog) to stopped process (pid={target_pid})...");
+    info!("Sending Hush (SuppressDeadLetterLog) to stopped process (pid={target_pid})...");
     let _ = proxy.tell(Hush).await;
 
     // Even though Hush suppresses log output, the stream still receives the notification.
     wait_for_count(&received, 1).await;
 
-    println!("  Stream received the dead letter despite SuppressDeadLetterLog.");
-    println!("  Log suppression is applied by the runtime — but stream delivery is never suppressed.\n");
+    info!("  Stream received the dead letter despite SuppressDeadLetterLog.");
+    info!("  Log suppression is applied by the runtime — but stream delivery is never suppressed.");
 }

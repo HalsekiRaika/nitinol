@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
+use tracing::info;
 
 /// Pipeline terminal stage: accumulates transformed text items in arrival order.
 ///
@@ -15,12 +16,13 @@ pub struct Collector {
 impl Process for Collector {
     async fn on_start(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!("[pid={pid}] Collector started");
+        info!("[pid={pid}] Collector started");
     }
 
     async fn on_stop(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!("[pid={pid}] Collector stopped ({} items collected)", self.items.len());
+        let n = self.items.len();
+        info!("[pid={pid}] Collector stopped ({n} items collected)");
     }
 }
 

@@ -14,6 +14,7 @@
 use std::fmt;
 
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
+use tracing::info;
 
 // ─── Messages ────────────────────────────────────────────────────────────────
 
@@ -65,15 +66,13 @@ impl DataTransformer {
 impl Process for DataTransformer {
     async fn on_start(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!("[pid={pid}] DataTransformer started (success_count=0)");
+        info!("[pid={pid}] DataTransformer started (success_count=0)");
     }
 
     async fn on_stop(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!(
-            "[pid={pid}] DataTransformer stopped (final success_count={})",
-            self.success_count
-        );
+        let count = self.success_count;
+        info!("[pid={pid}] DataTransformer stopped (final success_count={count})");
     }
 }
 

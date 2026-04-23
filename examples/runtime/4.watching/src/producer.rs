@@ -3,6 +3,7 @@ use std::convert::Infallible;
 
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::{Process, ProcessContext, Receive, Terminated, TerminatedReason};
+use tracing::info;
 
 /// Pipeline source stage: vends text items one-by-one and watches the downstream Transformer.
 ///
@@ -30,26 +31,23 @@ impl Producer {
 impl Process for Producer {
     async fn on_start(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!(
-            "[pid={pid}] Producer started ({} items), watching transformer pid={}",
-            self.items.len(),
-            self.transformer_pid
-        );
+        let n = self.items.len();
+        let transformer = self.transformer_pid;
+        info!("[pid={pid}] Producer started ({n} items), watching transformer pid={transformer}");
         ctx.watch(self.transformer_pid).await;
     }
 
     async fn on_stop(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!("[pid={pid}] Producer stopped");
+        info!("[pid={pid}] Producer stopped");
     }
 
     async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!(
-            "[pid={pid}] Producer received Terminated {{ who={}, why={:?} }}",
-            terminated.who, terminated.why
-        );
-        self.downstream_terminated_reason = Some(terminated.why);
+        let who = terminated.who;
+        let why = terminated.why;
+        info!("[pid={pid}] Producer received Terminated {{ who={who}, why={why:?} }}");
+        self.downstream_terminated_reason = Some(why);
     }
 }
 

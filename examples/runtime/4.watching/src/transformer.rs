@@ -2,6 +2,7 @@ use std::fmt;
 
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::{Process, ProcessContext, Receive, Terminated, TerminatedReason};
+use tracing::info;
 
 /// Pipeline middle stage: converts text to uppercase and watches the downstream Collector.
 ///
@@ -31,22 +32,22 @@ impl Transformer {
 impl Process for Transformer {
     async fn on_start(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!("[pid={pid}] Transformer started, watching collector pid={}", self.collector_pid);
+        let collector = self.collector_pid;
+        info!("[pid={pid}] Transformer started, watching collector pid={collector}");
         ctx.watch(self.collector_pid).await;
     }
 
     async fn on_stop(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!("[pid={pid}] Transformer stopped");
+        info!("[pid={pid}] Transformer stopped");
     }
 
     async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!(
-            "[pid={pid}] Transformer received Terminated {{ who={}, why={:?} }}",
-            terminated.who, terminated.why
-        );
-        self.downstream_terminated_reason = Some(terminated.why);
+        let who = terminated.who;
+        let why = terminated.why;
+        info!("[pid={pid}] Transformer received Terminated {{ who={who}, why={why:?} }}");
+        self.downstream_terminated_reason = Some(why);
         self.downstream_alive = false;
     }
 }

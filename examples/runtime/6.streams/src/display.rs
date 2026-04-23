@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::BoxedMessage;
+use tracing::info;
 
 use crate::reading::TemperatureReading;
 
@@ -39,15 +40,14 @@ impl DisplaySubscriber {
 
 impl Process for DisplaySubscriber {
     async fn on_start(&mut self, ctx: &mut ProcessContext) {
-        println!("[pid={}] DisplaySubscriber started", ctx.pid());
+        let pid = ctx.pid();
+        info!("[pid={pid}] DisplaySubscriber started");
     }
 
     async fn on_stop(&mut self, ctx: &mut ProcessContext) {
-        println!(
-            "[pid={}] DisplaySubscriber stopped (total received: {})",
-            ctx.pid(),
-            self.received_count.load(Ordering::SeqCst)
-        );
+        let pid = ctx.pid();
+        let total = self.received_count.load(Ordering::SeqCst);
+        info!("[pid={pid}] DisplaySubscriber stopped (total received: {total})");
     }
 }
 
@@ -64,10 +64,9 @@ impl Receive<BoxedMessage> for DisplaySubscriber {
     ) -> Result<(), std::convert::Infallible> {
         self.received_count.fetch_add(1, Ordering::SeqCst);
         if let Some(reading) = msg.downcast_ref::<TemperatureReading>() {
-            println!(
-                "[DISPLAY] sensor={} celsius={:.1}",
-                reading.sensor, reading.celsius
-            );
+            let sensor = &reading.sensor;
+            let celsius = reading.celsius;
+            info!("[DISPLAY] sensor={sensor} celsius={celsius:.1}");
         }
         Ok(())
     }

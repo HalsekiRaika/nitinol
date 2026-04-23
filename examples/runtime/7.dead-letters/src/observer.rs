@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use nitinol_runtime::process::ProcessContext;
 use nitinol_runtime::{BoxedMessage, DeadLetter, Subscriber};
+use tracing::info;
 
 use crate::message::{Hush, Ping, Query};
 
@@ -67,20 +68,21 @@ impl Subscriber<BoxedMessage> for DeadLetterInspector {
         let Some(dl) = msg.downcast_ref::<DeadLetter>() else {
             return;
         };
-        println!("  [inspector] destination: {}", dl.destination);
+        let destination = dl.destination;
+        info!("  [inspector] destination: {destination}");
         match &dl.sender {
-            Some(pid) => println!("  [inspector] sender: Some({pid})"),
-            None => println!("  [inspector] sender: None (direct tell/ask)"),
+            Some(pid) => info!("  [inspector] sender: Some({pid})"),
+            None => info!("  [inspector] sender: None (direct tell/ask)"),
         }
         // DeadLetter.message → inner type (inner)
         if dl.message.downcast_ref::<Ping>().is_some() {
-            println!("  [inspector] inner message: Ping");
+            info!("  [inspector] inner message: Ping");
         } else if dl.message.downcast_ref::<Query>().is_some() {
-            println!("  [inspector] inner message: Query");
+            info!("  [inspector] inner message: Query");
         } else if dl.message.downcast_ref::<Hush>().is_some() {
-            println!("  [inspector] inner message: Hush (SuppressDeadLetterLog)");
+            info!("  [inspector] inner message: Hush (SuppressDeadLetterLog)");
         } else {
-            println!("  [inspector] inner message: (unknown type)");
+            info!("  [inspector] inner message: (unknown type)");
         }
     }
 }

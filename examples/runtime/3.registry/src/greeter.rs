@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
+use tracing::info;
 
 /// A stateless greeter process.
 ///
@@ -12,12 +13,12 @@ pub struct Greeter;
 impl Process for Greeter {
     async fn on_start(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!("[pid={pid}] Greeter started");
+        info!("[pid={pid}] Greeter started");
     }
 
     async fn on_stop(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
-        println!("[pid={pid}] Greeter stopped");
+        info!("[pid={pid}] Greeter stopped");
     }
 }
 

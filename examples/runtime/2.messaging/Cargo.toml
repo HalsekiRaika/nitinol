@@ -19,3 +19,9 @@ path = "src/main.rs"
 [dependencies]
 nitinol-runtime = { path = "../../../nitinol-runtime" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+console-subscriber = { version = "0.4", optional = true }
+
+[features]
+console = ["dep:console-subscriber", "tokio/tracing"]

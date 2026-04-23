@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use nitinol_runtime::process::ProcessContext;
 use nitinol_runtime::{BoxedMessage, Subscriber};
+use tracing::info;
 
 use crate::reading::TemperatureReading;
 
@@ -53,10 +54,9 @@ impl Subscriber<BoxedMessage> for AlertSubscriber {
             };
             if reading.celsius > threshold {
                 alert_count.fetch_add(1, Ordering::SeqCst);
-                println!(
-                    "[ALERT] sensor={} celsius={:.1} exceeds threshold={:.1}",
-                    reading.sensor, reading.celsius, threshold
-                );
+                let sensor = &reading.sensor;
+                let celsius = reading.celsius;
+                info!("[ALERT] sensor={sensor} celsius={celsius:.1} exceeds threshold={threshold:.1}");
             }
         }
     }

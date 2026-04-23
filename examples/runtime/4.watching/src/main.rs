@@ -1,13 +1,57 @@
+//! Run with:
+//!   cargo run -p watching
+//!
+//! To enable tokio-console (opt-in):
+//!   set RUSTFLAGS="--cfg tokio_unstable"
+//!   cargo run --features console -p watching
+//!
+//! RUST_LOG can be set to override the default log level (defaults to `info`).
+
 use std::time::Duration;
 
 use nitinol_runtime::{ProcessSystem, Props};
+use tracing::info;
 
 use watching::collector::{Collect, Collector, GetCollected};
 use watching::producer::{Producer, Pull};
 use watching::transformer::{Transform, Transformer};
 
+/// Initialise tracing for this example.
+///
+/// Without `--features console`:
+///   Uses `fmt` + `EnvFilter`.  `RUST_LOG` controls the filter level;
+///   defaults to `info` when unset.
+///
+/// With `--features console` (requires `RUSTFLAGS="--cfg tokio_unstable"`):
+///   Adds a `console_subscriber` layer so the process can be inspected with
+///   `tokio-console`.  Run with:
+///     RUSTFLAGS="--cfg tokio_unstable" cargo run -p watching --features console
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    #[cfg(not(feature = "console"))]
+    tracing_subscriber::registry()
+        .with(fmt::layer())
+        .with(env_filter)
+        .init();
+
+    #[cfg(feature = "console")]
+    tracing_subscriber::registry()
+        .with(console_subscriber::spawn())
+        .with(fmt::layer())
+        .with(env_filter)
+        .init();
+}
+
 #[tokio::main]
 async fn main() {
+    init_tracing();
+
     let system = ProcessSystem::new().await;
 
     // ── Pipeline construction (bottom-up) ─────────────────────────────────────
@@ -36,7 +80,7 @@ async fn main() {
     // Allow on_start hooks and watch registrations to complete before use.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    println!("\n── Normal data flow ──────────────────────────────────────────────────────");
+    info!("Normal data flow");
 
     // ── Normal data flow: Pull → Transform → Collect ──────────────────────────
     //
@@ -67,9 +111,9 @@ async fn main() {
         .ask(GetCollected)
         .await
         .expect("ask GetCollected should succeed");
-    println!("Collected items: {collected:?}");
+    info!("Collected items: {collected:?}");
 
-    println!("\n── Cascade-stop demonstration ────────────────────────────────────────────");
+    info!("Cascade-stop demonstration");
 
     // ── Cascade-stop: Collector stops → Transformer errors → Producer notified ─
     //
@@ -93,7 +137,7 @@ async fn main() {
         .ok(); // process may have stopped; ignore SendError
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    println!("Pipeline cascade-stop complete.");
+    info!("Pipeline cascade-stop complete.");
 
     producer_proxy.stop().await.ok();
     tokio::time::sleep(Duration::from_millis(50)).await;

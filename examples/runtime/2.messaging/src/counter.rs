@@ -1,7 +1,7 @@
 use std::convert::Infallible;
-use std::future::Future;
 
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
+use tracing::info;
 
 use crate::message::{Decrement, GetCount, Increment};
 
@@ -24,13 +24,13 @@ impl Process for Counter {
     async fn on_start(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
         let count = self.count;
-        println!("[pid={pid}] Counter started (initial count={count})");
+        info!("[pid={pid}] Counter started (initial count={count})");
     }
 
     async fn on_stop(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();
         let count = self.count;
-        println!("[pid={pid}] Counter stopped (final count={count})");
+        info!("[pid={pid}] Counter stopped (final count={count})");
     }
 }
 
