@@ -10,12 +10,14 @@ pub struct Terminated {
 /// Reason for a `Terminated` notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminatedReason {
-    /// The process stopped normally (or via Supervision `Stop` directive).
+    /// The process stopped normally (via a Supervision `Stop` directive or channel close).
     Stopped,
     /// The watched process did not exist when `watch()` was called.
     NotFound,
     /// The process stopped because it was idle for longer than its configured timeout.
     Timeout,
+    /// The process was force-terminated without cleanup (via `Poison` directive).
+    Poisoned,
 }
 
 /// Internal message routed through DeadLetter to trigger `Terminated{NotFound}`.

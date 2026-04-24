@@ -88,8 +88,6 @@ async fn lifecycle_loop<P: Process>(
     let mut state = process;
     let mut user_rx = user_rx;
     let mut sys_rx = sys_rx;
-    let mut poisoned = false;
-    let mut timed_out = false;
     let mut watchers: HashSet<Pid> = HashSet::new();
     let mut restart_tracker = RestartTracker::new();
 
@@ -112,16 +110,13 @@ async fn lifecycle_loop<P: Process>(
 
     state.on_start(&mut ctx).await;
 
-    loop {
+    let reason: TerminatedReason = loop {
         tokio::select! {
             biased;
             Some(sys_sig) = sys_rx.recv() => {
                 match sys_sig {
-                    SystemSignal::Stop => break,
-                    SystemSignal::Poison => {
-                        poisoned = true;
-                        break;
-                    }
+                    SystemSignal::Stop => break TerminatedReason::Stopped,
+                    SystemSignal::Poison => break TerminatedReason::Poisoned,
                     SystemSignal::Watch { watcher_pid } => {
                         watchers.insert(watcher_pid);
                     }
@@ -143,7 +138,7 @@ async fn lifecycle_loop<P: Process>(
                         }
                         match &supervision.strategy {
                             SupervisionStrategy::Resume => continue,
-                            SupervisionStrategy::Stop => break,
+                            SupervisionStrategy::Stop => break TerminatedReason::Stopped,
                             SupervisionStrategy::Restart { max_retries, within } => {
                                 if restart_tracker.should_restart(*max_retries, *within) {
                                     state.on_stop(&mut ctx).await;
@@ -151,22 +146,21 @@ async fn lifecycle_loop<P: Process>(
                                     state.on_start(&mut ctx).await;
                                     // Loop continues; watchers set is preserved.
                                 } else {
-                                    break;
+                                    break TerminatedReason::Stopped;
                                 }
                             }
                         }
                     },
-                    None => break,
+                    None => break TerminatedReason::Stopped,
                 }
             }
             _ = &mut timeout => {
-                timed_out = true;
-                break;
+                break TerminatedReason::Timeout;
             }
         }
-    }
+    };
 
-    if !poisoned {
+    if reason != TerminatedReason::Poisoned {
         state.on_stop(&mut ctx).await;
     }
 
@@ -180,18 +174,12 @@ async fn lifecycle_loop<P: Process>(
         }
     }
 
-    let terminated_reason = if timed_out {
-        TerminatedReason::Timeout
-    } else {
-        TerminatedReason::Stopped
-    };
-
     for watcher_pid in watchers {
         if let Some(proxy) = registry.lookup(watcher_pid).await {
             let _ = proxy
                 .send_system_signal(SystemSignal::Terminated {
                     who: pid,
-                    why: terminated_reason,
+                    why: reason,
                 })
                 .await;
         }

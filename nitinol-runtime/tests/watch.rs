@@ -493,3 +493,93 @@ async fn terminated_is_clone() {
     let _ = TerminatedReason::Stopped.clone();
     let _ = TerminatedReason::NotFound.clone();
 }
+
+/// Poisoning a live process delivers Terminated{Poisoned} to its watcher
+/// and skips on_stop (no cleanup is performed).
+#[tokio::test]
+async fn watch_live_process_receives_terminated_poisoned_on_poison() {
+    // Given: a target process (running) with lifecycle event tracking
+    let system = ProcessSystem::new().await;
+    let target_started = Arc::new(AtomicBool::new(false));
+    let target_stopped = Arc::new(AtomicBool::new(false));
+    let target_proxy = system
+        .spawn(target_props(target_started.clone(), target_stopped.clone()))
+        .await;
+    let target_pid = target_proxy.pid();
+    wait_for_flag(&target_started).await;
+
+    // And: a watcher that begins watching the target
+    let received = Arc::new(Mutex::new(None::<Terminated>));
+    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Inherit)).await;
+    watcher_proxy
+        .tell(WatchPid { pid: target_pid })
+        .await
+        .expect("tell WatchPid should succeed");
+    // Barrier: ensure the watch is registered before we poison the target
+    watcher_proxy
+        .ask(Barrier)
+        .await
+        .expect("barrier ask should succeed");
+
+    // When: the target is poisoned (force-killed, no cleanup)
+    target_proxy.poison().await.expect("poison should succeed");
+
+    // Then: the watcher receives Terminated{who: target_pid, why: Poisoned}
+    wait_for_terminated(&received).await;
+    let terminated = received.lock().await.clone().unwrap();
+    assert_eq!(terminated.who, target_pid);
+    assert_eq!(terminated.why, TerminatedReason::Poisoned);
+
+    // And: on_stop was NOT called on the target (Poisoned skips cleanup)
+    assert!(
+        !target_stopped.load(Ordering::SeqCst),
+        "on_stop must not be called when a process is poisoned"
+    );
+}
+
+/// TerminatedReason::Poisoned is distinct from Stopped (they are separate termination causes).
+#[tokio::test]
+async fn terminated_reason_poisoned_is_distinct_from_stopped() {
+    assert_ne!(TerminatedReason::Poisoned, TerminatedReason::Stopped);
+}
+
+/// TerminatedReason::Poisoned is distinct from NotFound.
+#[tokio::test]
+async fn terminated_reason_poisoned_is_distinct_from_not_found() {
+    assert_ne!(TerminatedReason::Poisoned, TerminatedReason::NotFound);
+}
+
+/// TerminatedReason::Poisoned is distinct from Timeout.
+#[tokio::test]
+async fn terminated_reason_poisoned_is_distinct_from_timeout() {
+    assert_ne!(TerminatedReason::Poisoned, TerminatedReason::Timeout);
+}
+
+/// TerminatedReason::Poisoned implements PartialEq: equal to itself.
+#[tokio::test]
+async fn terminated_reason_poisoned_is_equal_to_itself() {
+    assert_eq!(TerminatedReason::Poisoned, TerminatedReason::Poisoned);
+}
+
+/// TerminatedReason::Poisoned is Copy: a copy leaves the original intact.
+#[tokio::test]
+async fn terminated_reason_poisoned_is_copy() {
+    // Given: a Poisoned variant value
+    let original = TerminatedReason::Poisoned;
+
+    // When: an implicit copy is made (no explicit clone)
+    let copy = original;
+
+    // Then: both values are equal (original is still usable — Copy semantics)
+    assert_eq!(original, copy);
+}
+
+/// TerminatedReason::Poisoned is Clone: clone produces an equal value.
+#[tokio::test]
+async fn terminated_reason_poisoned_is_clone() {
+    // Given / When: clone the Poisoned variant
+    let cloned = TerminatedReason::Poisoned.clone();
+
+    // Then: the clone equals the original
+    assert_eq!(cloned, TerminatedReason::Poisoned);
+}
