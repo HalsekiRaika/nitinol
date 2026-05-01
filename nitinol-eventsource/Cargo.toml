@@ -9,6 +9,9 @@ description = "Effect ADT and event sourcing utilities for nitinol"
 
 [dependencies]
 nitinol-runtime = { path = "../nitinol-runtime" }
+nitinol-persistence = { path = "../nitinol-persistence" }
+async-trait = "0.1"
+bytes = "1"
 futures-core = "0.3"
 thiserror = "2"
 

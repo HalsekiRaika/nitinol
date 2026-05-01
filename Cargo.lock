@@ -637,7 +637,10 @@ version = "0.4.2"
 name = "nitinol-eventsource"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "futures-core",
+ "nitinol-persistence",
  "nitinol-runtime",
  "thiserror",
  "tokio",
