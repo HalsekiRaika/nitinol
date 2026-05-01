@@ -182,8 +182,8 @@ fn run_effect<'a, A: Aggregate>(
     state: &'a mut A,
     aggregate_id: &'a AggregateId,
     sequence: &'a mut u64,
-    event_store: &'a dyn EventStore,
-    codec: &'a dyn EventCodec<A::Event>,
+    event_store: &'a (impl EventStore + ?Sized),
+    codec: &'a (impl EventCodec<A::Event> + ?Sized),
 ) -> futures_core::future::BoxFuture<'a, Result<Vec<A::Event>, EffectExecutionError>>
 where
     A::Event: Clone,
