@@ -11,6 +11,14 @@ default-members = [
 
 resolver = "2"
 
+[workspace.metadata.dylint]
+libraries = [
+    { git = "https://github.com/HalsekiRaika/dylints", rev = "cba0f0d", pattern = "lints/*" },
+]
+
+[workspace.lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(dylint_lib, values(any()))"]
 
 [workspace.package]
 edition = "2021"
