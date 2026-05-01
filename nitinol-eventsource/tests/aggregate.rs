@@ -7,6 +7,7 @@ use nitinol_persistence::{AggregateId, EventType};
 // Fixtures
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct Incremented;
 
 impl Event for Incremented {

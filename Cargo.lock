@@ -640,10 +640,13 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures-core",
+ "futures-util",
+ "jiff",
  "nitinol-persistence",
  "nitinol-runtime",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

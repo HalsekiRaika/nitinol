@@ -13,7 +13,11 @@ nitinol-persistence = { path = "../nitinol-persistence" }
 async-trait = "0.1"
 bytes = "1"
 futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+jiff = "0.2"
 thiserror = "2"
+tokio = { version = "1", default-features = false, features = ["rt"] }
+tracing = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
