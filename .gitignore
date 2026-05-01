@@ -24,8 +24,11 @@ target/
 # AI Assistants
 project_plans.md
 CLAUDE.md
-.claude/
+.claude/*
 .kiro/
+
+# AI Assistants Exclude
+!.claude/settings.json
 
 # debug files
 *.db
