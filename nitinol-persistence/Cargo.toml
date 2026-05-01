@@ -1,0 +1,19 @@
+[package]
+name = "nitinol-persistence"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Persistence abstractions for nitinol event sourcing"
+
+[dependencies]
+bytes = "1"
+chrono = "0.4"
+futures-core = "0.3"
+async-trait = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+futures-util = "0.3"
