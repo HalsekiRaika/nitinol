@@ -9,7 +9,7 @@ description = "Persistence abstractions for nitinol event sourcing"
 
 [dependencies]
 bytes = "1"
-chrono = "0.4"
+jiff = "0.2"
 futures-core = "0.3"
 async-trait = "0.1"
 thiserror = "2"

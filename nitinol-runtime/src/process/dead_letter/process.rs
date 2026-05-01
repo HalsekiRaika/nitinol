@@ -50,7 +50,10 @@ pub(crate) struct DeadLetterProcess {
 }
 
 impl DeadLetterProcess {
-    pub(crate) fn new(stream: ProcessProxy<Stream<BoxedMessage>>, registry: ProcessRegistry) -> Self {
+    pub(crate) fn new(
+        stream: ProcessProxy<Stream<BoxedMessage>>,
+        registry: ProcessRegistry,
+    ) -> Self {
         Self {
             stream,
             throttle: LogThrottle::new(),
@@ -114,4 +117,3 @@ impl Receive<DeadLetterEnvelopeMsg> for DeadLetterProcess {
         Ok(())
     }
 }
-

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nitinol_runtime::process::ProcessContext;
-use nitinol_runtime::{BoxedMessage, DeadLetter, Props, ProcessSystem, Subscriber};
+use nitinol_runtime::{BoxedMessage, DeadLetter, ProcessSystem, Props, Subscriber};
 
 use dead_letters::message::Query;
 use dead_letters::target::TargetProcess;

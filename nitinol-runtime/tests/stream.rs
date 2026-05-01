@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 
 use nitinol_runtime::ident::{Pid, ProcessName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{BoxedMessage, DeadLetter, Message, Props, ProcessSystem, Stream, Subscriber, SupervisionStrategy};
+use nitinol_runtime::{
+    BoxedMessage, DeadLetter, Message, ProcessSystem, Props, Stream, Subscriber,
+    SupervisionStrategy,
+};
 
 /// Error type for handlers that intentionally fail.
 #[derive(Debug, thiserror::Error)]
@@ -33,7 +36,9 @@ impl Receive<BoxedMessage> for ReceivingProcess {
 }
 
 fn receiving_props(count: Arc<AtomicU32>) -> Props<ReceivingProcess> {
-    Props::new(move || ReceivingProcess { count: count.clone() })
+    Props::new(move || ReceivingProcess {
+        count: count.clone(),
+    })
 }
 
 /// A Subscriber<Boxed> implementation that counts received messages.
@@ -215,9 +220,7 @@ async fn publish_delivers_to_all_subscribers() {
         .await
         .expect("spawn_stream should succeed");
 
-    let counts: Vec<Arc<AtomicU32>> = (0..3)
-        .map(|_| Arc::new(AtomicU32::new(0)))
-        .collect();
+    let counts: Vec<Arc<AtomicU32>> = (0..3).map(|_| Arc::new(AtomicU32::new(0))).collect();
 
     for count in &counts {
         let proxy = system.spawn(receiving_props(count.clone())).await;
@@ -377,7 +380,9 @@ async fn public_api_does_not_require_subscriber_process_type() {
     // but the caller never names that type)
     let props = Props::subscriber({
         let count = count.clone();
-        move || CountingSubscriber { count: count.clone() }
+        move || CountingSubscriber {
+            count: count.clone(),
+        }
     });
     let proxy = system.spawn(props).await;
     stream
@@ -461,7 +466,9 @@ async fn subscriber_trait_and_props_flow_receives_message() {
     let count = Arc::new(AtomicU32::new(0));
     let props = Props::subscriber({
         let count = count.clone();
-        move || CountingSubscriber { count: count.clone() }
+        move || CountingSubscriber {
+            count: count.clone(),
+        }
     });
     let subscriber_proxy = system.spawn(props).await;
     stream
@@ -490,7 +497,9 @@ async fn subscriber_trait_receives_multiple_publishes() {
     let count = Arc::new(AtomicU32::new(0));
     let props = Props::subscriber({
         let count = count.clone();
-        move || CountingSubscriber { count: count.clone() }
+        move || CountingSubscriber {
+            count: count.clone(),
+        }
     });
     let subscriber_proxy = system.spawn(props).await;
     stream
@@ -519,9 +528,7 @@ async fn mixed_subscriber_types_all_receive_published_message() {
         .expect("spawn_stream should succeed");
 
     let count_direct = Arc::new(AtomicU32::new(0));
-    let direct_proxy = system
-        .spawn(receiving_props(count_direct.clone()))
-        .await;
+    let direct_proxy = system.spawn(receiving_props(count_direct.clone())).await;
     stream
         .subscribe(direct_proxy)
         .await
@@ -1111,7 +1118,9 @@ async fn publish_to_dead_subscriber_routes_to_dead_letter_stream() {
     let dl_count = Arc::new(AtomicU32::new(0));
     let dl_sub_props = Props::subscriber({
         let dl_count = dl_count.clone();
-        move || DeadLetterCountSub { count: dl_count.clone() }
+        move || DeadLetterCountSub {
+            count: dl_count.clone(),
+        }
     });
     let dl_sub_proxy = system.spawn(dl_sub_props).await;
     dl_stream
@@ -1155,7 +1164,9 @@ async fn dead_letter_from_failed_publish_contains_subscriber_pid() {
     let captured: Arc<tokio::sync::Mutex<Option<Pid>>> = Arc::new(tokio::sync::Mutex::new(None));
     let dl_sub_props = Props::subscriber({
         let captured = captured.clone();
-        move || DeadLetterDestinationCapture { captured: captured.clone() }
+        move || DeadLetterDestinationCapture {
+            captured: captured.clone(),
+        }
     });
     let dl_sub_proxy = system.spawn(dl_sub_props).await;
     dl_stream
@@ -1203,7 +1214,9 @@ async fn dead_letter_from_failed_publish_contains_stream_pid_as_sender() {
         Arc::new(tokio::sync::Mutex::new(None));
     let dl_sub_props = Props::subscriber({
         let captured = captured.clone();
-        move || DeadLetterSenderCapture { captured: captured.clone() }
+        move || DeadLetterSenderCapture {
+            captured: captured.clone(),
+        }
     });
     let dl_sub_proxy = system.spawn(dl_sub_props).await;
     dl_stream
@@ -1250,7 +1263,9 @@ async fn publish_to_dead_subscriber_still_delivers_to_live_subscribers() {
     let dl_count = Arc::new(AtomicU32::new(0));
     let dl_sub_props = Props::subscriber({
         let dl_count = dl_count.clone();
-        move || DeadLetterCountSub { count: dl_count.clone() }
+        move || DeadLetterCountSub {
+            count: dl_count.clone(),
+        }
     });
     let dl_sub_proxy = system.spawn(dl_sub_props).await;
     dl_stream
@@ -1306,7 +1321,9 @@ async fn failed_publish_generates_exactly_one_dead_letter() {
     let dl_count = Arc::new(AtomicU32::new(0));
     let dl_sub_props = Props::subscriber({
         let dl_count = dl_count.clone();
-        move || DeadLetterCountSub { count: dl_count.clone() }
+        move || DeadLetterCountSub {
+            count: dl_count.clone(),
+        }
     });
     let dl_sub_proxy = system.spawn(dl_sub_props).await;
     dl_stream

@@ -9,9 +9,13 @@ use tokio::sync::Mutex;
 
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{IdleTimeout, ProcessSystem, Props, SupervisionStrategy, Terminated, TerminatedReason};
+use nitinol_runtime::{
+    IdleTimeout, ProcessSystem, Props, SupervisionStrategy, Terminated, TerminatedReason,
+};
 
-use common::{wait_for_flag, wait_for_terminated, watcher_props, Barrier, TestError, WatchPid, WatcherProcess};
+use common::{
+    wait_for_flag, wait_for_terminated, watcher_props, Barrier, TestError, WatchPid, WatcherProcess,
+};
 
 /// A simple target process that tracks lifecycle events.
 struct TargetProcess {
@@ -121,7 +125,9 @@ async fn watch_live_process_receives_terminated_stopped_on_stop() {
 
     // And: a watcher that begins watching the target
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Inherit)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Inherit))
+        .await;
     watcher_proxy
         .tell(WatchPid { pid: target_pid })
         .await
@@ -157,7 +163,9 @@ async fn terminated_who_matches_stopped_process_pid() {
     wait_for_flag(&a_started).await;
 
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Inherit)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Inherit))
+        .await;
 
     // Watch only A
     watcher_proxy
@@ -176,7 +184,10 @@ async fn terminated_who_matches_stopped_process_pid() {
     // Then: Terminated.who == pid_a (not some other PID)
     wait_for_terminated(&received).await;
     let terminated = received.lock().await.clone().unwrap();
-    assert_eq!(terminated.who, pid_a, "Terminated.who must be the stopped process PID");
+    assert_eq!(
+        terminated.who, pid_a,
+        "Terminated.who must be the stopped process PID"
+    );
 }
 
 /// Watching a process that is already stopped delivers Terminated{NotFound}.
@@ -198,7 +209,9 @@ async fn watch_already_stopped_process_receives_terminated_not_found() {
 
     // When: a watcher watches the already-dead PID
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Inherit)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Inherit))
+        .await;
     watcher_proxy
         .tell(WatchPid { pid: target_pid })
         .await
@@ -225,7 +238,9 @@ async fn unwatch_cancels_terminated_notification() {
     wait_for_flag(&target_started).await;
 
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Inherit)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Inherit))
+        .await;
     watcher_proxy
         .tell(WatchPid { pid: target_pid })
         .await
@@ -274,20 +289,30 @@ async fn multiple_watchers_all_receive_terminated() {
 
     // And: two watchers, each watching the same target
     let received_a = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_a = system.spawn(watcher_props(received_a.clone(), IdleTimeout::Inherit)).await;
+    let watcher_a = system
+        .spawn(watcher_props(received_a.clone(), IdleTimeout::Inherit))
+        .await;
     watcher_a
         .tell(WatchPid { pid: target_pid })
         .await
         .expect("tell WatchPid should succeed");
-    watcher_a.ask(Barrier).await.expect("barrier should succeed");
+    watcher_a
+        .ask(Barrier)
+        .await
+        .expect("barrier should succeed");
 
     let received_b = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_b = system.spawn(watcher_props(received_b.clone(), IdleTimeout::Inherit)).await;
+    let watcher_b = system
+        .spawn(watcher_props(received_b.clone(), IdleTimeout::Inherit))
+        .await;
     watcher_b
         .tell(WatchPid { pid: target_pid })
         .await
         .expect("tell WatchPid should succeed");
-    watcher_b.ask(Barrier).await.expect("barrier should succeed");
+    watcher_b
+        .ask(Barrier)
+        .await
+        .expect("barrier should succeed");
 
     // When: the target is stopped
     target_proxy.stop().await.expect("stop should succeed");
@@ -328,7 +353,9 @@ async fn restart_does_not_send_terminated_to_watchers() {
 
     // Set up watcher
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Inherit)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Inherit))
+        .await;
     watcher_proxy
         .tell(WatchPid { pid: target_pid })
         .await
@@ -384,7 +411,9 @@ async fn rate_limit_stop_sends_terminated_to_watchers() {
 
     // Set up watcher
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Inherit)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Inherit))
+        .await;
     watcher_proxy
         .tell(WatchPid { pid: target_pid })
         .await
@@ -431,7 +460,9 @@ async fn watch_persists_across_restart() {
 
     // Set up watcher before any restart
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Inherit)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Inherit))
+        .await;
     watcher_proxy
         .tell(WatchPid { pid: target_pid })
         .await
@@ -449,7 +480,10 @@ async fn watch_persists_across_restart() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     {
         let guard = received.lock().await;
-        assert!(guard.is_none(), "no Terminated should arrive during restart");
+        assert!(
+            guard.is_none(),
+            "no Terminated should arrive during restart"
+        );
     }
 
     // When: target permanently stops
@@ -510,7 +544,9 @@ async fn watch_live_process_receives_terminated_poisoned_on_poison() {
 
     // And: a watcher that begins watching the target
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Inherit)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Inherit))
+        .await;
     watcher_proxy
         .tell(WatchPid { pid: target_pid })
         .await

@@ -1,5 +1,5 @@
-use crate::id::AggregateId;
 use crate::event_type::EventType;
+use crate::id::AggregateId;
 
 #[derive(Debug, Clone, Default)]
 pub struct LoadQuery {

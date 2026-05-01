@@ -13,10 +13,7 @@ async fn save_and_load_checkpoint_roundtrip() {
         .save(&proj, 42, None)
         .await
         .expect("save should succeed");
-    let loaded = store
-        .load(&proj)
-        .await
-        .expect("load should succeed");
+    let loaded = store.load(&proj).await.expect("load should succeed");
 
     // Then: the saved sequence is returned
     assert_eq!(loaded, Some(42));
@@ -43,10 +40,7 @@ async fn multiple_saves_update_checkpoint_to_latest_value() {
         .await
         .expect("save seq=30 should succeed");
 
-    let loaded = store
-        .load(&proj)
-        .await
-        .expect("load should succeed");
+    let loaded = store.load(&proj).await.expect("load should succeed");
 
     // Then: the last written value (30) is returned
     assert_eq!(loaded, Some(30));
@@ -81,9 +75,6 @@ async fn save_with_none_tx_succeeds() {
 
     // Then: the call succeeds and the value is persisted
     assert!(result.is_ok(), "save with tx=None should succeed");
-    let loaded = store
-        .load(&proj)
-        .await
-        .expect("load should succeed");
+    let loaded = store.load(&proj).await.expect("load should succeed");
     assert_eq!(loaded, Some(99));
 }

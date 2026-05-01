@@ -48,4 +48,3 @@ pub struct DeadLetter {
     pub message: BoxedMessage,
     pub sender: Option<Pid>,
 }
-

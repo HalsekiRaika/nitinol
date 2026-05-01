@@ -157,8 +157,7 @@ impl EventStore for InMemoryEventStore {
 
         drop(state);
 
-        let items: Vec<Result<LoadedEvent, LoadError>> =
-            matching.into_iter().map(Ok).collect();
+        let items: Vec<Result<LoadedEvent, LoadError>> = matching.into_iter().map(Ok).collect();
 
         Ok(Box::pin(OwnedEventStream {
             items: items.into_iter(),

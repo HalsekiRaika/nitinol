@@ -30,8 +30,7 @@ fn init_tracing() {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     #[cfg(not(feature = "console"))]
     tracing_subscriber::registry()

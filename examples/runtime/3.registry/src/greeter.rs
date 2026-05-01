@@ -29,11 +29,7 @@ impl Receive<Greet> for Greeter {
     type Response = String;
     type Error = Infallible;
 
-    async fn recv(
-        &mut self,
-        msg: Greet,
-        _ctx: &mut ProcessContext,
-    ) -> Result<String, Infallible> {
+    async fn recv(&mut self, msg: Greet, _ctx: &mut ProcessContext) -> Result<String, Infallible> {
         Ok(format!("Hello, {}!", msg.0))
     }
 }

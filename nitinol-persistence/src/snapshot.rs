@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use crate::id::AggregateId;
 
@@ -8,5 +8,5 @@ pub struct PersistedSnapshot {
     pub aggregate_id: AggregateId,
     pub sequence: u64,
     pub payload: Bytes,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }

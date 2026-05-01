@@ -1,14 +1,18 @@
 use bytes::Bytes;
-use chrono::Utc;
+use jiff::Timestamp;
 use nitinol_persistence::store::{InMemorySnapshotStore, SnapshotStore};
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 
-fn make_snapshot(aggregate_id: AggregateId, sequence: u64, payload: &'static [u8]) -> PersistedSnapshot {
+fn make_snapshot(
+    aggregate_id: AggregateId,
+    sequence: u64,
+    payload: &'static [u8],
+) -> PersistedSnapshot {
     PersistedSnapshot {
         aggregate_id,
         sequence,
         payload: Bytes::from_static(payload),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -21,10 +25,7 @@ async fn save_and_load_latest_roundtrip() {
     let snapshot = make_snapshot(agg.clone(), 42, b"state-at-42");
 
     // When: the snapshot is saved and then loaded
-    store
-        .save(snapshot)
-        .await
-        .expect("save should succeed");
+    store.save(snapshot).await.expect("save should succeed");
     let loaded = store
         .load_latest(&agg)
         .await

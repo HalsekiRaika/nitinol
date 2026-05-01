@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use nitinol_runtime::error::{AskError, SendError, SpawnError};
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{BoxedMessage, Props, ProcessSystem, Subscriber};
+use nitinol_runtime::{BoxedMessage, ProcessSystem, Props, Subscriber};
 
-use common::{tracked_state, test_props, wait_for_flag, GetCount, Increment};
+use common::{test_props, tracked_state, wait_for_flag, GetCount, Increment};
 
 #[derive(Debug, thiserror::Error)]
 #[error("handler error: {0}")]
@@ -26,11 +26,7 @@ struct FailMsg;
 impl Receive<FailMsg> for FailingProcess {
     type Response = ();
     type Error = HandlerTestError;
-    async fn recv(
-        &mut self,
-        _: FailMsg,
-        _: &mut ProcessContext,
-    ) -> Result<(), HandlerTestError> {
+    async fn recv(&mut self, _: FailMsg, _: &mut ProcessContext) -> Result<(), HandlerTestError> {
         Err(HandlerTestError("deliberate failure".to_string()))
     }
 }
@@ -365,7 +361,9 @@ async fn dead_letter_stream_unsubscribed_subscriber_receives_no_further_events()
     let sub_proxy = system
         .spawn(Props::subscriber({
             let count = count.clone();
-            move || CountingSubscriber { count: count.clone() }
+            move || CountingSubscriber {
+                count: count.clone(),
+            }
         }))
         .await;
     let sub_pid = sub_proxy.pid();
@@ -386,7 +384,11 @@ async fn dead_letter_stream_unsubscribed_subscriber_receives_no_further_events()
 
     let _ = process_proxy.tell(Increment).await;
     wait_for_count_inner(&count, 1).await;
-    assert_eq!(count.load(Ordering::SeqCst), 1, "should have received first event");
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "should have received first event"
+    );
 
     // When: the subscriber is unsubscribed
     dl_stream
@@ -446,7 +448,9 @@ async fn props_subscriber_creates_working_subscriber() {
     let count = Arc::new(AtomicU32::new(0));
     let props = Props::subscriber({
         let count = count.clone();
-        move || CountingSubscriber { count: count.clone() }
+        move || CountingSubscriber {
+            count: count.clone(),
+        }
     });
     let sub_proxy = system.spawn(props).await;
     stream

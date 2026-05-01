@@ -34,7 +34,10 @@ pub struct AlertSubscriber {
 
 impl AlertSubscriber {
     pub fn new(threshold: f64, alert_count: Arc<AtomicU32>) -> Self {
-        Self { threshold, alert_count }
+        Self {
+            threshold,
+            alert_count,
+        }
     }
 }
 
@@ -49,7 +52,10 @@ impl Subscriber<BoxedMessage> for AlertSubscriber {
             self.alert_count.fetch_add(1, Ordering::SeqCst);
             let sensor = &reading.sensor;
             let celsius = reading.celsius;
-            info!("[ALERT] sensor={sensor} celsius={celsius:.1} exceeds threshold={threshold:.1}", threshold = self.threshold);
+            info!(
+                "[ALERT] sensor={sensor} celsius={celsius:.1} exceeds threshold={threshold:.1}",
+                threshold = self.threshold
+            );
         }
     }
 }

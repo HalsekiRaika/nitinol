@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nitinol_runtime::{Props, ProcessSystem};
+use nitinol_runtime::{ProcessSystem, Props};
 use tracing::info;
 
 use dead_letters::message::{Hush, Ping, Query};
@@ -60,8 +60,7 @@ fn init_tracing() {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     #[cfg(not(feature = "console"))]
     tracing_subscriber::registry()
@@ -81,7 +80,10 @@ fn init_tracing() {
 async fn wait_for_count(counter: &AtomicU32, expected: u32) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while counter.load(Ordering::SeqCst) < expected {
-        assert!(Instant::now() < deadline, "timed out waiting for dead letter");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for dead letter"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
@@ -118,7 +120,9 @@ async fn demo_tell_routes_to_dead_letter_stream() {
         .expect("subscribe should succeed");
 
     // Inspector performs the real two-stage downcast and prints actual field values.
-    let inspector_proxy = system.spawn(Props::subscriber(|| DeadLetterInspector)).await;
+    let inspector_proxy = system
+        .spawn(Props::subscriber(|| DeadLetterInspector))
+        .await;
     dl_stream
         .subscribe(inspector_proxy)
         .await
@@ -160,7 +164,9 @@ async fn demo_ask_returns_dead_letter_error_and_publishes_to_stream() {
         .expect("subscribe should succeed");
 
     // Inspector performs the real two-stage downcast and prints actual field values.
-    let inspector_proxy = system.spawn(Props::subscriber(|| DeadLetterInspector)).await;
+    let inspector_proxy = system
+        .spawn(Props::subscriber(|| DeadLetterInspector))
+        .await;
     dl_stream
         .subscribe(inspector_proxy)
         .await
@@ -207,7 +213,9 @@ async fn demo_suppress_log_marker_still_delivers_to_stream() {
         .expect("subscribe should succeed");
 
     // Inspector performs the real two-stage downcast and prints actual field values.
-    let inspector_proxy = system.spawn(Props::subscriber(|| DeadLetterInspector)).await;
+    let inspector_proxy = system
+        .spawn(Props::subscriber(|| DeadLetterInspector))
+        .await;
     dl_stream
         .subscribe(inspector_proxy)
         .await

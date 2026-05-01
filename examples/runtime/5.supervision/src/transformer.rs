@@ -82,12 +82,10 @@ impl Receive<Parse> for DataTransformer {
     type Response = String;
     type Error = ParseError;
 
-    async fn recv(
-        &mut self,
-        msg: Parse,
-        _ctx: &mut ProcessContext,
-    ) -> Result<String, ParseError> {
-        let n: i64 = msg.0.parse().map_err(|_| ParseError { input: msg.0.clone() })?;
+    async fn recv(&mut self, msg: Parse, _ctx: &mut ProcessContext) -> Result<String, ParseError> {
+        let n: i64 = msg.0.parse().map_err(|_| ParseError {
+            input: msg.0.clone(),
+        })?;
         self.success_count += 1;
         Ok(format!("{} * 2 = {}", n, n * 2))
     }

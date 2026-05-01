@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nitinol_runtime::ident::ProcessName;
-use nitinol_runtime::{BoxedMessage, Props, ProcessSystem};
+use nitinol_runtime::{BoxedMessage, ProcessSystem, Props};
 
 use streams::alert::AlertSubscriber;
 use streams::display::DisplaySubscriber;
@@ -333,11 +333,26 @@ async fn alert_count_tracks_only_above_threshold_readings() {
     //   30.0 → equal  (no alert, boundary)
     //   40.0 → above  (alert)
     //   32.0 → above  (alert)
-    sensor_proxy.tell(Measure(25.0)).await.expect("tell should succeed");
-    sensor_proxy.tell(Measure(35.0)).await.expect("tell should succeed");
-    sensor_proxy.tell(Measure(30.0)).await.expect("tell should succeed");
-    sensor_proxy.tell(Measure(40.0)).await.expect("tell should succeed");
-    sensor_proxy.tell(Measure(32.0)).await.expect("tell should succeed");
+    sensor_proxy
+        .tell(Measure(25.0))
+        .await
+        .expect("tell should succeed");
+    sensor_proxy
+        .tell(Measure(35.0))
+        .await
+        .expect("tell should succeed");
+    sensor_proxy
+        .tell(Measure(30.0))
+        .await
+        .expect("tell should succeed");
+    sensor_proxy
+        .tell(Measure(40.0))
+        .await
+        .expect("tell should succeed");
+    sensor_proxy
+        .tell(Measure(32.0))
+        .await
+        .expect("tell should succeed");
 
     // Wait for all 5 messages to be processed by display subscriber
     wait_for_count(&display_count, 5).await;
@@ -386,9 +401,18 @@ async fn display_subscriber_counts_every_received_message() {
         .await;
 
     // When: three temperature readings are published (mixed below/above threshold)
-    sensor_proxy.tell(Measure(20.0)).await.expect("tell should succeed");
-    sensor_proxy.tell(Measure(30.0)).await.expect("tell should succeed");
-    sensor_proxy.tell(Measure(40.0)).await.expect("tell should succeed");
+    sensor_proxy
+        .tell(Measure(20.0))
+        .await
+        .expect("tell should succeed");
+    sensor_proxy
+        .tell(Measure(30.0))
+        .await
+        .expect("tell should succeed");
+    sensor_proxy
+        .tell(Measure(40.0))
+        .await
+        .expect("tell should succeed");
 
     // Then: display subscriber receives all three
     wait_for_count(&display_count, 3).await;
@@ -431,7 +455,10 @@ async fn alert_subscriber_via_props_subscriber_receives_above_threshold_reading(
         sensor: "sensor-g".to_string(),
         celsius: 40.0,
     };
-    stream.publish(reading).await.expect("publish should succeed");
+    stream
+        .publish(reading)
+        .await
+        .expect("publish should succeed");
 
     // Then: the Subscriber<BoxedMessage> trait path fires the alert
     wait_for_count(&alert_count, 1).await;

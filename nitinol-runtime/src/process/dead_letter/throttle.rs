@@ -25,10 +25,13 @@ impl LogThrottle {
     /// Increments the counter; resets the window when expired.
     pub(crate) fn check_throttle(&mut self, type_id: TypeId) -> bool {
         let now = Instant::now();
-        let counter = self.counters.entry(type_id).or_insert_with(|| WindowCounter {
-            count: 0,
-            window_start: now,
-        });
+        let counter = self
+            .counters
+            .entry(type_id)
+            .or_insert_with(|| WindowCounter {
+                count: 0,
+                window_start: now,
+            });
         if now.duration_since(counter.window_start) >= THROTTLE_WINDOW {
             counter.count = 0;
             counter.window_start = now;

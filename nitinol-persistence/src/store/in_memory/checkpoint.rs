@@ -23,10 +23,7 @@ impl Default for InMemoryCheckpointStore {
 impl CheckpointStore for InMemoryCheckpointStore {
     type Tx = ();
 
-    async fn load(
-        &self,
-        projection_id: &ProjectionId,
-    ) -> Result<Option<u64>, CheckpointError> {
+    async fn load(&self, projection_id: &ProjectionId) -> Result<Option<u64>, CheckpointError> {
         let state = self.state.lock().unwrap();
         Ok(state.get(projection_id).copied())
     }

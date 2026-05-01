@@ -38,7 +38,7 @@
 use std::time::Duration;
 
 use nitinol_runtime::ident::ProcessName;
-use nitinol_runtime::{BoxedMessage, Props, ProcessSystem};
+use nitinol_runtime::{BoxedMessage, ProcessSystem, Props};
 use tracing::info;
 
 use streams::alert::AlertSubscriber;
@@ -62,8 +62,7 @@ fn init_tracing() {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     #[cfg(not(feature = "console"))]
     tracing_subscriber::registry()
@@ -102,7 +101,9 @@ async fn demo_fanout_broadcast() {
 
     // AlertSubscriber: Subscriber<BoxedMessage> trait — simplified API, no Result
     let alert_proxy = system
-        .spawn(Props::subscriber(|| AlertSubscriber::new(35.0, Default::default())))
+        .spawn(Props::subscriber(|| {
+            AlertSubscriber::new(35.0, Default::default())
+        }))
         .await;
     stream
         .subscribe(alert_proxy)
@@ -148,7 +149,9 @@ async fn demo_unsubscribe() {
         .expect("spawn_stream should succeed");
 
     let alert_proxy = system
-        .spawn(Props::subscriber(|| AlertSubscriber::new(20.0, Default::default())))
+        .spawn(Props::subscriber(|| {
+            AlertSubscriber::new(20.0, Default::default())
+        }))
         .await;
     // pid must be captured before subscribe() moves the proxy
     let alert_pid = alert_proxy.pid();
@@ -166,7 +169,10 @@ async fn demo_unsubscribe() {
         .expect("subscribe display should succeed");
 
     // Publish a direct TemperatureReading to demonstrate bypass of sensor
-    let reading = TemperatureReading { sensor: "sensor-2".to_string(), celsius: 25.0 };
+    let reading = TemperatureReading {
+        sensor: "sensor-2".to_string(),
+        celsius: 25.0,
+    };
     stream.publish(reading).await.ok();
     tokio::time::sleep(Duration::from_millis(100)).await;
     info!("Both subscribers received the first message.");
@@ -177,7 +183,10 @@ async fn demo_unsubscribe() {
         .expect("unsubscribe should succeed");
     info!("AlertSubscriber unsubscribed.");
 
-    let reading2 = TemperatureReading { sensor: "sensor-2".to_string(), celsius: 40.0 };
+    let reading2 = TemperatureReading {
+        sensor: "sensor-2".to_string(),
+        celsius: 40.0,
+    };
     stream.publish(reading2).await.ok();
     tokio::time::sleep(Duration::from_millis(100)).await;
     info!("Only DisplaySubscriber received the second message.");

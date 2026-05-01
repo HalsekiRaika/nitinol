@@ -32,8 +32,7 @@ fn init_tracing() {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     #[cfg(not(feature = "console"))]
     tracing_subscriber::registry()
@@ -73,9 +72,15 @@ async fn main() {
 
     // `items` is cloned inside the closure because `Fn()` may be called more
     // than once (e.g., if a supervision restart were configured).
-    let items = vec!["hello".to_string(), "world".to_string(), "watching".to_string()];
+    let items = vec![
+        "hello".to_string(),
+        "world".to_string(),
+        "watching".to_string(),
+    ];
     let producer_proxy = system
-        .spawn(Props::new(move || Producer::new(items.clone(), transformer_pid)))
+        .spawn(Props::new(move || {
+            Producer::new(items.clone(), transformer_pid)
+        }))
         .await;
 
     // Allow on_start hooks and watch registrations to complete before use.
@@ -128,7 +133,10 @@ async fn main() {
     //
     // This shows how a single downstream failure propagates up through the
     // pipeline using only the watch API — no explicit coordination needed.
-    collector_proxy.stop().await.expect("stop Collector should succeed");
+    collector_proxy
+        .stop()
+        .await
+        .expect("stop Collector should succeed");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Trigger the error path in Transformer's handler.

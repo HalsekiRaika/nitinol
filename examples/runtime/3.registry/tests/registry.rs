@@ -78,9 +78,7 @@ async fn lookup_by_pid_finds_process() {
     // Given: a Greeter process registered under "greeter"
     let system = ProcessSystem::new().await;
     let name = ProcessName::new("greeter");
-    let proxy = system
-        .spawn_named(name, Props::new(|| Greeter))
-        .await;
+    let proxy = system.spawn_named(name, Props::new(|| Greeter)).await;
     let pid = proxy.pid();
     tokio::time::sleep(Duration::from_millis(50)).await;
 

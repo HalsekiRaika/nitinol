@@ -1,7 +1,7 @@
 pub mod checkpoint_store;
 pub mod event_store;
-pub mod snapshot_store;
 mod in_memory;
+pub mod snapshot_store;
 
 pub use checkpoint_store::{CheckpointStore, DeliveryMode};
 pub use event_store::{EventStore, EventStream};

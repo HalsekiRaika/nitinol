@@ -67,7 +67,10 @@ impl ProcessSystem {
         let dl_stream_for_producer = dl_stream.clone();
         let registry_for_producer = registry.clone();
         let mut dl_process_props = Props::new(move || {
-            DeadLetterProcess::new(dl_stream_for_producer.clone(), registry_for_producer.clone())
+            DeadLetterProcess::new(
+                dl_stream_for_producer.clone(),
+                registry_for_producer.clone(),
+            )
         });
         dl_process_props.with_supervision_strategy(SupervisionStrategy::Resume);
         let (dl_process, _dl_process_idle, dl_process_supervision) = dl_process_props.into_parts();

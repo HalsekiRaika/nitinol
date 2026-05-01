@@ -8,8 +8,7 @@ use crate::event::{AppendingEvent, LoadedEvent};
 use crate::id::AggregateId;
 use crate::query::{AppendOutcome, LoadQuery};
 
-pub type EventStream<'a> =
-    Pin<Box<dyn Stream<Item = Result<LoadedEvent, LoadError>> + Send + 'a>>;
+pub type EventStream<'a> = Pin<Box<dyn Stream<Item = Result<LoadedEvent, LoadError>> + Send + 'a>>;
 
 #[async_trait]
 pub trait EventStore: Send + Sync {

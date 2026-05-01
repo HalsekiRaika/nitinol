@@ -37,10 +37,7 @@ where
         // (which would set sender: None). Stream's recv handles dead-letter
         // routing with the correct sender (Some(stream_pid)).
         let task: UserTask<P> = Box::new(TellTask::new(msg));
-        self.user_tx
-            .send(task)
-            .await
-            .map_err(|_| SendError)
+        self.user_tx.send(task).await.map_err(|_| SendError)
     }
 }
 

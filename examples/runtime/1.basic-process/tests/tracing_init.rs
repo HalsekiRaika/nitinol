@@ -71,8 +71,7 @@ fn tracing_registry_with_fmt_and_env_filter_composes_without_panic() {
     use tracing_subscriber::{fmt, EnvFilter};
 
     // Given: an EnvFilter identical to the one produced by init_tracing()
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // When: the non-console branch of init_tracing() is assembled (without .init())
     let _subscriber = tracing_subscriber::registry()

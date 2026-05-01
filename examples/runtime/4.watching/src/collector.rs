@@ -12,7 +12,6 @@ pub struct Collector {
     items: Vec<String>,
 }
 
-
 impl Process for Collector {
     async fn on_start(&mut self, ctx: &mut ProcessContext) {
         let pid = ctx.pid();

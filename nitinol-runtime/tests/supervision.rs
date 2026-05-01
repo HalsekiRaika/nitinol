@@ -237,7 +237,10 @@ async fn restart_process_remains_in_registry() {
 
     // Then: the process is still registered
     let found = system.lookup(pid).await;
-    assert!(found.is_some(), "restarted process should remain in registry");
+    assert!(
+        found.is_some(),
+        "restarted process should remain in registry"
+    );
 }
 
 /// Restart strategy: after restart, the new instance handles subsequent messages normally.
@@ -264,7 +267,10 @@ async fn restarted_process_handles_subsequent_messages() {
 
     // Then: the restarted instance handles new messages without error
     let result = proxy.ask(Ping).await;
-    assert!(result.is_ok(), "restarted process should handle new messages");
+    assert!(
+        result.is_ok(),
+        "restarted process should handle new messages"
+    );
 }
 
 /// Rate limiting: exceeding max_retries within the window causes the process to stop permanently.
@@ -309,7 +315,10 @@ async fn restart_rate_limit_exceeded_causes_permanent_stop() {
 
     // And: the process is unregistered
     let found = system.lookup(pid).await;
-    assert!(found.is_none(), "process should be unregistered after rate limit exceeded");
+    assert!(
+        found.is_none(),
+        "process should be unregistered after rate limit exceeded"
+    );
 }
 
 /// Rate limiting: failures outside the window do not count against the limit.
@@ -344,7 +353,10 @@ async fn restart_rate_limit_resets_after_window_expires() {
 
     // And: the process is still alive after the second restart
     let result = proxy.ask(Ping).await;
-    assert!(result.is_ok(), "process should still be alive after window-reset restart");
+    assert!(
+        result.is_ok(),
+        "process should still be alive after window-reset restart"
+    );
 }
 
 /// Rate limiting: exactly at the limit — the last allowed restart succeeds,
@@ -373,7 +385,10 @@ async fn restart_at_exact_rate_limit_boundary() {
 
     // Then: process is still alive after 1 restart
     let result = proxy.ask(Ping).await;
-    assert!(result.is_ok(), "process should be alive after 1 restart (within limit)");
+    assert!(
+        result.is_ok(),
+        "process should be alive after 1 restart (within limit)"
+    );
 
     // When: a second failure (exceeds limit → permanent stop)
     let _ = proxy.tell(Fail).await;
@@ -383,7 +398,10 @@ async fn restart_at_exact_rate_limit_boundary() {
     // Then: no further restart
     assert_eq!(start_count.load(Ordering::SeqCst), 2);
     let found = system.lookup(pid).await;
-    assert!(found.is_none(), "process should be unregistered after exceeding rate limit");
+    assert!(
+        found.is_none(),
+        "process should be unregistered after exceeding rate limit"
+    );
 }
 
 /// OneForOne: a failure in one process does not affect sibling processes.
@@ -413,8 +431,15 @@ async fn failure_in_one_process_does_not_affect_sibling() {
 
     // Then: process B is unaffected and still handles messages
     let result = proxy_b.ask(Ping).await;
-    assert!(result.is_ok(), "sibling process should be unaffected by another's failure");
-    assert_eq!(stop_b.load(Ordering::SeqCst), 0, "sibling should not have been stopped");
+    assert!(
+        result.is_ok(),
+        "sibling process should be unaffected by another's failure"
+    );
+    assert_eq!(
+        stop_b.load(Ordering::SeqCst),
+        0,
+        "sibling should not have been stopped"
+    );
 }
 
 /// Props::into_parts panics when `within` is Duration::ZERO, preventing silent
@@ -458,7 +483,10 @@ async fn resume_strategy_ignores_handler_error() {
     // Then: the process is still alive and handles subsequent messages
     // (Ping after tell(Fail) is a barrier — if it succeeds, Fail was already processed)
     let result = proxy.ask(Ping).await;
-    assert!(result.is_ok(), "process should still handle messages after a handler error under Resume");
+    assert!(
+        result.is_ok(),
+        "process should still handle messages after a handler error under Resume"
+    );
 }
 
 /// Resume strategy: handler failures do not trigger a restart.
@@ -486,7 +514,11 @@ async fn resume_strategy_does_not_restart() {
     let _ = proxy.ask(Ping).await;
 
     // Then: on_start was called exactly once (no restart occurred)
-    assert_eq!(start_count.load(Ordering::SeqCst), 1, "Resume must not restart on handler error");
+    assert_eq!(
+        start_count.load(Ordering::SeqCst),
+        1,
+        "Resume must not restart on handler error"
+    );
 }
 
 /// Resume strategy: on_stop is not called when a handler error occurs.
@@ -512,7 +544,11 @@ async fn resume_strategy_does_not_call_on_stop_on_error() {
     let _ = proxy.ask(Ping).await;
 
     // Then: on_stop has NOT been called (error was resumed, not stopped)
-    assert_eq!(stop_count.load(Ordering::SeqCst), 0, "Resume must not call on_stop on handler error");
+    assert_eq!(
+        stop_count.load(Ordering::SeqCst),
+        0,
+        "Resume must not call on_stop on handler error"
+    );
 
     // When: the process is explicitly stopped
     let _ = proxy.stop().await;
@@ -546,7 +582,10 @@ async fn resume_strategy_keeps_process_in_registry() {
 
     // Then: the process is still registered in the registry
     let found = system.lookup(pid).await;
-    assert!(found.is_some(), "process with Resume strategy must remain in registry after handler error");
+    assert!(
+        found.is_some(),
+        "process with Resume strategy must remain in registry after handler error"
+    );
 }
 
 /// Props::with_supervision_strategy is a builder method returning &mut Self,

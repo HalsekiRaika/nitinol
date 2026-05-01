@@ -163,7 +163,9 @@ async fn idle_timeout_after_notifies_watcher_with_timeout_reason() {
 
     // And: a watcher watching the target
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Persistent)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Persistent))
+        .await;
     watcher_proxy
         .tell(WatchPid { pid: target_pid })
         .await
@@ -201,7 +203,9 @@ async fn idle_timeout_inherit_uses_system_default_and_notifies_with_timeout() {
 
     // And: a watcher registered before any timeout fires
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Persistent)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Persistent))
+        .await;
     watcher_proxy
         .tell(WatchPid { pid: target_pid })
         .await
@@ -240,7 +244,9 @@ async fn idle_timeout_persistent_ignores_system_default() {
 
     // And: a watcher
     let received = Arc::new(Mutex::new(None::<Terminated>));
-    let watcher_proxy = system.spawn(watcher_props(received.clone(), IdleTimeout::Persistent)).await;
+    let watcher_proxy = system
+        .spawn(watcher_props(received.clone(), IdleTimeout::Persistent))
+        .await;
     watcher_proxy
         .tell(WatchPid { pid: target_pid })
         .await

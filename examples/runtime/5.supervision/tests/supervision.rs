@@ -68,9 +68,18 @@ async fn success_count_increments_on_each_valid_input() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: three valid messages are sent sequentially
-    proxy.ask(Parse("1".to_string())).await.expect("ask should succeed");
-    proxy.ask(Parse("2".to_string())).await.expect("ask should succeed");
-    proxy.ask(Parse("3".to_string())).await.expect("ask should succeed");
+    proxy
+        .ask(Parse("1".to_string()))
+        .await
+        .expect("ask should succeed");
+    proxy
+        .ask(Parse("2".to_string()))
+        .await
+        .expect("ask should succeed");
+    proxy
+        .ask(Parse("3".to_string()))
+        .await
+        .expect("ask should succeed");
 
     // Then: GetSuccessCount reflects all three successful parses
     let count = proxy
@@ -118,7 +127,10 @@ async fn stop_strategy_unregisters_process_after_error() {
 
     // Then: the process is unregistered from the registry
     let found = system.lookup(pid).await;
-    assert!(found.is_none(), "stopped process should be unregistered from the registry");
+    assert!(
+        found.is_none(),
+        "stopped process should be unregistered from the registry"
+    );
 }
 
 // ─── restart_strategy_keeps_process_in_registry ──────────────────────────────
@@ -143,7 +155,10 @@ async fn restart_strategy_keeps_process_in_registry() {
 
     // Then: the process is still registered — it restarted, not stopped
     let found = system.lookup(pid).await;
-    assert!(found.is_some(), "restarted process should remain in the registry");
+    assert!(
+        found.is_some(),
+        "restarted process should remain in the registry"
+    );
 
     proxy.stop().await.ok();
 }
@@ -167,8 +182,14 @@ async fn restart_resets_success_count_to_zero() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Accumulate 2 successful parses on the original instance
-    proxy.ask(Parse("10".to_string())).await.expect("ask should succeed");
-    proxy.ask(Parse("20".to_string())).await.expect("ask should succeed");
+    proxy
+        .ask(Parse("10".to_string()))
+        .await
+        .expect("ask should succeed");
+    proxy
+        .ask(Parse("20".to_string()))
+        .await
+        .expect("ask should succeed");
     let count_before = proxy
         .ask(GetSuccessCount)
         .await
@@ -214,7 +235,10 @@ async fn restarted_process_handles_subsequent_valid_messages() {
     let result = proxy.ask(Parse("7".to_string())).await;
 
     // Then: the restarted instance processes the message correctly
-    assert!(result.is_ok(), "restarted process should handle valid messages");
+    assert!(
+        result.is_ok(),
+        "restarted process should handle valid messages"
+    );
     assert_eq!(result.unwrap(), "7 * 2 = 14");
 
     proxy.stop().await.ok();

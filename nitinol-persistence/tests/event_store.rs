@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use chrono::Utc;
 use futures_util::TryStreamExt;
+use jiff::Timestamp;
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery};
@@ -16,7 +16,7 @@ fn make_event(
         sequence,
         event_type,
         payload: Bytes::from_static(payload),
-        occurred_at: Utc::now(),
+        occurred_at: Timestamp::now(),
     }
 }
 
@@ -148,10 +148,7 @@ async fn load_with_limit_returns_at_most_limit_events() {
 
     // When: loading with limit=3
     let query = LoadQuery::by_aggregate(agg).with_limit(3);
-    let stream = store
-        .load(query)
-        .await
-        .expect("load should succeed");
+    let stream = store.load(query).await.expect("load should succeed");
     let events: Vec<_> = stream.try_collect().await.expect("collect should succeed");
 
     // Then: at most 3 events are returned
@@ -277,7 +274,10 @@ async fn intra_batch_duplicate_sequence_returns_sequence_conflict() {
         .await
         .expect("load should succeed");
     let events: Vec<_> = stream.try_collect().await.expect("collect should succeed");
-    assert!(events.is_empty(), "no event must be stored after intra-batch conflict");
+    assert!(
+        events.is_empty(),
+        "no event must be stored after intra-batch conflict"
+    );
 }
 
 /// 空バッチの append は no-op — assigned_sequences が空で stream_version は現在の最大 sequence を返す
@@ -333,7 +333,10 @@ async fn empty_batch_on_nonexistent_aggregate_returns_stream_version_zero() {
 
     // Then: stream_version is 0 (no events exist)
     assert!(outcome.assigned_sequences.is_empty());
-    assert_eq!(outcome.stream_version, 0, "stream_version must be 0 for a new aggregate");
+    assert_eq!(
+        outcome.stream_version, 0,
+        "stream_version must be 0 for a new aggregate"
+    );
 }
 
 /// イベントの aggregate_id が引数と異なる場合は AggregateMismatch を返す

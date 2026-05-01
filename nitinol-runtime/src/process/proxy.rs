@@ -60,7 +60,10 @@ impl<P: Process> ProcessProxy<P> {
         }
     }
 
-    pub async fn ask<M>(&self, msg: M) -> Result<<P as Receive<M>>::Response, AskError<<P as Receive<M>>::Error>>
+    pub async fn ask<M>(
+        &self,
+        msg: M,
+    ) -> Result<<P as Receive<M>>::Response, AskError<<P as Receive<M>>::Error>>
     where
         P: Receive<M>,
         M: 'static + Send + Sync,
@@ -68,11 +71,14 @@ impl<P: Process> ProcessProxy<P> {
         <P as Receive<M>>::Error: 'static + Send,
     {
         let suppress = suppress_log::<M>();
-        let (tx, rx) = oneshot::channel::<Result<<P as Receive<M>>::Response, <P as Receive<M>>::Error>>();
+        let (tx, rx) =
+            oneshot::channel::<Result<<P as Receive<M>>::Response, <P as Receive<M>>::Error>>();
         let task: UserTask<P> = Box::new(AskTask::new(msg, tx));
         if let Err(send_err) = self.user_tx.send(task).await {
             self.route_to_dead_letter(send_err.0, suppress).await;
-            return Err(AskError::DeadLetter { destination: self.pid });
+            return Err(AskError::DeadLetter {
+                destination: self.pid,
+            });
         }
         match rx.await {
             Ok(Ok(r)) => Ok(r),
@@ -103,10 +109,6 @@ impl<P: Process> DynProxy for ProcessProxy<P> {
     }
 
     async fn send_sys_sig(&self, signal: SystemSignal) -> Result<(), SendError> {
-        self.sys_tx
-            .send(signal)
-            .await
-            .map_err(|_| SendError)
+        self.sys_tx.send(signal).await.map_err(|_| SendError)
     }
 }
-
