@@ -1,0 +1,16 @@
+[package]
+name = "nitinol-eventsource"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Effect ADT and event sourcing utilities for nitinol"
+
+[dependencies]
+nitinol-runtime = { path = "../nitinol-runtime" }
+futures-core = "0.3"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
