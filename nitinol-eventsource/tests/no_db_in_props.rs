@@ -23,12 +23,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    Aggregate, Codec, Context, Decider, Effect, ErasedCodec, Event,
+    Aggregate, Context, Decider, Effect, Event,
     EventPersistor, EventPersistorRef,
     SnapshotPersistor, SnapshotPersistorRef,
     Snapshotable,
     AggregateProps,
 };
+use nitinol_eventsource::codec::{Codec, ErasedCodec};
 use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, EventType};
 use nitinol_runtime::ProcessSystem;

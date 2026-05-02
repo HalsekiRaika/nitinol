@@ -14,7 +14,7 @@ use bytes::Bytes;
 use futures_core::future::BoxFuture;
 
 use nitinol_eventsource::{
-    Aggregate, Codec, Context, Decider, Effect, Event,
+    Aggregate, codec::Codec, Context, Decider, Effect, Event,
     EventPersistor,
     Receive as EvtReceive,
     SideEffect, SideEffectError,

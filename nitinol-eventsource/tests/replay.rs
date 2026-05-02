@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    Aggregate, Codec, Context, Decider, Effect, Event,
+    Aggregate, codec::Codec, Context, Decider, Effect, Event,
     EventPersistor, EventPersistorRef,
     SnapshotPersistor, SnapshotPersistorRef,
     Receive as EvtReceive,

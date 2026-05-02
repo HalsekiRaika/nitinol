@@ -4,7 +4,7 @@ use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::aggregate::Aggregate;
-use crate::ErasedCodec;
+use crate::codec::ErasedCodec;
 use crate::context::Context;
 use crate::decider::Decider;
 use crate::error::{AskHandlerError, CodecError, EffectExecutionError, ExecHandlerError, PersistorUnreachableKind};

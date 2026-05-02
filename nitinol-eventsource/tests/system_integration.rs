@@ -18,17 +18,16 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    Aggregate, Codec, Context, Decider, Effect, ErasedCodec, Event,
-    EventPersistor, EventPersistorRef,
-    Projector, ProjectionContext, ProjectorProps,
+    codec::Codec, codec::ErasedCodec, system::EventSourceSystem, Aggregate, Context, Decider, Effect,
+    Event,
+    EventPersistor, ProjectionContext, Projector,
+    ProjectorProps,
     Receive as EvtReceive,
     Snapshotable,
-    AggregateProps, AggregateProxy,
-    EventSourceSystem,
 };
+use nitinol_eventsource::SnapshotPersistor;
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, ProjectionId, PersistedSnapshot};
-use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorRef};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, PersistedSnapshot, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -381,7 +380,7 @@ async fn system_codec_integrates_with_projector_props() {
     // When: use system.codec() with ProjectorProps
     let _proxy = ProjectorProps::new(
         ProjectionId::new("sys-proj"),
-        Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || CountingProjector {
             count: Arc::clone(&count_c),

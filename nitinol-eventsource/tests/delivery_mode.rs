@@ -28,7 +28,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    Codec, Event,
+    codec::Codec, Event,
     Projector, ProjectionContext, ProjectorProps,
 };
 use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore};

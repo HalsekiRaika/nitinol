@@ -4,7 +4,7 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::{Props, ProcessSystem};
 
 use crate::aggregate::{Aggregate, Snapshotable};
-use crate::ErasedCodec;
+use crate::codec::ErasedCodec;
 use crate::process::aggregate_process::{AggregateProcess, SnapshotRestoreFn};
 use crate::process::persistence::{EventPersistorRef, SnapshotPersistorRef};
 use crate::process::proxy::AggregateProxy;

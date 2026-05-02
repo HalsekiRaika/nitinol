@@ -14,7 +14,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Codec, CodecError, ErasedCodec};
+use nitinol_eventsource::codec::{Codec, ErasedCodec};
+use nitinol_eventsource::error::CodecError;
 
 // ---------------------------------------------------------------------------
 // Fixtures: test event type

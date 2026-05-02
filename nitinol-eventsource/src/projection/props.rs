@@ -8,7 +8,7 @@ use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{Props, ProcessSystem, Stream};
 
-use crate::ErasedCodec;
+use crate::codec::ErasedCodec;
 use crate::event::Event;
 use crate::projection::envelope::EventEnvelope;
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};

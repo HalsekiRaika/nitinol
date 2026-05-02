@@ -5,7 +5,7 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
 use crate::aggregate::Aggregate;
-use crate::{Codec, ErasedCodec};
+use crate::codec::{Codec, ErasedCodec};
 use crate::{AggregateProps, AggregateProxy, EventPersistorRef};
 
 /// Marker type indicating no codec has been configured yet.
