@@ -17,4 +17,5 @@ pub use self::event::Event;
 pub use self::receive::Receive;
 
 pub use self::process::{AggregateProps, AggregateProxy, DecodeError, EncodeError, EventCodec};
-pub use self::error::{AskError, ExecError, TellError};
+pub use self::process::{EventPersistor, EventPersistorRef, SnapshotPersistor, SnapshotPersistorRef};
+pub use self::error::{AskError, ExecError, TellError, PersistorUnreachableKind};

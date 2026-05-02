@@ -1,32 +1,32 @@
 use std::sync::Arc;
 
-use nitinol_persistence::store::{EventStore, SnapshotStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::{Props, ProcessSystem};
 
 use crate::aggregate::{Aggregate, Snapshotable};
 use crate::process::aggregate_process::{AggregateProcess, SnapshotRestoreFn};
 use crate::process::codec::EventCodec;
+use crate::process::persistence::{EventPersistorRef, SnapshotPersistorRef};
 use crate::process::proxy::AggregateProxy;
 
 /// Builder for spawning an `AggregateProcess<A>` and obtaining an `AggregateProxy<A>`.
 ///
-/// Mandatory: `new(aggregate_id, event_store)` + `with_codec(codec)` + `spawn(system)`.
-/// Optional: `with_snapshot_store(store)` (only available when `A: Snapshotable`).
+/// Mandatory: `new(aggregate_id, event_ref)` + `with_codec(codec)` + `spawn(system)`.
+/// Optional: `with_snapshot_persistor(snapshot_ref)` (only available when `A: Snapshotable`).
 pub struct AggregateProps<A: Aggregate> {
     aggregate_id: AggregateId,
-    event_store: Arc<dyn EventStore>,
-    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    event_ref: EventPersistorRef,
+    snapshot_ref: Option<SnapshotPersistorRef>,
     codec: Option<Arc<dyn EventCodec<A::Event>>>,
     snapshot_restore: Option<SnapshotRestoreFn<A>>,
 }
 
 impl<A: Aggregate> AggregateProps<A> {
-    pub fn new(aggregate_id: AggregateId, event_store: Arc<dyn EventStore>) -> Self {
+    pub fn new(aggregate_id: AggregateId, event_ref: EventPersistorRef) -> Self {
         Self {
             aggregate_id,
-            event_store,
-            snapshot_store: None,
+            event_ref,
+            snapshot_ref: None,
             codec: None,
             snapshot_restore: None,
         }
@@ -47,15 +47,15 @@ impl<A: Aggregate> AggregateProps<A> {
             .codec
             .expect("AggregateProps::with_codec must be called before spawn");
         let aggregate_id = self.aggregate_id;
-        let event_store = self.event_store;
-        let snapshot_store = self.snapshot_store;
+        let event_ref = self.event_ref;
+        let snapshot_ref = self.snapshot_ref;
         let snapshot_restore = self.snapshot_restore;
 
         let props = Props::new(move || AggregateProcess {
             state: A::default(),
             aggregate_id: aggregate_id.clone(),
-            event_store: Arc::clone(&event_store),
-            snapshot_store: snapshot_store.clone(),
+            event_ref: event_ref.clone(),
+            snapshot_ref: snapshot_ref.clone(),
             codec: Arc::clone(&codec),
             sequence: 0,
             snapshot_restore: snapshot_restore.clone(),
@@ -67,11 +67,11 @@ impl<A: Aggregate> AggregateProps<A> {
 }
 
 impl<A: Aggregate + Snapshotable> AggregateProps<A> {
-    /// Set the snapshot store.  Only available for aggregates that implement
+    /// Set the snapshot persistor reference.  Only available for aggregates that implement
     /// `Snapshotable`.  On_start will attempt to restore from the latest snapshot
     /// before replaying delta events.
-    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
-        self.snapshot_store = Some(store);
+    pub fn with_snapshot_persistor(mut self, snapshot_ref: SnapshotPersistorRef) -> Self {
+        self.snapshot_ref = Some(snapshot_ref);
         self.snapshot_restore = Some(Arc::new(|payload: &[u8]| A::restore(payload)));
         self
     }

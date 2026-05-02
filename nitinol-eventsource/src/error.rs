@@ -1,6 +1,21 @@
 use crate::SideEffectError;
 use crate::process::EncodeError;
 
+/// Identifies why a persistence actor was unreachable.
+///
+/// Preserves the distinction between a dead-letter (actor never existed or
+/// already stopped) and a reply-dropped (actor started handling the message
+/// but the reply channel was dropped before the response arrived).
+#[derive(Debug, thiserror::Error)]
+pub enum PersistorUnreachableKind {
+    #[error("no process at pid {destination}")]
+    DeadLetter {
+        destination: nitinol_runtime::ident::Pid,
+    },
+    #[error("process dropped the reply channel")]
+    ReplyDropped,
+}
+
 /// Error produced by the effect interpreter when executing an `Effect`.
 #[derive(Debug, thiserror::Error)]
 pub enum EffectExecutionError {
@@ -10,6 +25,8 @@ pub enum EffectExecutionError {
     Encode(#[from] EncodeError),
     #[error("event store append failed: {0}")]
     Append(nitinol_persistence::error::AppendError),
+    #[error("persistence actor unreachable: {0}")]
+    PersistorUnreachable(PersistorUnreachableKind),
 }
 
 /// Error returned by `AggregateProxy::ask`.

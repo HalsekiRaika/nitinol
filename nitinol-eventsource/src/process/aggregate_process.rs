@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use futures_util::StreamExt;
-use nitinol_persistence::store::{EventStore, SnapshotStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
@@ -9,9 +7,10 @@ use crate::aggregate::{Aggregate, SnapshotRestoreError};
 use crate::context::Context;
 use crate::decider::Decider;
 use crate::Effect;
-use crate::error::{AskHandlerError, EffectExecutionError, ExecHandlerError};
+use crate::error::{AskHandlerError, EffectExecutionError, ExecHandlerError, PersistorUnreachableKind};
 use crate::event::Event;
 use crate::process::codec::EventCodec;
+use crate::process::persistence::{AppendEvents, EventPersistorRef, SnapshotPersistorRef};
 use crate::receive::Receive as EvtReceive;
 
 // ---------------------------------------------------------------------------
@@ -20,7 +19,7 @@ use crate::receive::Receive as EvtReceive;
 
 /// A heap-allocated, shareable function that restores an aggregate from a
 /// snapshot payload.  Stored as `Option<SnapshotRestoreFn<A>>` so it is set
-/// only when both `Snapshotable` and a snapshot store are in use.
+/// only when both `Snapshotable` and a snapshot persistor are in use.
 pub(crate) type SnapshotRestoreFn<A> =
     Arc<dyn Fn(&[u8]) -> Result<A, SnapshotRestoreError> + Send + Sync>;
 
@@ -47,23 +46,27 @@ pub(crate) struct ExecMsg<M>(pub(crate) M);
 pub struct AggregateProcess<A: Aggregate> {
     pub(crate) state: A,
     pub(crate) aggregate_id: AggregateId,
-    pub(crate) event_store: Arc<dyn EventStore>,
-    pub(crate) snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    pub(crate) event_ref: EventPersistorRef,
+    pub(crate) snapshot_ref: Option<SnapshotPersistorRef>,
     pub(crate) codec: Arc<dyn EventCodec<A::Event>>,
     pub(crate) sequence: u64,
     /// Restores aggregate state from a snapshot payload.
     /// Set only when the aggregate implements `Snapshotable` and a snapshot
-    /// store was provided via `AggregateProps::with_snapshot_store`.
+    /// persistor was provided via `AggregateProps::with_snapshot_persistor`.
     pub(crate) snapshot_restore: Option<SnapshotRestoreFn<A>>,
 }
 
 impl<A: Aggregate> Process for AggregateProcess<A> {
     async fn on_start(&mut self, _ctx: &mut ProcessContext) {
-        if let (Some(restore_fn), Some(ss)) = (
+        // Restore from snapshot if both a restore function and snapshot persistor are present.
+        if let (Some(restore_fn), Some(snapshot_ref)) = (
             self.snapshot_restore.clone(),
-            self.snapshot_store.clone(),
+            self.snapshot_ref.clone(),
         ) {
-            match ss.load_latest(&self.aggregate_id).await {
+            match snapshot_ref
+                .load_latest(self.aggregate_id.clone())
+                .await
+            {
                 Ok(Some(snapshot)) => match restore_fn(&snapshot.payload) {
                     Ok(restored) => {
                         self.state = restored;
@@ -75,40 +78,38 @@ impl<A: Aggregate> Process for AggregateProcess<A> {
                 },
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::error!(error = %e, "snapshot load failed; proceeding without snapshot");
+                    tracing::error!(error = ?e, "snapshot load failed; proceeding without snapshot");
                 }
             }
         }
 
+        // Replay events from the event persistor starting after the current sequence.
         let query = LoadQuery {
             aggregate_id: Some(self.aggregate_id.clone()),
             from_aggregate_sequence: Some(self.sequence + 1),
             ..Default::default()
         };
 
-        let stream = match self.event_store.load(query).await {
-            Ok(s) => s,
+        let events = match self
+            .event_ref
+            .load(query)
+            .await
+        {
+            Ok(evts) => evts,
             Err(e) => {
-                tracing::error!(error = %e, "event store load failed during replay");
+                tracing::error!(error = ?e, "event store load failed during replay");
                 return;
             }
         };
 
-        futures_util::pin_mut!(stream);
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(loaded) => match self.codec.decode(loaded.event_type, loaded.payload) {
-                    Ok(event) => {
-                        self.state.apply(event);
-                        self.sequence = loaded.sequence;
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "event decode failed; skipping event");
-                    }
-                },
+        for loaded in events {
+            match self.codec.decode(loaded.event_type, loaded.payload) {
+                Ok(event) => {
+                    self.state.apply(event);
+                    self.sequence = loaded.sequence;
+                }
                 Err(e) => {
-                    tracing::error!(error = %e, "event stream error; aborting replay");
-                    break;
+                    tracing::error!(error = %e, "event decode failed; skipping event");
                 }
             }
         }
@@ -141,7 +142,7 @@ where
             &mut self.state,
             &self.aggregate_id,
             &mut self.sequence,
-            self.event_store.as_ref(),
+            &self.event_ref,
             self.codec.as_ref(),
         )
         .await
@@ -182,7 +183,7 @@ fn run_effect<'a, A: Aggregate>(
     state: &'a mut A,
     aggregate_id: &'a AggregateId,
     sequence: &'a mut u64,
-    event_store: &'a (impl EventStore + ?Sized),
+    event_ref: &'a EventPersistorRef,
     codec: &'a (impl EventCodec<A::Event> + ?Sized),
 ) -> futures_core::future::BoxFuture<'a, Result<Vec<A::Event>, EffectExecutionError>>
 where
@@ -206,10 +207,14 @@ where
                         occurred_at: jiff::Timestamp::now(),
                     });
                 }
-                event_store
-                    .append(aggregate_id, appending)
+                event_ref
+                    .0
+                    .ask(AppendEvents {
+                        aggregate_id: aggregate_id.clone(),
+                        events: appending,
+                    })
                     .await
-                    .map_err(EffectExecutionError::Append)?;
+                    .map_err(map_append_ask_err)?;
                 // Commit the sequence counter only after a successful append.
                 *sequence = next_sequence;
                 let returned = events.clone();
@@ -240,7 +245,7 @@ where
                 let mut all = Vec::new();
                 for sub in effects {
                     let mut events =
-                        run_effect(sub, state, aggregate_id, sequence, event_store, codec)
+                        run_effect(sub, state, aggregate_id, sequence, event_ref, codec)
                             .await?;
                     all.append(&mut events);
                 }
@@ -248,4 +253,20 @@ where
             }
         }
     })
+}
+
+fn map_append_ask_err(
+    e: nitinol_runtime::error::AskError<nitinol_persistence::error::AppendError>,
+) -> EffectExecutionError {
+    match e {
+        nitinol_runtime::error::AskError::Handler(e) => EffectExecutionError::Append(e),
+        nitinol_runtime::error::AskError::DeadLetter { destination } => {
+            EffectExecutionError::PersistorUnreachable(
+                PersistorUnreachableKind::DeadLetter { destination },
+            )
+        }
+        nitinol_runtime::error::AskError::ReplyDropped => {
+            EffectExecutionError::PersistorUnreachable(PersistorUnreachableKind::ReplyDropped)
+        }
+    }
 }

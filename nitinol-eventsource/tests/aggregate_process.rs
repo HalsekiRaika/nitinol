@@ -2,8 +2,9 @@
 //
 // Tests verify the full request lifecycle: spawn → ask/tell/exec → persistence → state.
 //
-// These tests reference types from nitinol_eventsource::process that are implemented
-// in Phase 2.4. Compile errors are expected until the implementation is in place.
+// Phase 2 redesign: AggregateProps no longer accepts Arc<dyn EventStore> directly.
+// Persistence is delegated to EventPersistor, an actor that owns the store.
+// AggregateProcess communicates with it via EventPersistorRef (lockless messaging).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,12 +15,12 @@ use futures_core::future::BoxFuture;
 
 use nitinol_eventsource::{
     Aggregate, Context, Decider, Effect, Event,
+    EventCodec, DecodeError, EncodeError,
+    EventPersistor,
     Receive as EvtReceive,
     SideEffect, SideEffectError,
     AggregateProps, AggregateProxy, AskError, TellError,
-    EventCodec, EncodeError, DecodeError,
 };
-use nitinol_persistence::store::EventStore;
 use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::{AggregateId, EventType};
 use nitinol_runtime::ProcessSystem;
@@ -182,15 +183,20 @@ impl Decider<IncrementWithSide> for Counter {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: spawn a Counter process
+// Helper: spawn a Counter process with a fresh EventPersistor
 // ---------------------------------------------------------------------------
 
+/// Creates a ProcessSystem, spawns an EventPersistor backed by InMemoryEventStore,
+/// then spawns a Counter AggregateProcess using the EventPersistorRef.
+///
+/// Returns (system, proxy).  Caller must keep `_system` alive.
 async fn spawn_counter(
     aggregate_id: AggregateId,
-    event_store: Arc<dyn EventStore>,
 ) -> (ProcessSystem, AggregateProxy<Counter>) {
     let system = ProcessSystem::new().await;
-    let proxy = AggregateProps::<Counter>::new(aggregate_id, event_store)
+    let store = Arc::new(InMemoryEventStore::default());
+    let event_ref = EventPersistor::spawn(&system, store).await;
+    let proxy = AggregateProps::<Counter>::new(aggregate_id, event_ref)
         .with_codec(Arc::new(TestCodec))
         .spawn(&system)
         .await;
@@ -205,8 +211,7 @@ async fn spawn_counter(
 #[tokio::test]
 async fn ask_increment_returns_vec_incremented() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-basic"), store).await;
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-basic")).await;
 
     // When
     let events = proxy.ask(Increment).await.expect("ask(Increment) must succeed");
@@ -220,27 +225,34 @@ async fn ask_increment_returns_vec_incremented() {
 }
 
 // ---------------------------------------------------------------------------
-// ask<Increment>: events are persisted to the EventStore
+// ask<Increment>: events are persisted and replayable via shared EventPersistorRef
 // ---------------------------------------------------------------------------
 
-/// After ask(Increment), the EventStore contains the persisted event.
-/// Verified by spawning a second process on the same store and checking state via exec.
+/// After ask(Increment) on process 1, a second process using the same EventPersistorRef
+/// replays the stored event and restores the count to 1.
+///
+/// This verifies that persistence flows through the EventPersistor actor rather than
+/// a direct Arc<dyn EventStore> held by the process.
 #[tokio::test]
 async fn ask_persists_events_to_event_store() {
     // Given
-    let inner = Arc::new(InMemoryEventStore::default());
-    let store: Arc<dyn EventStore> = Arc::clone(&inner) as Arc<dyn EventStore>;
+    let system = ProcessSystem::new().await;
+    let store = Arc::new(InMemoryEventStore::default());
+    let event_ref = EventPersistor::spawn(&system, store).await;
     let id = AggregateId::new("agg-ask-persist");
-    let (_system, proxy) = spawn_counter(id.clone(), store).await;
+
+    let proxy = AggregateProps::<Counter>::new(id.clone(), event_ref.clone())
+        .with_codec(Arc::new(TestCodec))
+        .spawn(&system)
+        .await;
 
     // When
     proxy.ask(Increment).await.expect("ask must succeed");
 
-    // Then: a fresh process for the same aggregate_id replays the stored event.
-    let system2 = ProcessSystem::new().await;
-    let proxy2 = AggregateProps::<Counter>::new(id, Arc::clone(&inner) as Arc<dyn EventStore>)
+    // Then: a fresh process for the same aggregate_id replays through the same EventPersistor.
+    let proxy2 = AggregateProps::<Counter>::new(id, event_ref)
         .with_codec(Arc::new(TestCodec))
-        .spawn(&system2)
+        .spawn(&system)
         .await;
 
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
@@ -258,8 +270,8 @@ async fn ask_persists_events_to_event_store() {
 #[tokio::test]
 async fn ask_sequential_increments_accumulate_state() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-seq"), store).await;
+    let (_system, proxy) =
+        spawn_counter(AggregateId::new("agg-ask-seq")).await;
 
     // When
     proxy.ask(Increment).await.expect("ask 1 must succeed");
@@ -279,8 +291,8 @@ async fn ask_sequential_increments_accumulate_state() {
 #[tokio::test]
 async fn tell_increment_returns_unit() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-tell-unit"), store).await;
+    let (_system, proxy) =
+        spawn_counter(AggregateId::new("agg-tell-unit")).await;
 
     // When / Then
     let result: Result<(), TellError> = proxy.tell(Increment).await;
@@ -296,8 +308,8 @@ async fn tell_increment_returns_unit() {
 #[tokio::test]
 async fn tell_then_exec_sees_updated_state() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-tell-exec"), store).await;
+    let (_system, proxy) =
+        spawn_counter(AggregateId::new("agg-tell-exec")).await;
 
     // When: tell is queued first; exec is queued second and processed after tell.
     proxy.tell(Increment).await.expect("tell must succeed");
@@ -315,8 +327,8 @@ async fn tell_then_exec_sees_updated_state() {
 #[tokio::test]
 async fn exec_does_not_mutate_state() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-exec-immut"), store).await;
+    let (_system, proxy) =
+        spawn_counter(AggregateId::new("agg-exec-immut")).await;
     proxy.ask(Increment).await.expect("ask must succeed");
     proxy.ask(Increment).await.expect("ask must succeed");
 
@@ -338,8 +350,8 @@ async fn exec_does_not_mutate_state() {
 #[tokio::test]
 async fn ask_second_decider_increment_by() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-incby"), store).await;
+    let (_system, proxy) =
+        spawn_counter(AggregateId::new("agg-ask-incby")).await;
 
     // When
     let events = proxy
@@ -365,8 +377,8 @@ async fn ask_second_decider_increment_by() {
 #[tokio::test]
 async fn ask_rejected_command_returns_rejection_error() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-reject"), store).await;
+    let (_system, proxy) =
+        spawn_counter(AggregateId::new("agg-ask-reject")).await;
 
     // When
     let result = proxy.ask(IncrementIfLessThan(0)).await;
@@ -391,8 +403,8 @@ async fn ask_rejected_command_returns_rejection_error() {
 #[tokio::test]
 async fn side_effect_is_fire_and_forget_and_does_not_appear_in_response() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-side-ff"), store).await;
+    let (_system, proxy) =
+        spawn_counter(AggregateId::new("agg-side-ff")).await;
     let notify = Arc::new(tokio::sync::Notify::new());
 
     // When
@@ -423,8 +435,8 @@ async fn side_effect_is_fire_and_forget_and_does_not_appear_in_response() {
 #[tokio::test]
 async fn interleaved_ask_and_exec_maintain_consistent_state() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-interleaved"), store).await;
+    let (_system, proxy) =
+        spawn_counter(AggregateId::new("agg-interleaved")).await;
 
     // When
     proxy.ask(Increment).await.expect("ask 1 must succeed");
