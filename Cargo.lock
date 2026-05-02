@@ -644,6 +644,8 @@ dependencies = [
  "jiff",
  "nitinol-persistence",
  "nitinol-runtime",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",

@@ -18,7 +18,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    DecodeError, EncodeError, EventCodec, Event,
+    Codec, Event,
     EventEnvelope, Projector, ProjectionContext, ProjectorProps,
 };
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
@@ -51,26 +51,29 @@ impl Event for Labeled {
 // Fixtures: codec
 // ---------------------------------------------------------------------------
 
-/// Encodes to empty bytes (unit structs carry no data).
-/// Decodes by ignoring the payload and returning the fixed event value.
+/// Pass-through codec for unit events (no data to encode/decode).
 struct UnitCodec;
 
-impl EventCodec<Counted> for UnitCodec {
-    fn encode(&self, _event: &Counted) -> Result<Bytes, EncodeError> {
+impl Codec<Counted> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Counted) -> Result<Bytes, Self::Error> {
         Ok(Bytes::new())
     }
 
-    fn decode(&self, _event_type: EventType, _bytes: Bytes) -> Result<Counted, DecodeError> {
+    fn decode(_payload: &[u8]) -> Result<Counted, Self::Error> {
         Ok(Counted)
     }
 }
 
-impl EventCodec<Labeled> for UnitCodec {
-    fn encode(&self, _event: &Labeled) -> Result<Bytes, EncodeError> {
+impl Codec<Labeled> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Labeled) -> Result<Bytes, Self::Error> {
         Ok(Bytes::new())
     }
 
-    fn decode(&self, _event_type: EventType, _bytes: Bytes) -> Result<Labeled, DecodeError> {
+    fn decode(_payload: &[u8]) -> Result<Labeled, Self::Error> {
         Ok(Labeled)
     }
 }
@@ -528,11 +531,12 @@ async fn subscribe_requires_only_event_bound() {
     }
 
     struct MinimalCodec;
-    impl EventCodec<Minimal> for MinimalCodec {
-        fn encode(&self, _event: &Minimal) -> Result<Bytes, EncodeError> {
+    impl Codec<Minimal> for MinimalCodec {
+        type Error = std::convert::Infallible;
+        fn encode(_event: &Minimal) -> Result<Bytes, Self::Error> {
             Ok(Bytes::new())
         }
-        fn decode(&self, _event_type: EventType, _bytes: Bytes) -> Result<Minimal, DecodeError> {
+        fn decode(_payload: &[u8]) -> Result<Minimal, Self::Error> {
             Ok(Minimal)
         }
     }

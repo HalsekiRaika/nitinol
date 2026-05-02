@@ -15,12 +15,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    Aggregate, Context, Decider, Effect, Event,
-    EventCodec, DecodeError, EncodeError,
+    Aggregate, Codec, Context, Decider, Effect, Event,
     EventPersistor, EventPersistorRef,
     SnapshotPersistor, SnapshotPersistorRef,
     Receive as EvtReceive,
-    Snapshotable, SnapshotCaptureError, SnapshotRestoreError,
+    Snapshotable,
     AggregateProps, AggregateProxy,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
@@ -63,7 +62,8 @@ impl Aggregate for Counter {
 // ---------------------------------------------------------------------------
 
 /// Counter that supports snapshot capture and restore.
-/// Snapshot payload: 8 big-endian bytes encoding the u64 value.
+/// Snapshot value: the raw u64 counter value.
+/// Byte encoding is handled by BigEndianU64Codec (see below).
 #[derive(Default)]
 struct SnapshotableCounter {
     value: u64,
@@ -78,15 +78,14 @@ impl Aggregate for SnapshotableCounter {
 }
 
 impl Snapshotable for SnapshotableCounter {
-    fn restore(payload: &[u8]) -> Result<Self, SnapshotRestoreError> {
-        let arr: [u8; 8] = payload
-            .try_into()
-            .map_err(|e: std::array::TryFromSliceError| SnapshotRestoreError::Decode(Box::new(e)))?;
-        Ok(Self { value: u64::from_be_bytes(arr) })
+    type Snapshot = u64;
+
+    fn capture(&self) -> u64 {
+        self.value
     }
 
-    fn capture(&self) -> Result<Bytes, SnapshotCaptureError> {
-        Ok(Bytes::from(self.value.to_be_bytes().to_vec()))
+    fn restore(snapshot: u64) -> Self {
+        Self { value: snapshot }
     }
 }
 
@@ -144,18 +143,45 @@ impl EvtReceive<GetCount> for SnapshotableCounter {
 }
 
 // ---------------------------------------------------------------------------
-// Fixtures: test codec
+// Fixtures: test codecs
 // ---------------------------------------------------------------------------
 
+/// Pass-through codec for Incremented (unit struct — no data to encode).
 struct TestCodec;
 
-impl EventCodec<Incremented> for TestCodec {
-    fn encode(&self, _event: &Incremented) -> Result<Bytes, EncodeError> {
+impl Codec<Incremented> for TestCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Incremented) -> Result<Bytes, Self::Error> {
         Ok(Bytes::new())
     }
 
-    fn decode(&self, _event_type: EventType, _bytes: Bytes) -> Result<Incremented, DecodeError> {
+    fn decode(_payload: &[u8]) -> Result<Incremented, Self::Error> {
         Ok(Incremented)
+    }
+}
+
+/// Codec for u64 snapshots using 8-byte big-endian encoding.
+/// This matches the encoding used when manually creating PersistedSnapshot payloads
+/// in tests (e.g., `Bytes::from(5u64.to_be_bytes().to_vec())`).
+struct BigEndianU64Codec;
+
+#[derive(Debug, thiserror::Error)]
+#[error("snapshot payload must be 8 bytes, got {0}")]
+struct U64DecodeError(usize);
+
+impl Codec<u64> for BigEndianU64Codec {
+    type Error = U64DecodeError;
+
+    fn encode(value: &u64) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from(value.to_be_bytes().to_vec()))
+    }
+
+    fn decode(payload: &[u8]) -> Result<u64, Self::Error> {
+        let arr: [u8; 8] = payload
+            .try_into()
+            .map_err(|_| U64DecodeError(payload.len()))?;
+        Ok(u64::from_be_bytes(arr))
     }
 }
 
@@ -214,7 +240,7 @@ async fn spawn_snapshotable(
 ) -> AggregateProxy<SnapshotableCounter> {
     AggregateProps::<SnapshotableCounter>::new(id, event_ref)
         .with_codec(Arc::new(TestCodec))
-        .with_snapshot_persistor(snapshot_ref)
+        .with_snapshot_persistor(snapshot_ref, Arc::new(BigEndianU64Codec))
         .spawn(system)
         .await
 }
@@ -282,7 +308,7 @@ async fn replay_with_snapshot_only_restores_snapshot_state() {
         SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
     let id = AggregateId::new("replay-snap-only");
 
-    // Manually save a snapshot via SnapshotPersistorRef (no direct store access)
+    // Manually save a snapshot via SnapshotPersistorRef (big-endian u64 encoding)
     snapshot_ref
         .save(PersistedSnapshot {
             aggregate_id: id.clone(),

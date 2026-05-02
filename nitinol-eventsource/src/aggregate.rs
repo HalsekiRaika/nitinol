@@ -1,5 +1,3 @@
-use bytes::Bytes;
-
 use crate::event::Event;
 
 pub trait Aggregate: Default + Send + Sync + 'static {
@@ -8,19 +6,18 @@ pub trait Aggregate: Default + Send + Sync + 'static {
     fn apply(&mut self, event: Self::Event);
 }
 
+/// Enables an aggregate to be checkpointed as a serialisable snapshot value.
+///
+/// `type Snapshot` is the pure domain value captured and restored; byte
+/// serialisation is handled externally by a [`crate::codec::Codec<Self::Snapshot>`].
 pub trait Snapshotable: Sized {
-    fn restore(payload: &[u8]) -> Result<Self, SnapshotRestoreError>;
-    fn capture(&self) -> Result<Bytes, SnapshotCaptureError>;
-}
+    /// The pure domain value that represents a point-in-time snapshot of this
+    /// aggregate's state.
+    type Snapshot;
 
-#[derive(Debug, thiserror::Error)]
-pub enum SnapshotRestoreError {
-    #[error("decode error: {0}")]
-    Decode(Box<dyn std::error::Error + Send + Sync>),
-}
+    /// Capture the current state as a snapshot value.
+    fn capture(&self) -> Self::Snapshot;
 
-#[derive(Debug, thiserror::Error)]
-pub enum SnapshotCaptureError {
-    #[error("encode error: {0}")]
-    Encode(Box<dyn std::error::Error + Send + Sync>),
+    /// Restore aggregate state from a snapshot value.
+    fn restore(snapshot: Self::Snapshot) -> Self;
 }

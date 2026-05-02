@@ -28,7 +28,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    DecodeError, EncodeError, EventCodec, Event,
+    Codec, Event,
     Projector, ProjectionContext, ProjectorProps,
 };
 use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore};
@@ -52,12 +52,14 @@ impl Event for Evt {
 
 struct UnitCodec;
 
-impl EventCodec<Evt> for UnitCodec {
-    fn encode(&self, _event: &Evt) -> Result<Bytes, EncodeError> {
+impl Codec<Evt> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Evt) -> Result<Bytes, Self::Error> {
         Ok(Bytes::new())
     }
 
-    fn decode(&self, _event_type: EventType, _bytes: Bytes) -> Result<Evt, DecodeError> {
+    fn decode(_payload: &[u8]) -> Result<Evt, Self::Error> {
         Ok(Evt)
     }
 }

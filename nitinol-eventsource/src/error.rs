@@ -1,5 +1,13 @@
 use crate::SideEffectError;
-use crate::process::EncodeError;
+
+/// Error produced when a [`crate::codec::ErasedCodec`] operation fails.
+#[derive(Debug, thiserror::Error)]
+pub enum CodecError {
+    #[error("encode error: {0}")]
+    Encode(Box<dyn std::error::Error + Send + Sync>),
+    #[error("decode error: {0}")]
+    Decode(Box<dyn std::error::Error + Send + Sync>),
+}
 
 /// Identifies why a persistence actor was unreachable.
 ///
@@ -21,8 +29,8 @@ pub enum PersistorUnreachableKind {
 pub enum EffectExecutionError {
     #[error("side effect execution failed: {0}")]
     Side(#[from] SideEffectError),
-    #[error("event encode failed: {0}")]
-    Encode(#[from] EncodeError),
+    #[error("codec error: {0}")]
+    Codec(#[from] CodecError),
     #[error("event store append failed: {0}")]
     Append(nitinol_persistence::error::AppendError),
     #[error("persistence actor unreachable: {0}")]

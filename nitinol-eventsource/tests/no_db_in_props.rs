@@ -23,11 +23,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    Aggregate, Context, Decider, Effect, Event,
-    EventCodec, DecodeError, EncodeError,
+    Aggregate, Codec, Context, Decider, Effect, ErasedCodec, Event,
     EventPersistor, EventPersistorRef,
     SnapshotPersistor, SnapshotPersistorRef,
-    Snapshotable, SnapshotCaptureError, SnapshotRestoreError,
+    Snapshotable,
     AggregateProps,
 };
 use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore};
@@ -69,6 +68,8 @@ impl Decider<AlwaysIncrement> for Dummy {
 
 // ---------------------------------------------------------------------------
 // Minimal test aggregate (snapshotable)
+//
+// Snapshot = () (unit type): no domain data to capture, codec is trivial.
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
@@ -80,26 +81,45 @@ impl Aggregate for SnapshotDummy {
 }
 
 impl Snapshotable for SnapshotDummy {
-    fn restore(_payload: &[u8]) -> Result<Self, SnapshotRestoreError> {
-        Ok(Self)
-    }
-    fn capture(&self) -> Result<Bytes, SnapshotCaptureError> {
-        Ok(Bytes::new())
+    type Snapshot = ();
+
+    fn capture(&self) {}
+
+    fn restore(_snapshot: ()) -> Self {
+        Self
     }
 }
 
 // ---------------------------------------------------------------------------
-// Minimal codec
+// Minimal codecs
 // ---------------------------------------------------------------------------
 
 struct PassThroughCodec;
 
-impl EventCodec<DummyEvent> for PassThroughCodec {
-    fn encode(&self, _event: &DummyEvent) -> Result<Bytes, EncodeError> {
+impl Codec<DummyEvent> for PassThroughCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &DummyEvent) -> Result<Bytes, Self::Error> {
         Ok(Bytes::new())
     }
-    fn decode(&self, _event_type: EventType, _bytes: Bytes) -> Result<DummyEvent, DecodeError> {
+
+    fn decode(_payload: &[u8]) -> Result<DummyEvent, Self::Error> {
         Ok(DummyEvent)
+    }
+}
+
+/// Trivial codec for the unit snapshot type `()`.
+struct UnitSnapshotCodec;
+
+impl Codec<()> for UnitSnapshotCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_snapshot: &()) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -120,12 +140,16 @@ fn _assert_sig_aggregate_props_new_accepts_event_persistor_ref() {
 }
 
 /// Asserts that AggregateProps::<SnapshotDummy>::with_snapshot_persistor has the signature
-/// `fn(AggregateProps<SnapshotDummy>, SnapshotPersistorRef) -> AggregateProps<SnapshotDummy>`.
+/// `fn(AggregateProps<SnapshotDummy>, SnapshotPersistorRef, Arc<dyn ErasedCodec<()>>) -> AggregateProps<SnapshotDummy>`.
 ///
+/// The third argument is the snapshot codec (Arc<dyn ErasedCodec<A::Snapshot>>).
 /// If the method is ever changed to accept Arc<dyn SnapshotStore> again, this will not compile.
 fn _assert_sig_aggregate_props_with_snapshot_persistor_accepts_ref() {
-    let _: fn(AggregateProps<SnapshotDummy>, SnapshotPersistorRef) -> AggregateProps<SnapshotDummy> =
-        AggregateProps::with_snapshot_persistor;
+    let _: fn(
+        AggregateProps<SnapshotDummy>,
+        SnapshotPersistorRef,
+        Arc<dyn ErasedCodec<()>>,
+    ) -> AggregateProps<SnapshotDummy> = AggregateProps::with_snapshot_persistor;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +196,7 @@ async fn aggregate_props_spawns_snapshotable_with_snapshot_persistor_ref() {
     let proxy =
         AggregateProps::<SnapshotDummy>::new(AggregateId::new("arch-no-snap-store"), event_ref)
             .with_codec(Arc::new(PassThroughCodec))
-            .with_snapshot_persistor(snapshot_ref)
+            .with_snapshot_persistor(snapshot_ref, Arc::new(UnitSnapshotCodec))
             .spawn(&system)
             .await;
 

@@ -8,8 +8,8 @@ use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{Props, ProcessSystem, Stream};
 
+use crate::ErasedCodec;
 use crate::event::Event;
-use crate::EventCodec;
 use crate::projection::envelope::EventEnvelope;
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};
 use crate::projection::process::{CatchupOrigin, ProjectorProcess};
@@ -78,7 +78,7 @@ where
     ///
     /// During catch-up, each stored event whose `event_type` matches `E::EVENT_TYPE`
     /// is decoded with this codec and dispatched to `P: Projector<E>`.
-    pub fn with_event<E>(mut self, codec: Arc<dyn EventCodec<E>>) -> Self
+    pub fn with_event<E>(mut self, codec: Arc<dyn ErasedCodec<E>>) -> Self
     where
         P: Projector<E>,
         E: Event,

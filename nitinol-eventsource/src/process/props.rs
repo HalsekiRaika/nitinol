@@ -4,20 +4,20 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::{Props, ProcessSystem};
 
 use crate::aggregate::{Aggregate, Snapshotable};
+use crate::ErasedCodec;
 use crate::process::aggregate_process::{AggregateProcess, SnapshotRestoreFn};
-use crate::process::codec::EventCodec;
 use crate::process::persistence::{EventPersistorRef, SnapshotPersistorRef};
 use crate::process::proxy::AggregateProxy;
 
 /// Builder for spawning an `AggregateProcess<A>` and obtaining an `AggregateProxy<A>`.
 ///
 /// Mandatory: `new(aggregate_id, event_ref)` + `with_codec(codec)` + `spawn(system)`.
-/// Optional: `with_snapshot_persistor(snapshot_ref)` (only available when `A: Snapshotable`).
+/// Optional: `with_snapshot_persistor(snapshot_ref, snapshot_codec)` (only available when `A: Snapshotable`).
 pub struct AggregateProps<A: Aggregate> {
     aggregate_id: AggregateId,
     event_ref: EventPersistorRef,
     snapshot_ref: Option<SnapshotPersistorRef>,
-    codec: Option<Arc<dyn EventCodec<A::Event>>>,
+    codec: Option<Arc<dyn ErasedCodec<A::Event>>>,
     snapshot_restore: Option<SnapshotRestoreFn<A>>,
 }
 
@@ -33,7 +33,7 @@ impl<A: Aggregate> AggregateProps<A> {
     }
 
     /// Set the codec used to encode events for persistence and decode them during replay.
-    pub fn with_codec(mut self, codec: Arc<dyn EventCodec<A::Event>>) -> Self {
+    pub fn with_codec(mut self, codec: Arc<dyn ErasedCodec<A::Event>>) -> Self {
         self.codec = Some(codec);
         self
     }
@@ -67,12 +67,23 @@ impl<A: Aggregate> AggregateProps<A> {
 }
 
 impl<A: Aggregate + Snapshotable> AggregateProps<A> {
-    /// Set the snapshot persistor reference.  Only available for aggregates that implement
-    /// `Snapshotable`.  On_start will attempt to restore from the latest snapshot
-    /// before replaying delta events.
-    pub fn with_snapshot_persistor(mut self, snapshot_ref: SnapshotPersistorRef) -> Self {
+    /// Set the snapshot persistor and the codec used to encode/decode snapshots.
+    ///
+    /// The codec encodes `A::Snapshot` (the pure domain value) to bytes for storage,
+    /// and decodes bytes back to `A::Snapshot` before calling `A::restore`.
+    ///
+    /// On start, the process attempts to restore from the latest snapshot before
+    /// replaying delta events.
+    pub fn with_snapshot_persistor(
+        mut self,
+        snapshot_ref: SnapshotPersistorRef,
+        snapshot_codec: Arc<dyn ErasedCodec<A::Snapshot>>,
+    ) -> Self {
         self.snapshot_ref = Some(snapshot_ref);
-        self.snapshot_restore = Some(Arc::new(|payload: &[u8]| A::restore(payload)));
+        self.snapshot_restore = Some(Arc::new(move |payload: &[u8]| {
+            let snapshot = snapshot_codec.decode(payload)?;
+            Ok(A::restore(snapshot))
+        }));
         self
     }
 }

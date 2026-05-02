@@ -14,8 +14,7 @@ use bytes::Bytes;
 use futures_core::future::BoxFuture;
 
 use nitinol_eventsource::{
-    Aggregate, Context, Decider, Effect, Event,
-    EventCodec, DecodeError, EncodeError,
+    Aggregate, Codec, Context, Decider, Effect, Event,
     EventPersistor,
     Receive as EvtReceive,
     SideEffect, SideEffectError,
@@ -131,16 +130,18 @@ impl EvtReceive<GetCount> for Counter {
 // Fixtures: test codec
 // ---------------------------------------------------------------------------
 
-/// Test codec for Incremented events.
-/// Encodes as empty bytes (unit struct has no data); decodes by ignoring the payload.
+/// Pass-through codec for Incremented (unit struct — no data to encode).
+/// Encodes to empty bytes; decodes by returning Incremented regardless of payload.
 struct TestCodec;
 
-impl EventCodec<Incremented> for TestCodec {
-    fn encode(&self, _event: &Incremented) -> Result<Bytes, EncodeError> {
+impl Codec<Incremented> for TestCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Incremented) -> Result<Bytes, Self::Error> {
         Ok(Bytes::new())
     }
 
-    fn decode(&self, _event_type: EventType, _bytes: Bytes) -> Result<Incremented, DecodeError> {
+    fn decode(_payload: &[u8]) -> Result<Incremented, Self::Error> {
         Ok(Incremented)
     }
 }

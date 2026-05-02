@@ -3,13 +3,13 @@ use std::sync::Arc;
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
-use crate::aggregate::{Aggregate, SnapshotRestoreError};
+use crate::aggregate::Aggregate;
+use crate::ErasedCodec;
 use crate::context::Context;
 use crate::decider::Decider;
-use crate::Effect;
-use crate::error::{AskHandlerError, EffectExecutionError, ExecHandlerError, PersistorUnreachableKind};
+use crate::error::{AskHandlerError, CodecError, EffectExecutionError, ExecHandlerError, PersistorUnreachableKind};
 use crate::event::Event;
-use crate::process::codec::EventCodec;
+use crate::Effect;
 use crate::process::persistence::{AppendEvents, EventPersistorRef, SnapshotPersistorRef};
 use crate::receive::Receive as EvtReceive;
 
@@ -20,8 +20,11 @@ use crate::receive::Receive as EvtReceive;
 /// A heap-allocated, shareable function that restores an aggregate from a
 /// snapshot payload.  Stored as `Option<SnapshotRestoreFn<A>>` so it is set
 /// only when both `Snapshotable` and a snapshot persistor are in use.
+///
+/// The function decodes the raw bytes to the snapshot domain value (via the
+/// snapshot codec) and then calls `A::restore`.
 pub(crate) type SnapshotRestoreFn<A> =
-    Arc<dyn Fn(&[u8]) -> Result<A, SnapshotRestoreError> + Send + Sync>;
+    Arc<dyn Fn(&[u8]) -> Result<A, CodecError> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Internal message wrappers
@@ -48,7 +51,7 @@ pub struct AggregateProcess<A: Aggregate> {
     pub(crate) aggregate_id: AggregateId,
     pub(crate) event_ref: EventPersistorRef,
     pub(crate) snapshot_ref: Option<SnapshotPersistorRef>,
-    pub(crate) codec: Arc<dyn EventCodec<A::Event>>,
+    pub(crate) codec: Arc<dyn ErasedCodec<A::Event>>,
     pub(crate) sequence: u64,
     /// Restores aggregate state from a snapshot payload.
     /// Set only when the aggregate implements `Snapshotable` and a snapshot
@@ -103,7 +106,7 @@ impl<A: Aggregate> Process for AggregateProcess<A> {
         };
 
         for loaded in events {
-            match self.codec.decode(loaded.event_type, loaded.payload) {
+            match self.codec.decode(&loaded.payload) {
                 Ok(event) => {
                     self.state.apply(event);
                     self.sequence = loaded.sequence;
@@ -184,7 +187,7 @@ fn run_effect<'a, A: Aggregate>(
     aggregate_id: &'a AggregateId,
     sequence: &'a mut u64,
     event_ref: &'a EventPersistorRef,
-    codec: &'a (impl EventCodec<A::Event> + ?Sized),
+    codec: &'a dyn ErasedCodec<A::Event>,
 ) -> futures_core::future::BoxFuture<'a, Result<Vec<A::Event>, EffectExecutionError>>
 where
     A::Event: Clone,
@@ -198,7 +201,7 @@ where
                 let mut appending = Vec::with_capacity(events.len());
                 for event in &events {
                     next_sequence += 1;
-                    let payload = codec.encode(event).map_err(EffectExecutionError::Encode)?;
+                    let payload = codec.encode(event).map_err(EffectExecutionError::Codec)?;
                     appending.push(AppendingEvent {
                         aggregate_id: aggregate_id.clone(),
                         sequence: next_sequence,

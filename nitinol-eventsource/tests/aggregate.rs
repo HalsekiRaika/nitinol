@@ -1,6 +1,4 @@
-use nitinol_eventsource::{
-    Aggregate, Context, Event, Snapshotable, SnapshotCaptureError, SnapshotRestoreError,
-};
+use nitinol_eventsource::{Aggregate, Context, Event, Snapshotable};
 use nitinol_persistence::{AggregateId, EventType};
 
 // ---------------------------------------------------------------------------
@@ -27,19 +25,19 @@ impl Aggregate for Counter {
     }
 }
 
-// Snapshot encodes value as 8 big-endian bytes.
+// Snapshot is the raw counter value (u64).
+// Encoding/decoding is handled by a Codec<u64> at the process level;
+// Snapshotable only defines the domain-level type and the pure
+// capture / restore functions.
 impl Snapshotable for Counter {
-    fn restore(payload: &[u8]) -> Result<Self, SnapshotRestoreError> {
-        let arr: [u8; 8] = payload
-            .try_into()
-            .map_err(|e: std::array::TryFromSliceError| SnapshotRestoreError::Decode(Box::new(e)))?;
-        Ok(Counter {
-            value: u64::from_be_bytes(arr),
-        })
+    type Snapshot = u64;
+
+    fn capture(&self) -> u64 {
+        self.value
     }
 
-    fn capture(&self) -> Result<bytes::Bytes, SnapshotCaptureError> {
-        Ok(bytes::Bytes::from(self.value.to_be_bytes().to_vec()))
+    fn restore(snapshot: u64) -> Self {
+        Self { value: snapshot }
     }
 }
 
@@ -137,10 +135,66 @@ fn context_sequence_zero_is_valid() {
 }
 
 // ---------------------------------------------------------------------------
+// Snapshotable: capture
+// ---------------------------------------------------------------------------
+
+/// capture() returns the current counter value as a snapshot.
+#[test]
+fn snapshotable_capture_returns_current_value() {
+    // Given
+    let mut counter = Counter::default();
+    counter.apply(Incremented);
+    counter.apply(Incremented);
+
+    // When
+    let snapshot = counter.capture();
+
+    // Then
+    assert_eq!(snapshot, 2, "capture() must return the current value (2)");
+}
+
+/// capture() on a default counter returns 0.
+#[test]
+fn snapshotable_capture_default_counter_returns_zero() {
+    // Given
+    let counter = Counter::default();
+
+    // When
+    let snapshot = counter.capture();
+
+    // Then
+    assert_eq!(snapshot, 0, "capture() of a default Counter must return 0");
+}
+
+// ---------------------------------------------------------------------------
+// Snapshotable: restore
+// ---------------------------------------------------------------------------
+
+/// restore(n) creates a Counter with value n.
+#[test]
+fn snapshotable_restore_sets_value() {
+    // Given / When
+    let restored = Counter::restore(42);
+
+    // Then
+    assert_eq!(restored.value, 42, "restore(42) must produce a Counter with value 42");
+}
+
+/// restore(0) creates a Counter with value 0.
+#[test]
+fn snapshotable_restore_zero_produces_zero_value() {
+    // Given / When
+    let restored = Counter::restore(0);
+
+    // Then
+    assert_eq!(restored.value, 0, "restore(0) must produce a Counter with value 0");
+}
+
+// ---------------------------------------------------------------------------
 // Snapshotable: capture → restore roundtrip
 // ---------------------------------------------------------------------------
 
-/// capture() followed by restore() reproduces the original state
+/// capture() followed by restore() reproduces the original state.
 #[test]
 fn snapshot_roundtrip_preserves_counter_value() {
     // Given
@@ -150,8 +204,8 @@ fn snapshot_roundtrip_preserves_counter_value() {
     counter.apply(Incremented);
 
     // When
-    let bytes = counter.capture().expect("capture must succeed");
-    let restored = Counter::restore(&bytes).expect("restore must succeed");
+    let snapshot = counter.capture();
+    let restored = Counter::restore(snapshot);
 
     // Then
     assert_eq!(
@@ -160,15 +214,15 @@ fn snapshot_roundtrip_preserves_counter_value() {
     );
 }
 
-/// capture() of default (value 0) restores to value 0
+/// capture() of default (value 0) restores to value 0.
 #[test]
 fn snapshot_roundtrip_for_default_counter() {
     // Given
     let counter = Counter::default();
 
     // When
-    let bytes = counter.capture().expect("capture must succeed");
-    let restored = Counter::restore(&bytes).expect("restore must succeed");
+    let snapshot = counter.capture();
+    let restored = Counter::restore(snapshot);
 
     // Then
     assert_eq!(restored.value, 0, "restored Counter must have value 0 for default state");

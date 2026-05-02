@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use nitinol_persistence::EventType;
 
+use crate::ErasedCodec;
 use crate::event::Event;
-use crate::EventCodec;
 use crate::projection::context::ProjectionContext;
 use crate::projection::projector::Projector;
 
@@ -28,7 +28,7 @@ pub(crate) trait EventTypeHandler<P: Send + Sync, Tx: Send>: Send + Sync {
 }
 
 pub(crate) struct ConcreteHandler<P, E> {
-    pub codec: Arc<dyn EventCodec<E>>,
+    pub codec: Arc<dyn ErasedCodec<E>>,
     pub _phantom: PhantomData<P>,
 }
 
@@ -51,7 +51,7 @@ where
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event = self
             .codec
-            .decode(E::EVENT_TYPE, payload)
+            .decode(&payload)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         projector
             .project(event, ctx)
