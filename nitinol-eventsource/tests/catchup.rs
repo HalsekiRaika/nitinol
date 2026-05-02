@@ -149,7 +149,7 @@ async fn catchup_all_events_processed_from_empty_checkpoint() {
     // When
     let _proxy = ProjectorProps::new(
         ProjectionId::new("cu-all"),
-        Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
@@ -208,7 +208,7 @@ async fn catchup_skips_events_before_checkpoint() {
     // When
     let _proxy = ProjectorProps::new(
         projection_id,
-        Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
@@ -250,7 +250,7 @@ async fn catchup_empty_store_project_never_called() {
     // When
     let _proxy = ProjectorProps::new(
         ProjectionId::new("cu-empty"),
-        Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         {
             let count_c = Arc::clone(&count);
@@ -309,7 +309,7 @@ async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
     // When: catch-up from global sequence (covers all aggregates)
     let _proxy = ProjectorProps::new(
         ProjectionId::new("cu-multi"),
-        Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
@@ -366,7 +366,7 @@ async fn catchup_live_event_with_duplicate_sequence_is_skipped() {
     // When: spawn projector, subscribe to live stream
     let _proxy = ProjectorProps::new(
         ProjectionId::new("cu-dedup"),
-        Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
