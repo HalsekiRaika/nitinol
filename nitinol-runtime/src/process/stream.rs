@@ -41,7 +41,7 @@ where
     }
 }
 
-pub(crate) struct PublishMsg<T>(pub T);
+pub struct PublishMsg<T>(pub T);
 pub(crate) struct SubscribeMsg<T>(pub Box<dyn Dispatcher<T>>);
 pub(crate) struct UnsubscribeMsg(pub Pid);
 

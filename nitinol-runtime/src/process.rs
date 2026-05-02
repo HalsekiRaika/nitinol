@@ -18,7 +18,7 @@ pub use self::{
     message::*,
     props::*,
     proxy::*,
-    stream::Stream,
+    stream::{PublishMsg, Stream},
     subscriber::Subscriber,
     watch::{Terminated, TerminatedReason},
 };
