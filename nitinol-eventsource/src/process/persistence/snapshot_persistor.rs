@@ -25,7 +25,7 @@ pub(crate) struct LoadLatestSnapshot {
 
 /// Persistence actor that exclusively owns an `Arc<dyn SnapshotStore>`.
 ///
-/// All snapshot operations are serialised through this actor's message loop.
+/// All snapshot operations are serialized through this actor's message loop.
 pub struct SnapshotPersistor {
     store: Arc<dyn SnapshotStore>,
 }
@@ -66,13 +66,13 @@ impl SnapshotPersistor {
     pub async fn spawn(
         system: &ProcessSystem,
         store: Arc<dyn SnapshotStore>,
-    ) -> SnapshotPersistorRef {
+    ) -> SnapshotPersistorProxy {
         let mut props = Props::new(move || SnapshotPersistor {
             store: Arc::clone(&store),
         });
         props.with_supervision_strategy(SupervisionStrategy::Resume);
         props.with_idle_timeout(IdleTimeout::Persistent);
-        SnapshotPersistorRef(system.spawn(props).await)
+        SnapshotPersistorProxy(system.spawn(props).await)
     }
 }
 
@@ -84,9 +84,9 @@ impl SnapshotPersistor {
 ///
 /// Callers save and load snapshots without holding any direct store reference.
 #[derive(Clone)]
-pub struct SnapshotPersistorRef(ProcessProxy<SnapshotPersistor>);
+pub struct SnapshotPersistorProxy(ProcessProxy<SnapshotPersistor>);
 
-impl SnapshotPersistorRef {
+impl SnapshotPersistorProxy {
     /// Save a snapshot via the `SnapshotPersistor` actor.
     pub async fn save(&self, snapshot: PersistedSnapshot) -> Result<(), SnapshotError> {
         self.0

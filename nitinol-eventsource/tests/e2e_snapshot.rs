@@ -16,9 +16,9 @@ use bytes::Bytes;
 use nitinol_eventsource::{
     AggregateProps, AggregateProxy, Snapshotable,
     codec::Codec, Aggregate, Context, Decider, Effect, Event,
-    EventPersistor, EventPersistorRef,
+    EventPersistor, EventPersistorProxy,
     Receive as EvtReceive,
-    SnapshotPersistor, SnapshotPersistorRef,
+    SnapshotPersistor, SnapshotPersistorProxy,
 };
 use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, EventType, PersistedSnapshot};
@@ -183,8 +183,8 @@ impl Codec<u64> for SnapshotCodec {
 async fn spawn_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    event_ref: EventPersistorRef,
-    snapshot_ref: SnapshotPersistorRef,
+    event_ref: EventPersistorProxy,
+    snapshot_ref: SnapshotPersistorProxy,
 ) -> AggregateProxy<Counter> {
     AggregateProps::<Counter>::new(id, event_ref)
         .with_codec(Arc::new(EventCodec))
@@ -197,7 +197,7 @@ async fn spawn_counter(
 async fn spawn_plain_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    event_ref: EventPersistorRef,
+    event_ref: EventPersistorProxy,
 ) -> AggregateProxy<PlainCounter> {
     AggregateProps::<PlainCounter>::new(id, event_ref)
         .with_codec(Arc::new(EventCodec))

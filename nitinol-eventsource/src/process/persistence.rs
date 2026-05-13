@@ -1,8 +1,8 @@
 mod event_persistor;
 mod snapshot_persistor;
 
-pub use event_persistor::{EventPersistor, EventPersistorRef};
-pub use snapshot_persistor::{SnapshotPersistor, SnapshotPersistorRef};
+pub use event_persistor::{EventPersistor, EventPersistorProxy};
+pub use snapshot_persistor::{SnapshotPersistor, SnapshotPersistorProxy};
 
 // Re-export AppendEvents so aggregate_process::run_effect can perform a raw
 // ask for fine-grained error mapping (distinguishing handler errors from

@@ -24,8 +24,8 @@ use bytes::Bytes;
 
 use nitinol_eventsource::{
     Aggregate, Context, Decider, Effect, Event,
-    EventPersistor, EventPersistorRef,
-    SnapshotPersistor, SnapshotPersistorRef,
+    EventPersistor, EventPersistorProxy,
+    SnapshotPersistor, SnapshotPersistorProxy,
     Snapshotable,
     AggregateProps,
 };
@@ -137,7 +137,7 @@ impl Codec<()> for UnitSnapshotCodec {
 ///
 /// If Props is ever changed to accept Arc<dyn EventStore> again, this will not compile.
 fn _assert_sig_aggregate_props_new_accepts_event_persistor_ref() {
-    let _: fn(AggregateId, EventPersistorRef) -> AggregateProps<Dummy> = AggregateProps::new;
+    let _: fn(AggregateId, EventPersistorProxy) -> AggregateProps<Dummy> = AggregateProps::new;
 }
 
 /// Asserts that AggregateProps::<SnapshotDummy>::with_snapshot_persistor has the signature
@@ -148,7 +148,7 @@ fn _assert_sig_aggregate_props_new_accepts_event_persistor_ref() {
 fn _assert_sig_aggregate_props_with_snapshot_persistor_accepts_ref() {
     let _: fn(
         AggregateProps<SnapshotDummy>,
-        SnapshotPersistorRef,
+        SnapshotPersistorProxy,
         Arc<dyn ErasedCodec<()>>,
     ) -> AggregateProps<SnapshotDummy> = AggregateProps::with_snapshot_persistor;
 }

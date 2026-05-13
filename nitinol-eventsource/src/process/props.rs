@@ -6,7 +6,7 @@ use nitinol_runtime::{Props, ProcessSystem};
 use crate::aggregate::{Aggregate, Snapshotable};
 use crate::codec::ErasedCodec;
 use crate::process::aggregate_process::{AggregateProcess, SnapshotRestoreFn};
-use crate::process::persistence::{EventPersistorRef, SnapshotPersistorRef};
+use crate::process::persistence::{EventPersistorProxy, SnapshotPersistorProxy};
 use crate::process::proxy::AggregateProxy;
 
 /// Builder for spawning an `AggregateProcess<A>` and obtaining an `AggregateProxy<A>`.
@@ -15,14 +15,14 @@ use crate::process::proxy::AggregateProxy;
 /// Optional: `with_snapshot_persistor(snapshot_ref, snapshot_codec)` (only available when `A: Snapshotable`).
 pub struct AggregateProps<A: Aggregate> {
     aggregate_id: AggregateId,
-    event_ref: EventPersistorRef,
-    snapshot_ref: Option<SnapshotPersistorRef>,
+    event_ref: EventPersistorProxy,
+    snapshot_ref: Option<SnapshotPersistorProxy>,
     codec: Option<Arc<dyn ErasedCodec<A::Event>>>,
     snapshot_restore: Option<SnapshotRestoreFn<A>>,
 }
 
 impl<A: Aggregate> AggregateProps<A> {
-    pub fn new(aggregate_id: AggregateId, event_ref: EventPersistorRef) -> Self {
+    pub fn new(aggregate_id: AggregateId, event_ref: EventPersistorProxy) -> Self {
         Self {
             aggregate_id,
             event_ref,
@@ -76,7 +76,7 @@ impl<A: Aggregate + Snapshotable> AggregateProps<A> {
     /// replaying delta events.
     pub fn with_snapshot_persistor(
         mut self,
-        snapshot_ref: SnapshotPersistorRef,
+        snapshot_ref: SnapshotPersistorProxy,
         snapshot_codec: Arc<dyn ErasedCodec<A::Snapshot>>,
     ) -> Self {
         self.snapshot_ref = Some(snapshot_ref);

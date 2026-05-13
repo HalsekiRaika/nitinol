@@ -52,7 +52,7 @@ pub use self::event::Event;
 pub use self::receive::Receive;
 
 pub use self::process::{AggregateProps, AggregateProxy};
-pub use self::process::{EventPersistor, EventPersistorRef, SnapshotPersistor, SnapshotPersistorRef};
+pub use self::process::{EventPersistor, EventPersistorProxy, SnapshotPersistor, SnapshotPersistorProxy};
 pub use self::error::{AskError, ExecError, PersistorUnreachableKind, TellError};
 
 pub use self::projection::{EventEnvelope, ProjectionContext, Projector, ProjectorProps};

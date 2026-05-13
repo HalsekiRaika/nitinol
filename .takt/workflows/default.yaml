@@ -232,7 +232,8 @@ steps:
       - name: arch-review
         edit: false
         persona: architecture-reviewer
-        model: opus
+        provider: opencode
+        model: openai/gpt-5.5
         policy:
           - review
           - rust-review

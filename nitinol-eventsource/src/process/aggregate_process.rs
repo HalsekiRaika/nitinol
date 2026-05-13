@@ -10,7 +10,7 @@ use crate::decider::Decider;
 use crate::error::{AskHandlerError, CodecError, EffectExecutionError, ExecHandlerError, PersistorUnreachableKind};
 use crate::event::Event;
 use crate::Effect;
-use crate::process::persistence::{AppendEvents, EventPersistorRef, SnapshotPersistorRef};
+use crate::process::persistence::{AppendEvents, EventPersistorProxy, SnapshotPersistorProxy};
 use crate::receive::Receive as EvtReceive;
 
 // ---------------------------------------------------------------------------
@@ -49,8 +49,8 @@ pub(crate) struct ExecMsg<M>(pub(crate) M);
 pub struct AggregateProcess<A: Aggregate> {
     pub(crate) state: A,
     pub(crate) aggregate_id: AggregateId,
-    pub(crate) event_ref: EventPersistorRef,
-    pub(crate) snapshot_ref: Option<SnapshotPersistorRef>,
+    pub(crate) event_ref: EventPersistorProxy,
+    pub(crate) snapshot_ref: Option<SnapshotPersistorProxy>,
     pub(crate) codec: Arc<dyn ErasedCodec<A::Event>>,
     pub(crate) sequence: u64,
     /// Restores aggregate state from a snapshot payload.
@@ -62,11 +62,11 @@ pub struct AggregateProcess<A: Aggregate> {
 impl<A: Aggregate> Process for AggregateProcess<A> {
     async fn on_start(&mut self, _ctx: &mut ProcessContext) {
         // Restore from snapshot if both a restore function and snapshot persistor are present.
-        if let (Some(restore_fn), Some(snapshot_ref)) = (
+        if let (Some(restore_fn), Some(snapshot_proxy)) = (
             self.snapshot_restore.clone(),
             self.snapshot_ref.clone(),
         ) {
-            match snapshot_ref
+            match snapshot_proxy
                 .load_latest(self.aggregate_id.clone())
                 .await
             {
@@ -186,7 +186,7 @@ fn run_effect<'a, A: Aggregate>(
     state: &'a mut A,
     aggregate_id: &'a AggregateId,
     sequence: &'a mut u64,
-    event_ref: &'a EventPersistorRef,
+    event_ref: &'a EventPersistorProxy,
     codec: &'a dyn ErasedCodec<A::Event>,
 ) -> futures_core::future::BoxFuture<'a, Result<Vec<A::Event>, EffectExecutionError>>
 where

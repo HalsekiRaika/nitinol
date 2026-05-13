@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use nitinol_eventsource::{EventPersistor, EventPersistorRef};
+use nitinol_eventsource::{EventPersistor, EventPersistorProxy};
 use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery};
 use nitinol_runtime::ProcessSystem;
@@ -19,7 +19,7 @@ use nitinol_runtime::ProcessSystem;
 // ---------------------------------------------------------------------------
 
 /// Spawns a fresh ProcessSystem with an InMemoryEventStore-backed EventPersistor.
-async fn setup() -> (ProcessSystem, EventPersistorRef) {
+async fn setup() -> (ProcessSystem, EventPersistorProxy) {
     let system = ProcessSystem::new().await;
     let store = Arc::new(InMemoryEventStore::default());
     let event_ref = EventPersistor::spawn(&system, store).await;

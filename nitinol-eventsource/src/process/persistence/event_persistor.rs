@@ -80,13 +80,13 @@ impl EventPersistor {
     ///
     /// - Supervision: `Resume` — actor stays alive after handler errors.
     /// - Idle timeout: `Persistent` — never stopped due to inactivity.
-    pub async fn spawn(system: &ProcessSystem, store: Arc<dyn EventStore>) -> EventPersistorRef {
+    pub async fn spawn(system: &ProcessSystem, store: Arc<dyn EventStore>) -> EventPersistorProxy {
         let mut props = Props::new(move || EventPersistor {
             store: Arc::clone(&store),
         });
         props.with_supervision_strategy(SupervisionStrategy::Resume);
         props.with_idle_timeout(IdleTimeout::Persistent);
-        EventPersistorRef(system.spawn(props).await)
+        EventPersistorProxy(system.spawn(props).await)
     }
 }
 
@@ -100,9 +100,9 @@ impl EventPersistor {
 /// The inner proxy is `pub(crate)` so `run_effect` can perform a raw `ask` for
 /// fine-grained error mapping between handler errors and connectivity errors.
 #[derive(Clone)]
-pub struct EventPersistorRef(pub(crate) ProcessProxy<EventPersistor>);
+pub struct EventPersistorProxy(pub(crate) ProcessProxy<EventPersistor>);
 
-impl EventPersistorRef {
+impl EventPersistorProxy {
     /// Append events to the store via the `EventPersistor` actor.
     pub async fn append(
         &self,

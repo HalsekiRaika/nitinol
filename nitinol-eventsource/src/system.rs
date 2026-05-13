@@ -6,7 +6,7 @@ use nitinol_runtime::ProcessSystem;
 
 use crate::aggregate::Aggregate;
 use crate::codec::{Codec, ErasedCodec};
-use crate::{AggregateProps, AggregateProxy, EventPersistorRef};
+use crate::{AggregateProps, AggregateProxy, EventPersistorProxy};
 
 /// Marker type indicating no codec has been configured yet.
 ///
@@ -105,7 +105,7 @@ where
     pub async fn spawn_aggregate<A>(
         &self,
         id: AggregateId,
-        event_ref: EventPersistorRef,
+        event_ref: EventPersistorProxy,
     ) -> AggregateProxy<A>
     where
         A: Aggregate,
@@ -123,7 +123,7 @@ where
     pub fn aggregate_props<A>(
         &self,
         id: AggregateId,
-        event_ref: EventPersistorRef,
+        event_ref: EventPersistorProxy,
     ) -> AggregateProps<A>
     where
         A: Aggregate,
