@@ -237,6 +237,7 @@ steps:
         policy:
           - review
           - rust-review
+          - rust-review-gpt55
         knowledge: architecture
         provider_options:
           claude:
