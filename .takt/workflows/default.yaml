@@ -83,7 +83,8 @@ steps:
   # テスト
   - name: write_tests
     edit: true
-    model: sonnet
+    provider: claude
+    model: opus-4.7
     persona: coder
     policy:
       - coding
@@ -125,7 +126,8 @@ steps:
   - name: implement
     edit: true
     persona: coder
-    model: sonnet
+    provider: claude
+    model: opus-4.7
     policy:
       - coding
       - testing
@@ -167,7 +169,8 @@ steps:
   - name: ai_review
     edit: false
     persona: ai-antipattern-reviewer
-    model: opus
+    provider: codex
+    model: gpt-5.5
     policy:
       - review
       - ai-antipattern
@@ -232,11 +235,10 @@ steps:
       - name: arch-review
         edit: false
         persona: architecture-reviewer
-        provider: opencode
-        model: openai/gpt-5.5
+        provider: codex
+        model: gpt-5.5
         policy:
           - review
-          - rust-review
           - rust-review-gpt55
         knowledge: architecture
         provider_options:
@@ -259,7 +261,8 @@ steps:
       - name: supervise
         edit: false
         persona: supervisor
-        model: opus
+        provider: codex
+        model: gpt-5.5
         policy:
           - review
           - rust-review
