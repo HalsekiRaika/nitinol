@@ -731,6 +731,12 @@ dependencies = [
 [[package]]
 name = "nitinol"
 version = "0.4.2"
+dependencies = [
+ "nitinol-eventsource",
+ "nitinol-persistence",
+ "nitinol-runtime",
+ "tokio",
+]
 
 [[package]]
 name = "nitinol-eventsource"

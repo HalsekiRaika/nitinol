@@ -51,8 +51,12 @@ pub use self::effect::{Effect, SideEffect, SideEffectError};
 pub use self::event::Event;
 pub use self::receive::Receive;
 
-pub use self::process::{AggregateProps, AggregateProxy};
+pub use self::process::{AggregateProps, AggregateProxy, CodecUnset, CodecSet};
 pub use self::process::{EventPersistor, EventPersistorProxy, SnapshotPersistor, SnapshotPersistorProxy};
 pub use self::error::{AskError, ExecError, PersistorUnreachableKind, TellError};
 
-pub use self::projection::{EventEnvelope, ProjectionContext, Projector, ProjectorProps};
+pub use self::projection::{
+    EventEnvelope, ProjectionContext, Projector, ProjectorProps,
+    EventUnset, EventSet, OriginUnset, OriginSet,
+    TxProvider,
+};

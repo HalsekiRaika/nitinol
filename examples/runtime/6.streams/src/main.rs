@@ -173,7 +173,7 @@ async fn demo_unsubscribe() {
         sensor: "sensor-2".to_string(),
         celsius: 25.0,
     };
-    stream.publish(reading).await.ok();
+    stream.publish_boxed(reading).await.ok();
     tokio::time::sleep(Duration::from_millis(100)).await;
     info!("Both subscribers received the first message.");
 
@@ -187,7 +187,7 @@ async fn demo_unsubscribe() {
         sensor: "sensor-2".to_string(),
         celsius: 40.0,
     };
-    stream.publish(reading2).await.ok();
+    stream.publish_boxed(reading2).await.ok();
     tokio::time::sleep(Duration::from_millis(100)).await;
     info!("Only DisplaySubscriber received the second message.");
 }

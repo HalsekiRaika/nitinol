@@ -43,6 +43,6 @@ impl Receive<Measure> for TemperatureSensor {
             sensor: self.name.clone(),
             celsius: msg.0,
         };
-        self.stream.publish(reading).await
+        self.stream.publish_boxed(reading).await
     }
 }

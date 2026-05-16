@@ -23,7 +23,6 @@ use nitinol_eventsource::{
 use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, ProjectionId};
 use nitinol_runtime::ident::ProcessName;
-use nitinol_runtime::process::PublishMsg;
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -189,9 +188,13 @@ async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn projector that catches up from the aggregate's event stream
+    let proj_event_ref = EventPersistor::spawn(
+        system.process_system(),
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
+    ).await;
     let _proj_proxy = ProjectorProps::new(
         ProjectionId::new("e2e-proj-catchup"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        proj_event_ref,
         Arc::clone(&checkpoint_store),
         move || CountingProjector {
             count: Arc::clone(&count_c),
@@ -242,9 +245,13 @@ async fn e2e_live_projection_sees_published_event_envelope() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
+    let event_ref = EventPersistor::spawn(
+        system.process_system(),
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
+    ).await;
     let _proj_proxy = ProjectorProps::new(
         ProjectionId::new("e2e-proj-live"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        event_ref,
         Arc::clone(&checkpoint_store),
         move || CountingProjector {
             count: Arc::clone(&count_c),
@@ -259,12 +266,12 @@ async fn e2e_live_projection_sees_published_event_envelope() {
 
     // When: publish a live event to the stream
     stream
-        .tell(PublishMsg(EventEnvelope {
+        .publish(EventEnvelope {
             aggregate_id: agg_id,
             sequence: 1,
             global_sequence: 1,
             event: Incremented,
-        }))
+        })
         .await
         .expect("publish must succeed");
 
@@ -312,9 +319,13 @@ async fn e2e_at_most_once_delivery_advances_checkpoint_before_project() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn projector with AtMostOnce delivery
+    let proj_event_ref = EventPersistor::spawn(
+        system.process_system(),
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
+    ).await;
     let _proj_proxy = ProjectorProps::new(
         projection_id.clone(),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        proj_event_ref,
         Arc::clone(&checkpoint_store),
         move || CountingProjector {
             count: Arc::clone(&count_c),

@@ -124,7 +124,7 @@ where
         &self,
         id: AggregateId,
         event_ref: EventPersistorProxy,
-    ) -> AggregateProps<A>
+    ) -> AggregateProps<A, crate::CodecSet<A::Event>>
     where
         A: Aggregate,
         C: Codec<A::Event>,

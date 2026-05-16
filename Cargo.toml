@@ -30,8 +30,6 @@ description = "A utilities for event sourcing"
 
 [workspace.dependencies]
 
-[features]
-
 [package]
 name = "nitinol"
 version = "0.4.2"
@@ -41,4 +39,20 @@ authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]
 repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
+[features]
+# No features are enabled by default — explicit opt-in, Tokio style.
+default = []
+runtime = ["dep:nitinol-runtime"]
+persistence = ["dep:nitinol-persistence"]
+eventsource = ["dep:nitinol-eventsource", "runtime", "persistence"]
+full = ["runtime", "persistence", "eventsource"]
+
 [dependencies]
+nitinol-runtime    = { path = "nitinol-runtime",    optional = true }
+nitinol-persistence = { path = "nitinol-persistence", optional = true }
+nitinol-eventsource = { path = "nitinol-eventsource", optional = true }
+
+[dev-dependencies]
+# Required by the `#[tokio::test]` attribute in umbrella integration tests.
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
+nitinol-persistence = { path = "nitinol-persistence" }

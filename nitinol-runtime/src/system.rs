@@ -9,7 +9,7 @@ use crate::process::{
 };
 
 /// The well-known topic name for the dead-letter stream.
-const DEAD_LETTERS_TOPIC: &str = "$dead-letter-stream";
+const DEAD_LETTERS_TOPIC: &str = "$dead-letters";
 
 /// The well-known process name for the dead-letter actor.
 const DEAD_LETTER_PROCESS_NAME: &str = "$dead-letter";

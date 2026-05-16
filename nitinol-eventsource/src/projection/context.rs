@@ -1,10 +1,6 @@
 use nitinol_persistence::store::DeliveryMode;
 use nitinol_persistence::ProjectionId;
 
-/// Context passed to `Projector::project` for each event.
-///
-/// Provides metadata about the current projection step and an optional
-/// transaction handle for ExactlyOnce delivery mode.
 pub struct ProjectionContext<'a, Tx> {
     projection_id: &'a ProjectionId,
     current_sequence: u64,
@@ -45,14 +41,11 @@ impl<'a, Tx> ProjectionContext<'a, Tx> {
         self.delivery_mode
     }
 
-    /// The transaction handle, if one was provided by the framework.
-    ///
-    /// For ExactlyOnce delivery mode with a real database backend, the
-    /// framework populates this so the user can save both the read-model
-    /// update and the checkpoint within the same transaction.
-    /// Returns `None` when the framework does not manage transactions
-    /// (the default for all built-in stores).
     pub fn tx(&mut self) -> Option<&mut Tx> {
         self.tx.as_mut()
+    }
+
+    pub(crate) fn take_tx(&mut self) -> Option<Tx> {
+        self.tx.take()
     }
 }

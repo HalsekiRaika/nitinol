@@ -101,7 +101,7 @@ impl Receive<DeadLetterEnvelopeMsg> for DeadLetterProcess {
             message: envelope.message,
             sender: envelope.sender,
         };
-        let _ = self.stream.publish(dead_letter).await;
+        let _ = self.stream.publish_boxed(dead_letter).await;
 
         if let Some((watched, watcher)) = watch_pair {
             if let Some(proxy) = self.registry.lookup(watcher).await {

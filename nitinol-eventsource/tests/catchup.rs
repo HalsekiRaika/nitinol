@@ -24,8 +24,8 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::store::{CheckpointStore, EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, ProjectionId};
+use nitinol_eventsource::EventPersistor;
 use nitinol_runtime::ident::ProcessName;
-use nitinol_runtime::process::PublishMsg;
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -149,9 +149,10 @@ async fn catchup_all_events_processed_from_empty_checkpoint() {
     let notify_c = Arc::clone(&notify);
 
     // When
+    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         ProjectionId::new("cu-all"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        event_ref,
         Arc::clone(&checkpoint_store),
         move || SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
@@ -208,9 +209,10 @@ async fn catchup_skips_events_before_checkpoint() {
     let notify_c = Arc::clone(&notify);
 
     // When
+    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         projection_id,
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        event_ref,
         Arc::clone(&checkpoint_store),
         move || SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
@@ -250,9 +252,10 @@ async fn catchup_empty_store_project_never_called() {
     let count = Arc::new(AtomicUsize::new(0));
 
     // When
+    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         ProjectionId::new("cu-empty"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        event_ref,
         Arc::clone(&checkpoint_store),
         {
             let count_c = Arc::clone(&count);
@@ -309,9 +312,10 @@ async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
     let notify_c = Arc::clone(&notify);
 
     // When: catch-up from global sequence (covers all aggregates)
+    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         ProjectionId::new("cu-multi"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        event_ref,
         Arc::clone(&checkpoint_store),
         move || SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
@@ -366,9 +370,10 @@ async fn catchup_live_event_with_duplicate_sequence_is_skipped() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn projector, subscribe to live stream
+    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         ProjectionId::new("cu-dedup"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        event_ref,
         Arc::clone(&checkpoint_store),
         move || SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
@@ -384,23 +389,23 @@ async fn catchup_live_event_with_duplicate_sequence_is_skipped() {
 
     // Publish a live event with sequence=2 (already covered by catch-up → must be skipped)
     stream
-        .tell(PublishMsg(EventEnvelope {
+        .publish(EventEnvelope {
             aggregate_id: agg_id.clone(),
             sequence: 2,
             global_sequence: 2,
             event: Evt,
-        }))
+        })
         .await
         .expect("publish dup must succeed");
 
     // Publish a live event with sequence=4 (new, beyond catch-up → must be projected)
     stream
-        .tell(PublishMsg(EventEnvelope {
+        .publish(EventEnvelope {
             aggregate_id: agg_id,
             sequence: 4,
             global_sequence: 4,
             event: Evt,
-        }))
+        })
         .await
         .expect("publish new must succeed");
 
