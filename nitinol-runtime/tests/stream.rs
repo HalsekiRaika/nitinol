@@ -179,7 +179,7 @@ async fn publish_with_no_subscribers_succeeds() {
         .expect("spawn_stream should succeed");
 
     // When: a message is published
-    let result = stream.publish(42u32).await;
+    let result = stream.publish_boxed(42u32).await;
 
     // Then: no error (dispatching to an empty list is a no-op)
     assert!(result.is_ok());
@@ -203,7 +203,7 @@ async fn publish_delivers_message_to_subscriber() {
         .expect("subscribe should succeed");
 
     // When: a message is published
-    stream.publish(1u32).await.expect("publish should succeed");
+    stream.publish_boxed(1u32).await.expect("publish should succeed");
 
     // Then: the subscriber receives the message
     wait_for_count(&count, 1).await;
@@ -232,7 +232,7 @@ async fn publish_delivers_to_all_subscribers() {
 
     // When: a message is published
     stream
-        .publish(String::from("broadcast"))
+        .publish_boxed(String::from("broadcast"))
         .await
         .expect("publish should succeed");
 
@@ -261,9 +261,9 @@ async fn publish_multiple_messages_all_delivered_in_order() {
         .expect("subscribe should succeed");
 
     // When: three messages are published sequentially
-    stream.publish(1u32).await.expect("publish should succeed");
-    stream.publish(2u32).await.expect("publish should succeed");
-    stream.publish(3u32).await.expect("publish should succeed");
+    stream.publish_boxed(1u32).await.expect("publish should succeed");
+    stream.publish_boxed(2u32).await.expect("publish should succeed");
+    stream.publish_boxed(3u32).await.expect("publish should succeed");
 
     // Then: all three messages are received
     wait_for_count(&count, 3).await;
@@ -348,7 +348,7 @@ async fn stream_downcast_proxy_can_publish() {
         .expect("subscribe should succeed");
 
     // When: publish through the downcast proxy
-    let result = stream.publish(7u32).await;
+    let result = stream.publish_boxed(7u32).await;
 
     // Then: publish succeeds and message is delivered
     assert!(result.is_ok());
@@ -390,7 +390,7 @@ async fn public_api_does_not_require_subscriber_process_type() {
         .await
         .expect("subscribe should succeed");
 
-    stream.publish(1u32).await.expect("publish should succeed");
+    stream.publish_boxed(1u32).await.expect("publish should succeed");
 
     // Then: the subscriber receives the message — no internal types needed
     wait_for_count(&count, 1).await;
@@ -446,7 +446,7 @@ async fn subscriber_recv_uses_all_parameters() {
         .expect("subscribe should succeed");
 
     // When: a message with a known u32 value is published
-    stream.publish(5u32).await.expect("publish should succeed");
+    stream.publish_boxed(5u32).await.expect("publish should succeed");
 
     // Then: the subscriber uses the msg parameter and accumulates the value
     wait_for_count(&received, 5).await;
@@ -477,7 +477,7 @@ async fn subscriber_trait_and_props_flow_receives_message() {
         .expect("subscribe should succeed");
 
     // When: a message is published
-    stream.publish(77u32).await.expect("publish should succeed");
+    stream.publish_boxed(77u32).await.expect("publish should succeed");
 
     // Then: the Subscriber::recv is called
     wait_for_count(&count, 1).await;
@@ -508,9 +508,9 @@ async fn subscriber_trait_receives_multiple_publishes() {
         .expect("subscribe should succeed");
 
     // When: three messages are published
-    stream.publish(1u32).await.expect("publish should succeed");
-    stream.publish(2u32).await.expect("publish should succeed");
-    stream.publish(3u32).await.expect("publish should succeed");
+    stream.publish_boxed(1u32).await.expect("publish should succeed");
+    stream.publish_boxed(2u32).await.expect("publish should succeed");
+    stream.publish_boxed(3u32).await.expect("publish should succeed");
 
     // Then: the subscriber receives all three
     wait_for_count(&count, 3).await;
@@ -546,7 +546,7 @@ async fn mixed_subscriber_types_all_receive_published_message() {
         .expect("subscribe trait should succeed");
 
     // When: a message is published
-    stream.publish(true).await.expect("publish should succeed");
+    stream.publish_boxed(true).await.expect("publish should succeed");
 
     // Then: both subscriber types receive the message
     wait_for_count(&count_direct, 1).await;
@@ -675,7 +675,7 @@ async fn terminated_subscriber_is_auto_removed_from_stream() {
 
     // Verify the subscriber is receiving before stopping
     stream
-        .publish(1u32)
+        .publish_boxed(1u32)
         .await
         .expect("initial publish should succeed");
     wait_for_count(&count, 1).await;
@@ -688,7 +688,7 @@ async fn terminated_subscriber_is_auto_removed_from_stream() {
 
     // And: another message is published
     stream
-        .publish(2u32)
+        .publish_boxed(2u32)
         .await
         .expect("second publish should succeed");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -733,7 +733,7 @@ async fn only_terminated_subscriber_is_removed_remaining_stays_active() {
 
     // Verify both receive the initial message
     stream
-        .publish(1u32)
+        .publish_boxed(1u32)
         .await
         .expect("initial publish should succeed");
     wait_for_count(&count_a, 1).await;
@@ -746,7 +746,7 @@ async fn only_terminated_subscriber_is_removed_remaining_stays_active() {
 
     // And: a second message is published
     stream
-        .publish(2u32)
+        .publish_boxed(2u32)
         .await
         .expect("second publish should succeed");
 
@@ -799,14 +799,14 @@ async fn restarted_subscriber_continues_receiving_messages_after_failure() {
     // When: the subscriber fails (triggering a Restart)
     fail_next.store(true, Ordering::SeqCst);
     stream
-        .publish(1u32)
+        .publish_boxed(1u32)
         .await
         .expect("fail-trigger publish should succeed");
     wait_for_count(&start_count, 2).await; // confirmed restart
 
     // And: a message is published after the restart
     stream
-        .publish(2u32)
+        .publish_boxed(2u32)
         .await
         .expect("post-restart publish should succeed");
 
@@ -837,7 +837,7 @@ async fn unsubscribed_subscriber_no_longer_receives_messages() {
 
     // Verify the subscriber is receiving before unsubscribing
     stream
-        .publish(1u32)
+        .publish_boxed(1u32)
         .await
         .expect("initial publish should succeed");
     wait_for_count(&count, 1).await;
@@ -850,7 +850,7 @@ async fn unsubscribed_subscriber_no_longer_receives_messages() {
 
     // And: another message is published
     stream
-        .publish(2u32)
+        .publish_boxed(2u32)
         .await
         .expect("second publish should succeed");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -888,7 +888,7 @@ async fn only_unsubscribed_subscriber_stops_receiving_other_stays_active() {
 
     // Verify both receive the initial message
     stream
-        .publish(1u32)
+        .publish_boxed(1u32)
         .await
         .expect("initial publish should succeed");
     wait_for_count(&count_a, 1).await;
@@ -902,7 +902,7 @@ async fn only_unsubscribed_subscriber_stops_receiving_other_stays_active() {
 
     // And: a second message is published
     stream
-        .publish(2u32)
+        .publish_boxed(2u32)
         .await
         .expect("second publish should succeed");
 
@@ -955,7 +955,7 @@ async fn subscriber_permanently_stopped_by_rate_limit_is_auto_removed_from_strea
     // When: the subscriber fails once (within max_retries → restarts)
     fail_next.store(true, Ordering::SeqCst);
     stream
-        .publish(1u32)
+        .publish_boxed(1u32)
         .await
         .expect("first fail-trigger publish should succeed");
     wait_for_count(&start_count, 2).await;
@@ -963,7 +963,7 @@ async fn subscriber_permanently_stopped_by_rate_limit_is_auto_removed_from_strea
     // And: the subscriber fails again (exceeds max_retries → permanent stop)
     fail_next.store(true, Ordering::SeqCst);
     stream
-        .publish(2u32)
+        .publish_boxed(2u32)
         .await
         .expect("second fail-trigger publish should succeed");
 
@@ -972,7 +972,7 @@ async fn subscriber_permanently_stopped_by_rate_limit_is_auto_removed_from_strea
 
     // And: a normal message is published after the subscriber is permanently gone
     stream
-        .publish(3u32)
+        .publish_boxed(3u32)
         .await
         .expect("post-stop publish should succeed");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1146,7 +1146,7 @@ async fn publish_to_dead_subscriber_routes_to_dead_letter_stream() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: a message is published (dispatch to the dead subscriber will fail)
-    stream.publish(42u32).await.expect("publish should succeed");
+    stream.publish_boxed(42u32).await.expect("publish should succeed");
 
     // Then: the dead-letter stream receives exactly one notification
     wait_for_count(&dl_count, 1).await;
@@ -1192,7 +1192,7 @@ async fn dead_letter_from_failed_publish_contains_subscriber_pid() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: a message is published
-    stream.publish(42u32).await.expect("publish should succeed");
+    stream.publish_boxed(42u32).await.expect("publish should succeed");
 
     // Then: the captured destination matches the dead subscriber's PID
     let destination = wait_for_capture(&captured).await;
@@ -1242,7 +1242,7 @@ async fn dead_letter_from_failed_publish_contains_stream_pid_as_sender() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: a message is published
-    stream.publish(42u32).await.expect("publish should succeed");
+    stream.publish_boxed(42u32).await.expect("publish should succeed");
 
     // Then: the captured sender is Some(stream_pid)
     let sender = wait_for_capture(&captured).await;
@@ -1298,7 +1298,7 @@ async fn publish_to_dead_subscriber_still_delivers_to_live_subscribers() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: a message is published
-    stream.publish(99u32).await.expect("publish should succeed");
+    stream.publish_boxed(99u32).await.expect("publish should succeed");
 
     // Then: the live subscriber receives the message
     wait_for_count(&live_count, 1).await;
@@ -1348,7 +1348,7 @@ async fn failed_publish_generates_exactly_one_dead_letter() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: a message is published
-    stream.publish(1u32).await.expect("publish should succeed");
+    stream.publish_boxed(1u32).await.expect("publish should succeed");
 
     // Then: exactly one dead-letter notification arrives (no double-routing)
     wait_for_count(&dl_count, 1).await;

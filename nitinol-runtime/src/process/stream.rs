@@ -41,7 +41,7 @@ where
     }
 }
 
-pub struct PublishMsg<T>(pub T);
+pub(crate) struct PublishMsg<T>(pub(crate) T);
 pub(crate) struct SubscribeMsg<T>(pub Box<dyn Dispatcher<T>>);
 pub(crate) struct UnsubscribeMsg(pub Pid);
 
@@ -160,10 +160,24 @@ where
 impl ProcessProxy<Stream<BoxedMessage>> {
     /// Publish any `Message` value to all subscribers of this stream.
     ///
-    /// The value is type-erased into `Boxed` so every subscriber receives
-    /// the same zero-copy `Arc` clone.
-    pub async fn publish<M: Message>(&self, msg: M) -> Result<(), SendError> {
+    /// The value is type-erased into `BoxedMessage` so every subscriber receives
+    /// the same zero-copy `Arc` clone. Use [`publish`][ProcessProxy::publish] on a
+    /// typed `Stream<T>` instead when the stream message type is known.
+    pub async fn publish_boxed<M: Message>(&self, msg: M) -> Result<(), SendError> {
         self.tell(PublishMsg(BoxedMessage::new(msg))).await
+    }
+}
+
+impl<T> ProcessProxy<Stream<T>>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    /// Publish a typed value to all subscribers of this stream.
+    ///
+    /// Symmetric counterpart of [`tell`][ProcessProxy::tell]: both accept a concrete
+    /// message type, giving `publish` the same ergonomics as `tell`.
+    pub async fn publish(&self, msg: T) -> Result<(), SendError> {
+        self.tell(PublishMsg(msg)).await
     }
 }
 

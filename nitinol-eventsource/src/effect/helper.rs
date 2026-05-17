@@ -1,5 +1,5 @@
 use nitinol_runtime::process::{Process, ProcessProxy, Receive, Stream};
-use nitinol_runtime::{BoxedMessage, Message};
+use nitinol_runtime::Message;
 
 use crate::effect::core::Effect;
 use crate::effect::publish::TypedPublish;
@@ -41,8 +41,10 @@ impl<E> Effect<E> {
         }))
     }
 
-    /// Publish a typed message to a `Stream<BoxedMessage>`.
-    pub fn publish<M: Message>(stream: ProcessProxy<Stream<BoxedMessage>>, msg: M) -> Self {
+    pub fn publish<T>(stream: ProcessProxy<Stream<T>>, msg: T) -> Self
+    where
+        T: Message + Clone,
+    {
         Self::Side(Box::new(TypedPublish {
             stream,
             message: msg,

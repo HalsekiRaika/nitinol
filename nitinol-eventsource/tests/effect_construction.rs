@@ -135,8 +135,8 @@ async fn publish_returns_side_variant() {
         .await
         .expect("spawn_stream should succeed");
 
-    // When: building a publish effect with a u32 message
-    let effect = Effect::<()>::publish(stream, 1u32);
+    // When: building a publish effect with a BoxedMessage (T = BoxedMessage for Stream<BoxedMessage>)
+    let effect = Effect::<()>::publish(stream, BoxedMessage::new(1u32));
 
     // Then: the result is the Side variant
     assert!(

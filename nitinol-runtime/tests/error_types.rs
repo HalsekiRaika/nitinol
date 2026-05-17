@@ -459,7 +459,7 @@ async fn props_subscriber_creates_working_subscriber() {
         .expect("subscribe should succeed");
 
     // When: a message is published
-    stream.publish(42u32).await.expect("publish should succeed");
+    stream.publish_boxed(42u32).await.expect("publish should succeed");
 
     // Then: the subscriber receives the message
     wait_for_count_inner(&count, 1).await;

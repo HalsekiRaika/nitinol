@@ -1,20 +1,15 @@
 use futures_core::future::BoxFuture;
 use nitinol_runtime::process::{ProcessProxy, Stream};
-use nitinol_runtime::{BoxedMessage, Message};
+use nitinol_runtime::Message;
 
 use crate::effect::core::{SideEffect, SideEffectError};
 
-/// A side effect that publishes a typed message to a `Stream<BoxedMessage>`.
-///
-/// The stream proxy is fixed to `ProcessProxy<Stream<BoxedMessage>>` because
-/// `PublishMsg<T>` is crate-private in `nitinol-runtime`.  The message is
-/// type-erased into `BoxedMessage` on execution.
-pub(crate) struct TypedPublish<M: Message> {
-    pub(crate) stream: ProcessProxy<Stream<BoxedMessage>>,
-    pub(crate) message: M,
+pub(crate) struct TypedPublish<T: Message + Clone> {
+    pub(crate) stream: ProcessProxy<Stream<T>>,
+    pub(crate) message: T,
 }
 
-impl<M: Message> SideEffect for TypedPublish<M> {
+impl<T: Message + Clone> SideEffect for TypedPublish<T> {
     fn execute(self: Box<Self>) -> BoxFuture<'static, Result<(), SideEffectError>> {
         Box::pin(async move {
             self.stream

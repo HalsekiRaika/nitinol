@@ -147,7 +147,7 @@ impl Decider<PublishNotification> for Counter {
         cmd: PublishNotification,
         _ctx: &mut Context,
     ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::publish(cmd.stream, Notification))
+        Ok(Effect::publish(cmd.stream, nitinol_runtime::BoxedMessage::new(Notification)))
     }
 }
 

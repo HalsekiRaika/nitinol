@@ -53,6 +53,8 @@ async fn main() {
         Arc::clone(&event_store) as Arc<dyn EventStore>,
     )
     .await;
+    // Clone so both the aggregate and the projector share the same EventPersistor actor.
+    let proj_event_ref = event_ref.clone();
 
     let agg_id = AggregateId::new("proj-counter");
     let proxy = system
@@ -72,7 +74,7 @@ async fn main() {
 
     let _proj = ProjectorProps::new(
         ProjectionId::new("proj-read-model"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        proj_event_ref,
         Arc::clone(&checkpoint_store),
         move || CountProjector {
             model: CountReadModel {

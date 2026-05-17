@@ -378,9 +378,10 @@ async fn system_codec_integrates_with_projector_props() {
     let notify_c = Arc::clone(&notify);
 
     // When: use system.codec() with ProjectorProps
+    let event_ref = EventPersistor::spawn(system.process_system(), Arc::clone(&event_store) as Arc<dyn EventStore>).await;
     let _proxy = ProjectorProps::new(
         ProjectionId::new("sys-proj"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        event_ref,
         Arc::clone(&checkpoint_store),
         move || CountingProjector {
             count: Arc::clone(&count_c),

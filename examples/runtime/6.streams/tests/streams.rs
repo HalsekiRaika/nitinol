@@ -456,7 +456,7 @@ async fn alert_subscriber_via_props_subscriber_receives_above_threshold_reading(
         celsius: 40.0,
     };
     stream
-        .publish(reading)
+        .publish_boxed(reading)
         .await
         .expect("publish should succeed");
 

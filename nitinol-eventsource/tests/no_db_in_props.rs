@@ -27,7 +27,7 @@ use nitinol_eventsource::{
     EventPersistor, EventPersistorProxy,
     SnapshotPersistor, SnapshotPersistorProxy,
     Snapshotable,
-    AggregateProps,
+    AggregateProps, CodecSet,
 };
 use nitinol_eventsource::codec::{Codec, ErasedCodec};
 use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore};
@@ -140,17 +140,17 @@ fn _assert_sig_aggregate_props_new_accepts_event_persistor_ref() {
     let _: fn(AggregateId, EventPersistorProxy) -> AggregateProps<Dummy> = AggregateProps::new;
 }
 
-/// Asserts that AggregateProps::<SnapshotDummy>::with_snapshot_persistor has the signature
-/// `fn(AggregateProps<SnapshotDummy>, SnapshotPersistorRef, Arc<dyn ErasedCodec<()>>) -> AggregateProps<SnapshotDummy>`.
+/// Asserts that `AggregateProps::with_snapshot_persistor` accepts `SnapshotPersistorProxy`
+/// (not `Arc<dyn SnapshotStore>`) as its second argument.
 ///
-/// The third argument is the snapshot codec (Arc<dyn ErasedCodec<A::Snapshot>>).
-/// If the method is ever changed to accept Arc<dyn SnapshotStore> again, this will not compile.
+/// The method is only available in `CodecSet` state, so the function-pointer
+/// type must name the state explicitly using `CodecSet<A::Event>`.
 fn _assert_sig_aggregate_props_with_snapshot_persistor_accepts_ref() {
     let _: fn(
-        AggregateProps<SnapshotDummy>,
+        AggregateProps<SnapshotDummy, CodecSet<DummyEvent>>,
         SnapshotPersistorProxy,
         Arc<dyn ErasedCodec<()>>,
-    ) -> AggregateProps<SnapshotDummy> = AggregateProps::with_snapshot_persistor;
+    ) -> AggregateProps<SnapshotDummy, CodecSet<DummyEvent>> = AggregateProps::with_snapshot_persistor;
 }
 
 // ---------------------------------------------------------------------------
