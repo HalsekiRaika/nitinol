@@ -48,7 +48,7 @@ eventsource = ["dep:nitinol-eventsource", "runtime", "persistence"]
 full = ["runtime", "persistence", "eventsource"]
 
 [dependencies]
-nitinol-runtime    = { path = "nitinol-runtime",    optional = true }
+nitinol-runtime = { path = "nitinol-runtime", optional = true }
 nitinol-persistence = { path = "nitinol-persistence", optional = true }
 nitinol-eventsource = { path = "nitinol-eventsource", optional = true }
 
