@@ -177,7 +177,7 @@ where
 {
     /// Override the delivery mode when no `TxProvider` is configured.
     ///
-    /// This method is intentionally unavailable after [`with_tx_provider`] is
+    /// This method is intentionally unavailable after `with_tx_provider` is
     /// called (`Tx != ()`).  A `TxProvider` always implies `ExactlyOnce`; allowing
     /// the caller to override the mode afterwards would silently break the Tx
     /// wiring (the delivery engine only activates the Tx path when `mode ==

@@ -51,6 +51,18 @@ pub trait Aggregate: Default + Send + Sync + 'static {
 ///
 /// `type Snapshot` is the pure domain value captured and restored; byte
 /// serialisation is handled externally by a [`crate::codec::Codec<Self::Snapshot>`].
+///
+/// # Replay acceleration
+///
+/// When a snapshot exists for an aggregate, replay starts from the snapshot
+/// and only events written after it are reapplied — full replay from the
+/// beginning of the stream is skipped. When no snapshot exists, every event
+/// is replayed from the start.
+///
+/// When to capture a snapshot is an application-level decision: this trait
+/// only describes how to materialise and restore one. Saves are issued by the
+/// caller (typically through the snapshot persistor) at whatever sequence
+/// boundary the application chooses.
 pub trait Snapshotable: Sized {
     /// The pure domain value that represents a point-in-time snapshot of this
     /// aggregate's state.

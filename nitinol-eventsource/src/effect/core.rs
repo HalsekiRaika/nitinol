@@ -11,6 +11,10 @@ pub enum Effect<E> {
     /// Persist the given events to the `EventStore` and then apply them.
     Persist(Vec<E>),
     /// Apply the given events to the aggregate without persisting them.
+    ///
+    /// Intended for tests and transient state changes (e.g. UI previews). For
+    /// regular CQRS + Event Sourcing flows use [`Effect::Persist`] so the events
+    /// reach the `EventStore` and survive replay.
     Apply(Vec<E>),
     /// Execute an arbitrary side effect (fire-and-forget in Phase 2.4+).
     Side(Box<dyn SideEffect>),

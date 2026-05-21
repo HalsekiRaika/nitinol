@@ -24,12 +24,6 @@
 //! 4. `eventsource-snapshot` – snapshot-accelerated replay
 //! 5. `eventsource-aggregate-communication` – inter-aggregate messaging
 //! 6. `eventsource-codec-switch` – custom codec
-//!
-//! # Design guide
-//!
-//! For the rationale behind key design decisions — why `apply` is synchronous,
-//! why there is no Reply type, how `Effect::Side` works, etc. — see
-//! `nitinol-eventsource/docs/DESIGN.md`.
 
 mod aggregate;
 pub mod codec;
