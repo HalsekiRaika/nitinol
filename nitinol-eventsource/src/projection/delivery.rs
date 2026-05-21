@@ -7,6 +7,7 @@ use nitinol_persistence::ProjectionId;
 use crate::projection::context::ProjectionContext;
 use crate::projection::tx_provider::ErasedTxProvider;
 
+//noinspection DuplicatedCode
 pub(crate) async fn apply<'pid, Cs, F>(
     mode: DeliveryMode,
     store: &Cs,
@@ -39,6 +40,7 @@ where
     }
 }
 
+//noinspection DuplicatedCode
 async fn apply_with_tx<'pid, Cs, F>(
     mode: DeliveryMode,
     store: &Cs,
@@ -105,6 +107,7 @@ where
     }
 }
 
+//noinspection DuplicatedCode
 async fn apply_no_tx<'pid, Cs, F>(
     mode: DeliveryMode,
     store: &Cs,
@@ -314,8 +317,7 @@ mod tests {
                 &self,
                 _tx: (),
             ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                Err(Box::new(std::io::Error::other(
                     "simulated commit failure",
                 )))
             }

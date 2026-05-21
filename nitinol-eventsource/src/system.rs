@@ -50,7 +50,7 @@ impl EventSourceSystemBuilder<Unset> {
 }
 
 impl<C> EventSourceSystemBuilder<C> {
-    /// Finalise construction and return the configured [`EventSourceSystem`].
+    /// Finalize construction and return the configured [`EventSourceSystem`].
     pub fn build(self) -> EventSourceSystem<C> {
         EventSourceSystem {
             ps: self.ps,
@@ -118,7 +118,7 @@ where
 
     /// Return an [`AggregateProps`] pre-wired with the system event codec.
     ///
-    /// Use this when additional configuration (e.g. snapshot persistor) is needed
+    /// Use this when additional configuration (e.g., snapshot persistor) is needed
     /// before spawning.
     pub fn aggregate_props<A>(
         &self,

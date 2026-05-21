@@ -4,7 +4,7 @@ use futures_core::future::BoxFuture;
 ///
 /// `Effect<E>` is a Monoid: `None` is the identity element and `combine` is the
 /// associative binary operation.  The `Sequence` variant accumulates leaves in a
-/// flat list; no nesting is introduced by `combine`.
+/// flat list; 'combine' introduces no nesting.
 pub enum Effect<E> {
     /// No-op — the identity element of the Monoid.
     None,
@@ -12,8 +12,8 @@ pub enum Effect<E> {
     Persist(Vec<E>),
     /// Apply the given events to the aggregate without persisting them.
     ///
-    /// Intended for tests and transient state changes (e.g. UI previews). For
-    /// regular CQRS + Event Sourcing flows use [`Effect::Persist`] so the events
+    /// Intended for tests and transient state changes (e.g., UI previews). For
+    /// regular CQRS and Event Sourcing flows use [`Effect::Persist`] so the events
     /// reach the `EventStore` and survive replay.
     Apply(Vec<E>),
     /// Execute an arbitrary side effect (fire-and-forget in Phase 2.4+).

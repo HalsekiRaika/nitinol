@@ -8,7 +8,7 @@ use crate::projection::context::ProjectionContext;
 /// A single projector type `P` may implement `Projector<E>` for multiple event
 /// types, enabling a single process to consume events from several aggregates.
 ///
-/// `&mut self` allows stateful projectors (e.g. those holding a DB connection).
+/// `&mut self` allows stateful projectors (e.g., those holding a DB connection).
 ///
 /// The `Tx` type parameter defaults to `()` and matches the `CheckpointStore::Tx`
 /// associated type.  For ExactlyOnce delivery with a real database backend,
@@ -29,7 +29,7 @@ use crate::projection::context::ProjectionContext;
 /// restarts between handling an event and saving its checkpoint, or when an
 /// event seen during catch-up is also received from a live subscription.
 ///
-/// For non-idempotent read-model updates (e.g. incrementing a counter), use
+/// For non-idempotent read-model updates (e.g., incrementing a counter), use
 /// `ExactlyOnce` delivery with a [`crate::TxProvider`] configured on the
 /// projector. The framework then manages `begin → project → checkpoint save →
 /// commit`, rolling back the transaction if either step fails, so the event

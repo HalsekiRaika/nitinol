@@ -4,7 +4,7 @@ use jiff::Timestamp;
 use crate::event_type::EventType;
 use crate::id::AggregateId;
 
-/// append 用。global_sequence は DB が採番するため持たない。
+/// Append only. Does not carry `global_sequence` because it is assigned by the DB.
 #[derive(Debug, Clone)]
 pub struct AppendingEvent {
     pub aggregate_id: AggregateId,
@@ -14,7 +14,7 @@ pub struct AppendingEvent {
     pub occurred_at: Timestamp,
 }
 
-/// load 用。global_sequence を含む。
+/// For loading. Includes `global_sequence`.
 #[derive(Debug, Clone)]
 pub struct LoadedEvent {
     pub aggregate_id: AggregateId,

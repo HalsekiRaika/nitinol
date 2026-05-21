@@ -7,7 +7,7 @@ use crate::process::{Process, ProcessContext, Props, Receive};
 ///
 /// Implement this instead of `Receive<T>` when you want a simpler interface
 /// that receives messages without returning a `Result`. Wrap the implementor
-/// with `Props::subscriber` to obtain spawn-ready `Props`.
+/// with `Props::subscriber` to get spawn-ready `Props`.
 pub trait Subscriber<T>: 'static + Send + Sync {
     fn recv(&mut self, msg: T, ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send;
 }

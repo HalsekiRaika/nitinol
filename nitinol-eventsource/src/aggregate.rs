@@ -3,7 +3,7 @@ use crate::event::Event;
 /// Core trait for event-sourced aggregates.
 ///
 /// An aggregate holds domain state and evolves it by applying domain events.
-/// It is the central building block of the CQRS + Event Sourcing pattern:
+/// It is the central building block of the CQRS and Event Sourcing pattern:
 /// commands are decided by [`crate::Decider`], and the resulting events are
 /// applied here to advance the state.
 ///
@@ -47,10 +47,10 @@ pub trait Aggregate: Default + Send + Sync + 'static {
     fn apply(&mut self, event: Self::Event);
 }
 
-/// Enables an aggregate to be checkpointed as a serialisable snapshot value.
+/// Enables an aggregate to be checkpointed as a serializable snapshot value.
 ///
 /// `type Snapshot` is the pure domain value captured and restored; byte
-/// serialisation is handled externally by a [`crate::codec::Codec<Self::Snapshot>`].
+/// serialization is handled externally by a [`crate::codec::Codec<Self::Snapshot>`].
 ///
 /// # Replay acceleration
 ///
@@ -60,8 +60,8 @@ pub trait Aggregate: Default + Send + Sync + 'static {
 /// is replayed from the start.
 ///
 /// When to capture a snapshot is an application-level decision: this trait
-/// only describes how to materialise and restore one. Saves are issued by the
-/// caller (typically through the snapshot persistor) at whatever sequence
+/// only describes how to materialize and restore one. The caller issues saves
+///  (typically through the snapshot persistor) at whatever sequence
 /// boundary the application chooses.
 pub trait Snapshotable: Sized {
     /// The pure domain value that represents a point-in-time snapshot of this

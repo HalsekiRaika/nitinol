@@ -31,7 +31,7 @@ pub(crate) struct LoadEvents {
 
 /// Persistence actor that exclusively owns an `Arc<dyn EventStore>`.
 ///
-/// All event store operations are serialised through this actor's message loop.
+/// All event store operations are serialized through this actor's message loop.
 /// No other process holds a reference to the store — satisfying the Phase 2
 /// lockless, DB-lock-free design.
 pub struct EventPersistor {

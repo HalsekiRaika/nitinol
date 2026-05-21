@@ -20,7 +20,7 @@
 //!
 //! 1. `eventsource-basic-aggregate` – minimal counter aggregate
 //! 2. `eventsource-multiple-deciders` – multiple commands per aggregate
-//! 3. `eventsource-projection` – aggregate + projector (Catch-up + Live)
+//! 3. `eventsource-projection` – aggregate and projector (Catch-up and Live)
 //! 4. `eventsource-snapshot` – snapshot-accelerated replay
 //! 5. `eventsource-aggregate-communication` – inter-aggregate messaging
 //! 6. `eventsource-codec-switch` – custom codec

@@ -41,7 +41,7 @@ impl<A: Aggregate> AggregateProxy<A> {
     /// Send a command without waiting for a response.
     ///
     /// The command is queued and processed in FIFO order; ordering relative to
-    /// subsequent `exec` calls is guaranteed by the single-threaded process loop.
+    /// later `exec` calls is guaranteed by the single-threaded process loop.
     pub async fn tell<C>(&self, cmd: C) -> Result<(), TellError>
     where
         A: Decider<C>,

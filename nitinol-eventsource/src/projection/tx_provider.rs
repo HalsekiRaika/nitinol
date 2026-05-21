@@ -5,7 +5,7 @@ use async_trait::async_trait;
 /// Wiring a `TxProvider` into a projector via
 /// [`crate::ProjectorProps::with_tx_provider`] fixes the delivery mode to
 /// `ExactlyOnce`. For each event the projector process calls [`begin`] to
-/// obtain a transaction, runs [`crate::Projector::project`] against that
+/// get a transaction, runs [`crate::Projector::project`] against that
 /// transaction, saves the checkpoint inside the same transaction, then calls
 /// [`commit`]. If `project` or the checkpoint save fails, the transaction is
 /// handed to [`rollback`] and the checkpoint is not advanced, so the same

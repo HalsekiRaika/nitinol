@@ -22,7 +22,7 @@ pub enum DeliveryMode {
     /// crash between the two causes the event to be redelivered on restart,
     /// so handlers must be idempotent.
     AtLeastOnce,
-    /// Behaviour depends on whether a `TxProvider` is configured on the
+    /// Behavior depends on whether a `TxProvider` is configured on the
     /// projector.
     ///
     /// **Without a `TxProvider`**: the framework does **not** save the

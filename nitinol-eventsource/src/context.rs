@@ -28,7 +28,7 @@ impl Context {
     /// During `Decider::decide`, `sequence()` reflects the sequence number of
     /// the most recently applied event **before** this decision round started.
     /// After each `Aggregate::apply` call the runtime increments the internal
-    /// counter, so subsequent decisions within the same round observe the
+    /// counter, so later decisions within the same round observe the
     /// updated sequence.  On a brand-new aggregate with no events the value
     /// is `0`.
     pub fn sequence(&self) -> u64 {

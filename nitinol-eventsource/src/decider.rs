@@ -8,14 +8,14 @@ use crate::Effect;
 ///
 /// `decide` receives the current aggregate state as `&self` (shared reference),
 /// preventing any state mutation during the decision.  State changes happen
-/// exclusively through [`crate::Aggregate::apply`] after the events are
+/// exclusively through [`Aggregate::apply`] after the events are
 /// committed.
 ///
 /// # `Rejection` semantics
 ///
 /// `Rejection` represents **domain-rule violations only** — for example,
 /// "cannot withdraw more than the current balance".  Infrastructure errors
-/// (I/O failures, serialisation errors) must not be modelled as `Rejection`;
+/// (I/O failures, serialization errors) must not be modeled as `Rejection`;
 /// they propagate through a separate `Result` path at the infrastructure layer.
 ///
 /// # Why there is no Reply type

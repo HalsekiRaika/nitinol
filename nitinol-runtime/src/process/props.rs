@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::process::supervision::SupervisionConfig;
 use crate::process::Process;
 
-/// Controls the idle timeout behaviour for a single process.
+/// Controls the idle timeout behavior for a single process.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum IdleTimeout {
     /// Inherit the system-level default idle timeout (no timeout if no system default is set).
