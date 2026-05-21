@@ -127,7 +127,7 @@ steps:
     edit: true
     persona: coder
     provider: claude
-    model: opus-4.7
+    model: opus
     policy:
       - coding
       - testing
