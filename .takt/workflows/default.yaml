@@ -84,7 +84,7 @@ steps:
   - name: write_tests
     edit: true
     provider: claude
-    model: opus-4.7
+    model: opus
     persona: coder
     policy:
       - coding
