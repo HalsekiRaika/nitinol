@@ -6,9 +6,10 @@
 //!
 //! | Feature        | Contents |
 //! |----------------|---------|
-//! | `runtime`      | [`runtime`] — actor runtime (`ProcessSystem`, `Process`, …) |
-//! | `persistence`  | [`persistence`] — persistence abstractions (`EventStore`, IDs, …) |
-//! | `eventsource`  | [`eventsource`] — event sourcing layer (`Aggregate`, `Projector`, …) |
+//! | `runtime`      | `runtime` — actor runtime (`ProcessSystem`, `Process`, …) |
+//! | `persistence`  | `persistence` — persistence abstractions (`EventStore`, IDs, …) |
+//! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
+//! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
 //! | `full`         | All of the above |
 //!
 //! # Example
@@ -26,3 +27,6 @@ pub use nitinol_persistence as persistence;
 
 #[cfg(feature = "eventsource")]
 pub use nitinol_eventsource as eventsource;
+
+#[cfg(feature = "saga")]
+pub use nitinol_saga as saga;

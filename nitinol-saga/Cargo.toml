@@ -1,0 +1,25 @@
+[package]
+name = "nitinol-saga"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Event-sourced process manager (Saga) for nitinol"
+
+[dependencies]
+async-trait = "0.1"
+futures-core = "0.3"
+jiff = "0.2"
+thiserror = "2"
+tokio = { version = "1", default-features = false, features = ["rt"] }
+tracing = "0.1"
+nitinol-runtime = { path = "../nitinol-runtime" }
+nitinol-persistence = { path = "../nitinol-persistence" }
+nitinol-eventsource = { path = "../nitinol-eventsource" }
+
+[dev-dependencies]
+bytes = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

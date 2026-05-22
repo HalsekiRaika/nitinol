@@ -735,6 +735,7 @@ dependencies = [
  "nitinol-eventsource",
  "nitinol-persistence",
  "nitinol-runtime",
+ "nitinol-saga",
  "tokio",
 ]
 
@@ -775,6 +776,24 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nitinol-saga"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "jiff",
+ "nitinol-eventsource",
+ "nitinol-persistence",
+ "nitinol-runtime",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -983,6 +1002,24 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "saga-basic-saga"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "nitinol-eventsource",
+ "nitinol-persistence",
+ "nitinol-runtime",
+ "nitinol-saga",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "serde"

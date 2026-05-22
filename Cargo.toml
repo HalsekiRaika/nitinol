@@ -3,7 +3,8 @@ members = [
   ".",
   "nitinol-*",
   "examples/runtime/*",
-  "examples/eventsource/*"
+  "examples/eventsource/*",
+  "examples/saga/*"
 ]
 default-members = [
   ".",
@@ -45,12 +46,14 @@ default = []
 runtime = ["dep:nitinol-runtime"]
 persistence = ["dep:nitinol-persistence"]
 eventsource = ["dep:nitinol-eventsource", "runtime", "persistence"]
-full = ["runtime", "persistence", "eventsource"]
+saga = ["dep:nitinol-saga", "runtime", "persistence", "eventsource"]
+full = ["runtime", "persistence", "eventsource", "saga"]
 
 [dependencies]
 nitinol-runtime = { path = "nitinol-runtime", optional = true }
 nitinol-persistence = { path = "nitinol-persistence", optional = true }
 nitinol-eventsource = { path = "nitinol-eventsource", optional = true }
+nitinol-saga = { path = "nitinol-saga", optional = true }
 
 [dev-dependencies]
 # Required by the `#[tokio::test]` attribute in umbrella integration tests.
