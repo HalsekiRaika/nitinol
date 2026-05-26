@@ -29,6 +29,7 @@ mod aggregate;
 pub mod codec;
 mod context;
 mod decider;
+mod durable_stream;
 mod effect;
 mod event;
 mod receive;
@@ -52,4 +53,8 @@ pub use self::error::{AskError, ExecError, TellError};
 pub use self::projection::{
     EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, Projector,
     ProjectorProps, TxProvider,
+};
+
+pub use self::durable_stream::{
+    CursorSet, CursorUnset, DurableStream, DurableStreamProxy, SequenceCursor,
 };
