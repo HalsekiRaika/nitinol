@@ -2,12 +2,14 @@ use bytes::Bytes;
 use jiff::Timestamp;
 
 use crate::event_type::EventType;
-use crate::id::AggregateId;
 
 /// Append only. Does not carry `global_sequence` because it is assigned by the DB.
+///
+/// The stream key is supplied by [`crate::store::EventStore::append`]'s `key`
+/// parameter; carrying it on the event itself would be a redundant second
+/// source of truth.
 #[derive(Debug, Clone)]
 pub struct AppendingEvent {
-    pub aggregate_id: AggregateId,
     pub sequence: u64,
     pub event_type: EventType,
     pub payload: Bytes,
@@ -17,7 +19,10 @@ pub struct AppendingEvent {
 /// For loading. Includes `global_sequence`.
 #[derive(Debug, Clone)]
 pub struct LoadedEvent {
-    pub aggregate_id: AggregateId,
+    /// The stream key under which this event was appended.  The same physical
+    /// store may host aggregate streams and saga streams side by side, so the
+    /// key is kept as a `String` rather than a typed `AggregateId`.
+    pub stream_key: String,
     pub sequence: u64,
     pub global_sequence: u64,
     pub event_type: EventType,

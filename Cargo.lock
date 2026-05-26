@@ -788,6 +788,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures-core",
+ "futures-util",
  "jiff",
  "nitinol-eventsource",
  "nitinol-persistence",

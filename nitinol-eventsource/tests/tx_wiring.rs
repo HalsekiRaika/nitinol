@@ -18,9 +18,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    codec::Codec,
-    Event, ProjectionContext, Projector, ProjectorProps, TxProvider,
-    EventPersistor,
+    codec::Codec, Event, ProjectionContext, Projector, ProjectorProps, TxProvider,
 };
 use nitinol_persistence::error::CheckpointError;
 use nitinol_persistence::store::{CheckpointStore, EventStore, InMemoryEventStore};
@@ -239,9 +237,8 @@ impl Projector<TickEvent, MockTx> for TxCapturingProjector {
 async fn append_tick(store: &InMemoryEventStore, agg_id: &AggregateId, seq: u64) {
     store
         .append(
-            agg_id,
+            agg_id.as_str(),
             vec![AppendingEvent {
-                aggregate_id: agg_id.clone(),
                 sequence: seq,
                 event_type: EventType::from_str("TickEvent"),
                 payload: Bytes::new(),
@@ -279,7 +276,6 @@ async fn tx_provider_supplies_tx_to_projection_context() {
 
     append_tick(&store, &agg_id, 1).await;
 
-    let event_ref = EventPersistor::spawn(&system, Arc::clone(&store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
 
     let received_tx = Arc::new(AtomicBool::new(false));
     let notify = Arc::new(Notify::new());
@@ -291,7 +287,7 @@ async fn tx_provider_supplies_tx_to_projection_context() {
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
     let _proxy = ProjectorProps::new(
         ProjectionId::new("tx-ctx-test-proj"),
-        event_ref,
+        Arc::clone(&store) as Arc<dyn EventStore>,
         Arc::clone(&mock_cs),
         move || TxCapturingProjector {
             received_tx: Arc::clone(&received_tx_c),
@@ -331,7 +327,6 @@ async fn exactly_once_with_tx_provider_saves_checkpoint_in_same_tx() {
 
     append_tick(&store, &agg_id, 1).await;
 
-    let event_ref = EventPersistor::spawn(&system, Arc::clone(&store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
 
     let notify = Arc::new(Notify::new());
     let notify_c = Arc::clone(&notify);
@@ -340,7 +335,7 @@ async fn exactly_once_with_tx_provider_saves_checkpoint_in_same_tx() {
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
     let _proxy = ProjectorProps::new(
         ProjectionId::new("tx-ckpt-test-proj"),
-        event_ref,
+        Arc::clone(&store) as Arc<dyn EventStore>,
         Arc::clone(&mock_cs),
         move || TxCapturingProjector {
             received_tx: Arc::new(AtomicBool::new(false)),
@@ -380,7 +375,6 @@ async fn tx_provider_commit_called_after_successful_project() {
 
     append_tick(&store, &agg_id, 1).await;
 
-    let event_ref = EventPersistor::spawn(&system, Arc::clone(&store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
 
     let notify = Arc::new(Notify::new());
     let notify_c = Arc::clone(&notify);
@@ -389,7 +383,7 @@ async fn tx_provider_commit_called_after_successful_project() {
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
     let _proxy = ProjectorProps::new(
         ProjectionId::new("tx-commit-test-proj"),
-        event_ref,
+        Arc::clone(&store) as Arc<dyn EventStore>,
         Arc::clone(&mock_cs),
         move || TxCapturingProjector {
             received_tx: Arc::new(AtomicBool::new(false)),
@@ -437,12 +431,6 @@ async fn tx_provider_rollback_called_when_project_fails() {
 
     append_tick(&store, &agg_id, 1).await;
 
-    let event_ref = EventPersistor::spawn(
-        &system,
-        Arc::clone(&store) as Arc<dyn nitinol_persistence::store::EventStore>,
-    )
-    .await;
-
     let notify = Arc::new(Notify::new());
     let notify_c = Arc::clone(&notify);
     let (tp, tp_state) = MockTxProvider::new();
@@ -450,7 +438,7 @@ async fn tx_provider_rollback_called_when_project_fails() {
     // When: spawn projector that always fails (ExactlyOnce forced by with_tx_provider)
     let _proxy = ProjectorProps::new(
         ProjectionId::new("tx-rollback-test-proj"),
-        event_ref,
+        Arc::clone(&store) as Arc<dyn EventStore>,
         Arc::clone(&mock_cs),
         move || FailingProjector {
             notify: Arc::clone(&notify_c),
@@ -511,7 +499,6 @@ async fn without_tx_provider_ctx_tx_returns_none() {
 
     append_tick(&store, &agg_id, 1).await;
 
-    let event_ref = EventPersistor::spawn(&system, Arc::clone(&store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
 
     let tx_was_some = Arc::new(AtomicBool::new(false));
     let notify = Arc::new(Notify::new());
@@ -544,7 +531,7 @@ async fn without_tx_provider_ctx_tx_returns_none() {
     // When: spawn without TxProvider (default Tx = ())
     let _proxy = ProjectorProps::new(
         ProjectionId::new("tx-none-test-proj"),
-        event_ref,
+        Arc::clone(&store) as Arc<dyn EventStore>,
         cs,
         move || NullTxProjector {
             tx_was_some: Arc::clone(&tx_was_some_c),

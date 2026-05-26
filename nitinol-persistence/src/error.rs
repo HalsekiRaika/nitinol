@@ -1,14 +1,7 @@
-use crate::id::AggregateId;
-
 #[derive(Debug, thiserror::Error)]
 pub enum AppendError {
-    #[error("sequence conflict for aggregate {0:?}")]
-    SequenceConflict(AggregateId),
-    #[error("aggregate id mismatch: expected {expected:?}, got {actual:?}")]
-    AggregateMismatch {
-        expected: AggregateId,
-        actual: AggregateId,
-    },
+    #[error("sequence conflict for stream {0:?}")]
+    SequenceConflict(String),
     #[error("backend failure: {0}")]
     Backend(Box<dyn std::error::Error + Send + Sync>),
 }

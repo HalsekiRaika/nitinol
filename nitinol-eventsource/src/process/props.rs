@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
+use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::{Props, ProcessSystem};
+use nitinol_runtime::{ProcessSystem, Props};
 
 use crate::aggregate::{Aggregate, Snapshotable};
 use crate::codec::ErasedCodec;
 use crate::process::aggregate_process::{AggregateProcess, SnapshotRestoreFn};
-use crate::process::persistence::{EventPersistorProxy, SnapshotPersistorProxy};
 use crate::process::proxy::AggregateProxy;
+use crate::process::snapshot_persistor::SnapshotPersistorProxy;
 
 pub struct CodecUnset;
 
@@ -17,27 +18,30 @@ pub struct CodecSet<E> {
 
 pub struct AggregateProps<A: Aggregate, S = CodecUnset> {
     aggregate_id: AggregateId,
-    event_ref: EventPersistorProxy,
+    store: Arc<dyn EventStore>,
     snapshot_ref: Option<SnapshotPersistorProxy>,
     snapshot_restore: Option<SnapshotRestoreFn<A>>,
     state: S,
 }
 
 impl<A: Aggregate> AggregateProps<A, CodecUnset> {
-    pub fn new(aggregate_id: AggregateId, event_ref: EventPersistorProxy) -> Self {
+    pub fn new(aggregate_id: AggregateId, store: Arc<dyn EventStore>) -> Self {
         Self {
             aggregate_id,
-            event_ref,
+            store,
             snapshot_ref: None,
             snapshot_restore: None,
             state: CodecUnset,
         }
     }
 
-    pub fn with_codec(self, codec: Arc<dyn ErasedCodec<A::Event>>) -> AggregateProps<A, CodecSet<A::Event>> {
+    pub fn with_codec(
+        self,
+        codec: Arc<dyn ErasedCodec<A::Event>>,
+    ) -> AggregateProps<A, CodecSet<A::Event>> {
         AggregateProps {
             aggregate_id: self.aggregate_id,
-            event_ref: self.event_ref,
+            store: self.store,
             snapshot_ref: self.snapshot_ref,
             snapshot_restore: self.snapshot_restore,
             state: CodecSet { codec },
@@ -46,32 +50,39 @@ impl<A: Aggregate> AggregateProps<A, CodecUnset> {
 }
 
 impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
+    /// Spawn this aggregate process.
+    ///
+    /// [`with_codec`][AggregateProps::with_codec] must be called before `spawn`.
+    /// Calling `spawn` on a builder in [`CodecUnset`] state is a **compile error**:
+    ///
     /// ```compile_fail
-    /// # use nitinol_eventsource::AggregateProps;
-    /// # use nitinol_persistence::AggregateId;
-    /// # use nitinol_eventsource::Aggregate;
-    /// # #[derive(Default)]
-    /// # struct Dummy;
-    /// # impl Aggregate for Dummy { type Event = (); fn apply(&mut self, _: ()) {} }
-    /// # async fn _test() {
-    /// # let system = nitinol_runtime::ProcessSystem::new().await;
-    /// # let event_ref = todo!();
-    /// AggregateProps::<Dummy>::new(AggregateId::new("x"), event_ref)
-    ///     .spawn(&system)
-    ///     .await;
+    /// # use std::sync::Arc;
+    /// # use nitinol_eventsource::{Aggregate, AggregateProps, Event};
+    /// # use nitinol_persistence::{AggregateId, EventType};
+    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # #[derive(Default)] struct MyAgg;
+    /// # #[derive(Clone, PartialEq, Debug)] struct MyEv;
+    /// # impl Event for MyEv { const EVENT_TYPE: EventType = EventType::from_str("Ev"); }
+    /// # impl Aggregate for MyAgg { type Event = MyEv; fn apply(&mut self, _: MyEv) {} }
+    /// # async fn bad() {
+    /// let system = ProcessSystem::new().await;
+    /// let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    /// // compile error: spawn() requires CodecSet — call with_codec() first
+    /// AggregateProps::<MyAgg>::new(AggregateId::new("x"), store).spawn(&system).await;
     /// # }
     /// ```
     pub async fn spawn(self, system: &ProcessSystem) -> AggregateProxy<A> {
         let codec = self.state.codec;
         let aggregate_id = self.aggregate_id;
-        let event_ref = self.event_ref;
+        let store = self.store;
         let snapshot_ref = self.snapshot_ref;
         let snapshot_restore = self.snapshot_restore;
 
         let props = Props::new(move || AggregateProcess {
             state: A::default(),
             aggregate_id: aggregate_id.clone(),
-            event_ref: event_ref.clone(),
+            store: Arc::clone(&store),
             snapshot_ref: snapshot_ref.clone(),
             codec: Arc::clone(&codec),
             sequence: 0,

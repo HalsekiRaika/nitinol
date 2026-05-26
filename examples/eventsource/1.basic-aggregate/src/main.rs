@@ -4,7 +4,7 @@
 //!
 //! 1. Create a `ProcessSystem`
 //! 2. Build an `EventSourceSystem` with a codec
-//! 3. Spawn an `EventPersistor` backed by `InMemoryEventStore`
+//! 3. Create an `InMemoryEventStore` and wrap it in `Arc<dyn EventStore>`
 //! 4. Spawn a `Counter` aggregate and call `ask`, `tell`, `exec`
 //!
 //! Run with:
@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use nitinol_eventsource::{system::EventSourceSystem, EventPersistor};
-use nitinol_persistence::{store::InMemoryEventStore, AggregateId};
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
 use eventsource_basic_aggregate::codec::JsonCodec;
@@ -43,16 +44,12 @@ async fn main() {
     // 2. Wire codec into the event-source system.
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
-    // 3. Spawn a persistence process backed by an in-memory store.
-    let event_ref = EventPersistor::spawn(
-        system.process_system(),
-        Arc::new(InMemoryEventStore::default()),
-    )
-    .await;
+    // 3. Create an in-memory event store.
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     // 4. Spawn the aggregate process.
     let id = AggregateId::new("counter-1");
-    let proxy = system.spawn_aggregate::<Counter>(id, event_ref).await;
+    let proxy = system.spawn_aggregate::<Counter>(id, store).await;
 
     // ask() sends a command and waits for the persisted events.
     let events = proxy.ask(Increment).await.expect("ask failed");

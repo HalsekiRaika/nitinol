@@ -22,7 +22,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, AggregateProxy, Context, Decider, Effect,
-    Event, EventPersistor, Receive as EvtReceive, SideEffect, SideEffectError,
+    Event, Receive as EvtReceive, SideEffect, SideEffectError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType};
@@ -240,9 +240,8 @@ impl Receive<BoxedMessage> for NotificationSubscriber {
 
 async fn spawn_counter(system: &EventSourceSystem<JsonCodec>, id: &str) -> AggregateProxy<Counter> {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let event_ref = EventPersistor::spawn(system.process_system(), store).await;
     system
-        .spawn_aggregate::<Counter>(AggregateId::new(id), event_ref)
+        .spawn_aggregate::<Counter>(AggregateId::new(id), store)
         .await
 }
 

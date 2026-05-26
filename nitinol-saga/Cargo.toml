@@ -10,6 +10,7 @@ description = "Event-sourced process manager (Saga) for nitinol"
 [dependencies]
 async-trait = "0.1"
 futures-core = "0.3"
+futures-util = "0.3"
 jiff = "0.2"
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["rt"] }

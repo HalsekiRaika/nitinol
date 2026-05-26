@@ -6,12 +6,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Context, Decider, Effect, Event,
-    EventEnvelope, EventPersistor, EventPersistorProxy, Receive as EvtReceive,
+    EventEnvelope, Receive as EvtReceive,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, LoadQuery};
@@ -188,19 +189,15 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let order_event_ref =
-        EventPersistor::spawn(system.process_system(), Arc::clone(&order_store)).await;
     let order_proxy = system
-        .spawn_aggregate::<Order>(AggregateId::new("saga-e2e-order"), order_event_ref)
+        .spawn_aggregate::<Order>(AggregateId::new("saga-e2e-order"), order_store)
         .await;
 
     let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let inventory_event_ref =
-        EventPersistor::spawn(system.process_system(), Arc::clone(&inventory_store)).await;
     let inventory_proxy = system
         .spawn_aggregate::<Inventory>(
             AggregateId::new("saga-e2e-inventory"),
-            inventory_event_ref,
+            inventory_store,
         )
         .await;
 
@@ -211,9 +208,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
         .expect("spawn_stream must succeed");
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_event_ref =
-        EventPersistor::spawn(system.process_system(), Arc::clone(&saga_store)).await;
-    let saga_event_ref_for_assert = saga_event_ref.clone();
+    let saga_store_for_assert = Arc::clone(&saga_store);
 
     let saga_id = SagaId::new("saga-e2e-reservation-1");
     let done = Arc::new(Notify::new());
@@ -230,7 +225,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
 
     let _saga_proxy = SagaProps::<ReservationSaga>::new(
         saga_id.clone(),
-        saga_event_ref,
+        saga_store,
         move || ReservationSaga {
             inventory: inventory_for_producer.clone(),
             done_notify: Arc::clone(&done_for_producer),
@@ -280,7 +275,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
         "fresh saga has sequence 0 before its first SagaEffect::Persist"
     );
 
-    let saga_events = load_saga_events(&saga_event_ref_for_assert, &saga_id).await;
+    let saga_events = load_saga_events(&saga_store_for_assert, &saga_id).await;
     assert_eq!(
         saga_events.len(),
         1,
@@ -303,12 +298,10 @@ async fn saga_skips_events_not_routed_to_its_instance() {
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let inventory_event_ref =
-        EventPersistor::spawn(system.process_system(), Arc::clone(&inventory_store)).await;
     let inventory_proxy = system
         .spawn_aggregate::<Inventory>(
             AggregateId::new("saga-route-inventory"),
-            inventory_event_ref,
+            inventory_store,
         )
         .await;
 
@@ -319,8 +312,6 @@ async fn saga_skips_events_not_routed_to_its_instance() {
         .expect("spawn_stream must succeed");
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_event_ref =
-        EventPersistor::spawn(system.process_system(), Arc::clone(&saga_store)).await;
 
     let matched_id = SagaId::new("saga-route-match");
     let done = Arc::new(Notify::new());
@@ -343,7 +334,7 @@ async fn saga_skips_events_not_routed_to_its_instance() {
 
     let _saga_proxy = SagaProps::<ReservationSaga>::new(
         matched_id.clone(),
-        saga_event_ref,
+        saga_store,
         move || ReservationSaga {
             inventory: inventory_for_producer.clone(),
             done_notify: Arc::clone(&done_for_producer),
@@ -401,11 +392,14 @@ async fn saga_skips_events_not_routed_to_its_instance() {
 }
 
 async fn load_saga_events(
-    event_ref: &EventPersistorProxy,
+    store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
 ) -> Vec<nitinol_persistence::LoadedEvent> {
-    event_ref
-        .load(LoadQuery::by_aggregate(saga_id.clone()))
+    store
+        .load(LoadQuery::by_stream(saga_id))
         .await
         .expect("saga event store load must succeed")
+        .try_collect()
+        .await
+        .expect("collect saga events must succeed")
 }

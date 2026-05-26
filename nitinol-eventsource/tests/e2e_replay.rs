@@ -1,6 +1,6 @@
 // E2E test: Aggregate replay after process restart.
 //
-// Scenario: Aggregate accumulates events → process "restarts" (same EventPersistorRef,
+// Scenario: Aggregate accumulates events → process "restarts" (same store,
 // new proxy) → on_start replays from the EventStore → state is fully restored.
 //
 // Three E2E stories:
@@ -15,11 +15,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    AggregateProps, AggregateProxy, Snapshotable,
-    codec::Codec, Aggregate, Context, Decider, Effect, Event,
-    EventPersistor, EventPersistorProxy,
-    Receive as EvtReceive,
-    SnapshotPersistor, SnapshotPersistorProxy,
+    codec::Codec, Aggregate, AggregateProps, AggregateProxy, Context, Decider, Effect, Event,
+    Receive as EvtReceive, Snapshotable, SnapshotPersistor, SnapshotPersistorProxy,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore};
@@ -183,8 +180,6 @@ impl Codec<u64> for BigEndianU64Codec {
 // Fixtures: SlowEventStore — wraps InMemoryEventStore with a load delay
 // ---------------------------------------------------------------------------
 
-/// Simulates slow storage by delaying `load` calls.
-/// Used to verify that messages sent during replay are buffered until on_start completes.
 struct SlowEventStore {
     inner: Arc<InMemoryEventStore>,
     load_delay: Duration,
@@ -194,10 +189,10 @@ struct SlowEventStore {
 impl EventStore for SlowEventStore {
     async fn append(
         &self,
-        aggregate_id: &AggregateId,
+        key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        self.inner.append(aggregate_id, events).await
+        self.inner.append(key, events).await
     }
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
@@ -213,9 +208,9 @@ impl EventStore for SlowEventStore {
 async fn spawn_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    event_ref: EventPersistorProxy,
+    store: Arc<dyn EventStore>,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id, event_ref)
+    AggregateProps::<Counter>::new(id, store)
         .with_codec(Arc::new(TestCodec))
         .spawn(system)
         .await
@@ -224,10 +219,10 @@ async fn spawn_counter(
 async fn spawn_snapshotable_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    event_ref: EventPersistorProxy,
+    store: Arc<dyn EventStore>,
     snapshot_ref: SnapshotPersistorProxy,
 ) -> AggregateProxy<SnapshotableCounter> {
-    AggregateProps::<SnapshotableCounter>::new(id, event_ref)
+    AggregateProps::<SnapshotableCounter>::new(id, store)
         .with_codec(Arc::new(TestCodec))
         .with_snapshot_persistor(snapshot_ref, Arc::new(BigEndianU64Codec))
         .spawn(system)
@@ -243,21 +238,21 @@ async fn spawn_snapshotable_counter(
 /// Then on_start replays all 3 events and restores counter to 3.
 #[tokio::test]
 async fn e2e_replay_restores_state_after_process_restart() {
-    // Given: shared system and event persistor
+    // Given: shared system and event store
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("e2e-replay-basic");
 
     // Process 1: write 3 events
     {
-        let proxy1 = spawn_counter(&system, id.clone(), event_ref.clone()).await;
+        let proxy1 = spawn_counter(&system, id.clone(), Arc::clone(&store)).await;
         proxy1.ask(Increment).await.expect("ask 1");
         proxy1.ask(Increment).await.expect("ask 2");
         proxy1.ask(Increment).await.expect("ask 3");
     }
 
     // When: spawn process 2 (triggers replay in on_start)
-    let proxy2 = spawn_counter(&system, id, event_ref).await;
+    let proxy2 = spawn_counter(&system, id, store).await;
     let count: u64 = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: state fully restored from replay
@@ -274,10 +269,6 @@ async fn e2e_replay_restores_state_after_process_restart() {
 /// immediately (before on_start finishes),
 /// Then the exec is buffered in the mpsc channel and processed after replay completes,
 /// returning count == 2.
-///
-/// This verifies the runtime invariant: on_start runs to completion before the
-/// message loop starts (lifecycle.rs), so buffered messages are guaranteed to see
-/// the fully-replayed state.
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_message_sent_during_slow_replay_is_processed_after() {
     // Given: pre-write 2 events to the inner store
@@ -286,12 +277,8 @@ async fn e2e_message_sent_during_slow_replay_is_processed_after() {
 
     {
         let setup_system = ProcessSystem::new().await;
-        let event_ref = EventPersistor::spawn(
-            &setup_system,
-            Arc::clone(&inner) as Arc<dyn EventStore>,
-        )
-        .await;
-        let proxy = spawn_counter(&setup_system, id.clone(), event_ref).await;
+        let store: Arc<dyn EventStore> = inner.clone();
+        let proxy = spawn_counter(&setup_system, id.clone(), store).await;
         proxy.ask(Increment).await.expect("setup ask 1");
         proxy.ask(Increment).await.expect("setup ask 2");
     }
@@ -303,10 +290,9 @@ async fn e2e_message_sent_during_slow_replay_is_processed_after() {
     });
 
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, slow_store).await;
 
     // When: spawn process (on_start begins the 50 ms slow replay)
-    let proxy = spawn_counter(&system, id, event_ref).await;
+    let proxy = spawn_counter(&system, id, slow_store).await;
 
     // exec is queued while on_start is still sleeping; runtime buffers it
     let count: u64 = proxy.exec(GetCount).await.expect("exec must succeed");
@@ -329,7 +315,7 @@ async fn e2e_message_sent_during_slow_replay_is_processed_after() {
 async fn e2e_replay_with_snapshot_restores_state() {
     // Given: shared persistors
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_ref =
         SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
     let id = AggregateId::new("e2e-replay-snap");
@@ -339,7 +325,7 @@ async fn e2e_replay_with_snapshot_restores_state() {
         let proxy1 = spawn_snapshotable_counter(
             &system,
             id.clone(),
-            event_ref.clone(),
+            Arc::clone(&store),
             snapshot_ref.clone(),
         )
         .await;
@@ -360,7 +346,7 @@ async fn e2e_replay_with_snapshot_restores_state() {
         .expect("save snapshot must succeed");
 
     // When: spawn process 2 — replay: snapshot (seq=3) + delta events (seq=4, seq=5)
-    let proxy2 = spawn_snapshotable_counter(&system, id, event_ref, snapshot_ref).await;
+    let proxy2 = spawn_snapshotable_counter(&system, id, store, snapshot_ref).await;
     let count: u64 = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: snapshot (value=3) + 2 delta events = 5

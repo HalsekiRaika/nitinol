@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use nitinol_persistence::store::{CheckpointStore, DeliveryMode};
+use futures_util::StreamExt;
+use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore};
 use nitinol_persistence::{AggregateId, LoadQuery, ProjectionId};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::event::Event;
-use crate::process::persistence::EventPersistorProxy;
 use crate::projection::delivery;
 use crate::projection::envelope::EventEnvelope;
 use crate::projection::handler::EventTypeHandler;
@@ -24,7 +24,7 @@ pub(crate) enum CatchupOrigin {
 pub struct ProjectorProcess<P, Cs, Tx = ()> {
     pub(crate) projector: P,
     pub(crate) projection_id: ProjectionId,
-    pub(crate) event_ref: EventPersistorProxy,
+    pub(crate) store: Arc<dyn EventStore>,
     pub(crate) checkpoint_store: Arc<Cs>,
     pub(crate) delivery_mode: DeliveryMode,
     pub(crate) catchup_origin: CatchupOrigin,
@@ -51,8 +51,8 @@ where
 
         let query = match &self.catchup_origin {
             CatchupOrigin::Aggregate(agg_id) => LoadQuery {
-                aggregate_id: Some(agg_id.clone()),
-                from_aggregate_sequence: Some(checkpoint + 1),
+                stream_key: Some(agg_id.as_str().to_owned()),
+                from_stream_sequence: Some(checkpoint + 1),
                 ..Default::default()
             },
             CatchupOrigin::Global => LoadQuery {
@@ -61,15 +61,24 @@ where
             },
         };
 
-        let events = match self.event_ref.load(query).await {
-            Ok(evts) => evts,
+        let stream = match self.store.load(query).await {
+            Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = ?e, "event store load failed during catch-up");
                 return;
             }
         };
 
-        for loaded in events {
+        futures_util::pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+            let loaded = match item {
+                Ok(ev) => ev,
+                Err(e) => {
+                    tracing::error!(error = ?e, "event store stream error during catch-up");
+                    return;
+                }
+            };
+
             let sequence = match &self.catchup_origin {
                 CatchupOrigin::Aggregate(_) => loaded.sequence,
                 CatchupOrigin::Global => loaded.global_sequence,

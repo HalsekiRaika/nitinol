@@ -1,8 +1,8 @@
 pub(crate) mod aggregate_process;
-pub(crate) mod persistence;
 mod props;
 mod proxy;
+mod snapshot_persistor;
 
-pub use self::persistence::{EventPersistor, EventPersistorProxy, SnapshotPersistor, SnapshotPersistorProxy};
-pub use self::props::{AggregateProps, CodecUnset, CodecSet};
+pub use self::props::{AggregateProps, CodecSet, CodecUnset};
 pub use self::proxy::AggregateProxy;
+pub use self::snapshot_persistor::{SnapshotPersistor, SnapshotPersistorProxy};

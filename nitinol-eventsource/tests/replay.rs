@@ -1,12 +1,8 @@
 // Integration tests for the Replay flow in AggregateProcess.
 //
-// These tests verify that on_start correctly restores Aggregate state from an
-// EventPersistor (and optionally a SnapshotPersistor) before the process begins
+// These tests verify that on_start correctly restores Aggregate state from the
+// EventStore (and optionally a SnapshotPersistor) before the process begins
 // serving user messages.
-//
-// Phase 2 redesign: the stores are no longer passed directly into AggregateProps.
-// Instead, EventPersistor and SnapshotPersistor actors own the stores and receive
-// messages from AggregateProcess via EventPersistorRef / SnapshotPersistorRef.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,17 +11,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    Aggregate, codec::Codec, Context, Decider, Effect, Event,
-    EventPersistor, EventPersistorProxy,
-    SnapshotPersistor, SnapshotPersistorProxy,
-    Receive as EvtReceive,
-    Snapshotable,
-    AggregateProps, AggregateProxy,
+    codec::Codec, Aggregate, AggregateProps, AggregateProxy, Context, Decider, Effect, Event,
+    Receive as EvtReceive, Snapshotable, SnapshotPersistor, SnapshotPersistorProxy,
 };
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
+use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, AppendOutcome, EventType, PersistedSnapshot};
-use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::EventStream;
 use nitinol_persistence::LoadQuery;
 use nitinol_runtime::ProcessSystem;
 
@@ -200,16 +191,13 @@ struct SlowEventStore {
 impl EventStore for SlowEventStore {
     async fn append(
         &self,
-        aggregate_id: &AggregateId,
+        key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        self.inner.append(aggregate_id, events).await
+        self.inner.append(key, events).await
     }
 
-    async fn load(
-        &self,
-        query: LoadQuery,
-    ) -> Result<EventStream<'_>, nitinol_persistence::error::LoadError> {
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         tokio::time::sleep(self.load_delay).await;
         self.inner.load(query).await
     }
@@ -219,26 +207,27 @@ impl EventStore for SlowEventStore {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Spawns a fresh Counter process using the provided EventPersistorRef.
+/// Spawns a fresh Counter process using the provided `Arc<dyn EventStore>`.
 async fn spawn_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    event_ref: EventPersistorProxy,
+    store: Arc<dyn EventStore>,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id, event_ref)
+    AggregateProps::<Counter>::new(id, store)
         .with_codec(Arc::new(TestCodec))
         .spawn(system)
         .await
 }
 
-/// Spawns a SnapshotableCounter process using the provided EventPersistorRef and SnapshotPersistorRef.
+/// Spawns a SnapshotableCounter process using the provided `Arc<dyn EventStore>`
+/// and `SnapshotPersistorProxy`.
 async fn spawn_snapshotable(
     system: &ProcessSystem,
     id: AggregateId,
-    event_ref: EventPersistorProxy,
+    store: Arc<dyn EventStore>,
     snapshot_ref: SnapshotPersistorProxy,
 ) -> AggregateProxy<SnapshotableCounter> {
-    AggregateProps::<SnapshotableCounter>::new(id, event_ref)
+    AggregateProps::<SnapshotableCounter>::new(id, store)
         .with_codec(Arc::new(TestCodec))
         .with_snapshot_persistor(snapshot_ref, Arc::new(BigEndianU64Codec))
         .spawn(system)
@@ -249,25 +238,25 @@ async fn spawn_snapshotable(
 // Replay: all events applied from empty state
 // ---------------------------------------------------------------------------
 
-/// Append 3 events via process 1, then spawn process 2 with the same EventPersistorRef
+/// Append 3 events via process 1, then spawn process 2 sharing the same store
 /// and aggregate_id. Replay in on_start restores the counter to 3.
 #[tokio::test]
 async fn replay_restores_state_from_persisted_events() {
-    // Given: shared system and event persistor
+    // Given: shared system and event store
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("replay-basic");
 
     // Write 3 events through process 1
     {
-        let proxy = spawn_counter(&system, id.clone(), event_ref.clone()).await;
+        let proxy = spawn_counter(&system, id.clone(), Arc::clone(&store)).await;
         proxy.ask(Increment).await.expect("ask 1");
         proxy.ask(Increment).await.expect("ask 2");
         proxy.ask(Increment).await.expect("ask 3");
     }
 
     // When: spawn a fresh process for the same aggregate_id (triggers replay in on_start)
-    let proxy2 = spawn_counter(&system, id, event_ref).await;
+    let proxy2 = spawn_counter(&system, id, store).await;
 
     // Then: replayed state equals 3
     let count: u64 = proxy2.exec(GetCount).await.expect("exec must succeed");
@@ -281,12 +270,12 @@ async fn replay_restores_state_from_persisted_events() {
 /// Spawning a process when no events exist starts from the aggregate's Default state.
 #[tokio::test]
 async fn replay_from_empty_store_starts_with_default_state() {
-    // Given: fresh event persistor with no events
+    // Given: fresh event store with no events
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     // When
-    let proxy = spawn_counter(&system, AggregateId::new("replay-empty"), event_ref).await;
+    let proxy = spawn_counter(&system, AggregateId::new("replay-empty"), store).await;
 
     // Then: default Counter::value == 0
     let count: u64 = proxy.exec(GetCount).await.expect("exec must succeed");
@@ -303,7 +292,7 @@ async fn replay_from_empty_store_starts_with_default_state() {
 async fn replay_with_snapshot_only_restores_snapshot_state() {
     // Given: a SnapshotPersistor with a pre-saved snapshot (value=5, sequence=5)
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_ref =
         SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
     let id = AggregateId::new("replay-snap-only");
@@ -320,7 +309,7 @@ async fn replay_with_snapshot_only_restores_snapshot_state() {
         .expect("save snapshot must succeed");
 
     // When
-    let proxy = spawn_snapshotable(&system, id, event_ref, snapshot_ref).await;
+    let proxy = spawn_snapshotable(&system, id, store, snapshot_ref).await;
 
     // Then: state restored from snapshot → value=5
     let count: u64 = proxy.exec(GetCount).await.expect("exec must succeed");
@@ -337,7 +326,7 @@ async fn replay_with_snapshot_only_restores_snapshot_state() {
 async fn replay_applies_delta_events_after_snapshot() {
     // Given: shared persistors
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_ref =
         SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
     let id = AggregateId::new("replay-snap-delta");
@@ -347,7 +336,7 @@ async fn replay_applies_delta_events_after_snapshot() {
         let proxy = spawn_snapshotable(
             &system,
             id.clone(),
-            event_ref.clone(),
+            Arc::clone(&store),
             snapshot_ref.clone(),
         )
         .await;
@@ -368,7 +357,7 @@ async fn replay_applies_delta_events_after_snapshot() {
         .expect("save snapshot");
 
     // When: spawn a fresh process — replay loads snapshot (seq=3), then 2 delta events (seq=4,5)
-    let proxy2 = spawn_snapshotable(&system, id, event_ref, snapshot_ref).await;
+    let proxy2 = spawn_snapshotable(&system, id, store, snapshot_ref).await;
 
     // Then: value=5 (3 from snapshot + 2 delta events)
     let count: u64 = proxy2.exec(GetCount).await.expect("exec must succeed");
@@ -385,7 +374,7 @@ async fn replay_applies_delta_events_after_snapshot() {
 async fn replay_snapshot_at_latest_sequence_no_delta_events() {
     // Given: pre-write 3 events through a process, then save a snapshot at seq=3
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_ref =
         SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
     let id = AggregateId::new("replay-snap-latest");
@@ -394,7 +383,7 @@ async fn replay_snapshot_at_latest_sequence_no_delta_events() {
         let proxy = spawn_snapshotable(
             &system,
             id.clone(),
-            event_ref.clone(),
+            Arc::clone(&store),
             snapshot_ref.clone(),
         )
         .await;
@@ -415,7 +404,7 @@ async fn replay_snapshot_at_latest_sequence_no_delta_events() {
         .expect("save snapshot");
 
     // When: spawn fresh process — snapshot covers all events, no delta events follow
-    let proxy2 = spawn_snapshotable(&system, id, event_ref, snapshot_ref).await;
+    let proxy2 = spawn_snapshotable(&system, id, store, snapshot_ref).await;
 
     // Then: value=3 (snapshot only)
     let count: u64 = proxy2.exec(GetCount).await.expect("exec must succeed");
@@ -427,8 +416,8 @@ async fn replay_snapshot_at_latest_sequence_no_delta_events() {
 // ---------------------------------------------------------------------------
 
 /// Messages sent to a newly spawned process while on_start is still running
-/// (replay from a slow EventStore passed into EventPersistor) are buffered in
-/// the mpsc channel and processed after replay completes.
+/// (replay from a slow EventStore) are buffered in the mpsc channel and
+/// processed after replay completes.
 ///
 /// Invariant guaranteed by runtime lifecycle (lifecycle.rs:111):
 /// `state.on_start(&mut ctx).await` runs to completion before the select! loop begins.
@@ -441,11 +430,11 @@ async fn messages_buffered_during_slow_replay_are_processed_after() {
 
     {
         let system = ProcessSystem::new().await;
-        let event_ref = EventPersistor::spawn(&system, inner.clone()).await;
-        let proxy = spawn_counter(&system, id.clone(), event_ref).await;
+        let store: Arc<dyn EventStore> = inner.clone();
+        let proxy = spawn_counter(&system, id.clone(), store).await;
         proxy.ask(Increment).await.expect("setup ask 1");
         proxy.ask(Increment).await.expect("setup ask 2");
-        // system and event_ref drop here — events remain in `inner`
+        // system drops here — events remain in `inner`
     }
 
     // A slow store introduces a 50 ms delay in load so that replay takes measurable time.
@@ -455,10 +444,9 @@ async fn messages_buffered_during_slow_replay_are_processed_after() {
     });
 
     let system2 = ProcessSystem::new().await;
-    let event_ref2 = EventPersistor::spawn(&system2, slow_store).await;
 
-    // When: spawn the process (on_start begins the 50ms slow replay via EventPersistor)
-    let proxy2 = spawn_counter(&system2, id, event_ref2).await;
+    // When: spawn the process (on_start begins the 50ms slow replay via the store)
+    let proxy2 = spawn_counter(&system2, id, slow_store).await;
 
     // exec is queued immediately — it arrives while on_start is still in the 50ms sleep.
     // The runtime buffers it and processes it after on_start completes.

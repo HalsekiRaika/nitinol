@@ -1,8 +1,10 @@
+use std::borrow::Borrow;
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::EventEnvelope;
-use nitinol_eventsource::EventPersistorProxy;
+use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendingEvent, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
@@ -16,7 +18,7 @@ pub(crate) type RouteFn<E> = Arc<dyn Fn(&E) -> Option<SagaId> + Send + Sync>;
 pub struct SagaProcess<S: Saga> {
     pub(crate) state: S,
     pub(crate) saga_id: SagaId,
-    pub(crate) event_ref: EventPersistorProxy,
+    pub(crate) store: Arc<dyn EventStore>,
     pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
     pub(crate) route_fn: RouteFn<S::SubscribedEvent>,
     pub(crate) sequence: u64,
@@ -25,20 +27,28 @@ pub struct SagaProcess<S: Saga> {
 impl<S: Saga> Process for SagaProcess<S> {
     async fn on_start(&mut self, _ctx: &mut ProcessContext) {
         let query = LoadQuery {
-            aggregate_id: Some(self.saga_id.clone()),
-            from_aggregate_sequence: Some(self.sequence + 1),
+            stream_key: Some(self.saga_id.as_str().to_owned()),
+            from_stream_sequence: Some(self.sequence + 1),
             ..Default::default()
         };
 
-        let events = match self.event_ref.load(query).await {
-            Ok(evts) => evts,
+        let stream = match self.store.load(query).await {
+            Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = ?e, "saga event store load failed during replay");
                 return;
             }
         };
 
-        for loaded in events {
+        futures_util::pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+            let loaded = match item {
+                Ok(ev) => ev,
+                Err(e) => {
+                    tracing::error!(error = ?e, "saga event store stream error during replay");
+                    return;
+                }
+            };
             match self.codec.decode(&loaded.payload) {
                 Ok(event) => {
                     self.state.apply(event);
@@ -82,7 +92,7 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
             &mut self.state,
             &self.saga_id,
             &mut self.sequence,
-            &self.event_ref,
+            self.store.as_ref(),
             self.codec.as_ref(),
         )
         .await;
@@ -95,7 +105,7 @@ fn run_saga_effect<'a, S: Saga>(
     state: &'a mut S,
     saga_id: &'a SagaId,
     sequence: &'a mut u64,
-    event_ref: &'a EventPersistorProxy,
+    store: &'a dyn EventStore,
     codec: &'a dyn ErasedCodec<S::Event>,
 ) -> futures_core::future::BoxFuture<'a, ()> {
     Box::pin(async move {
@@ -103,7 +113,7 @@ fn run_saga_effect<'a, S: Saga>(
             SagaEffect::None => {}
 
             SagaEffect::Persist(events) => {
-                persist_events(events, state, saga_id, sequence, event_ref, codec).await;
+                persist_events(events, state, saga_id, sequence, store, codec).await;
             }
 
             SagaEffect::Tell(SagaTellEffect(side)) => {
@@ -112,7 +122,7 @@ fn run_saga_effect<'a, S: Saga>(
 
             SagaEffect::Sequence(effects) => {
                 for sub in effects {
-                    run_saga_effect(sub, state, saga_id, sequence, event_ref, codec).await;
+                    run_saga_effect(sub, state, saga_id, sequence, store, codec).await;
                 }
             }
         }
@@ -124,7 +134,7 @@ async fn persist_events<S: Saga>(
     state: &mut S,
     saga_id: &SagaId,
     sequence: &mut u64,
-    event_ref: &EventPersistorProxy,
+    store: &dyn EventStore,
     codec: &dyn ErasedCodec<S::Event>,
 ) {
     let mut next_sequence = *sequence;
@@ -139,7 +149,6 @@ async fn persist_events<S: Saga>(
             }
         };
         appending.push(AppendingEvent {
-            aggregate_id: saga_id.clone(),
             sequence: next_sequence,
             event_type: <S::Event as nitinol_eventsource::Event>::EVENT_TYPE,
             payload,
@@ -147,7 +156,7 @@ async fn persist_events<S: Saga>(
         });
     }
 
-    if let Err(e) = event_ref.append(saga_id.clone(), appending).await {
+    if let Err(e) = store.append(saga_id.borrow(), appending).await {
         tracing::warn!(error = %e, "saga event append failed; skipping apply");
         return;
     }

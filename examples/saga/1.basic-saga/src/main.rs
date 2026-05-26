@@ -5,7 +5,7 @@ use tokio::sync::Notify;
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{EventEnvelope, EventPersistor};
+use nitinol_eventsource::EventEnvelope;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ident::ProcessName;
@@ -34,17 +34,15 @@ async fn main() {
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let order_event_ref = EventPersistor::spawn(system.process_system(), order_store).await;
     let order_proxy = system
-        .spawn_aggregate::<Order>(AggregateId::new("example-order"), order_event_ref)
+        .spawn_aggregate::<Order>(AggregateId::new("example-order"), order_store)
         .await;
 
     let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let inventory_event_ref = EventPersistor::spawn(system.process_system(), inventory_store).await;
     let inventory_proxy = system
         .spawn_aggregate::<Inventory>(
             AggregateId::new("example-inventory"),
-            inventory_event_ref,
+            inventory_store,
         )
         .await;
 
@@ -55,7 +53,6 @@ async fn main() {
         .expect("spawn_stream must succeed");
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_event_ref = EventPersistor::spawn(system.process_system(), saga_store).await;
     let saga_id = SagaId::new("example-reservation-saga");
     let done = Arc::new(Notify::new());
 
@@ -65,7 +62,7 @@ async fn main() {
 
     let _saga_proxy = SagaProps::<ReservationSaga>::new(
         saga_id.clone(),
-        saga_event_ref,
+        saga_store,
         move || ReservationSaga {
             inventory: inventory_for_producer.clone(),
             done_notify: Arc::clone(&done_for_producer),

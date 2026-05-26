@@ -3,7 +3,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use nitinol_eventsource::codec::ErasedCodec;
-use nitinol_eventsource::{EventEnvelope, EventPersistorProxy};
+use nitinol_eventsource::EventEnvelope;
+use nitinol_persistence::store::EventStore;
 use nitinol_runtime::process::{ProcessProxy, Stream};
 use nitinol_runtime::{ProcessSystem, Props};
 
@@ -40,7 +41,7 @@ type SubscribeFn<S> = Box<
 /// - `Sub` — subscription configuration (`SubscriptionUnset` / `SubscriptionSet<S>`)
 pub struct SagaProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
     saga_id: SagaId,
-    event_ref: EventPersistorProxy,
+    store: Arc<dyn EventStore>,
     producer: Arc<dyn Fn() -> S + Send + Sync>,
     codec: C,
     subscription: Sub,
@@ -55,12 +56,12 @@ impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
     /// `Restart` supervision strategy.
     pub fn new(
         saga_id: SagaId,
-        event_ref: EventPersistorProxy,
+        store: Arc<dyn EventStore>,
         producer: impl Fn() -> S + Send + Sync + 'static,
     ) -> Self {
         Self {
             saga_id,
-            event_ref,
+            store,
             producer: Arc::new(producer),
             codec: CodecUnset,
             subscription: SubscriptionUnset,
@@ -73,7 +74,7 @@ impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
     pub fn with_codec(self, codec: Arc<dyn ErasedCodec<S::Event>>) -> SagaProps<S, CodecSet<S::Event>, Sub> {
         SagaProps {
             saga_id: self.saga_id,
-            event_ref: self.event_ref,
+            store: self.store,
             producer: self.producer,
             codec: CodecSet { codec },
             subscription: self.subscription,
@@ -105,7 +106,7 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
         });
         SagaProps {
             saga_id: self.saga_id,
-            event_ref: self.event_ref,
+            store: self.store,
             producer: self.producer,
             codec: self.codec,
             subscription: SubscriptionSet {
@@ -124,14 +125,14 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
     /// `spawn` — calling it earlier is a compile error.
     pub async fn spawn(self, system: &ProcessSystem) -> SagaProxy<S> {
         let saga_id = self.saga_id;
-        let event_ref = self.event_ref;
+        let store = self.store;
         let producer = self.producer;
         let codec = self.codec.codec;
         let route_fn = self.subscription.route_fn;
         let subscribe_fn = self.subscription.subscribe_fn;
 
         let saga_id_for_props = saga_id.clone();
-        let event_ref_for_props = event_ref.clone();
+        let store_for_props = Arc::clone(&store);
         let codec_for_props = Arc::clone(&codec);
         let route_fn_for_props = Arc::clone(&route_fn);
         let producer_for_props = Arc::clone(&producer);
@@ -139,7 +140,7 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let props = Props::new(move || SagaProcess::<S> {
             state: producer_for_props(),
             saga_id: saga_id_for_props.clone(),
-            event_ref: event_ref_for_props.clone(),
+            store: Arc::clone(&store_for_props),
             codec: Arc::clone(&codec_for_props),
             route_fn: Arc::clone(&route_fn_for_props),
             sequence: 0,

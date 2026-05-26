@@ -14,13 +14,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    AggregateProps, AggregateProxy, Snapshotable,
-    codec::Codec, Aggregate, Context, Decider, Effect, Event,
-    EventPersistor, EventPersistorProxy,
-    Receive as EvtReceive,
-    SnapshotPersistor, SnapshotPersistorProxy,
+    codec::Codec, Aggregate, AggregateProps, AggregateProxy, Context, Decider, Effect, Event,
+    Receive as EvtReceive, Snapshotable, SnapshotPersistor, SnapshotPersistorProxy,
 };
-use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, EventType, PersistedSnapshot};
 use nitinol_runtime::ProcessSystem;
 
@@ -179,27 +176,27 @@ impl Codec<u64> for SnapshotCodec {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Spawn a Counter (Snapshotable) process with event + snapshot persistors.
+/// Spawn a Counter (Snapshotable) process with event store + snapshot persistor.
 async fn spawn_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    event_ref: EventPersistorProxy,
+    store: Arc<dyn EventStore>,
     snapshot_ref: SnapshotPersistorProxy,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id, event_ref)
+    AggregateProps::<Counter>::new(id, store)
         .with_codec(Arc::new(EventCodec))
         .with_snapshot_persistor(snapshot_ref, Arc::new(SnapshotCodec))
         .spawn(system)
         .await
 }
 
-/// Spawn a PlainCounter (no Snapshotable) process with event persistor only.
+/// Spawn a PlainCounter (no Snapshotable) process with event store only.
 async fn spawn_plain_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    event_ref: EventPersistorProxy,
+    store: Arc<dyn EventStore>,
 ) -> AggregateProxy<PlainCounter> {
-    AggregateProps::<PlainCounter>::new(id, event_ref)
+    AggregateProps::<PlainCounter>::new(id, store)
         .with_codec(Arc::new(EventCodec))
         .spawn(system)
         .await
@@ -216,14 +213,14 @@ async fn spawn_plain_counter(
 async fn e2e_snapshot_at_latest_sequence_restores_state() {
     // Given: shared system and persistors
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_ref =
         SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
     let id = AggregateId::new("e2e-snap-latest");
 
     // Write 3 events via process 1
     {
-        let proxy1 = spawn_counter(&system, id.clone(), event_ref.clone(), snapshot_ref.clone()).await;
+        let proxy1 = spawn_counter(&system, id.clone(), Arc::clone(&store), snapshot_ref.clone()).await;
         proxy1.ask(Increment).await.expect("ask 1");
         proxy1.ask(Increment).await.expect("ask 2");
         proxy1.ask(Increment).await.expect("ask 3");
@@ -241,7 +238,7 @@ async fn e2e_snapshot_at_latest_sequence_restores_state() {
         .expect("save snapshot must succeed");
 
     // When: spawn process 2 — loads snapshot at seq=3, finds no delta events
-    let proxy2 = spawn_counter(&system, id, event_ref, snapshot_ref).await;
+    let proxy2 = spawn_counter(&system, id, store, snapshot_ref).await;
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: state fully restored from the snapshot alone
@@ -263,14 +260,14 @@ async fn e2e_snapshot_at_latest_sequence_restores_state() {
 async fn e2e_snapshot_plus_delta_events_combine_correctly() {
     // Given: shared system and persistors
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_ref =
         SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
     let id = AggregateId::new("e2e-snap-delta");
 
     // Write 8 events
     {
-        let proxy1 = spawn_counter(&system, id.clone(), event_ref.clone(), snapshot_ref.clone()).await;
+        let proxy1 = spawn_counter(&system, id.clone(), Arc::clone(&store), snapshot_ref.clone()).await;
         for _ in 0..8 {
             proxy1.ask(Increment).await.expect("ask must succeed");
         }
@@ -288,7 +285,7 @@ async fn e2e_snapshot_plus_delta_events_combine_correctly() {
         .expect("save snapshot must succeed");
 
     // When: spawn process 2 — loads snapshot (seq=5) then replays seq=6,7,8
-    let proxy2 = spawn_counter(&system, id, event_ref, snapshot_ref).await;
+    let proxy2 = spawn_counter(&system, id, store, snapshot_ref).await;
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: snapshot (5) + 3 delta events = 8
@@ -307,21 +304,21 @@ async fn e2e_snapshot_plus_delta_events_combine_correctly() {
 /// Then all 5 events are replayed from scratch and the counter reaches 5.
 #[tokio::test]
 async fn e2e_no_snapshot_means_full_event_replay() {
-    // Given: event persistor only (no snapshot store)
+    // Given: event store only (no snapshot store)
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("e2e-snap-no-snap");
 
     // Write 5 events via process 1
     {
-        let proxy1 = spawn_plain_counter(&system, id.clone(), event_ref.clone()).await;
+        let proxy1 = spawn_plain_counter(&system, id.clone(), Arc::clone(&store)).await;
         for _ in 0..5 {
             proxy1.ask(Increment).await.expect("ask must succeed");
         }
     }
 
     // When: spawn process 2 — no snapshot, all 5 events are replayed
-    let proxy2 = spawn_plain_counter(&system, id, event_ref).await;
+    let proxy2 = spawn_plain_counter(&system, id, store).await;
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: full replay produces correct state

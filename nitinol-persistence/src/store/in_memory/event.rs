@@ -8,12 +8,11 @@ use futures_core::Stream;
 
 use crate::error::{AppendError, LoadError};
 use crate::event::{AppendingEvent, LoadedEvent};
-use crate::id::AggregateId;
 use crate::query::{AppendOutcome, LoadQuery};
 use crate::store::event_store::{EventStore, EventStream};
 
 struct EventStoreState {
-    events: HashMap<AggregateId, Vec<LoadedEvent>>,
+    events: HashMap<String, Vec<LoadedEvent>>,
     next_global_sequence: u64,
 }
 
@@ -43,26 +42,16 @@ impl Default for InMemoryEventStore {
 impl EventStore for InMemoryEventStore {
     async fn append(
         &self,
-        aggregate_id: &AggregateId,
+        key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
         let mut state = self.state.lock().unwrap();
-
-        // Validate that every event's aggregate_id matches the stream key
-        for event in &events {
-            if &event.aggregate_id != aggregate_id {
-                return Err(AppendError::AggregateMismatch {
-                    expected: aggregate_id.clone(),
-                    actual: event.aggregate_id.clone(),
-                });
-            }
-        }
 
         // Empty batch: no-op — return current max sequence (0 if no events exist yet)
         if events.is_empty() {
             let stream_version = state
                 .events
-                .get(aggregate_id)
+                .get(key)
                 .and_then(|stored| stored.iter().map(|e| e.sequence).max())
                 .unwrap_or(0);
             return Ok(AppendOutcome {
@@ -75,13 +64,13 @@ impl EventStore for InMemoryEventStore {
         // detecting both store conflicts and intra-batch duplicates in one pass.
         let mut seen: HashSet<u64> = state
             .events
-            .get(aggregate_id)
+            .get(key)
             .map(|stored| stored.iter().map(|e| e.sequence).collect())
             .unwrap_or_default();
 
         for event in &events {
             if !seen.insert(event.sequence) {
-                return Err(AppendError::SequenceConflict(aggregate_id.clone()));
+                return Err(AppendError::SequenceConflict(key.to_owned()));
             }
         }
 
@@ -98,10 +87,10 @@ impl EventStore for InMemoryEventStore {
 
             state
                 .events
-                .entry(aggregate_id.clone())
+                .entry(key.to_owned())
                 .or_default()
                 .push(LoadedEvent {
-                    aggregate_id: event.aggregate_id,
+                    stream_key: key.to_owned(),
                     sequence: event.sequence,
                     global_sequence,
                     event_type: event.event_type,
@@ -124,8 +113,8 @@ impl EventStore for InMemoryEventStore {
             .values()
             .flat_map(|events| events.iter().cloned())
             .filter(|event| {
-                if let Some(ref agg_id) = query.aggregate_id {
-                    if &event.aggregate_id != agg_id {
+                if let Some(ref key) = query.stream_key {
+                    if &event.stream_key != key {
                         return false;
                     }
                 }
@@ -139,8 +128,8 @@ impl EventStore for InMemoryEventStore {
                         return false;
                     }
                 }
-                if let Some(from_agg_seq) = query.from_aggregate_sequence {
-                    if event.sequence < from_agg_seq {
+                if let Some(from_stream_seq) = query.from_stream_sequence {
+                    if event.sequence < from_stream_seq {
                         return false;
                     }
                 }

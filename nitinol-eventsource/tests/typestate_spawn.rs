@@ -4,12 +4,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    codec::Codec,
-    Aggregate, AggregateProps, Context, Decider, Effect, Event,
-    EventPersistor,
-    ProjectionContext, Projector, ProjectorProps,
+    codec::Codec, Aggregate, AggregateProps, Context, Decider, Effect, Event, ProjectionContext,
+    Projector, ProjectorProps,
 };
-use nitinol_persistence::store::{InMemoryCheckpointStore, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
@@ -93,13 +91,12 @@ impl Projector<Incremented> for NoopProjector {
 async fn aggregate_props_correct_chain_compiles_and_spawns() {
     // Given
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
-    let event_ref = EventPersistor::spawn(&system, store).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     // When: the full required chain
     let proxy = AggregateProps::<Counter>::new(
         AggregateId::new("typestate-agg-ok"),
-        event_ref,
+        store,
     )
     .with_codec(Arc::new(IncrementedCodec)) // transitions to CodecSet
     .spawn(&system)                          // only available in CodecSet state
@@ -121,14 +118,13 @@ async fn aggregate_props_correct_chain_compiles_and_spawns() {
 async fn projector_props_correct_chain_compiles_and_spawns() {
     // Given
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
-    let event_ref = EventPersistor::spawn(&system, store).await;
 
     // When: full required chain
     let _proxy = ProjectorProps::new(
         ProjectionId::new("typestate-proj-ok"),
-        event_ref,
+        store,
         checkpoint_store,
         NoopProjector::new,
     )
@@ -156,14 +152,13 @@ impl NoopProjector {
 async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
     // Given
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
-    let event_ref = EventPersistor::spawn(&system, store).await;
 
     // When: two with_event() calls followed by catchup → spawn
     let _proxy = ProjectorProps::new(
         ProjectionId::new("typestate-multi-event-ok"),
-        event_ref,
+        store,
         checkpoint_store,
         NoopProjector::new,
     )
@@ -185,16 +180,15 @@ async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
 async fn projector_props_catchup_from_aggregate_enables_spawn() {
     // Given
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
-    let event_ref = EventPersistor::spawn(&system, store).await;
 
     let agg_id = AggregateId::new("typestate-agg-origin");
 
     // When: using catchup_from_aggregate instead of catchup_from_global
     let _proxy = ProjectorProps::new(
         ProjectionId::new("typestate-proj-agg-origin"),
-        event_ref,
+        store,
         checkpoint_store,
         NoopProjector::new,
     )
@@ -210,21 +204,8 @@ async fn projector_props_catchup_from_aggregate_enables_spawn() {
 // Compile-fail coverage
 // ---------------------------------------------------------------------------
 //
-// The following scenarios must produce COMPILE ERRORS:
-//
-//   // ERROR: spawn() not available on AggregateProps<Counter, CodecUnset>
-//   AggregateProps::<Counter>::new(id, event_ref).spawn(&system).await;
-//
-//   // ERROR: spawn() not available on ProjectorProps<P, Cs, (), EventUnset, *>
-//   ProjectorProps::new(pid, event_ref, cs, producer).spawn(&system).await;
-//
-//   // ERROR: spawn() not available on ProjectorProps<P, Cs, (), EventSet, OriginUnset>
-//   ProjectorProps::new(pid, event_ref, cs, producer)
-//       .with_event::<E>(codec)
-//       .spawn(&system)
-//       .await;
-//
-// These are verified via rustdoc compile_fail doctests embedded in the
-// AggregateProps::spawn and ProjectorProps::spawn rustdoc comments.
+// The following scenarios must produce COMPILE ERRORS and are verified via
+// rustdoc compile_fail doctests embedded in the AggregateProps::spawn and
+// ProjectorProps::spawn rustdoc comments.
 // See: nitinol-eventsource/src/process/props.rs and
 //      nitinol-eventsource/src/projection/props.rs

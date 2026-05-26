@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use tracing::info;
 
-use nitinol_eventsource::{system::EventSourceSystem, EventPersistor, ProjectorProps};
+use nitinol_eventsource::{system::EventSourceSystem, ProjectorProps};
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::ProcessSystem;
@@ -45,20 +45,12 @@ async fn main() {
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     // Shared stores
-    let event_store = Arc::new(InMemoryEventStore::default());
+    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
-
-    let event_ref = EventPersistor::spawn(
-        system.process_system(),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-    )
-    .await;
-    // Clone so both the aggregate and the projector share the same EventPersistor actor.
-    let proj_event_ref = event_ref.clone();
 
     let agg_id = AggregateId::new("proj-counter");
     let proxy = system
-        .spawn_aggregate::<Counter>(agg_id.clone(), event_ref)
+        .spawn_aggregate::<Counter>(agg_id.clone(), Arc::clone(&event_store))
         .await;
 
     // Persist two events
@@ -74,7 +66,7 @@ async fn main() {
 
     let _proj = ProjectorProps::new(
         ProjectionId::new("proj-read-model"),
-        proj_event_ref,
+        Arc::clone(&event_store),
         Arc::clone(&checkpoint_store),
         move || CountProjector {
             model: CountReadModel {

@@ -18,8 +18,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tracing::info;
 
-use nitinol_eventsource::{AggregateProps, EventPersistor, SnapshotPersistor};
-use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore};
+use nitinol_eventsource::{AggregateProps, SnapshotPersistor};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::ProcessSystem;
 
@@ -40,14 +40,14 @@ async fn main() {
     init_tracing();
 
     let system = ProcessSystem::new().await;
-    let event_ref = EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_ref =
         SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
     let id = AggregateId::new("snap-counter");
 
     // Process 1: write 5 events
     {
-        let proxy = AggregateProps::<Counter>::new(id.clone(), event_ref.clone())
+        let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
             .with_codec(Arc::new(EventCodec))
             .with_snapshot_persistor(snapshot_ref.clone(), Arc::new(SnapshotCodec))
             .spawn(&system)
@@ -72,7 +72,7 @@ async fn main() {
 
     // Process 2: add 2 more events (seq=6,7)
     {
-        let proxy = AggregateProps::<Counter>::new(id.clone(), event_ref.clone())
+        let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
             .with_codec(Arc::new(EventCodec))
             .with_snapshot_persistor(snapshot_ref.clone(), Arc::new(SnapshotCodec))
             .spawn(&system)
@@ -83,7 +83,7 @@ async fn main() {
     }
 
     // Process 3: restore from snapshot (seq=5) + apply delta events (seq=6,7)
-    let proxy3 = AggregateProps::<Counter>::new(id.clone(), event_ref.clone())
+    let proxy3 = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
         .with_codec(Arc::new(EventCodec))
         .with_snapshot_persistor(snapshot_ref.clone(), Arc::new(SnapshotCodec))
         .spawn(&system)

@@ -3,14 +3,13 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use nitinol_persistence::store::{CheckpointStore, DeliveryMode};
+use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore};
 use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{Props, ProcessSystem, Stream};
 
 use crate::codec::ErasedCodec;
 use crate::event::Event;
-use crate::process::persistence::EventPersistorProxy;
 use crate::projection::envelope::EventEnvelope;
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};
 use crate::projection::process::{CatchupOrigin, ProjectorProcess};
@@ -31,7 +30,7 @@ type SubscribeFn<P, Cs, Tx> = Box<
 
 pub struct ProjectorProps<P, Cs, Tx = (), E = EventUnset, O = OriginUnset> {
     projection_id: ProjectionId,
-    event_ref: EventPersistorProxy,
+    store: Arc<dyn EventStore>,
     checkpoint_store: Arc<Cs>,
     delivery_mode: DeliveryMode,
     catchup_origin: O,
@@ -49,13 +48,13 @@ where
 {
     pub fn new(
         projection_id: ProjectionId,
-        event_ref: EventPersistorProxy,
+        store: Arc<dyn EventStore>,
         checkpoint_store: Arc<Cs>,
         producer: impl Fn() -> P + Send + Sync + 'static,
     ) -> Self {
         Self {
             projection_id,
-            event_ref,
+            store,
             checkpoint_store,
             delivery_mode: DeliveryMode::AtLeastOnce,
             catchup_origin: OriginUnset,
@@ -79,45 +78,6 @@ where
     /// the delivery mode is therefore fixed to `ExactlyOnce` by this call and cannot
     /// be overridden afterwards.  Calling `delivery_mode` after `with_tx_provider`
     /// is a **compile error** (the method is unavailable when `Tx != ()`).
-    ///
-    /// ### Cannot override delivery mode after `with_tx_provider`
-    ///
-    /// ```compile_fail
-    /// # use std::sync::Arc;
-    /// # use async_trait::async_trait;
-    /// # use nitinol_eventsource::{ProjectorProps, EventPersistorProxy, TxProvider};
-    /// # use nitinol_persistence::store::{CheckpointStore, DeliveryMode};
-    /// # use nitinol_persistence::error::CheckpointError;
-    /// # use nitinol_persistence::ProjectionId;
-    /// struct MyTx;
-    /// struct MyTxProvider;
-    /// #[async_trait]
-    /// impl TxProvider for MyTxProvider {
-    ///     type Tx = MyTx;
-    ///     type Error = std::convert::Infallible;
-    ///     async fn begin(&self) -> Result<MyTx, Self::Error> { Ok(MyTx) }
-    ///     async fn commit(&self, _: MyTx) -> Result<(), Self::Error> { Ok(()) }
-    ///     async fn rollback(&self, _: MyTx) {}
-    /// }
-    /// struct MyCheckpointStore;
-    /// #[async_trait]
-    /// impl CheckpointStore for MyCheckpointStore {
-    ///     type Tx = MyTx;
-    ///     async fn load(&self, _: &ProjectionId) -> Result<Option<u64>, CheckpointError> { Ok(None) }
-    ///     async fn save(&self, _: &ProjectionId, _: u64, _: Option<&mut MyTx>) -> Result<(), CheckpointError> { Ok(()) }
-    /// }
-    /// # async fn _test(event_ref: EventPersistorProxy) {
-    /// // ERROR: `delivery_mode` is not available once Tx != ()
-    /// let _ = ProjectorProps::new(
-    ///     ProjectionId::new("demo"),
-    ///     event_ref,
-    ///     Arc::new(MyCheckpointStore),
-    ///     || (),
-    /// )
-    /// .with_tx_provider(MyTxProvider)
-    /// .delivery_mode(DeliveryMode::AtLeastOnce); // compile error here
-    /// # }
-    /// ```
     pub fn with_tx_provider<TP>(self, provider: TP) -> ProjectorProps<P, Cs, TP::Tx, EventUnset, O>
     where
         TP: TxProvider,
@@ -125,7 +85,7 @@ where
     {
         ProjectorProps {
             projection_id: self.projection_id,
-            event_ref: self.event_ref,
+            store: self.store,
             checkpoint_store: self.checkpoint_store,
             // ExactlyOnce is the only delivery mode that makes sense with a TxProvider.
             delivery_mode: DeliveryMode::ExactlyOnce,
@@ -157,7 +117,7 @@ where
         self.handlers.push(handler);
         ProjectorProps {
             projection_id: self.projection_id,
-            event_ref: self.event_ref,
+            store: self.store,
             checkpoint_store: self.checkpoint_store,
             delivery_mode: self.delivery_mode,
             catchup_origin: self.catchup_origin,
@@ -223,7 +183,7 @@ where
     pub fn catchup_from_aggregate(self, agg_id: AggregateId) -> ProjectorProps<P, Cs, Tx, E, OriginSet> {
         ProjectorProps {
             projection_id: self.projection_id,
-            event_ref: self.event_ref,
+            store: self.store,
             checkpoint_store: self.checkpoint_store,
             delivery_mode: self.delivery_mode,
             catchup_origin: OriginSet(CatchupOrigin::Aggregate(agg_id)),
@@ -238,7 +198,7 @@ where
     pub fn catchup_from_global(self) -> ProjectorProps<P, Cs, Tx, E, OriginSet> {
         ProjectorProps {
             projection_id: self.projection_id,
-            event_ref: self.event_ref,
+            store: self.store,
             checkpoint_store: self.checkpoint_store,
             delivery_mode: self.delivery_mode,
             catchup_origin: OriginSet(CatchupOrigin::Global),
@@ -263,64 +223,63 @@ where
     /// `catchup_from_*` methods must be called before `spawn`.  Calling `spawn`
     /// from an incomplete builder is a **compile error**.
     ///
-    /// ### Missing `with_event`
+    /// Calling `spawn` without any `with_event` call (builder is in [`EventUnset`] state):
     ///
     /// ```compile_fail
     /// # use std::sync::Arc;
-    /// # use nitinol_eventsource::{ProjectorProps, EventPersistorProxy};
-    /// # use nitinol_persistence::store::InMemoryCheckpointStore;
+    /// # use nitinol_eventsource::ProjectorProps;
     /// # use nitinol_persistence::ProjectionId;
-    /// # async fn _test(system: nitinol_runtime::ProcessSystem, event_ref: EventPersistorProxy) {
-    /// # let cs = Arc::new(InMemoryCheckpointStore::default());
-    /// // ERROR: spawn() not available on ProjectorProps<_, _, _, EventUnset, _>
-    /// ProjectorProps::new(
-    ///     ProjectionId::new("no-event"),
-    ///     event_ref,
-    ///     cs,
-    ///     || (),
-    /// )
-    /// .catchup_from_global()
-    /// .spawn(&system)
-    /// .await;
+    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryCheckpointStore};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # struct MyProj;
+    /// # impl MyProj { fn new() -> Self { MyProj } }
+    /// # async fn bad() {
+    /// let system = ProcessSystem::new().await;
+    /// let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    /// let cs = Arc::new(InMemoryCheckpointStore::default());
+    /// // compile error: spawn() requires EventSet — call with_event() first
+    /// ProjectorProps::new(ProjectionId::new("p"), store, cs, MyProj::new)
+    ///     .spawn(&system)
+    ///     .await;
     /// # }
     /// ```
     ///
-    /// ### Missing `catchup_from_*`
+    /// Calling `spawn` after `with_event` but without a `catchup_from_*` call (builder is in
+    /// [`OriginUnset`] state):
     ///
     /// ```compile_fail
     /// # use std::sync::Arc;
     /// # use async_trait::async_trait;
-    /// # use bytes::Bytes;
-    /// # use nitinol_eventsource::{ProjectorProps, EventPersistorProxy, Event, Projector, ProjectionContext};
+    /// # use nitinol_eventsource::{Event, Projector, ProjectorProps, ProjectionContext};
     /// # use nitinol_eventsource::codec::Codec;
-    /// # use nitinol_persistence::store::InMemoryCheckpointStore;
-    /// # use nitinol_persistence::{ProjectionId, EventType};
-    /// # #[derive(Clone)] struct DummyEvent;
-    /// # impl Event for DummyEvent { const EVENT_TYPE: EventType = EventType::from_str("d.e"); }
-    /// # struct DummyCodec;
-    /// # impl Codec<DummyEvent> for DummyCodec {
-    /// #     type Error = std::convert::Infallible;
-    /// #     fn encode(_: &DummyEvent) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
-    /// #     fn decode(_: &[u8]) -> Result<DummyEvent, Self::Error> { Ok(DummyEvent) }
-    /// # }
-    /// # struct DummyProjector;
+    /// # use nitinol_persistence::{EventType, ProjectionId};
+    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryCheckpointStore};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # use bytes::Bytes;
+    /// # #[derive(Clone, PartialEq, Debug)] struct MyEv;
+    /// # impl Event for MyEv { const EVENT_TYPE: EventType = EventType::from_str("Ev"); }
+    /// # struct MyProj;
+    /// # impl MyProj { fn new() -> Self { MyProj } }
     /// # #[async_trait]
-    /// # impl Projector<DummyEvent> for DummyProjector {
+    /// # impl Projector<MyEv> for MyProj {
     /// #     type Error = std::convert::Infallible;
-    /// #     async fn project(&mut self, _: DummyEvent, _: &mut ProjectionContext<'_, ()>) -> Result<(), Self::Error> { Ok(()) }
+    /// #     async fn project(&mut self, _: MyEv, _: &mut ProjectionContext<'_, ()>) -> Result<(), Self::Error> { Ok(()) }
     /// # }
-    /// # async fn _test(system: nitinol_runtime::ProcessSystem, event_ref: EventPersistorProxy) {
-    /// # let cs = Arc::new(InMemoryCheckpointStore::default());
-    /// // ERROR: spawn() not available on ProjectorProps<_, _, _, EventSet, OriginUnset>
-    /// ProjectorProps::new(
-    ///     ProjectionId::new("no-origin"),
-    ///     event_ref,
-    ///     cs,
-    ///     || DummyProjector,
-    /// )
-    /// .with_event::<DummyEvent>(Arc::new(DummyCodec))
-    /// .spawn(&system)
-    /// .await;
+    /// # struct MyCodec;
+    /// # impl Codec<MyEv> for MyCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &MyEv) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<MyEv, Self::Error> { Ok(MyEv) }
+    /// # }
+    /// # async fn bad() {
+    /// let system = ProcessSystem::new().await;
+    /// let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    /// let cs = Arc::new(InMemoryCheckpointStore::default());
+    /// // compile error: spawn() requires OriginSet — call catchup_from_aggregate() or catchup_from_global() first
+    /// ProjectorProps::new(ProjectionId::new("p"), store, cs, MyProj::new)
+    ///     .with_event::<MyEv>(Arc::new(MyCodec))
+    ///     .spawn(&system)
+    ///     .await;
     /// # }
     /// ```
     pub async fn spawn(
@@ -329,7 +288,7 @@ where
     ) -> ProcessProxy<ProjectorProcess<P, Cs, Tx>> {
         let catchup_origin = self.catchup_origin.0;
         let projection_id = self.projection_id;
-        let event_ref = self.event_ref;
+        let store = self.store;
         let checkpoint_store = self.checkpoint_store;
         let delivery_mode = self.delivery_mode;
         let handlers = self.handlers;
@@ -339,7 +298,7 @@ where
         let runtime_props = Props::new(move || ProjectorProcess {
             projector: producer(),
             projection_id: projection_id.clone(),
-            event_ref: event_ref.clone(),
+            store: Arc::clone(&store),
             checkpoint_store: Arc::clone(&checkpoint_store),
             delivery_mode,
             catchup_origin: catchup_origin.clone(),

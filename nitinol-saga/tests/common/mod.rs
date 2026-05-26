@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{
-    Aggregate, Context, Decider, Effect, Event, EventPersistor,
-};
+use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType};
 use nitinol_runtime::ProcessSystem;
@@ -81,9 +79,8 @@ pub async fn make_tell_effect<E>() -> SagaEffect<E> {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let event_ref = EventPersistor::spawn(system.process_system(), store).await;
     let proxy = system
-        .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-target"), event_ref)
+        .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-target"), store)
         .await;
     SagaEffect::tell(proxy, NoopCmd)
 }

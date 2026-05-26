@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use tracing::info;
 
-use nitinol_eventsource::{system::EventSourceSystem, EventPersistor};
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
@@ -41,9 +41,8 @@ async fn spawn_counter(
     id: &str,
 ) -> nitinol_eventsource::AggregateProxy<Counter> {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let event_ref = EventPersistor::spawn(system.process_system(), store).await;
     system
-        .spawn_aggregate::<Counter>(AggregateId::new(id), event_ref)
+        .spawn_aggregate::<Counter>(AggregateId::new(id), store)
         .await
 }
 

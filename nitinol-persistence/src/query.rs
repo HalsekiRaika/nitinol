@@ -1,19 +1,26 @@
+use std::borrow::Borrow;
+
 use crate::event_type::EventType;
-use crate::id::AggregateId;
 
 #[derive(Debug, Clone, Default)]
 pub struct LoadQuery {
-    pub aggregate_id: Option<AggregateId>,
+    pub stream_key: Option<String>,
     pub event_type: Option<EventType>,
     pub from_global_sequence: Option<u64>,
-    pub from_aggregate_sequence: Option<u64>,
+    pub from_stream_sequence: Option<u64>,
     pub limit: Option<usize>,
 }
 
 impl LoadQuery {
-    pub fn by_aggregate(id: AggregateId) -> Self {
+    /// Build a query targeting a single stream.
+    ///
+    /// Accepts a reference to anything that `Borrow<str>`s — `AggregateId`,
+    /// `SagaId`, `&str`, `String`, etc. — so the same store can serve
+    /// heterogeneous stream-key newtypes side by side.  Mirrors the
+    /// `HashMap::get<Q: ?Sized>(&Q) where K: Borrow<Q>` signature.
+    pub fn by_stream<K: ?Sized + Borrow<str>>(key: &K) -> Self {
         Self {
-            aggregate_id: Some(id),
+            stream_key: Some(key.borrow().to_owned()),
             ..Default::default()
         }
     }

@@ -18,13 +18,11 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    codec::Codec, Event,
-    EventEnvelope, Projector, ProjectionContext, ProjectorProps,
+    codec::Codec, Event, EventEnvelope, ProjectionContext, Projector, ProjectorProps,
 };
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, ProjectionId};
 use nitinol_runtime::ident::ProcessName;
-use nitinol_eventsource::EventPersistor;
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -161,9 +159,8 @@ fn make_tracking_state() -> (
 async fn append_counted(store: &InMemoryEventStore, agg_id: &AggregateId, sequence: u64) {
     store
         .append(
-            agg_id,
+            agg_id.as_str(),
             vec![AppendingEvent {
-                aggregate_id: agg_id.clone(),
                 sequence,
                 event_type: EventType::from_str("Counted"),
                 payload: Bytes::new(),
@@ -177,9 +174,8 @@ async fn append_counted(store: &InMemoryEventStore, agg_id: &AggregateId, sequen
 async fn append_labeled(store: &InMemoryEventStore, agg_id: &AggregateId, sequence: u64) {
     store
         .append(
-            agg_id,
+            agg_id.as_str(),
             vec![AppendingEvent {
-                aggregate_id: agg_id.clone(),
                 sequence,
                 event_type: EventType::from_str("Labeled"),
                 payload: Bytes::new(),
@@ -229,10 +225,9 @@ async fn projector_single_event_type_project_called_during_catchup() {
     let notify_c = Arc::clone(&notify);
 
     // When
-    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         ProjectionId::new("proj-single"),
-        event_ref,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || TrackingProjector {
             count: Arc::clone(&count_c),
@@ -280,10 +275,9 @@ async fn projector_context_provides_correct_projection_id() {
     let last_pid_c = Arc::clone(&last_pid);
 
     // When
-    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         projection_id.clone(),
-        event_ref,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || TrackingProjector {
             count: Arc::clone(&count_c),
@@ -336,10 +330,9 @@ async fn projector_context_provides_current_sequence() {
     let last_seq_c = Arc::clone(&last_seq);
 
     // When
-    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         ProjectionId::new("proj-ctx-seq"),
-        event_ref,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || TrackingProjector {
             count: Arc::clone(&count_c),
@@ -388,10 +381,9 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
     let notify_c = Arc::clone(&notify);
 
     // When
-    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         ProjectionId::new("proj-multi"),
-        event_ref,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || TrackingProjector {
             count: Arc::clone(&count_c),
@@ -451,10 +443,9 @@ async fn projector_live_event_is_projected_after_catchup() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn the projector subscribed to the live stream
-    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         projection_id,
-        event_ref,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || TrackingProjector {
             count: Arc::clone(&count_c),
@@ -563,10 +554,9 @@ async fn subscribe_requires_only_event_bound() {
     let notify_c = Arc::clone(&notify);
 
     // This line must compile with `where E: Event` only — no extra `Clone + Sync`.
-    let event_ref = EventPersistor::spawn(&system, Arc::clone(&event_store) as Arc<dyn nitinol_persistence::store::EventStore>).await;
     let _proxy = ProjectorProps::new(
         projection_id,
-        event_ref,
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || MinimalProjector { count: Arc::clone(&count_c), notify: Arc::clone(&notify_c) },
     )

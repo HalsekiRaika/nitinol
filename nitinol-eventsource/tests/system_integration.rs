@@ -18,15 +18,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    codec::Codec, codec::ErasedCodec, system::EventSourceSystem, Aggregate, Context, Decider, Effect,
-    Event,
-    EventPersistor, ProjectionContext, Projector,
-    ProjectorProps,
-    Receive as EvtReceive,
+    codec::Codec, codec::ErasedCodec, system::EventSourceSystem, Aggregate, Context, Decider,
+    Effect, Event, ProjectionContext, Projector, ProjectorProps, Receive as EvtReceive,
     Snapshotable,
 };
 use nitinol_eventsource::SnapshotPersistor;
-use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore};
+use nitinol_persistence::store::{
+    EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore,
+};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, PersistedSnapshot, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
@@ -237,13 +236,12 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
     let system = EventSourceSystem::new(ps)
         .with_codec::<JsonCodec>()
         .build();
-    let store = Arc::new(InMemoryEventStore::default());
-    let event_ref = EventPersistor::spawn(system.process_system(), store).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("sys-spawn-basic");
 
     // When
     let proxy = system
-        .spawn_aggregate::<Counter>(id, event_ref)
+        .spawn_aggregate::<Counter>(id, store)
         .await;
 
     let events = proxy.ask(Increment).await.expect("ask must succeed");
@@ -257,7 +255,7 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
 // ---------------------------------------------------------------------------
 
 /// After ask(Increment) on process 1, spawning a second process with the same id
-/// and EventPersistorRef replays the stored event and restores count to 1.
+/// and the same `Arc<dyn EventStore>` replays the stored event and restores count to 1.
 #[tokio::test]
 async fn spawn_aggregate_second_process_replays_state() {
     // Given
@@ -265,21 +263,20 @@ async fn spawn_aggregate_second_process_replays_state() {
     let system = EventSourceSystem::new(ps)
         .with_codec::<JsonCodec>()
         .build();
-    let store = Arc::new(InMemoryEventStore::default());
-    let event_ref = EventPersistor::spawn(system.process_system(), store).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("sys-replay-state");
 
     // Write one event via process 1
     {
         let proxy = system
-            .spawn_aggregate::<Counter>(id.clone(), event_ref.clone())
+            .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
             .await;
         proxy.ask(Increment).await.expect("ask must succeed");
     }
 
     // When: spawn a fresh process for the same id — triggers replay in on_start
     let proxy2 = system
-        .spawn_aggregate::<Counter>(id, event_ref)
+        .spawn_aggregate::<Counter>(id, store)
         .await;
 
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
@@ -300,10 +297,9 @@ async fn spawn_aggregate_sequential_increments_accumulate_state() {
     let system = EventSourceSystem::new(ps)
         .with_codec::<JsonCodec>()
         .build();
-    let store = Arc::new(InMemoryEventStore::default());
-    let event_ref = EventPersistor::spawn(system.process_system(), store).await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let proxy = system
-        .spawn_aggregate::<Counter>(AggregateId::new("sys-seq"), event_ref)
+        .spawn_aggregate::<Counter>(AggregateId::new("sys-seq"), store)
         .await;
 
     // When
@@ -353,16 +349,15 @@ async fn system_codec_integrates_with_projector_props() {
         .with_codec::<JsonCodec>()
         .build();
 
-    let event_store = Arc::new(InMemoryEventStore::default());
+    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("sys-proj-agg");
 
     // Pre-append one event so catch-up has something to project
     event_store
         .append(
-            &agg_id,
+            agg_id.as_str(),
             vec![AppendingEvent {
-                aggregate_id: agg_id.clone(),
                 sequence: 1,
                 event_type: EventType::from_str("SysIntIncremented"),
                 payload: serde_json::to_vec(&Incremented).map(Bytes::from).unwrap(),
@@ -378,10 +373,9 @@ async fn system_codec_integrates_with_projector_props() {
     let notify_c = Arc::clone(&notify);
 
     // When: use system.codec() with ProjectorProps
-    let event_ref = EventPersistor::spawn(system.process_system(), Arc::clone(&event_store) as Arc<dyn EventStore>).await;
     let _proxy = ProjectorProps::new(
         ProjectionId::new("sys-proj"),
-        event_ref,
+        Arc::clone(&event_store),
         Arc::clone(&checkpoint_store),
         move || CountingProjector {
             count: Arc::clone(&count_c),
@@ -417,9 +411,8 @@ async fn snapshot_roundtrip_via_event_source_system() {
         .with_codec::<JsonCodec>()
         .build();
 
-    let event_store = Arc::new(InMemoryEventStore::default());
+    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_store = Arc::new(InMemorySnapshotStore::default());
-    let event_ref = EventPersistor::spawn(system.process_system(), event_store).await;
     let snapshot_ref = SnapshotPersistor::spawn(system.process_system(), snapshot_store).await;
     let id = AggregateId::new("sys-snap-restore");
 
@@ -439,7 +432,7 @@ async fn snapshot_roundtrip_via_event_source_system() {
 
     // When: spawn a process that restores from the snapshot using the system's codec
     let proxy = system
-        .aggregate_props::<CounterWithSnapshot>(id, event_ref)
+        .aggregate_props::<CounterWithSnapshot>(id, event_store)
         .with_snapshot_persistor(snapshot_ref, system.codec::<u64>())
         .spawn(system.process_system())
         .await;

@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use nitinol_eventsource::{system::EventSourceSystem, EventPersistor};
-use nitinol_persistence::{store::InMemoryEventStore, AggregateId};
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
 use eventsource_multiple_deciders::codec::JsonCodec;
@@ -33,14 +34,10 @@ async fn main() {
 
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
-    let event_ref = EventPersistor::spawn(
-        system.process_system(),
-        Arc::new(InMemoryEventStore::default()),
-    )
-    .await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let proxy = system
-        .spawn_aggregate::<Wallet>(AggregateId::new("wallet-1"), event_ref)
+        .spawn_aggregate::<Wallet>(AggregateId::new("wallet-1"), store)
         .await;
 
     // Deposit 100

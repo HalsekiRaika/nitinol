@@ -15,11 +15,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+use futures_util::TryStreamExt;
 use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event,
-    EventPersistor, Receive as EvtReceive,
+    Receive as EvtReceive,
 };
-use nitinol_persistence::store::InMemoryEventStore;
+use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 
@@ -112,13 +113,9 @@ async fn e2e_ask_persists_event_and_returns_it() {
     // Given
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
-    let event_ref = EventPersistor::spawn(
-        system.process_system(),
-        Arc::new(InMemoryEventStore::default()),
-    )
-    .await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let proxy = system
-        .spawn_aggregate::<Counter>(AggregateId::new("e2e-agg-ask"), event_ref)
+        .spawn_aggregate::<Counter>(AggregateId::new("e2e-agg-ask"), store)
         .await;
 
     // When
@@ -144,24 +141,20 @@ async fn e2e_persisted_event_survives_process_restart() {
     // Given
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
-    let event_ref = EventPersistor::spawn(
-        system.process_system(),
-        Arc::new(InMemoryEventStore::default()),
-    )
-    .await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("e2e-agg-restart");
 
     // Process 1: write one event via ask()
     {
         let proxy1 = system
-            .spawn_aggregate::<Counter>(id.clone(), event_ref.clone())
+            .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
             .await;
         proxy1.ask(Increment).await.expect("ask must succeed");
     }
 
     // When: spawn process 2 for the same AggregateId — triggers replay in on_start
     let proxy2 = system
-        .spawn_aggregate::<Counter>(id, event_ref)
+        .spawn_aggregate::<Counter>(id, store)
         .await;
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
 
@@ -185,14 +178,10 @@ async fn e2e_multiple_asks_advance_sequence_monotonically() {
     // Given
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
-    let event_ref = EventPersistor::spawn(
-        system.process_system(),
-        Arc::new(InMemoryEventStore::default()),
-    )
-    .await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("e2e-agg-multi");
     let proxy = system
-        .spawn_aggregate::<Counter>(id.clone(), event_ref.clone())
+        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
         .await;
 
     // When: three sequential increments
@@ -204,11 +193,14 @@ async fn e2e_multiple_asks_advance_sequence_monotonically() {
     // Then: in-memory state reflects all three increments
     assert_eq!(count, 3, "counter must be 3 after three Increment commands");
 
-    // And: the event persistor holds exactly 3 events with monotonic sequences
-    let loaded = event_ref
-        .load(LoadQuery::by_aggregate(id))
+    // And: the store holds exactly 3 events with monotonic sequences
+    let loaded: Vec<_> = store
+        .load(LoadQuery::by_stream(&id))
         .await
-        .expect("load must succeed");
+        .expect("load must succeed")
+        .try_collect()
+        .await
+        .expect("collect must succeed");
     assert_eq!(loaded.len(), 3, "three events must be persisted");
 
     let sequences: Vec<u64> = loaded.iter().map(|e| e.sequence).collect();

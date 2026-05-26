@@ -1,12 +1,13 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
 use crate::aggregate::Aggregate;
 use crate::codec::{Codec, ErasedCodec};
-use crate::{AggregateProps, AggregateProxy, EventPersistorProxy};
+use crate::{AggregateProps, AggregateProxy};
 
 /// Marker type indicating no codec has been configured yet.
 ///
@@ -105,15 +106,13 @@ where
     pub async fn spawn_aggregate<A>(
         &self,
         id: AggregateId,
-        event_ref: EventPersistorProxy,
+        store: Arc<dyn EventStore>,
     ) -> AggregateProxy<A>
     where
         A: Aggregate,
         C: Codec<A::Event>,
     {
-        self.aggregate_props::<A>(id, event_ref)
-            .spawn(&self.ps)
-            .await
+        self.aggregate_props::<A>(id, store).spawn(&self.ps).await
     }
 
     /// Return an [`AggregateProps`] pre-wired with the system event codec.
@@ -123,12 +122,12 @@ where
     pub fn aggregate_props<A>(
         &self,
         id: AggregateId,
-        event_ref: EventPersistorProxy,
+        store: Arc<dyn EventStore>,
     ) -> AggregateProps<A, crate::CodecSet<A::Event>>
     where
         A: Aggregate,
         C: Codec<A::Event>,
     {
-        AggregateProps::<A>::new(id, event_ref).with_codec(self.codec::<A::Event>())
+        AggregateProps::<A>::new(id, store).with_codec(self.codec::<A::Event>())
     }
 }

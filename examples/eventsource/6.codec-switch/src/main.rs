@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use nitinol_eventsource::{AggregateProps, EventPersistor};
-use nitinol_persistence::store::InMemoryEventStore;
+use nitinol_eventsource::AggregateProps;
+use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
@@ -42,9 +42,8 @@ async fn main() {
 
     // --- JSON codec ---
     {
-        let event_ref =
-            EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
-        let proxy = AggregateProps::<Counter>::new(AggregateId::new("codec-json"), event_ref)
+        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let proxy = AggregateProps::<Counter>::new(AggregateId::new("codec-json"), store)
             .with_codec(Arc::new(JsonCodec))
             .spawn(&system)
             .await;
@@ -56,9 +55,8 @@ async fn main() {
 
     // --- PassThrough codec ---
     {
-        let event_ref =
-            EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
-        let proxy = AggregateProps::<Counter>::new(AggregateId::new("codec-pass"), event_ref)
+        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let proxy = AggregateProps::<Counter>::new(AggregateId::new("codec-pass"), store)
             .with_codec(Arc::new(PassThrough))
             .spawn(&system)
             .await;
@@ -70,9 +68,8 @@ async fn main() {
 
     // --- User-defined codec ---
     {
-        let event_ref =
-            EventPersistor::spawn(&system, Arc::new(InMemoryEventStore::default())).await;
-        let proxy = AggregateProps::<Counter>::new(AggregateId::new("codec-user"), event_ref)
+        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let proxy = AggregateProps::<Counter>::new(AggregateId::new("codec-user"), store)
             .with_codec(Arc::new(UserDefinedCodec))
             .spawn(&system)
             .await;
