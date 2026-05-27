@@ -60,13 +60,13 @@ where
         ctx: &mut ProcessContext,
         _ev: (),
     ) -> Result<(), HandlerError> {
-        match AssertUnwindSafe(state.poll_tick(ctx)).catch_unwind().await {
-            Ok(result) => result,
-            Err(_panic) => {
+        AssertUnwindSafe(state.poll_tick(ctx))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_panic| {
                 tracing::warn!("durable_stream: poller panic caught — supervisor will restart");
                 Err(HandlerError)
-            }
-        }
+            })
     }
 
     fn supports_idle_timeout(&self) -> bool {
@@ -173,7 +173,7 @@ where
         };
 
         let observed = cursor.observed(&loaded);
-        match (transform)(loaded) {
+        match transform(loaded) {
             Some(value) => {
                 if let Err(e) = proxy.tell(value).await {
                     tracing::warn!(
@@ -219,7 +219,7 @@ where
         };
 
         let observed = cursor.observed(&loaded);
-        match (transform)(loaded) {
+        match transform(loaded) {
             Some(value) => match stream_proxy.publish(value).await {
                 Ok(()) => cursor.advance(observed),
                 Err(e) => {

@@ -125,7 +125,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
         dead_letter: dead_letter.clone(),
     };
 
-    // A driver that opts out (e.g. tick / poll sources) has no meaningful
+    // A driver that opts out (e.g., tick / poll sources) has no meaningful
     // "idle" notion, so the idle-timeout timer must stay disarmed even when
     // the caller configured `IdleTimeout::After(_)`.
     let timeout = if driver.supports_idle_timeout() {
