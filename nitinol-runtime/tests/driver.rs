@@ -20,13 +20,13 @@ impl Driver<DummyProcess> for IntDriver {
         self.rx.recv()
     }
 
-    fn apply(
+    async fn apply(
         &mut self,
         _state: &mut DummyProcess,
         _ctx: &mut ProcessContext,
         _ev: Self::Event,
-    ) -> impl Future<Output = Result<(), HandlerError>> + Send {
-        async { Ok(()) }
+    ) -> Result<(), HandlerError> {
+        Ok(())
     }
 }
 
@@ -35,17 +35,17 @@ struct AlwaysFailingDriver;
 impl Driver<DummyProcess> for AlwaysFailingDriver {
     type Event = ();
 
-    fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        async { Some(()) }
+    async fn next(&mut self) -> Option<Self::Event> {
+        Some(())
     }
 
-    fn apply(
+    async fn apply(
         &mut self,
         _state: &mut DummyProcess,
         _ctx: &mut ProcessContext,
         _ev: Self::Event,
-    ) -> impl Future<Output = Result<(), HandlerError>> + Send {
-        async { Err(HandlerError) }
+    ) -> Result<(), HandlerError> {
+        Err(HandlerError)
     }
 }
 
@@ -54,17 +54,17 @@ struct NeverIdleDriver;
 impl Driver<DummyProcess> for NeverIdleDriver {
     type Event = ();
 
-    fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        async { None }
+    async fn next(&mut self) -> Option<Self::Event> {
+        None
     }
 
-    fn apply(
+    async fn apply(
         &mut self,
         _state: &mut DummyProcess,
         _ctx: &mut ProcessContext,
         _ev: Self::Event,
-    ) -> impl Future<Output = Result<(), HandlerError>> + Send {
-        async { Ok(()) }
+    ) -> Result<(), HandlerError> {
+        Ok(())
     }
 
     fn supports_idle_timeout(&self) -> bool {
@@ -77,17 +77,17 @@ struct DefaultDriver;
 impl Driver<DummyProcess> for DefaultDriver {
     type Event = ();
 
-    fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        async { None }
+    async fn next(&mut self) -> Option<Self::Event>{
+        None
     }
 
-    fn apply(
+    async fn apply(
         &mut self,
         _state: &mut DummyProcess,
         _ctx: &mut ProcessContext,
         _ev: Self::Event,
-    ) -> impl Future<Output = Result<(), HandlerError>> + Send {
-        async { Ok(()) }
+    ) -> Result<(), HandlerError> {
+        Ok(())
     }
 }
 

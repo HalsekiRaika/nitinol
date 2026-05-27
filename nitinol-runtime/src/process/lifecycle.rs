@@ -220,13 +220,13 @@ mod tests {
             std::future::pending()
         }
 
-        fn apply(
+        async fn apply(
             &mut self,
             _state: &mut NoOpProcess,
             _ctx: &mut ProcessContext,
             _ev: (),
-        ) -> impl Future<Output = Result<(), HandlerError>> + Send {
-            async { Ok(()) }
+        ) -> Result<(), HandlerError> {
+            Ok(())
         }
 
         fn supports_idle_timeout(&self) -> bool {

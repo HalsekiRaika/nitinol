@@ -120,7 +120,7 @@ where
     /// `Stream<T>` fan-out: both historical (catchup) and future (live) events
     /// arrive through the same per-subscriber loop, in ascending sequence
     /// order.  This guarantees that catchup events are never interleaved with
-    /// live events, satisfying "catchup 完了後、live 配信に切り替え".
+    /// live events, satisfying Switch to live streaming after the catch-up broadcast ends.
     ///
     /// The per-subscriber poller is aborted when this [`DurableStreamProxy`]
     /// is dropped, or when [`unsubscribe`][Self::unsubscribe] is called with

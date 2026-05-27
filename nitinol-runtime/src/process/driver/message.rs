@@ -28,12 +28,12 @@ impl<P: Process> Driver<P> for MessageDriver<P> {
         self.rx.recv()
     }
 
-    fn apply(
+    async fn apply(
         &mut self,
         state: &mut P,
         ctx: &mut ProcessContext,
         ev: Self::Event,
-    ) -> impl Future<Output = Result<(), HandlerError>> + Send {
-        async move { ev.run(state, ctx).await }
+    ) -> Result<(), HandlerError> {
+        ev.run(state, ctx).await
     }
 }
