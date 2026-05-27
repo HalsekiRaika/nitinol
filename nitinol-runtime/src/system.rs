@@ -1,8 +1,11 @@
 use std::time::Duration;
 
+use tokio::sync::mpsc;
+
 use crate::error::{SendError, SpawnError};
 use crate::ident::{Pid, ProcessName};
-use crate::process::run;
+use crate::process::task::UserTask;
+use crate::process::{run, run_with_driver, Driver};
 use crate::process::{
     AnyProxy, BoxedMessage, DeadLetterProcess, DeadLetterProxy, IdleTimeout, Process, ProcessProxy,
     ProcessRegistry, Props, Receive, Stream, SupervisionStrategy,
@@ -129,6 +132,54 @@ impl ProcessSystem {
             process,
             Some(name),
             self.registry.clone(),
+            timeout,
+            Some(self.dead_letter_proxy.clone()),
+            supervision,
+        )
+        .await
+    }
+
+    pub async fn spawn_with_driver<P, D>(&self, props: Props<P>, driver: D) -> ProcessProxy<P>
+    where
+        P: Process,
+        D: Driver<P>,
+    {
+        self.spawn_with_driver_inner(None, props, driver).await
+    }
+
+    pub async fn spawn_named_with_driver<P, D>(
+        &self,
+        name: ProcessName,
+        props: Props<P>,
+        driver: D,
+    ) -> ProcessProxy<P>
+    where
+        P: Process,
+        D: Driver<P>,
+    {
+        self.spawn_with_driver_inner(Some(name), props, driver)
+            .await
+    }
+
+    async fn spawn_with_driver_inner<P, D>(
+        &self,
+        name: Option<ProcessName>,
+        props: Props<P>,
+        driver: D,
+    ) -> ProcessProxy<P>
+    where
+        P: Process,
+        D: Driver<P>,
+    {
+        let (process, idle_timeout, supervision) = props.into_parts();
+        let timeout = self.resolve_idle_timeout(idle_timeout);
+        let (user_tx, _user_rx) = mpsc::channel::<UserTask<P>>(32);
+        run_with_driver(
+            process,
+            name,
+            self.registry.clone(),
+            user_tx,
+            driver,
             timeout,
             Some(self.dead_letter_proxy.clone()),
             supervision,

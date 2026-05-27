@@ -32,6 +32,12 @@ impl<P> Clone for ProcessProxy<P> {
     }
 }
 
+impl<P> ProcessProxy<P> {
+    pub fn signal_stop_nonblocking(&self) {
+        let _ = self.sys_tx.try_send(SystemSignal::Stop);
+    }
+}
+
 impl<P: Process> ProcessProxy<P> {
     pub fn pid(&self) -> Pid {
         self.pid

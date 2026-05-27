@@ -1,61 +1,154 @@
+use std::future::Future;
+use std::marker::PhantomData;
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadedEvent;
-use nitinol_runtime::process::{Process, ProcessProxy, Receive};
+use nitinol_runtime::error::HandlerError;
+use nitinol_runtime::ident::Pid;
+use nitinol_runtime::process::{
+    Driver, Process, ProcessContext, ProcessProxy, Receive, Terminated,
+};
 use nitinol_runtime::Stream;
-use tokio::sync::oneshot;
 
 use crate::durable_stream::cursor::SequenceCursor;
 
-/// Boxed transform that maps a raw [`LoadedEvent`] into the durable stream's
-/// payload type.  Returning `None` skips the event.
-pub(crate) type TransformFn<T> =
-    Arc<dyn Fn(LoadedEvent) -> Option<T> + Send + Sync + 'static>;
+pub(crate) type TransformFn<T> = Arc<dyn Fn(LoadedEvent) -> Option<T> + Send + Sync + 'static>;
 
-/// Dedicated per-subscriber polling loop.
-///
-/// Unlike the shared [`run`] loop, this function delivers events directly to a
-/// single subscriber via `proxy.tell()` rather than publishing to a shared
-/// `Stream<T>` fan-out.  This guarantees that catchup and live events reach
-/// the subscriber in ascending sequence order: the event store returns events
-/// ordered by sequence, and each delivery is awaited before advancing the
-/// cursor.
-///
-/// The loop runs until the subscriber process is unreachable (dead), at which
-/// point polling stops.  Transient errors from the event store are logged and
-/// retried on the next poll interval.
-pub(crate) async fn run_direct<T, P>(
-    store: Arc<dyn EventStore>,
-    proxy: ProcessProxy<P>,
-    transform: TransformFn<T>,
-    mut cursor: SequenceCursor,
-    poll_interval: Duration,
-) where
-    T: 'static + Send + Sync,
-    P: Process + Receive<T, Response = ()>,
-{
-    loop {
-        let alive = poll_direct_once(&store, &proxy, &transform, &mut cursor).await;
-        if !alive {
-            return;
+pub(crate) trait Poll: Process {
+    fn poll_tick(
+        &mut self,
+        ctx: &mut ProcessContext,
+    ) -> impl Future<Output = Result<(), HandlerError>> + Send;
+}
+
+pub(crate) struct IntervalDriver<P> {
+    interval: Duration,
+    _phantom: PhantomData<fn() -> P>,
+}
+
+impl<P> IntervalDriver<P> {
+    pub(crate) fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            _phantom: PhantomData,
         }
-        tokio::time::sleep(poll_interval).await;
     }
 }
 
-/// One iteration of the per-subscriber direct polling loop.
-///
-/// Returns `true` to continue polling, or `false` when the subscriber is gone
-/// and the loop should terminate.
+impl<P> Driver<P> for IntervalDriver<P>
+where
+    P: Poll,
+{
+    type Event = ();
+
+    fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
+        let interval = self.interval;
+        async move {
+            tokio::time::sleep(interval).await;
+            Some(())
+        }
+    }
+
+    async fn apply(
+        &mut self,
+        state: &mut P,
+        ctx: &mut ProcessContext,
+        _ev: (),
+    ) -> Result<(), HandlerError> {
+        match AssertUnwindSafe(state.poll_tick(ctx)).catch_unwind().await {
+            Ok(result) => result,
+            Err(_panic) => {
+                tracing::warn!("durable_stream: poller panic caught — supervisor will restart");
+                Err(HandlerError)
+            }
+        }
+    }
+
+    fn supports_idle_timeout(&self) -> bool {
+        false
+    }
+}
+
+pub(crate) struct DurablePollerProcess<T> {
+    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) publisher: ProcessProxy<Stream<T>>,
+    pub(crate) transform: TransformFn<T>,
+    pub(crate) cursor: SequenceCursor,
+    pub(crate) start_open: Arc<AtomicBool>,
+}
+
+impl<T> Process for DurablePollerProcess<T> where T: 'static + Send + Sync + Clone {}
+
+impl<T> Poll for DurablePollerProcess<T>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    async fn poll_tick(&mut self, _ctx: &mut ProcessContext) -> Result<(), HandlerError> {
+        if !self.start_open.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        poll_once(
+            &self.store,
+            &self.publisher,
+            &self.transform,
+            &mut self.cursor,
+        )
+        .await
+    }
+}
+
+pub(crate) struct DirectPollerProcess<T, P> {
+    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) subscriber: ProcessProxy<P>,
+    pub(crate) transform: TransformFn<T>,
+    pub(crate) cursor: SequenceCursor,
+    pub(crate) owner_pid: Pid,
+}
+
+impl<T, P> Process for DirectPollerProcess<T, P>
+where
+    T: 'static + Send + Sync,
+    P: Process + Receive<T, Response = ()>,
+{
+    async fn on_start(&mut self, ctx: &mut ProcessContext) {
+        ctx.watch(self.subscriber.pid()).await;
+        ctx.watch(self.owner_pid).await;
+    }
+
+    async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext) {
+        if terminated.who == self.subscriber.pid() || terminated.who == self.owner_pid {
+            let _ = ctx.stop_self().await;
+        }
+    }
+}
+
+impl<T, P> Poll for DirectPollerProcess<T, P>
+where
+    T: 'static + Send + Sync,
+    P: Process + Receive<T, Response = ()>,
+{
+    async fn poll_tick(&mut self, _ctx: &mut ProcessContext) -> Result<(), HandlerError> {
+        poll_direct_once(
+            &self.store,
+            &self.subscriber,
+            &self.transform,
+            &mut self.cursor,
+        )
+        .await
+    }
+}
+
 async fn poll_direct_once<T, P>(
     store: &Arc<dyn EventStore>,
     proxy: &ProcessProxy<P>,
     transform: &TransformFn<T>,
     cursor: &mut SequenceCursor,
-) -> bool
+) -> Result<(), HandlerError>
 where
     T: 'static + Send + Sync,
     P: Process + Receive<T, Response = ()>,
@@ -65,7 +158,7 @@ where
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = ?e, "durable_stream: subscriber direct poll load failed");
-            return true; // transient error — retry on next poll
+            return Ok(());
         }
     };
 
@@ -75,7 +168,7 @@ where
             Ok(ev) => ev,
             Err(e) => {
                 tracing::warn!(error = ?e, "durable_stream: subscriber direct stream error");
-                return true; // transient error — retry on next poll
+                return Ok(());
             }
         };
 
@@ -87,57 +180,23 @@ where
                         error = %e,
                         "durable_stream: subscriber direct tell failed, subscriber dead"
                     );
-                    return false; // subscriber gone — stop polling
+                    return Ok(());
                 }
                 cursor.advance(observed);
             }
-            // Transform skipped this event. Advance past it to avoid
-            // re-loading the same payload on subsequent polls.
             None => cursor.advance(observed),
         }
     }
-    true
+    Ok(())
 }
 
-/// Polling loop driven by `tokio::spawn`.
-///
-/// The loop blocks on `start_rx` before the first iteration.  This guarantees
-/// that no events are published — and therefore no cursor advancement occurs —
-/// until [`DurableStreamProxy::subscribe`] has registered at least one
-/// subscriber.  Without this gate the poller could advance the cursor past
-/// catchup events before any subscriber is listening, silently discarding
-/// them and violating the at-least-once contract.
-///
-/// After `start_rx` fires, each iteration fetches events past the cursor,
-/// publishes the ones the transform accepts, and sleeps for `poll_interval`.
-/// Transient errors are logged but do not abort the loop — only
-/// `JoinHandle::abort` (triggered by the proxy's drop-guard) halts polling.
-pub(crate) async fn run<T>(
-    store: Arc<dyn EventStore>,
-    stream_proxy: ProcessProxy<Stream<T>>,
-    transform: TransformFn<T>,
-    mut cursor: SequenceCursor,
-    poll_interval: Duration,
-    start_rx: oneshot::Receiver<()>,
-) where
-    T: 'static + Send + Sync + Clone,
-{
-    // Wait for the first subscriber to register before polling.
-    start_rx.await.ok();
-    loop {
-        poll_once(&store, &stream_proxy, &transform, &mut cursor).await;
-        tokio::time::sleep(poll_interval).await;
-    }
-}
-
-/// One iteration of the shared polling loop.  Errors short-circuit this iteration but
-/// leave the loop intact — the next call will retry from the unchanged cursor.
 async fn poll_once<T>(
     store: &Arc<dyn EventStore>,
     stream_proxy: &ProcessProxy<Stream<T>>,
     transform: &TransformFn<T>,
     cursor: &mut SequenceCursor,
-) where
+) -> Result<(), HandlerError>
+where
     T: 'static + Send + Sync + Clone,
 {
     let query = cursor.to_load_query();
@@ -145,7 +204,7 @@ async fn poll_once<T>(
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = ?e, "durable_stream: event store load failed");
-            return;
+            return Ok(());
         }
     };
 
@@ -155,7 +214,7 @@ async fn poll_once<T>(
             Ok(ev) => ev,
             Err(e) => {
                 tracing::warn!(error = ?e, "durable_stream: event store stream error");
-                return;
+                return Ok(());
             }
         };
 
@@ -164,18 +223,15 @@ async fn poll_once<T>(
             Some(value) => match stream_proxy.publish(value).await {
                 Ok(()) => cursor.advance(observed),
                 Err(e) => {
-                    // At-least-once: leave the cursor untouched so the next
-                    // poll re-loads and retries this event.
                     tracing::warn!(
                         error = %e,
                         "durable_stream: publish failed, will retry on next poll"
                     );
-                    return;
+                    return Ok(());
                 }
             },
-            // Transform skipped this event.  Advance past it to avoid
-            // re-loading the same payload on every poll.
             None => cursor.advance(observed),
         }
     }
+    Ok(())
 }

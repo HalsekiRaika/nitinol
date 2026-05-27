@@ -24,6 +24,31 @@ pub(crate) async fn run<P: Process>(
     supervision: SupervisionConfig<P>,
 ) -> ProcessProxy<P> {
     let (user_tx, user_rx) = mpsc::channel::<UserTask<P>>(32);
+    let driver = MessageDriver::new(user_rx);
+    run_with_driver(
+        process,
+        process_name,
+        registry,
+        user_tx,
+        driver,
+        timeout,
+        dead_letter,
+        supervision,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_with_driver<P: Process, D: Driver<P>>(
+    process: P,
+    process_name: Option<ProcessName>,
+    registry: ProcessRegistry,
+    user_tx: mpsc::Sender<UserTask<P>>,
+    driver: D,
+    timeout: Option<Duration>,
+    dead_letter: Option<DeadLetterProxy>,
+    supervision: SupervisionConfig<P>,
+) -> ProcessProxy<P> {
     let (sys_tx, sys_rx) = mpsc::channel::<SystemSignal>(32);
 
     let pid = Pid::next();
@@ -45,8 +70,6 @@ pub(crate) async fn run<P: Process>(
         Some(name) => format!("process-{}", name),
         None => format!("process-{}", pid),
     };
-
-    let driver = MessageDriver::new(user_rx);
 
     let fut = lifecycle_loop(
         process,

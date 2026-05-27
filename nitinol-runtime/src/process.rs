@@ -26,7 +26,7 @@ pub use self::{
 };
 
 pub(crate) use self::dead_letter::{DeadLetterProcess, DeadLetterProxy};
-pub(crate) use self::lifecycle::run;
+pub(crate) use self::lifecycle::{run, run_with_driver};
 pub(crate) use self::registry::*;
 
 use std::future::Future;

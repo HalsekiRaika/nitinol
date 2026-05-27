@@ -32,7 +32,10 @@ impl ProcessRegistry {
     pub async fn unregister(&self, pid: Pid, name: Option<&ProcessName>) {
         self.0.processes.write().await.remove(&pid);
         if let Some(name) = name {
-            self.0.aliases.write().await.remove(name);
+            let mut aliases = self.0.aliases.write().await;
+            if aliases.get(name).copied() == Some(pid) {
+                aliases.remove(name);
+            }
         }
     }
 

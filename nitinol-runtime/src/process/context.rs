@@ -2,6 +2,7 @@ use std::any::TypeId;
 
 use tokio::sync::mpsc;
 
+use crate::error::SendError;
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::{DeadLetterEnvelope, DeadLetterProxy};
 use crate::process::message::BoxedMessage;
@@ -49,6 +50,13 @@ impl ProcessContext {
                 self.deliver_not_found(target_pid).await;
             }
         }
+    }
+
+    pub async fn stop_self(&self) -> Result<(), SendError> {
+        self.sys_tx
+            .send(SystemSignal::Stop)
+            .await
+            .map_err(|_| SendError)
     }
 
     /// Stop watching the process at `target_pid`.

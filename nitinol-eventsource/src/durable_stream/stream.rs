@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,16 +7,20 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadedEvent;
 use nitinol_runtime::error::SpawnError;
 use nitinol_runtime::ident::ProcessName;
+use nitinol_runtime::process::{Props, SupervisionStrategy};
 use nitinol_runtime::ProcessSystem;
 
 use crate::durable_stream::cursor::SequenceCursor;
-use crate::durable_stream::poller::{self, TransformFn};
-use crate::durable_stream::proxy::{DurableStreamProxy, PollerHandle};
+use crate::durable_stream::poller::{DurablePollerProcess, IntervalDriver, TransformFn};
+use crate::durable_stream::proxy::{shared_poller_name, DurableStreamProxy};
 
 /// Polling cadence used when [`with_poll_interval`][DurableStream::with_poll_interval]
 /// is not called.  Chosen as a balance between catch-up latency and event
 /// store load; callers driving high-throughput workloads should override it.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+const POLLER_RESTART_MAX_RETRIES: u32 = 5;
+const POLLER_RESTART_WITHIN: Duration = Duration::from_secs(60);
 
 /// Typestate marker: the builder has no cursor configured yet.
 ///
@@ -113,41 +118,49 @@ impl<T> DurableStream<T, CursorSet>
 where
     T: 'static + Send + Sync + Clone,
 {
-    /// Spawn the underlying `Stream<T>` process under `topic`, start the
-    /// polling task, and return a proxy whose drop aborts polling.
-    ///
-    /// Returns [`SpawnError`] when `topic` is already registered in
-    /// `system` — propagated unchanged from
-    /// [`ProcessSystem::spawn_stream`].
-    pub async fn spawn(
-        self,
-        system: &ProcessSystem,
-    ) -> Result<DurableStreamProxy<T>, SpawnError> {
+    pub async fn spawn(self, system: &ProcessSystem) -> Result<DurableStreamProxy<T>, SpawnError> {
         let stream_proxy = system.spawn_stream::<T>(self.topic).await?;
         let publisher = stream_proxy.clone();
         let DurableStream {
             store,
             transform,
             poll_interval,
-            cursor: CursorSet(cursor),
+            cursor: CursorSet(initial_cursor),
             ..
         } = self;
 
-        // Retain clones in the proxy so `subscribe_from` can spawn
-        // per-subscriber catchup tasks after `store` and `transform` have
-        // been moved into the polling task.
         let proxy_store = Arc::clone(&store);
         let proxy_transform = Arc::clone(&transform);
 
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-        let handle = tokio::spawn(async move {
-            poller::run(store, publisher, transform, cursor, poll_interval, start_rx).await;
+        let start_open = Arc::new(AtomicBool::new(false));
+        let producer_store = Arc::clone(&store);
+        let producer_transform = Arc::clone(&transform);
+        let producer_publisher = publisher.clone();
+        let producer_start_open = Arc::clone(&start_open);
+        let producer_cursor = initial_cursor;
+
+        let mut props = Props::new(move || DurablePollerProcess {
+            store: Arc::clone(&producer_store),
+            publisher: producer_publisher.clone(),
+            transform: Arc::clone(&producer_transform),
+            cursor: producer_cursor.clone(),
+            start_open: Arc::clone(&producer_start_open),
         });
+        props.with_supervision_strategy(SupervisionStrategy::Restart {
+            max_retries: POLLER_RESTART_MAX_RETRIES,
+            within: POLLER_RESTART_WITHIN,
+        });
+
+        let driver = IntervalDriver::<DurablePollerProcess<T>>::new(poll_interval);
+        let poller_name = shared_poller_name(stream_proxy.pid());
+        let shared_poller = system
+            .spawn_named_with_driver(poller_name, props, driver)
+            .await;
 
         Ok(DurableStreamProxy::new(
             stream_proxy,
-            PollerHandle::new(handle),
-            start_tx,
+            shared_poller,
+            start_open,
             proxy_store,
             proxy_transform,
             poll_interval,
