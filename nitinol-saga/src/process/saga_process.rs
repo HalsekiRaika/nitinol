@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use nitinol_eventsource::codec::ErasedCodec;
-use nitinol_eventsource::EventEnvelope;
+use nitinol_eventsource::{DurableStreamProxy, EventEnvelope};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendingEvent, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
@@ -22,6 +22,11 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
     pub(crate) route_fn: RouteFn<S::SubscribedEvent>,
     pub(crate) sequence: u64,
+    /// Keeps the upstream `DurableStream` alive for exactly as long as this
+    /// `SagaProcess` is alive.  Tied to the process, not to the external
+    /// `SagaProxy` handle, so that dropping all `SagaProxy` clones never
+    /// silently kills the poller while the saga is still running.
+    pub(crate) _ds_keepalive: Arc<DurableStreamProxy<EventEnvelope<S::SubscribedEvent>>>,
 }
 
 impl<S: Saga> Process for SagaProcess<S> {

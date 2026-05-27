@@ -27,9 +27,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{
-    codec::Codec, Event, ProjectionContext, Projector, ProjectorProps,
-};
+use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
 use nitinol_persistence::store::{
     CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
@@ -154,9 +152,7 @@ async fn wait_for_checkpoint(
         }
     })
     .await
-    .unwrap_or_else(|_| {
-        panic!("timed out waiting for checkpoint to reach {:?}", expected)
-    });
+    .unwrap_or_else(|_| panic!("timed out waiting for checkpoint to reach {:?}", expected));
 }
 
 // ---------------------------------------------------------------------------
@@ -320,8 +316,7 @@ async fn at_least_once_checkpoint_not_saved_when_project_fails() {
         .await
         .expect("load must succeed");
     assert_eq!(
-        checkpoint,
-        None,
+        checkpoint, None,
         "AtLeastOnce must NOT save the checkpoint when project() fails"
     );
 }
@@ -546,8 +541,7 @@ async fn exactly_once_framework_does_not_save_checkpoint() {
         .await
         .expect("load must succeed");
     assert_eq!(
-        checkpoint,
-        None,
+        checkpoint, None,
         "ExactlyOnce must NOT save the checkpoint; the user controls it inside project()"
     );
 

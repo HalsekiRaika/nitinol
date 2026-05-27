@@ -106,8 +106,6 @@ pub fn shape_of<E: Clone>(effect: &SagaEffect<E>) -> Shape<E> {
         SagaEffect::None => Shape::None,
         SagaEffect::Persist(events) => Shape::Persist(events.clone()),
         SagaEffect::Tell(_) => Shape::Tell,
-        SagaEffect::Sequence(children) => {
-            Shape::Sequence(children.iter().map(shape_of).collect())
-        }
+        SagaEffect::Sequence(children) => Shape::Sequence(children.iter().map(shape_of).collect()),
     }
 }

@@ -15,7 +15,7 @@ use bytes::Bytes;
 
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, Context, Decider, Effect, Event,
-    Receive as EvtReceive, Snapshotable, SnapshotPersistor, SnapshotPersistorProxy,
+    Receive as EvtReceive, SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, EventType, PersistedSnapshot};
@@ -220,7 +220,13 @@ async fn e2e_snapshot_at_latest_sequence_restores_state() {
 
     // Write 3 events via process 1
     {
-        let proxy1 = spawn_counter(&system, id.clone(), Arc::clone(&store), snapshot_ref.clone()).await;
+        let proxy1 = spawn_counter(
+            &system,
+            id.clone(),
+            Arc::clone(&store),
+            snapshot_ref.clone(),
+        )
+        .await;
         proxy1.ask(Increment).await.expect("ask 1");
         proxy1.ask(Increment).await.expect("ask 2");
         proxy1.ask(Increment).await.expect("ask 3");
@@ -267,7 +273,13 @@ async fn e2e_snapshot_plus_delta_events_combine_correctly() {
 
     // Write 8 events
     {
-        let proxy1 = spawn_counter(&system, id.clone(), Arc::clone(&store), snapshot_ref.clone()).await;
+        let proxy1 = spawn_counter(
+            &system,
+            id.clone(),
+            Arc::clone(&store),
+            snapshot_ref.clone(),
+        )
+        .await;
         for _ in 0..8 {
             proxy1.ask(Increment).await.expect("ask must succeed");
         }

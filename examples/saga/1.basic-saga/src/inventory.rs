@@ -4,9 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{
-    Aggregate, Context, Decider, Effect, Event, Receive as EvtReceive,
-};
+use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, Receive as EvtReceive};
 use nitinol_persistence::EventType;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,11 +57,7 @@ impl EvtReceive<GetReservedCount> for Inventory {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(
-        &self,
-        _msg: GetReservedCount,
-        _ctx: &mut Context,
-    ) -> Result<u64, Self::Error> {
+    async fn recv(&self, _msg: GetReservedCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
         Ok(self.reserved_count)
     }
 }

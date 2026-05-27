@@ -34,7 +34,16 @@ where
 
     if use_tx {
         let provider = tx_provider.unwrap();
-        apply_with_tx(mode, store, pid, current_checkpoint, sequence, provider, project_fn).await
+        apply_with_tx(
+            mode,
+            store,
+            pid,
+            current_checkpoint,
+            sequence,
+            provider,
+            project_fn,
+        )
+        .await
     } else {
         apply_no_tx(mode, store, pid, current_checkpoint, sequence, project_fn).await
     }
@@ -55,8 +64,13 @@ where
     Cs::Tx: 'static,
     F: for<'ctx> FnOnce(
             &'ctx mut ProjectionContext<'pid, Cs::Tx>,
-        ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'ctx>>
-        + Send,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>
+                    + Send
+                    + 'ctx,
+            >,
+        > + Send,
 {
     let tx = match ErasedTxProvider::begin(provider).await {
         Ok(t) => t,
@@ -120,8 +134,13 @@ where
     Cs: CheckpointStore,
     F: for<'ctx> FnOnce(
             &'ctx mut ProjectionContext<'pid, Cs::Tx>,
-        ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'ctx>>
-        + Send,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>
+                    + Send
+                    + 'ctx,
+            >,
+        > + Send,
 {
     pre_project(mode, store, pid, sequence).await;
     let mut ctx = ProjectionContext::new(pid, sequence, mode, None);
@@ -165,30 +184,28 @@ pub(crate) async fn post_project<Cs: CheckpointStore>(
             }
             sequence
         }
-        DeliveryMode::AtLeastOnce => {
-            match result {
-                Ok(()) => {
-                    if let Err(e) = checkpoint_store.save(projection_id, sequence, None).await {
-                        tracing::error!(
-                            error = %e,
-                            sequence,
-                            "checkpoint save failed after project (at-least-once); will retry on restart",
-                        );
-                        current_checkpoint
-                    } else {
-                        sequence
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
+        DeliveryMode::AtLeastOnce => match result {
+            Ok(()) => {
+                if let Err(e) = checkpoint_store.save(projection_id, sequence, None).await {
+                    tracing::error!(
                         error = %e,
                         sequence,
-                        "project() failed; checkpoint not advanced (at-least-once)",
+                        "checkpoint save failed after project (at-least-once); will retry on restart",
                     );
                     current_checkpoint
+                } else {
+                    sequence
                 }
             }
-        }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    sequence,
+                    "project() failed; checkpoint not advanced (at-least-once)",
+                );
+                current_checkpoint
+            }
+        },
         DeliveryMode::ExactlyOnce => {
             if let Err(e) = result {
                 tracing::warn!(
@@ -230,8 +247,14 @@ mod tests {
         )
         .await;
 
-        assert!(called.load(std::sync::atomic::Ordering::SeqCst), "project_fn must be called");
-        assert_eq!(new_seq, 1, "checkpoint must advance to the processed sequence");
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "project_fn must be called"
+        );
+        assert_eq!(
+            new_seq, 1,
+            "checkpoint must advance to the processed sequence"
+        );
         assert_eq!(
             store.load(&pid).await.expect("load ok"),
             Some(1),
@@ -252,9 +275,9 @@ mod tests {
             2,
             None,
             move |_ctx| {
-                Box::pin(async move {
-                    Err(Box::<dyn std::error::Error + Send + Sync>::from("fail"))
-                })
+                Box::pin(
+                    async move { Err(Box::<dyn std::error::Error + Send + Sync>::from("fail")) },
+                )
             },
         )
         .await;
@@ -317,9 +340,7 @@ mod tests {
                 &self,
                 _tx: (),
             ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-                Err(Box::new(std::io::Error::other(
-                    "simulated commit failure",
-                )))
+                Err(Box::new(std::io::Error::other("simulated commit failure")))
             }
 
             async fn rollback(&self, _tx: ()) {}
@@ -333,8 +354,8 @@ mod tests {
             DeliveryMode::ExactlyOnce,
             &store,
             &pid,
-            0,  // current_checkpoint
-            5,  // sequence being processed
+            0, // current_checkpoint
+            5, // sequence being processed
             Some(&provider as &(dyn ErasedTxProvider<()> + Send + Sync)),
             |_ctx| Box::pin(async move { Ok(()) }),
         )

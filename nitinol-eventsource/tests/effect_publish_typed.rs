@@ -40,11 +40,7 @@ impl Receive<TypedMsg> for MsgReceiver {
     type Response = ();
     type Error = std::convert::Infallible;
 
-    async fn recv(
-        &mut self,
-        msg: TypedMsg,
-        _ctx: &mut ProcessContext,
-    ) -> Result<(), Self::Error> {
+    async fn recv(&mut self, msg: TypedMsg, _ctx: &mut ProcessContext) -> Result<(), Self::Error> {
         *self.received.lock().unwrap() = Some(msg);
         self.notify.notify_one();
         Ok(())
@@ -139,7 +135,11 @@ async fn effect_publish_typed_delivers_message_to_subscriber() {
     .await
     .expect("subscriber must receive message within 500 ms");
 
-    let received_msg = received.lock().unwrap().clone().expect("must have received a message");
+    let received_msg = received
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("must have received a message");
     assert_eq!(
         received_msg, expected,
         "subscriber must receive the exact TypedMsg that was published"
@@ -243,6 +243,9 @@ async fn effect_publish_typed_broadcasts_to_all_subscribers() {
         .expect("each subscriber must receive the message within 500 ms");
 
         let msg = recv.lock().unwrap().clone().expect("must have received");
-        assert_eq!(msg, expected, "all subscribers must receive the same typed message");
+        assert_eq!(
+            msg, expected,
+            "all subscribers must receive the same typed message"
+        );
     }
 }

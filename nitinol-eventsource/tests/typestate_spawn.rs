@@ -94,13 +94,10 @@ async fn aggregate_props_correct_chain_compiles_and_spawns() {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     // When: the full required chain
-    let proxy = AggregateProps::<Counter>::new(
-        AggregateId::new("typestate-agg-ok"),
-        store,
-    )
-    .with_codec(Arc::new(IncrementedCodec)) // transitions to CodecSet
-    .spawn(&system)                          // only available in CodecSet state
-    .await;
+    let proxy = AggregateProps::<Counter>::new(AggregateId::new("typestate-agg-ok"), store)
+        .with_codec(Arc::new(IncrementedCodec)) // transitions to CodecSet
+        .spawn(&system) // only available in CodecSet state
+        .await;
 
     // Then: spawn succeeds — proxy is usable
     proxy
@@ -129,8 +126,8 @@ async fn projector_props_correct_chain_compiles_and_spawns() {
         NoopProjector::new,
     )
     .with_event::<Incremented>(Arc::new(IncrementedCodec)) // EventUnset → EventSet
-    .catchup_from_global()                                  // OriginUnset → OriginSet
-    .spawn(&system)                                         // only EventSet + OriginSet
+    .catchup_from_global() // OriginUnset → OriginSet
+    .spawn(&system) // only EventSet + OriginSet
     .await;
 
     // Then: spawn succeeds (no panic, no compile error)
@@ -193,7 +190,7 @@ async fn projector_props_catchup_from_aggregate_enables_spawn() {
         NoopProjector::new,
     )
     .with_event::<Incremented>(Arc::new(IncrementedCodec))
-    .catchup_from_aggregate(agg_id)    // OriginUnset → OriginSet
+    .catchup_from_aggregate(agg_id) // OriginUnset → OriginSet
     .spawn(&system)
     .await;
 

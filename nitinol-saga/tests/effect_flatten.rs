@@ -26,28 +26,19 @@ fn flatten_of_persist_leaf_is_noop() {
 
 #[test]
 fn flatten_of_flat_sequence_is_noop() {
-    let flat = SagaEffect::Sequence(vec![
-        SagaEffect::persist(1u32),
-        SagaEffect::persist(2u32),
-    ]);
+    let flat = SagaEffect::Sequence(vec![SagaEffect::persist(1u32), SagaEffect::persist(2u32)]);
     let result = flat.flatten();
 
     assert_eq!(
         shape_of(&result),
-        Shape::Sequence(vec![
-            Shape::Persist(vec![1u32]),
-            Shape::Persist(vec![2u32]),
-        ]),
+        Shape::Sequence(vec![Shape::Persist(vec![1u32]), Shape::Persist(vec![2u32]),]),
         "flatten of a flat Sequence must be unchanged"
     );
 }
 
 #[test]
 fn flatten_removes_nested_sequence() {
-    let inner = SagaEffect::Sequence(vec![
-        SagaEffect::persist(1u32),
-        SagaEffect::persist(2u32),
-    ]);
+    let inner = SagaEffect::Sequence(vec![SagaEffect::persist(1u32), SagaEffect::persist(2u32)]);
     let outer = SagaEffect::Sequence(vec![inner, SagaEffect::persist(3u32)]);
     let flat = outer.flatten();
 
@@ -88,9 +79,7 @@ fn flatten_deeply_nested_sequence_produces_fully_flat_result() {
                 );
             }
         }
-        _ => panic!(
-            "expected Sequence after flattening deeply nested Sequence, got: {shape:?}"
-        ),
+        _ => panic!("expected Sequence after flattening deeply nested Sequence, got: {shape:?}"),
     }
 }
 

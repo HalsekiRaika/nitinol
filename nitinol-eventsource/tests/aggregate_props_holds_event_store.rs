@@ -18,8 +18,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, Context, Decider, Effect, Event,
-    Receive as EvtReceive,
+    codec::Codec, Aggregate, AggregateProps, Context, Decider, Effect, Event, Receive as EvtReceive,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType};

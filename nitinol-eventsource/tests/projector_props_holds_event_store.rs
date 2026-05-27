@@ -12,17 +12,15 @@
 //! 2. Runtime integration — events pre-loaded into the store are observed
 //!    by the projector during catchup.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{
-    codec::Codec, Event, ProjectionContext, Projector, ProjectorProps,
-};
+use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, ProjectionId};
 use nitinol_runtime::ProcessSystem;

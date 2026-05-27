@@ -195,10 +195,7 @@ async fn batch_append_with_conflict_is_all_or_nothing() {
     let result = store
         .append(
             agg.borrow(),
-            vec![
-                make_event(2, et, b"ok"),
-                make_event(1, et, b"conflict"),
-            ],
+            vec![make_event(2, et, b"ok"), make_event(1, et, b"conflict")],
         )
         .await;
 
@@ -251,10 +248,7 @@ async fn intra_batch_duplicate_sequence_returns_sequence_conflict() {
     let result = store
         .append(
             agg.borrow(),
-            vec![
-                make_event(5, et, b"first"),
-                make_event(5, et, b"duplicate"),
-            ],
+            vec![make_event(5, et, b"first"), make_event(5, et, b"duplicate")],
         )
         .await;
 

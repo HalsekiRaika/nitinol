@@ -17,16 +17,18 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+use nitinol_eventsource::SnapshotPersistor;
 use nitinol_eventsource::{
     codec::Codec, codec::ErasedCodec, system::EventSourceSystem, Aggregate, Context, Decider,
     Effect, Event, ProjectionContext, Projector, ProjectorProps, Receive as EvtReceive,
     Snapshotable,
 };
-use nitinol_eventsource::SnapshotPersistor;
 use nitinol_persistence::store::{
     EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore,
 };
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, PersistedSnapshot, ProjectionId};
+use nitinol_persistence::{
+    AggregateId, AppendingEvent, EventType, PersistedSnapshot, ProjectionId,
+};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -216,9 +218,7 @@ async fn event_source_system_builder_produces_system() {
     let ps = ProcessSystem::new().await;
 
     // When
-    let system = EventSourceSystem::new(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     // Then: process_system() is accessible (type-level proof)
     let _ = system.process_system();
@@ -233,21 +233,21 @@ async fn event_source_system_builder_produces_system() {
 async fn spawn_aggregate_creates_working_aggregate_proxy() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("sys-spawn-basic");
 
     // When
-    let proxy = system
-        .spawn_aggregate::<Counter>(id, store)
-        .await;
+    let proxy = system.spawn_aggregate::<Counter>(id, store).await;
 
     let events = proxy.ask(Increment).await.expect("ask must succeed");
 
     // Then
-    assert_eq!(events, vec![Incremented], "ask must return the persisted event");
+    assert_eq!(
+        events,
+        vec![Incremented],
+        "ask must return the persisted event"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -260,9 +260,7 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
 async fn spawn_aggregate_second_process_replays_state() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("sys-replay-state");
 
@@ -275,14 +273,15 @@ async fn spawn_aggregate_second_process_replays_state() {
     }
 
     // When: spawn a fresh process for the same id — triggers replay in on_start
-    let proxy2 = system
-        .spawn_aggregate::<Counter>(id, store)
-        .await;
+    let proxy2 = system.spawn_aggregate::<Counter>(id, store).await;
 
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: replayed state equals 1
-    assert_eq!(count, 1, "replay must restore count to 1 after one persisted Increment");
+    assert_eq!(
+        count, 1,
+        "replay must restore count to 1 after one persisted Increment"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -294,9 +293,7 @@ async fn spawn_aggregate_second_process_replays_state() {
 async fn spawn_aggregate_sequential_increments_accumulate_state() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let proxy = system
         .spawn_aggregate::<Counter>(AggregateId::new("sys-seq"), store)
@@ -322,9 +319,7 @@ async fn spawn_aggregate_sequential_increments_accumulate_state() {
 async fn system_codec_returns_usable_erased_codec() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     // When
     let codec: Arc<dyn ErasedCodec<Incremented>> = system.codec::<Incremented>();
@@ -332,7 +327,10 @@ async fn system_codec_returns_usable_erased_codec() {
     let decoded: Incremented = codec.decode(&encoded).expect("decode must succeed");
 
     // Then
-    assert_eq!(decoded, Incremented, "codec roundtrip must preserve the event");
+    assert_eq!(
+        decoded, Incremented,
+        "codec roundtrip must preserve the event"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -345,9 +343,7 @@ async fn system_codec_returns_usable_erased_codec() {
 async fn system_codec_integrates_with_projector_props() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
@@ -407,9 +403,7 @@ async fn system_codec_integrates_with_projector_props() {
 async fn snapshot_roundtrip_via_event_source_system() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_store = Arc::new(InMemorySnapshotStore::default());
@@ -440,5 +434,8 @@ async fn snapshot_roundtrip_via_event_source_system() {
     let count = proxy.exec(GetCount).await.expect("exec must succeed");
 
     // Then: state is restored from snapshot (value=7)
-    assert_eq!(count, 7, "snapshot restore must produce the saved value (7)");
+    assert_eq!(
+        count, 7,
+        "snapshot restore must produce the saved value (7)"
+    );
 }

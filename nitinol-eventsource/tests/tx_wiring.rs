@@ -9,8 +9,8 @@
 // 4. Call provider.commit(tx) after a successful project().
 //
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -276,7 +276,6 @@ async fn tx_provider_supplies_tx_to_projection_context() {
 
     append_tick(&store, &agg_id, 1).await;
 
-
     let received_tx = Arc::new(AtomicBool::new(false));
     let notify = Arc::new(Notify::new());
     let received_tx_c = Arc::clone(&received_tx);
@@ -327,7 +326,6 @@ async fn exactly_once_with_tx_provider_saves_checkpoint_in_same_tx() {
 
     append_tick(&store, &agg_id, 1).await;
 
-
     let notify = Arc::new(Notify::new());
     let notify_c = Arc::clone(&notify);
     let (tp, _tp_state) = MockTxProvider::new();
@@ -374,7 +372,6 @@ async fn tx_provider_commit_called_after_successful_project() {
     let agg_id = AggregateId::new("tx-commit-test");
 
     append_tick(&store, &agg_id, 1).await;
-
 
     let notify = Arc::new(Notify::new());
     let notify_c = Arc::clone(&notify);
@@ -476,8 +473,7 @@ async fn tx_provider_rollback_called_when_project_fails() {
         .await
         .expect("load must succeed");
     assert_eq!(
-        persisted,
-        None,
+        persisted, None,
         "checkpoint must not be persisted after a failed project + rollback"
     );
 }
@@ -498,7 +494,6 @@ async fn without_tx_provider_ctx_tx_returns_none() {
     let cs = Arc::new(InMemoryCheckpointStore::default());
 
     append_tick(&store, &agg_id, 1).await;
-
 
     let tx_was_some = Arc::new(AtomicBool::new(false));
     let notify = Arc::new(Notify::new());

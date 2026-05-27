@@ -14,20 +14,18 @@ use crate::projection::context::ProjectionContext;
 /// associated type.  For ExactlyOnce delivery with a real database backend,
 /// implement `Projector<E, DbTx>` and use `ctx.tx()` to access the transaction.
 ///
-/// # Catch-up and live phases
+/// # Catch-up and live delivery
 ///
-/// A projector process runs in two phases. On startup it performs a catch-up
-/// pass: events from the last saved checkpoint onward are loaded from the
-/// `EventStore` and handed to `project` one by one. Once catch-up completes,
-/// the process transitions to the live phase and consumes events from any
-/// subscribed live streams.
+/// A projector process subscribes to an internal `DurableStream<LoadedEvent>` that
+/// performs catch-up from the last saved checkpoint and then continues with live
+/// polling — both phases flow through the same channel.  Events are handed to
+/// `project` in sequence order.
 ///
 /// # Idempotency
 ///
 /// Under `AtLeastOnce` delivery (the default), `project` must be idempotent.
 /// The same event can arrive more than once — for example when a process
-/// restarts between handling an event and saving its checkpoint, or when an
-/// event seen during catch-up is also received from a live subscription.
+/// restarts between handling an event and saving its checkpoint.
 ///
 /// For non-idempotent read-model updates (e.g., incrementing a counter), use
 /// `ExactlyOnce` delivery with a [`crate::TxProvider`] configured on the

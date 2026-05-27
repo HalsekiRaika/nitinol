@@ -68,7 +68,10 @@ async fn main() {
         .await
         .expect("ask must succeed");
 
-    assert!(events.is_empty(), "DelegateToTarget produces no persisted events");
+    assert!(
+        events.is_empty(),
+        "DelegateToTarget produces no persisted events"
+    );
     info!(?events, "ask(DelegateToTarget) returned");
 
     // Wait for the side effect to fire

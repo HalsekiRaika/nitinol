@@ -84,7 +84,10 @@ fn apply_incremented_increments_value() {
     counter.apply(Incremented);
 
     // Then
-    assert_eq!(counter.value, 1, "value must be 1 after one apply(Incremented)");
+    assert_eq!(
+        counter.value, 1,
+        "value must be 1 after one apply(Incremented)"
+    );
 }
 
 /// Applying three events accumulates state correctly
@@ -121,7 +124,11 @@ fn context_new_stores_aggregate_id_and_sequence() {
         "agg-001",
         "aggregate_id must match the value passed to new()"
     );
-    assert_eq!(ctx.sequence(), 42, "sequence must match the value passed to new()");
+    assert_eq!(
+        ctx.sequence(),
+        42,
+        "sequence must match the value passed to new()"
+    );
 }
 
 /// Context::sequence returns 0 when constructed with sequence 0
@@ -131,7 +138,11 @@ fn context_sequence_zero_is_valid() {
     let ctx = Context::new(AggregateId::new("agg-zero"), 0);
 
     // Then
-    assert_eq!(ctx.sequence(), 0, "sequence 0 must be a valid initial sequence");
+    assert_eq!(
+        ctx.sequence(),
+        0,
+        "sequence 0 must be a valid initial sequence"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +188,10 @@ fn snapshotable_restore_sets_value() {
     let restored = Counter::restore(42);
 
     // Then
-    assert_eq!(restored.value, 42, "restore(42) must produce a Counter with value 42");
+    assert_eq!(
+        restored.value, 42,
+        "restore(42) must produce a Counter with value 42"
+    );
 }
 
 /// restore(0) creates a Counter with value 0.
@@ -187,7 +201,10 @@ fn snapshotable_restore_zero_produces_zero_value() {
     let restored = Counter::restore(0);
 
     // Then
-    assert_eq!(restored.value, 0, "restore(0) must produce a Counter with value 0");
+    assert_eq!(
+        restored.value, 0,
+        "restore(0) must produce a Counter with value 0"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -225,5 +242,8 @@ fn snapshot_roundtrip_for_default_counter() {
     let restored = Counter::restore(snapshot);
 
     // Then
-    assert_eq!(restored.value, 0, "restored Counter must have value 0 for default state");
+    assert_eq!(
+        restored.value, 0,
+        "restored Counter must have value 0 for default state"
+    );
 }

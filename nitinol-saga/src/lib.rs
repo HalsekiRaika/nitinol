@@ -22,7 +22,8 @@
 //!
 //! # MVP scope
 //!
-//! - Subscription-driven (single `Stream<EventEnvelope<E>>`).
+//! - Subscription-driven: the saga subscribes to an upstream [`nitinol_persistence::store::EventStore`]
+//!   via an internal `DurableStream<EventEnvelope<E>>` (catchup + live, at-least-once delivery).
 //! - No scheduler, no compensation, no snapshotting.
 //! - Routing is a single closure `Fn(&SubscribedEvent) -> Option<SagaId>`.
 //! - Side-effect failures and persistence failures are logged, not
@@ -38,5 +39,7 @@ mod saga;
 pub use self::context::SagaContext;
 pub use self::effect::{SagaEffect, SagaTellEffect};
 pub use self::id::SagaId;
-pub use self::process::{CodecSet, CodecUnset, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset};
+pub use self::process::{
+    CodecSet, CodecUnset, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset,
+};
 pub use self::saga::Saga;

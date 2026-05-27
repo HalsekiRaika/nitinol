@@ -1,5 +1,5 @@
 mod common;
-use common::{Shape, shape_of};
+use common::{shape_of, Shape};
 
 use async_trait::async_trait;
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
@@ -152,7 +152,10 @@ async fn decide_increment_if_less_than_rejection_at_boundary() {
     let result = counter.decide(IncrementIfLessThan(5), &mut ctx).await;
 
     // Then
-    assert!(result.is_err(), "decide must fail at exact boundary (value == threshold)");
+    assert!(
+        result.is_err(),
+        "decide must fail at exact boundary (value == threshold)"
+    );
     // Use .err().unwrap() instead of .unwrap_err() because Effect<E> does not
     // implement Debug (required by unwrap_err's T: Debug bound).
     let err = result.err().unwrap();

@@ -6,17 +6,17 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Context, Decider, Effect, Event,
-    EventEnvelope, Receive as EvtReceive,
+    Receive as EvtReceive, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, LoadQuery};
-use nitinol_runtime::ident::ProcessName;
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -58,9 +58,6 @@ impl Aggregate for Order {
 
 struct PlaceOrder {
     sku: String,
-    stream: nitinol_runtime::process::ProcessProxy<
-        nitinol_runtime::process::Stream<EventEnvelope<OrderPlaced>>,
-    >,
 }
 
 #[async_trait]
@@ -70,20 +67,9 @@ impl Decider<PlaceOrder> for Order {
     async fn decide(
         &self,
         cmd: PlaceOrder,
-        ctx: &mut Context,
+        _ctx: &mut Context,
     ) -> Result<Effect<OrderPlaced>, Self::Rejection> {
-        let envelope = EventEnvelope {
-            aggregate_id: ctx.aggregate_id().clone(),
-            sequence: ctx.sequence() + 1,
-            global_sequence: 0,
-            event: OrderPlaced {
-                sku: cmd.sku.clone(),
-            },
-        };
-        Ok(Effect::persist(OrderPlaced {
-            sku: cmd.sku,
-        })
-        .combine(Effect::publish(cmd.stream, envelope)))
+        Ok(Effect::persist(OrderPlaced { sku: cmd.sku }))
     }
 }
 
@@ -128,11 +114,7 @@ impl EvtReceive<GetReservedCount> for Inventory {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(
-        &self,
-        _msg: GetReservedCount,
-        _ctx: &mut Context,
-    ) -> Result<u64, Self::Error> {
+    async fn recv(&self, _msg: GetReservedCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
         Ok(self.reserved_count)
     }
 }
@@ -170,8 +152,9 @@ impl Saga for ReservationSaga {
         });
         *self.handle_count.lock().unwrap() += 1;
 
-        let persist_own_event =
-            SagaEffect::persist(ReservationRequested { sku: event.sku.clone() });
+        let persist_own_event = SagaEffect::persist(ReservationRequested {
+            sku: event.sku.clone(),
+        });
         let tell_inventory = SagaEffect::tell(
             self.inventory.clone(),
             Reserve {
@@ -189,23 +172,15 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let order_id = AggregateId::new("saga-e2e-order");
     let order_proxy = system
-        .spawn_aggregate::<Order>(AggregateId::new("saga-e2e-order"), order_store)
+        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&order_store))
         .await;
 
     let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory_proxy = system
-        .spawn_aggregate::<Inventory>(
-            AggregateId::new("saga-e2e-inventory"),
-            inventory_store,
-        )
+        .spawn_aggregate::<Inventory>(AggregateId::new("saga-e2e-inventory"), inventory_store)
         .await;
-
-    let stream = system
-        .process_system()
-        .spawn_stream::<EventEnvelope<OrderPlaced>>(ProcessName::new("saga-e2e-stream"))
-        .await
-        .expect("spawn_stream must succeed");
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_store_for_assert = Arc::clone(&saga_store);
@@ -223,32 +198,36 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let captured_for_producer = Arc::clone(&captured);
     let handle_count_for_producer = Arc::clone(&handle_count);
 
-    let _saga_proxy = SagaProps::<ReservationSaga>::new(
-        saga_id.clone(),
-        saga_store,
-        move || ReservationSaga {
+    let _saga_proxy =
+        SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || ReservationSaga {
             inventory: inventory_for_producer.clone(),
             done_notify: Arc::clone(&done_for_producer),
             captured: Arc::clone(&captured_for_producer),
             handle_count: Arc::clone(&handle_count_for_producer),
-        },
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(stream.clone(), route_fn)
-    .spawn(system.process_system())
-    .await;
+        })
+        .with_codec(system.codec::<ReservationRequested>())
+        .with_subscription(
+            Arc::clone(&order_store),
+            system.codec::<OrderPlaced>(),
+            SequenceCursor::Stream {
+                key: order_id.as_str().to_owned(),
+                after: 0,
+            },
+            route_fn,
+        )
+        .spawn(system.process_system())
+        .await;
 
     order_proxy
         .ask(PlaceOrder {
             sku: "SKU-001".into(),
-            stream: stream.clone(),
         })
         .await
         .expect("ask(PlaceOrder) must succeed");
 
-    tokio::time::timeout(Duration::from_millis(500), done.notified())
+    tokio::time::timeout(Duration::from_secs(3), done.notified())
         .await
-        .expect("saga must drive a Reserve into Inventory within 500 ms");
+        .expect("saga must drive a Reserve into Inventory within 3 seconds");
 
     let count = inventory_proxy
         .exec(GetReservedCount)
@@ -299,17 +278,13 @@ async fn saga_skips_events_not_routed_to_its_instance() {
 
     let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory_proxy = system
-        .spawn_aggregate::<Inventory>(
-            AggregateId::new("saga-route-inventory"),
-            inventory_store,
-        )
+        .spawn_aggregate::<Inventory>(AggregateId::new("saga-route-inventory"), inventory_store)
         .await;
 
-    let stream = system
-        .process_system()
-        .spawn_stream::<EventEnvelope<OrderPlaced>>(ProcessName::new("saga-route-stream"))
-        .await
-        .expect("spawn_stream must succeed");
+    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let publisher_id = AggregateId::new("publisher-A");
+    append_order_placed(&upstream_store, &publisher_id, 1, "SKIP-001").await;
+    append_order_placed(&upstream_store, &publisher_id, 2, "MATCH-001").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
@@ -332,50 +307,33 @@ async fn saga_skips_events_not_routed_to_its_instance() {
     let captured_for_producer = Arc::clone(&captured);
     let handle_count_for_producer = Arc::clone(&handle_count);
 
-    let _saga_proxy = SagaProps::<ReservationSaga>::new(
-        matched_id.clone(),
-        saga_store,
-        move || ReservationSaga {
-            inventory: inventory_for_producer.clone(),
-            done_notify: Arc::clone(&done_for_producer),
-            captured: Arc::clone(&captured_for_producer),
-            handle_count: Arc::clone(&handle_count_for_producer),
-        },
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(stream.clone(), route_fn)
-    .spawn(system.process_system())
-    .await;
-
-    stream
-        .publish(EventEnvelope {
-            aggregate_id: AggregateId::new("publisher-A"),
-            sequence: 1,
-            global_sequence: 1,
-            event: OrderPlaced {
-                sku: "SKIP-001".into(),
-            },
+    let _saga_proxy =
+        SagaProps::<ReservationSaga>::new(matched_id.clone(), saga_store, move || {
+            ReservationSaga {
+                inventory: inventory_for_producer.clone(),
+                done_notify: Arc::clone(&done_for_producer),
+                captured: Arc::clone(&captured_for_producer),
+                handle_count: Arc::clone(&handle_count_for_producer),
+            }
         })
-        .await
-        .expect("publish (skip) must succeed");
-
-    stream
-        .publish(EventEnvelope {
-            aggregate_id: AggregateId::new("publisher-A"),
-            sequence: 2,
-            global_sequence: 2,
-            event: OrderPlaced {
-                sku: "MATCH-001".into(),
+        .with_codec(system.codec::<ReservationRequested>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<OrderPlaced>(),
+            SequenceCursor::Stream {
+                key: publisher_id.as_str().to_owned(),
+                after: 0,
             },
-        })
-        .await
-        .expect("publish (match) must succeed");
+            route_fn,
+        )
+        .spawn(system.process_system())
+        .await;
 
-    tokio::time::timeout(Duration::from_millis(500), done.notified())
+    tokio::time::timeout(Duration::from_secs(3), done.notified())
         .await
-        .expect("the matched event must reach Inventory within 500 ms");
+        .expect("the matched event must reach Inventory within 3 seconds");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let final_count = *handle_count.lock().unwrap();
     assert_eq!(
@@ -389,6 +347,31 @@ async fn saga_skips_events_not_routed_to_its_instance() {
         1,
         "exactly one event must be captured by handle()"
     );
+}
+
+async fn append_order_placed(
+    store: &Arc<dyn EventStore>,
+    agg_id: &AggregateId,
+    sequence: u64,
+    sku: &str,
+) {
+    let payload = serde_json::to_vec(&OrderPlaced {
+        sku: sku.to_owned(),
+    })
+    .map(Bytes::from)
+    .expect("encode OrderPlaced must succeed");
+    store
+        .append(
+            agg_id.as_str(),
+            vec![AppendingEvent {
+                sequence,
+                event_type: OrderPlaced::EVENT_TYPE,
+                payload,
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("append OrderPlaced must succeed");
 }
 
 async fn load_saga_events(

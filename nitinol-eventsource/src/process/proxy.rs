@@ -1,5 +1,5 @@
-use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::error::AskError as RuntimeAskError;
+use nitinol_runtime::process::ProcessProxy;
 
 use crate::aggregate::Aggregate;
 use crate::decider::Decider;
@@ -32,10 +32,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         A: Decider<C>,
         C: Send + Sync + 'static,
     {
-        self.0
-            .ask(AskCmd(cmd))
-            .await
-            .map_err(map_ask_error)
+        self.0.ask(AskCmd(cmd)).await.map_err(map_ask_error)
     }
 
     /// Send a command without waiting for a response.
@@ -61,10 +58,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         A: EvtReceive<M>,
         M: Send + Sync + 'static,
     {
-        self.0
-            .ask(ExecMsg(msg))
-            .await
-            .map_err(map_exec_error)
+        self.0.ask(ExecMsg(msg)).await.map_err(map_exec_error)
     }
 }
 
@@ -72,9 +66,7 @@ impl<A: Aggregate> AggregateProxy<A> {
 // Error mappers
 // ---------------------------------------------------------------------------
 
-fn map_ask_error<R>(
-    e: RuntimeAskError<AskHandlerError<R>>,
-) -> AskError<R>
+fn map_ask_error<R>(e: RuntimeAskError<AskHandlerError<R>>) -> AskError<R>
 where
     R: std::error::Error + Send + Sync + 'static,
 {
@@ -89,9 +81,7 @@ where
     }
 }
 
-fn map_exec_error<E>(
-    e: RuntimeAskError<ExecHandlerError<E>>,
-) -> ExecError<E>
+fn map_exec_error<E>(e: RuntimeAskError<ExecHandlerError<E>>) -> ExecError<E>
 where
     E: std::error::Error + Send + Sync + 'static,
 {

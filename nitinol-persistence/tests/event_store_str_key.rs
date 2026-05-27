@@ -189,7 +189,11 @@ async fn load_query_uses_renamed_stream_fields() {
     let events: Vec<_> = stream.try_collect().await.expect("collect must succeed");
 
     // Then
-    assert_eq!(events.len(), 2, "from_stream_sequence=2 must yield 2 events");
+    assert_eq!(
+        events.len(),
+        2,
+        "from_stream_sequence=2 must yield 2 events"
+    );
     assert_eq!(events[0].sequence, 2);
     assert_eq!(events[1].sequence, 3);
 }

@@ -60,7 +60,10 @@ async fn snapshot_persistor_save_and_load_latest() {
 
     // Then
     let loaded = loaded.expect("snapshot must be present after save");
-    assert_eq!(loaded.sequence, 5, "loaded sequence must match saved sequence");
+    assert_eq!(
+        loaded.sequence, 5,
+        "loaded sequence must match saved sequence"
+    );
     assert_eq!(
         loaded.payload,
         Bytes::from(42u64.to_be_bytes().to_vec()),
@@ -166,9 +169,15 @@ async fn snapshot_persistor_load_isolates_by_aggregate_id() {
     let snap_a = loaded_a.expect("id_a snapshot must be present");
     let snap_b = loaded_b.expect("id_b snapshot must be present");
 
-    assert_eq!(snap_a.aggregate_id, id_a, "id_a snapshot must have correct aggregate_id");
+    assert_eq!(
+        snap_a.aggregate_id, id_a,
+        "id_a snapshot must have correct aggregate_id"
+    );
     assert_eq!(snap_a.sequence, 2, "id_a snapshot must have sequence=2");
-    assert_eq!(snap_b.aggregate_id, id_b, "id_b snapshot must have correct aggregate_id");
+    assert_eq!(
+        snap_b.aggregate_id, id_b,
+        "id_b snapshot must have correct aggregate_id"
+    );
     assert_eq!(snap_b.sequence, 4, "id_b snapshot must have sequence=4");
 }
 
@@ -201,7 +210,10 @@ async fn snapshot_persistor_overwrite_returns_newer_snapshot() {
 
     // Then: the newer snapshot (seq=10) is returned
     let snap = loaded.expect("snapshot must be present");
-    assert_eq!(snap.sequence, 10, "load_latest must return the newest snapshot");
+    assert_eq!(
+        snap.sequence, 10,
+        "load_latest must return the newest snapshot"
+    );
     assert_eq!(
         snap.payload,
         Bytes::from(999u64.to_be_bytes().to_vec()),

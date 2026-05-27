@@ -1,5 +1,5 @@
 mod common;
-use common::{Shape, shape_of};
+use common::{shape_of, Shape};
 use nitinol_eventsource::Effect;
 
 // ---------------------------------------------------------------------------
@@ -13,7 +13,10 @@ fn flatten_of_none_returns_none() {
     let result: Effect<u32> = Effect::None.flatten();
 
     // Then
-    assert!(matches!(result, Effect::None), "flatten(None) must return None");
+    assert!(
+        matches!(result, Effect::None),
+        "flatten(None) must return None"
+    );
 }
 
 /// flatten() of a Persist leaf is a no-op
@@ -62,10 +65,7 @@ fn flatten_of_flat_sequence_is_noop() {
     // Then: same structure, no change
     assert_eq!(
         shape_of(&result),
-        Shape::Sequence(vec![
-            Shape::Persist(vec![1u32]),
-            Shape::Apply(vec![2u32]),
-        ]),
+        Shape::Sequence(vec![Shape::Persist(vec![1u32]), Shape::Apply(vec![2u32]),]),
         "flatten of already-flat Sequence must be unchanged"
     );
 }

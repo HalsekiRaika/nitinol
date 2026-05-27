@@ -188,9 +188,7 @@ impl Decider<IncrementWithSide> for Counter {
 /// `Arc<dyn EventStore>` directly.
 ///
 /// Returns (system, proxy).  Caller must keep `_system` alive.
-async fn spawn_counter(
-    aggregate_id: AggregateId,
-) -> (ProcessSystem, AggregateProxy<Counter>) {
+async fn spawn_counter(aggregate_id: AggregateId) -> (ProcessSystem, AggregateProxy<Counter>) {
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let proxy = AggregateProps::<Counter>::new(aggregate_id, store)
@@ -211,7 +209,10 @@ async fn ask_increment_returns_vec_incremented() {
     let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-basic")).await;
 
     // When
-    let events = proxy.ask(Increment).await.expect("ask(Increment) must succeed");
+    let events = proxy
+        .ask(Increment)
+        .await
+        .expect("ask(Increment) must succeed");
 
     // Then
     assert_eq!(
@@ -263,8 +264,7 @@ async fn ask_persists_events_to_event_store() {
 #[tokio::test]
 async fn ask_sequential_increments_accumulate_state() {
     // Given
-    let (_system, proxy) =
-        spawn_counter(AggregateId::new("agg-ask-seq")).await;
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-seq")).await;
 
     // When
     proxy.ask(Increment).await.expect("ask 1 must succeed");
@@ -272,7 +272,10 @@ async fn ask_sequential_increments_accumulate_state() {
     proxy.ask(Increment).await.expect("ask 3 must succeed");
 
     // Then
-    let count = proxy.exec(GetCount).await.expect("exec(GetCount) must succeed");
+    let count = proxy
+        .exec(GetCount)
+        .await
+        .expect("exec(GetCount) must succeed");
     assert_eq!(count, 3, "state must be 3 after three Increment asks");
 }
 
@@ -284,8 +287,7 @@ async fn ask_sequential_increments_accumulate_state() {
 #[tokio::test]
 async fn tell_increment_returns_unit() {
     // Given
-    let (_system, proxy) =
-        spawn_counter(AggregateId::new("agg-tell-unit")).await;
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-tell-unit")).await;
 
     // When / Then
     let result: Result<(), TellError> = proxy.tell(Increment).await;
@@ -301,15 +303,17 @@ async fn tell_increment_returns_unit() {
 #[tokio::test]
 async fn tell_then_exec_sees_updated_state() {
     // Given
-    let (_system, proxy) =
-        spawn_counter(AggregateId::new("agg-tell-exec")).await;
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-tell-exec")).await;
 
     // When: tell is queued first; exec is queued second and processed after tell.
     proxy.tell(Increment).await.expect("tell must succeed");
     let count = proxy.exec(GetCount).await.expect("exec must succeed");
 
     // Then
-    assert_eq!(count, 1, "exec(GetCount) must return 1 after tell(Increment)");
+    assert_eq!(
+        count, 1,
+        "exec(GetCount) must return 1 after tell(Increment)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -320,18 +324,23 @@ async fn tell_then_exec_sees_updated_state() {
 #[tokio::test]
 async fn exec_does_not_mutate_state() {
     // Given
-    let (_system, proxy) =
-        spawn_counter(AggregateId::new("agg-exec-immut")).await;
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-exec-immut")).await;
     proxy.ask(Increment).await.expect("ask must succeed");
     proxy.ask(Increment).await.expect("ask must succeed");
 
     // When
     let first: u64 = proxy.exec(GetCount).await.expect("first exec must succeed");
-    let second: u64 = proxy.exec(GetCount).await.expect("second exec must succeed");
+    let second: u64 = proxy
+        .exec(GetCount)
+        .await
+        .expect("second exec must succeed");
 
     // Then
     assert_eq!(first, 2, "first exec must return 2");
-    assert_eq!(second, 2, "second exec must return same value — exec must not mutate state");
+    assert_eq!(
+        second, 2,
+        "second exec must return same value — exec must not mutate state"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -343,8 +352,7 @@ async fn exec_does_not_mutate_state() {
 #[tokio::test]
 async fn ask_second_decider_increment_by() {
     // Given
-    let (_system, proxy) =
-        spawn_counter(AggregateId::new("agg-ask-incby")).await;
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-incby")).await;
 
     // When
     let events = proxy
@@ -370,8 +378,7 @@ async fn ask_second_decider_increment_by() {
 #[tokio::test]
 async fn ask_rejected_command_returns_rejection_error() {
     // Given
-    let (_system, proxy) =
-        spawn_counter(AggregateId::new("agg-ask-reject")).await;
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-reject")).await;
 
     // When
     let result = proxy.ask(IncrementIfLessThan(0)).await;
@@ -396,13 +403,14 @@ async fn ask_rejected_command_returns_rejection_error() {
 #[tokio::test]
 async fn side_effect_is_fire_and_forget_and_does_not_appear_in_response() {
     // Given
-    let (_system, proxy) =
-        spawn_counter(AggregateId::new("agg-side-ff")).await;
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-side-ff")).await;
     let notify = Arc::new(tokio::sync::Notify::new());
 
     // When
     let events = proxy
-        .ask(IncrementWithSide { notify: notify.clone() })
+        .ask(IncrementWithSide {
+            notify: notify.clone(),
+        })
         .await
         .expect("ask with side effect must succeed");
 
@@ -428,8 +436,7 @@ async fn side_effect_is_fire_and_forget_and_does_not_appear_in_response() {
 #[tokio::test]
 async fn interleaved_ask_and_exec_maintain_consistent_state() {
     // Given
-    let (_system, proxy) =
-        spawn_counter(AggregateId::new("agg-interleaved")).await;
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-interleaved")).await;
 
     // When
     proxy.ask(Increment).await.expect("ask 1 must succeed");

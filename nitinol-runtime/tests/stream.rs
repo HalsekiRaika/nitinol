@@ -203,7 +203,10 @@ async fn publish_delivers_message_to_subscriber() {
         .expect("subscribe should succeed");
 
     // When: a message is published
-    stream.publish_boxed(1u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(1u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: the subscriber receives the message
     wait_for_count(&count, 1).await;
@@ -261,9 +264,18 @@ async fn publish_multiple_messages_all_delivered_in_order() {
         .expect("subscribe should succeed");
 
     // When: three messages are published sequentially
-    stream.publish_boxed(1u32).await.expect("publish should succeed");
-    stream.publish_boxed(2u32).await.expect("publish should succeed");
-    stream.publish_boxed(3u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(1u32)
+        .await
+        .expect("publish should succeed");
+    stream
+        .publish_boxed(2u32)
+        .await
+        .expect("publish should succeed");
+    stream
+        .publish_boxed(3u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: all three messages are received
     wait_for_count(&count, 3).await;
@@ -390,7 +402,10 @@ async fn public_api_does_not_require_subscriber_process_type() {
         .await
         .expect("subscribe should succeed");
 
-    stream.publish_boxed(1u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(1u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: the subscriber receives the message — no internal types needed
     wait_for_count(&count, 1).await;
@@ -446,7 +461,10 @@ async fn subscriber_recv_uses_all_parameters() {
         .expect("subscribe should succeed");
 
     // When: a message with a known u32 value is published
-    stream.publish_boxed(5u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(5u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: the subscriber uses the msg parameter and accumulates the value
     wait_for_count(&received, 5).await;
@@ -477,7 +495,10 @@ async fn subscriber_trait_and_props_flow_receives_message() {
         .expect("subscribe should succeed");
 
     // When: a message is published
-    stream.publish_boxed(77u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(77u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: the Subscriber::recv is called
     wait_for_count(&count, 1).await;
@@ -508,9 +529,18 @@ async fn subscriber_trait_receives_multiple_publishes() {
         .expect("subscribe should succeed");
 
     // When: three messages are published
-    stream.publish_boxed(1u32).await.expect("publish should succeed");
-    stream.publish_boxed(2u32).await.expect("publish should succeed");
-    stream.publish_boxed(3u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(1u32)
+        .await
+        .expect("publish should succeed");
+    stream
+        .publish_boxed(2u32)
+        .await
+        .expect("publish should succeed");
+    stream
+        .publish_boxed(3u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: the subscriber receives all three
     wait_for_count(&count, 3).await;
@@ -546,7 +576,10 @@ async fn mixed_subscriber_types_all_receive_published_message() {
         .expect("subscribe trait should succeed");
 
     // When: a message is published
-    stream.publish_boxed(true).await.expect("publish should succeed");
+    stream
+        .publish_boxed(true)
+        .await
+        .expect("publish should succeed");
 
     // Then: both subscriber types receive the message
     wait_for_count(&count_direct, 1).await;
@@ -1146,7 +1179,10 @@ async fn publish_to_dead_subscriber_routes_to_dead_letter_stream() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: a message is published (dispatch to the dead subscriber will fail)
-    stream.publish_boxed(42u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(42u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: the dead-letter stream receives exactly one notification
     wait_for_count(&dl_count, 1).await;
@@ -1192,7 +1228,10 @@ async fn dead_letter_from_failed_publish_contains_subscriber_pid() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: a message is published
-    stream.publish_boxed(42u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(42u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: the captured destination matches the dead subscriber's PID
     let destination = wait_for_capture(&captured).await;
@@ -1242,7 +1281,10 @@ async fn dead_letter_from_failed_publish_contains_stream_pid_as_sender() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: a message is published
-    stream.publish_boxed(42u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(42u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: the captured sender is Some(stream_pid)
     let sender = wait_for_capture(&captured).await;
@@ -1298,7 +1340,10 @@ async fn publish_to_dead_subscriber_still_delivers_to_live_subscribers() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: a message is published
-    stream.publish_boxed(99u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(99u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: the live subscriber receives the message
     wait_for_count(&live_count, 1).await;
@@ -1348,7 +1393,10 @@ async fn failed_publish_generates_exactly_one_dead_letter() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // When: a message is published
-    stream.publish_boxed(1u32).await.expect("publish should succeed");
+    stream
+        .publish_boxed(1u32)
+        .await
+        .expect("publish should succeed");
 
     // Then: exactly one dead-letter notification arrives (no double-routing)
     wait_for_count(&dl_count, 1).await;

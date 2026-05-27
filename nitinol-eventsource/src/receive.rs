@@ -54,9 +54,5 @@ where
     type Response: Send + Sync + 'static;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    async fn recv(
-        &self,
-        msg: M,
-        ctx: &mut Context,
-    ) -> Result<Self::Response, Self::Error>;
+    async fn recv(&self, msg: M, ctx: &mut Context) -> Result<Self::Response, Self::Error>;
 }

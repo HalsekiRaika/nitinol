@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, EventEnvelope};
+use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
 use nitinol_persistence::EventType;
-use nitinol_runtime::process::{ProcessProxy, Stream};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OrderPlaced {
@@ -25,7 +24,6 @@ impl Aggregate for Order {
 
 pub struct PlaceOrder {
     pub sku: String,
-    pub stream: ProcessProxy<Stream<EventEnvelope<OrderPlaced>>>,
 }
 
 #[async_trait]
@@ -35,16 +33,8 @@ impl Decider<PlaceOrder> for Order {
     async fn decide(
         &self,
         cmd: PlaceOrder,
-        ctx: &mut Context,
+        _ctx: &mut Context,
     ) -> Result<Effect<OrderPlaced>, Self::Rejection> {
-        let envelope = EventEnvelope {
-            aggregate_id: ctx.aggregate_id().clone(),
-            sequence: ctx.sequence() + 1,
-            global_sequence: 0,
-            event: OrderPlaced {
-                sku: cmd.sku.clone(),
-            },
-        };
-        Ok(Effect::persist(OrderPlaced { sku: cmd.sku }).combine(Effect::publish(cmd.stream, envelope)))
+        Ok(Effect::persist(OrderPlaced { sku: cmd.sku }))
     }
 }

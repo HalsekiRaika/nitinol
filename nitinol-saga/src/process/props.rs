@@ -1,11 +1,11 @@
-use std::future::Future;
-use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use nitinol_eventsource::codec::ErasedCodec;
-use nitinol_eventsource::EventEnvelope;
+use nitinol_eventsource::{DurableStream, EventEnvelope, SequenceCursor};
 use nitinol_persistence::store::EventStore;
-use nitinol_runtime::process::{ProcessProxy, Stream};
+use nitinol_persistence::AggregateId;
+use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::{ProcessSystem, Props};
 
 use crate::id::SagaId;
@@ -26,13 +26,13 @@ pub struct SubscriptionUnset;
 
 /// Marker: the upstream subscription has been provided.
 pub struct SubscriptionSet<S: Saga> {
-    pub(crate) subscribe_fn: SubscribeFn<S>,
+    pub(crate) upstream_store: Arc<dyn EventStore>,
+    pub(crate) upstream_codec: Arc<dyn ErasedCodec<S::SubscribedEvent>>,
+    pub(crate) cursor: SequenceCursor,
     pub(crate) route_fn: RouteFn<S::SubscribedEvent>,
 }
 
-type SubscribeFn<S> = Box<
-    dyn FnOnce(ProcessProxy<SagaProcess<S>>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
->;
+static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Builder for a saga spawn.
 ///
@@ -71,7 +71,10 @@ impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
 
 impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
     /// Bind the codec used to encode and decode the saga's own events.
-    pub fn with_codec(self, codec: Arc<dyn ErasedCodec<S::Event>>) -> SagaProps<S, CodecSet<S::Event>, Sub> {
+    pub fn with_codec(
+        self,
+        codec: Arc<dyn ErasedCodec<S::Event>>,
+    ) -> SagaProps<S, CodecSet<S::Event>, Sub> {
         SagaProps {
             saga_id: self.saga_id,
             store: self.store,
@@ -83,34 +86,34 @@ impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
 }
 
 impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
-    /// Subscribe this saga instance to an upstream stream of envelopes.
+    /// Subscribe this saga instance to an upstream `EventStore` via an
+    /// internal [`DurableStream`] (catchup + live, at-least-once).
     ///
-    /// `route_fn` decides which saga instance an envelope belongs to.  The
-    /// runtime drops envelopes whose route maps to a different `SagaId` (or
-    /// to `None`).
+    /// `upstream_store` is the event store whose events drive the saga,
+    /// `upstream_codec` decodes the persisted bytes into `S::SubscribedEvent`,
+    /// `cursor` is the initial resume point, and `route_fn` decides which
+    /// saga instance an event belongs to.  The runtime drops events whose
+    /// route maps to a different `SagaId` (or to `None`).
     pub fn with_subscription<F>(
         self,
-        stream: ProcessProxy<Stream<EventEnvelope<S::SubscribedEvent>>>,
+        upstream_store: Arc<dyn EventStore>,
+        upstream_codec: Arc<dyn ErasedCodec<S::SubscribedEvent>>,
+        cursor: SequenceCursor,
         route_fn: F,
     ) -> SagaProps<S, C, SubscriptionSet<S>>
     where
         F: Fn(&S::SubscribedEvent) -> Option<SagaId> + Send + Sync + 'static,
     {
         let route_fn: RouteFn<S::SubscribedEvent> = Arc::new(route_fn);
-        let subscribe_fn: SubscribeFn<S> = Box::new(move |proxy| {
-            Box::pin(async move {
-                if let Err(e) = stream.subscribe(proxy).await {
-                    tracing::error!(error = %e, "saga failed to subscribe to upstream stream");
-                }
-            })
-        });
         SagaProps {
             saga_id: self.saga_id,
             store: self.store,
             producer: self.producer,
             codec: self.codec,
             subscription: SubscriptionSet {
-                subscribe_fn,
+                upstream_store,
+                upstream_codec,
+                cursor,
                 route_fn,
             },
         }
@@ -118,7 +121,8 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
 }
 
 impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
-    /// Spawn the saga process and register it on the upstream stream.
+    /// Spawn the saga process and wire its internal `DurableStream` against
+    /// the upstream `EventStore`.
     ///
     /// Both [`with_codec`][Self::with_codec] and
     /// [`with_subscription`][Self::with_subscription] must be called before
@@ -129,13 +133,61 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let producer = self.producer;
         let codec = self.codec.codec;
         let route_fn = self.subscription.route_fn;
-        let subscribe_fn = self.subscription.subscribe_fn;
+        let upstream_store = self.subscription.upstream_store;
+        let upstream_codec = self.subscription.upstream_codec;
+        let cursor = self.subscription.cursor;
+
+        // Build the upstream DurableStream first so its keepalive Arc can be
+        // moved into SagaProcess.  Tying the lifetime to the process (not to
+        // the external SagaProxy handle) ensures the poller is never stopped
+        // while the saga is still alive.
+        let codec_for_transform = Arc::clone(&upstream_codec);
+        let transform = move |loaded: nitinol_persistence::LoadedEvent| {
+            if loaded.event_type != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE {
+                return None;
+            }
+            match codec_for_transform.decode(&loaded.payload) {
+                Ok(event) => Some(EventEnvelope {
+                    aggregate_id: AggregateId::new(loaded.stream_key),
+                    sequence: loaded.sequence,
+                    global_sequence: loaded.global_sequence,
+                    event,
+                }),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        event_type = ?loaded.event_type,
+                        "saga upstream decode failed; skipping event",
+                    );
+                    None
+                }
+            }
+        };
+
+        let topic = ProcessName::new(format!(
+            "saga-upstream-{}-{}",
+            saga_id.as_str(),
+            UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        let ds_proxy = Arc::new(
+            DurableStream::<EventEnvelope<S::SubscribedEvent>>::new(
+                topic,
+                upstream_store,
+                transform,
+            )
+            .cursor(cursor.clone())
+            .spawn(system)
+            .await
+            .expect("DurableStream::spawn must succeed for saga upstream subscription"),
+        );
 
         let saga_id_for_props = saga_id.clone();
         let store_for_props = Arc::clone(&store);
         let codec_for_props = Arc::clone(&codec);
         let route_fn_for_props = Arc::clone(&route_fn);
         let producer_for_props = Arc::clone(&producer);
+        let ds_keepalive_for_props = Arc::clone(&ds_proxy);
 
         let props = Props::new(move || SagaProcess::<S> {
             state: producer_for_props(),
@@ -144,10 +196,16 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
             codec: Arc::clone(&codec_for_props),
             route_fn: Arc::clone(&route_fn_for_props),
             sequence: 0,
+            _ds_keepalive: Arc::clone(&ds_keepalive_for_props),
         });
 
-        let proxy = system.spawn(props).await;
-        subscribe_fn(proxy.clone()).await;
-        SagaProxy(proxy)
+        let saga_proxy = system.spawn(props).await;
+
+        ds_proxy
+            .subscribe_from(system, saga_proxy.clone(), cursor)
+            .await
+            .expect("DurableStream::subscribe_from must succeed for saga upstream subscription");
+
+        SagaProxy::new(saga_proxy)
     }
 }

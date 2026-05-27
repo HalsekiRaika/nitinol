@@ -1,16 +1,16 @@
-use std::future::Future;
 use std::marker::PhantomData;
-use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore};
 use nitinol_persistence::{AggregateId, ProjectionId};
+use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::ProcessProxy;
-use nitinol_runtime::{Props, ProcessSystem, Stream};
+use nitinol_runtime::{ProcessSystem, Props};
 
 use crate::codec::ErasedCodec;
+use crate::durable_stream::{DurableStream, DurableStreamProxy, SequenceCursor};
 use crate::event::Event;
-use crate::projection::envelope::EventEnvelope;
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};
 use crate::projection::process::{CatchupOrigin, ProjectorProcess};
 use crate::projection::projector::Projector;
@@ -21,12 +21,7 @@ pub struct EventSet;
 pub struct OriginUnset;
 pub struct OriginSet(pub(crate) CatchupOrigin);
 
-type SubscribeFn<P, Cs, Tx> = Box<
-    dyn FnOnce(
-            ProcessProxy<ProjectorProcess<P, Cs, Tx>>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send>>
-        + Send,
->;
+static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct ProjectorProps<P, Cs, Tx = (), E = EventUnset, O = OriginUnset> {
     projection_id: ProjectionId,
@@ -37,7 +32,6 @@ pub struct ProjectorProps<P, Cs, Tx = (), E = EventUnset, O = OriginUnset> {
     tx_provider: Option<Arc<dyn ErasedTxProvider<Tx> + Send + Sync>>,
     producer: Box<dyn Fn() -> P + Send + Sync>,
     handlers: Vec<Arc<dyn EventTypeHandler<P, Tx>>>,
-    subscriptions: Vec<SubscribeFn<P, Cs, Tx>>,
     _phantom: PhantomData<E>,
 }
 
@@ -61,7 +55,6 @@ where
             tx_provider: None,
             producer: Box::new(producer),
             handlers: Vec::new(),
-            subscriptions: Vec::new(),
             _phantom: PhantomData,
         }
     }
@@ -93,7 +86,6 @@ where
             tx_provider: Some(Arc::new(provider) as Arc<dyn ErasedTxProvider<TP::Tx> + Send + Sync>),
             producer: self.producer,
             handlers: Vec::new(),
-            subscriptions: Vec::new(),
             _phantom: PhantomData,
         }
     }
@@ -105,7 +97,10 @@ where
     Cs: CheckpointStore + Send + Sync + 'static,
     Tx: Send + 'static,
 {
-    pub fn with_event<E>(mut self, codec: Arc<dyn ErasedCodec<E>>) -> ProjectorProps<P, Cs, Tx, EventSet, O>
+    pub fn with_event<E>(
+        mut self,
+        codec: Arc<dyn ErasedCodec<E>>,
+    ) -> ProjectorProps<P, Cs, Tx, EventSet, O>
     where
         P: Projector<E, Tx>,
         E: Event,
@@ -124,7 +119,6 @@ where
             tx_provider: self.tx_provider,
             producer: self.producer,
             handlers: self.handlers,
-            subscriptions: self.subscriptions,
             _phantom: PhantomData,
         }
     }
@@ -148,39 +142,16 @@ where
     }
 }
 
-impl<P, Cs, Tx, O> ProjectorProps<P, Cs, Tx, EventSet, O>
-where
-    P: Send + Sync + 'static,
-    Cs: CheckpointStore + Send + Sync + 'static,
-    Tx: Send + 'static,
-{
-    pub fn subscribe<E>(mut self, stream: ProcessProxy<Stream<EventEnvelope<E>>>) -> Self
-    where
-        P: Projector<E, Tx>,
-        E: Event,
-        ProjectorProcess<P, Cs, Tx>: nitinol_runtime::process::Receive<EventEnvelope<E>, Response = ()>,
-    {
-        let sub: SubscribeFn<P, Cs, Tx> = Box::new(
-            move |proxy: ProcessProxy<ProjectorProcess<P, Cs, Tx>>| {
-                Box::pin(async move {
-                    if let Err(e) = stream.subscribe(proxy).await {
-                        tracing::error!(error = %e, "failed to subscribe to live stream");
-                    }
-                })
-            },
-        );
-        self.subscriptions.push(sub);
-        self
-    }
-}
-
 impl<P, Cs, Tx, E> ProjectorProps<P, Cs, Tx, E, OriginUnset>
 where
     P: Send + Sync + 'static,
     Cs: CheckpointStore + Send + Sync + 'static,
     Tx: Send + 'static,
 {
-    pub fn catchup_from_aggregate(self, agg_id: AggregateId) -> ProjectorProps<P, Cs, Tx, E, OriginSet> {
+    pub fn catchup_from_aggregate(
+        self,
+        agg_id: AggregateId,
+    ) -> ProjectorProps<P, Cs, Tx, E, OriginSet> {
         ProjectorProps {
             projection_id: self.projection_id,
             store: self.store,
@@ -190,7 +161,6 @@ where
             tx_provider: self.tx_provider,
             producer: self.producer,
             handlers: self.handlers,
-            subscriptions: self.subscriptions,
             _phantom: PhantomData,
         }
     }
@@ -205,7 +175,6 @@ where
             tx_provider: self.tx_provider,
             producer: self.producer,
             handlers: self.handlers,
-            subscriptions: self.subscriptions,
             _phantom: PhantomData,
         }
     }
@@ -282,10 +251,7 @@ where
     ///     .await;
     /// # }
     /// ```
-    pub async fn spawn(
-        self,
-        system: &ProcessSystem,
-    ) -> ProcessProxy<ProjectorProcess<P, Cs, Tx>> {
+    pub async fn spawn(self, system: &ProcessSystem) -> ProcessProxy<ProjectorProcess<P, Cs, Tx>> {
         let catchup_origin = self.catchup_origin.0;
         let projection_id = self.projection_id;
         let store = self.store;
@@ -295,23 +261,53 @@ where
         let producer = self.producer;
         let tx_provider = self.tx_provider;
 
+        let checkpoint = checkpoint_store
+            .load(&projection_id)
+            .await
+            .expect("checkpoint load must succeed before projector spawn")
+            .unwrap_or(0);
+
+        let cursor = match &catchup_origin {
+            CatchupOrigin::Aggregate(agg_id) => SequenceCursor::Stream {
+                key: agg_id.as_str().to_owned(),
+                after: checkpoint,
+            },
+            CatchupOrigin::Global => SequenceCursor::Global { after: checkpoint },
+        };
+
+        let topic = ProcessName::new(format!(
+            "projection-stream-{}-{}",
+            projection_id.as_str(),
+            UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        let ds_proxy: Arc<DurableStreamProxy<nitinol_persistence::LoadedEvent>> = Arc::new(
+            DurableStream::<nitinol_persistence::LoadedEvent>::new(topic, Arc::clone(&store), Some)
+                .cursor(cursor.clone())
+                .spawn(system)
+                .await
+                .expect("DurableStream::spawn must succeed for projector"),
+        );
+
+        let ds_for_props = Arc::clone(&ds_proxy);
         let runtime_props = Props::new(move || ProjectorProcess {
             projector: producer(),
             projection_id: projection_id.clone(),
-            store: Arc::clone(&store),
             checkpoint_store: Arc::clone(&checkpoint_store),
             delivery_mode,
             catchup_origin: catchup_origin.clone(),
             handlers: handlers.clone(),
             tx_provider: tx_provider.clone(),
-            checkpoint_sequence: 0,
+            checkpoint_sequence: checkpoint,
+            _ds_keepalive: Arc::clone(&ds_for_props),
         });
 
         let proxy = system.spawn(runtime_props).await;
 
-        for sub_fn in self.subscriptions {
-            sub_fn(proxy.clone()).await;
-        }
+        ds_proxy
+            .subscribe_from(system, proxy.clone(), cursor)
+            .await
+            .expect("DurableStream::subscribe_from must succeed for projector");
 
         proxy
     }

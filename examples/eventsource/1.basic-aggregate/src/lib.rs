@@ -2,5 +2,5 @@
 //!
 //! Exports the domain types so the integration tests can import them.
 
-pub mod counter;
 pub mod codec;
+pub mod counter;

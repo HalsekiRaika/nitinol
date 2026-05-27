@@ -840,13 +840,9 @@ async fn durable_stream_direct_poller_observable_via_registry_lookup_by_name() {
     let sub = system.spawn(Props::new(recorder.producer())).await;
     let sub_pid = sub.pid();
 
-    ds.subscribe_from(
-        &system,
-        sub,
-        SequenceCursor::Global { after: 0 },
-    )
-    .await
-    .expect("subscribe_from must succeed");
+    ds.subscribe_from(&system, sub, SequenceCursor::Global { after: 0 })
+        .await
+        .expect("subscribe_from must succeed");
 
     let poller_name = ProcessName::new(format!("direct-poller-{sub_pid}"));
     let found = system.lookup_by_name(&poller_name).await;
@@ -948,21 +944,13 @@ async fn durable_stream_subscribe_from_twice_new_poller_stays_in_registry() {
     let sub_pid = sub.pid();
     let poller_name = ProcessName::new(format!("direct-poller-{sub_pid}"));
 
-    ds.subscribe_from(
-        &system,
-        sub.clone(),
-        SequenceCursor::Global { after: 0 },
-    )
-    .await
-    .expect("first subscribe_from must succeed");
+    ds.subscribe_from(&system, sub.clone(), SequenceCursor::Global { after: 0 })
+        .await
+        .expect("first subscribe_from must succeed");
 
-    ds.subscribe_from(
-        &system,
-        sub,
-        SequenceCursor::Global { after: 0 },
-    )
-    .await
-    .expect("second subscribe_from must succeed");
+    ds.subscribe_from(&system, sub, SequenceCursor::Global { after: 0 })
+        .await
+        .expect("second subscribe_from must succeed");
 
     tokio::time::sleep(TEST_POLL_INTERVAL * 8).await;
 

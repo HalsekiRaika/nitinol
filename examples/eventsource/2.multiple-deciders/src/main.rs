@@ -41,7 +41,10 @@ async fn main() {
         .await;
 
     // Deposit 100
-    let events = proxy.ask(Deposit { amount: 100 }).await.expect("deposit failed");
+    let events = proxy
+        .ask(Deposit { amount: 100 })
+        .await
+        .expect("deposit failed");
     info!(?events, "deposit returned");
 
     let balance = proxy.exec(GetBalance).await.expect("exec failed");
@@ -49,7 +52,10 @@ async fn main() {
     assert_eq!(balance, 100);
 
     // Withdraw 40
-    proxy.ask(Withdraw { amount: 40 }).await.expect("withdraw failed");
+    proxy
+        .ask(Withdraw { amount: 40 })
+        .await
+        .expect("withdraw failed");
     let balance = proxy.exec(GetBalance).await.expect("exec failed");
     info!(balance, "balance after withdrawal");
     assert_eq!(balance, 60);

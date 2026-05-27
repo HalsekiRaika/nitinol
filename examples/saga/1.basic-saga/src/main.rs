@@ -5,10 +5,9 @@ use tokio::sync::Notify;
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::EventEnvelope;
+use nitinol_eventsource::SequenceCursor;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaId, SagaProps};
 
@@ -34,23 +33,15 @@ async fn main() {
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let order_id = AggregateId::new("example-order");
     let order_proxy = system
-        .spawn_aggregate::<Order>(AggregateId::new("example-order"), order_store)
+        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&order_store))
         .await;
 
     let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory_proxy = system
-        .spawn_aggregate::<Inventory>(
-            AggregateId::new("example-inventory"),
-            inventory_store,
-        )
+        .spawn_aggregate::<Inventory>(AggregateId::new("example-inventory"), inventory_store)
         .await;
-
-    let stream = system
-        .process_system()
-        .spawn_stream::<EventEnvelope<OrderPlaced>>(ProcessName::new("example-saga-stream"))
-        .await
-        .expect("spawn_stream must succeed");
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new("example-reservation-saga");
@@ -60,32 +51,34 @@ async fn main() {
     let done_for_producer = Arc::clone(&done);
     let route_target = saga_id.clone();
 
-    let _saga_proxy = SagaProps::<ReservationSaga>::new(
-        saga_id.clone(),
-        saga_store,
-        move || ReservationSaga {
+    let _saga_proxy =
+        SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || ReservationSaga {
             inventory: inventory_for_producer.clone(),
             done_notify: Arc::clone(&done_for_producer),
-        },
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(stream.clone(), move |_event: &OrderPlaced| {
-        Some(route_target.clone())
-    })
-    .spawn(system.process_system())
-    .await;
+        })
+        .with_codec(system.codec::<ReservationRequested>())
+        .with_subscription(
+            Arc::clone(&order_store),
+            system.codec::<OrderPlaced>(),
+            SequenceCursor::Stream {
+                key: order_id.as_str().to_owned(),
+                after: 0,
+            },
+            move |_event: &OrderPlaced| Some(route_target.clone()),
+        )
+        .spawn(system.process_system())
+        .await;
 
     order_proxy
         .ask(PlaceOrder {
             sku: "SKU-EXAMPLE".into(),
-            stream: stream.clone(),
         })
         .await
         .expect("ask(PlaceOrder) must succeed");
 
-    tokio::time::timeout(Duration::from_millis(500), done.notified())
+    tokio::time::timeout(Duration::from_secs(3), done.notified())
         .await
-        .expect("saga must drive a Reserve into Inventory within 500 ms");
+        .expect("saga must drive a Reserve into Inventory within 3 seconds");
 
     let count = inventory_proxy
         .exec(GetReservedCount)

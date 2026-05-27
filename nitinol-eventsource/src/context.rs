@@ -12,7 +12,10 @@ pub struct Context {
 
 impl Context {
     pub fn new(aggregate_id: AggregateId, sequence: u64) -> Self {
-        Self { aggregate_id, sequence }
+        Self {
+            aggregate_id,
+            sequence,
+        }
     }
 
     /// Returns the identifier of the aggregate instance that owns this context.

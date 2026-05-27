@@ -28,7 +28,7 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType};
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Stream};
-use nitinol_runtime::{BoxedMessage, Props, ProcessSystem};
+use nitinol_runtime::{BoxedMessage, ProcessSystem, Props};
 
 // ---------------------------------------------------------------------------
 // Fixtures: event
@@ -147,7 +147,10 @@ impl Decider<PublishNotification> for Counter {
         cmd: PublishNotification,
         _ctx: &mut Context,
     ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::publish(cmd.stream, nitinol_runtime::BoxedMessage::new(Notification)))
+        Ok(Effect::publish(
+            cmd.stream,
+            nitinol_runtime::BoxedMessage::new(Notification),
+        ))
     }
 }
 
@@ -349,14 +352,17 @@ async fn e2e_publish_side_effect_from_decide_reaches_stream_subscriber() {
     // Spawn the subscriber and subscribe it to the stream
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
-    let sub_proxy = system.process_system().spawn(Props::new({
-        let count = Arc::clone(&count);
-        let notify = Arc::clone(&notify);
-        move || NotificationSubscriber {
-            count: Arc::clone(&count),
-            notify: Arc::clone(&notify),
-        }
-    })).await;
+    let sub_proxy = system
+        .process_system()
+        .spawn(Props::new({
+            let count = Arc::clone(&count);
+            let notify = Arc::clone(&notify);
+            move || NotificationSubscriber {
+                count: Arc::clone(&count),
+                notify: Arc::clone(&notify),
+            }
+        }))
+        .await;
 
     stream
         .subscribe(sub_proxy)

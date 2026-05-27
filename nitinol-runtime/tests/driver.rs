@@ -77,7 +77,7 @@ struct DefaultDriver;
 impl Driver<DummyProcess> for DefaultDriver {
     type Event = ();
 
-    async fn next(&mut self) -> Option<Self::Event>{
+    async fn next(&mut self) -> Option<Self::Event> {
         None
     }
 

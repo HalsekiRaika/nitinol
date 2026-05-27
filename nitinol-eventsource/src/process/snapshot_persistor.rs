@@ -3,9 +3,9 @@ use std::sync::Arc;
 use nitinol_persistence::error::SnapshotError;
 use nitinol_persistence::store::SnapshotStore;
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
-use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::process::ProcessProxy;
-use nitinol_runtime::{IdleTimeout, Props, ProcessSystem, SupervisionStrategy};
+use nitinol_runtime::process::{Process, ProcessContext, Receive};
+use nitinol_runtime::{IdleTimeout, ProcessSystem, Props, SupervisionStrategy};
 
 // ---------------------------------------------------------------------------
 // Internal messages

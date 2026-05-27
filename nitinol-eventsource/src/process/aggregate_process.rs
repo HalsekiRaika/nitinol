@@ -26,8 +26,7 @@ use crate::Effect;
 ///
 /// The function decodes the raw bytes to the snapshot domain value (via the
 /// snapshot codec) and then calls `A::restore`.
-pub(crate) type SnapshotRestoreFn<A> =
-    Arc<dyn Fn(&[u8]) -> Result<A, CodecError> + Send + Sync>;
+pub(crate) type SnapshotRestoreFn<A> = Arc<dyn Fn(&[u8]) -> Result<A, CodecError> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Internal message wrappers
@@ -64,10 +63,9 @@ pub struct AggregateProcess<A: Aggregate> {
 
 impl<A: Aggregate> Process for AggregateProcess<A> {
     async fn on_start(&mut self, _ctx: &mut ProcessContext) {
-        if let (Some(restore_fn), Some(snapshot_proxy)) = (
-            self.snapshot_restore.clone(),
-            self.snapshot_ref.clone(),
-        ) {
+        if let (Some(restore_fn), Some(snapshot_proxy)) =
+            (self.snapshot_restore.clone(), self.snapshot_ref.clone())
+        {
             match snapshot_proxy.load_latest(self.aggregate_id.clone()).await {
                 Ok(Some(snapshot)) => match restore_fn(&snapshot.payload) {
                     Ok(restored) => {

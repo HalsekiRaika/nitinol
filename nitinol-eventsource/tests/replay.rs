@@ -12,12 +12,16 @@ use bytes::Bytes;
 
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, Context, Decider, Effect, Event,
-    Receive as EvtReceive, Snapshotable, SnapshotPersistor, SnapshotPersistorProxy,
+    Receive as EvtReceive, SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, AppendOutcome, EventType, PersistedSnapshot};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore,
+};
 use nitinol_persistence::LoadQuery;
+use nitinol_persistence::{
+    AggregateId, AppendOutcome, AppendingEvent, EventType, PersistedSnapshot,
+};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -361,7 +365,10 @@ async fn replay_applies_delta_events_after_snapshot() {
 
     // Then: value=5 (3 from snapshot + 2 delta events)
     let count: u64 = proxy2.exec(GetCount).await.expect("exec must succeed");
-    assert_eq!(count, 5, "replay must apply snapshot (3) + 2 delta events = 5");
+    assert_eq!(
+        count, 5,
+        "replay must apply snapshot (3) + 2 delta events = 5"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +415,10 @@ async fn replay_snapshot_at_latest_sequence_no_delta_events() {
 
     // Then: value=3 (snapshot only)
     let count: u64 = proxy2.exec(GetCount).await.expect("exec must succeed");
-    assert_eq!(count, 3, "replay must restore value=3 from snapshot with no delta events");
+    assert_eq!(
+        count, 3,
+        "replay must restore value=3 from snapshot with no delta events"
+    );
 }
 
 // ---------------------------------------------------------------------------

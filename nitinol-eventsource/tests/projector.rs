@@ -1,14 +1,3 @@
-// Integration tests for Projector<E> trait and ProjectionContext.
-//
-// Tests verify:
-// - project() is called for events during catch-up
-// - ProjectionContext provides projection_id and current_sequence
-// - A single type P can implement Projector<E1> and Projector<E2>
-// - Live events published to a subscribed Stream<EventEnvelope<E>> are projected
-//
-// Compile errors involving the projection module are expected until the
-// implementation in nitinol-eventsource/src/projection/ is complete.
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,19 +6,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{
-    codec::Codec, Event, EventEnvelope, ProjectionContext, Projector, ProjectorProps,
-};
+use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, ProjectionId};
-use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
-// Fixtures: event types
-// ---------------------------------------------------------------------------
-
-/// A simple unit event for counting projection calls.
 #[derive(Clone)]
 struct Counted;
 
@@ -37,7 +18,6 @@ impl Event for Counted {
     const EVENT_TYPE: EventType = EventType::from_str("Counted");
 }
 
-/// A second unit event to test multiple Projector<E> implementations on one type.
 #[derive(Clone)]
 struct Labeled;
 
@@ -45,11 +25,6 @@ impl Event for Labeled {
     const EVENT_TYPE: EventType = EventType::from_str("Labeled");
 }
 
-// ---------------------------------------------------------------------------
-// Fixtures: codec
-// ---------------------------------------------------------------------------
-
-/// Pass-through codec for unit events (no data to encode/decode).
 struct UnitCodec;
 
 impl Codec<Counted> for UnitCodec {
@@ -75,13 +50,6 @@ impl Codec<Labeled> for UnitCodec {
         Ok(Labeled)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Fixtures: TrackingProjector
-//
-// Shared-state projector that records each project() call so the test can
-// inspect which events were received and what context values were provided.
-// ---------------------------------------------------------------------------
 
 struct TrackingProjector {
     /// Incremented on every Counted project() call.
@@ -132,16 +100,12 @@ impl Projector<Labeled> for TrackingProjector {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helper: shared state factory
-// ---------------------------------------------------------------------------
-
 fn make_tracking_state() -> (
-    Arc<AtomicUsize>,   // count (Counted)
-    Arc<AtomicUsize>,   // label_count (Labeled)
+    Arc<AtomicUsize>, // count (Counted)
+    Arc<AtomicUsize>, // label_count (Labeled)
     Arc<Notify>,
     Arc<Mutex<Option<ProjectionId>>>,
-    Arc<AtomicUsize>,   // last_sequence
+    Arc<AtomicUsize>, // last_sequence
 ) {
     (
         Arc::new(AtomicUsize::new(0)),
@@ -151,10 +115,6 @@ fn make_tracking_state() -> (
         Arc::new(AtomicUsize::new(0)),
     )
 }
-
-// ---------------------------------------------------------------------------
-// Helper: append a Counted event to the store
-// ---------------------------------------------------------------------------
 
 async fn append_counted(store: &InMemoryEventStore, agg_id: &AggregateId, sequence: u64) {
     store
@@ -186,12 +146,8 @@ async fn append_labeled(store: &InMemoryEventStore, agg_id: &AggregateId, sequen
         .expect("append must succeed");
 }
 
-// ---------------------------------------------------------------------------
-// Helper: wait until counter reaches expected value or timeout
-// ---------------------------------------------------------------------------
-
 async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expected: usize) {
-    tokio::time::timeout(Duration::from_millis(500), async {
+    tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let notified = notify.notified();
             if counter.load(Ordering::SeqCst) >= expected {
@@ -204,15 +160,8 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
     .unwrap_or_else(|_| panic!("timed out waiting for {expected} project() calls"));
 }
 
-// ---------------------------------------------------------------------------
-// Test: single Projector<E> — project() is called for each catch-up event
-// ---------------------------------------------------------------------------
-
-/// Given one Counted event in the store, spawning a ProjectorProcess triggers
-/// catch-up and calls project() exactly once.
 #[tokio::test]
 async fn projector_single_event_type_project_called_during_catchup() {
-    // Given
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
@@ -224,7 +173,6 @@ async fn projector_single_event_type_project_called_during_catchup() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    // When
     let _proxy = ProjectorProps::new(
         ProjectionId::new("proj-single"),
         Arc::clone(&event_store) as Arc<dyn EventStore>,
@@ -242,7 +190,6 @@ async fn projector_single_event_type_project_called_during_catchup() {
     .spawn(&system)
     .await;
 
-    // Then
     wait_for_count(&count, &notify, 1).await;
     assert_eq!(
         count.load(Ordering::SeqCst),
@@ -251,15 +198,8 @@ async fn projector_single_event_type_project_called_during_catchup() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test: ProjectionContext provides the configured projection_id
-// ---------------------------------------------------------------------------
-
-/// The ProjectionContext passed to project() exposes the projection_id used
-/// when building ProjectorProps.
 #[tokio::test]
 async fn projector_context_provides_correct_projection_id() {
-    // Given
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
@@ -274,7 +214,6 @@ async fn projector_context_provides_correct_projection_id() {
     let notify_c = Arc::clone(&notify);
     let last_pid_c = Arc::clone(&last_pid);
 
-    // When
     let _proxy = ProjectorProps::new(
         projection_id.clone(),
         Arc::clone(&event_store) as Arc<dyn EventStore>,
@@ -294,7 +233,6 @@ async fn projector_context_provides_correct_projection_id() {
 
     wait_for_count(&count, &notify, 1).await;
 
-    // Then
     let seen = last_pid.lock().unwrap().clone();
     assert_eq!(
         seen,
@@ -303,21 +241,13 @@ async fn projector_context_provides_correct_projection_id() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test: ProjectionContext provides the event sequence
-// ---------------------------------------------------------------------------
-
-/// ctx.current_sequence() in project() returns the sequence of the event being
-/// processed.
 #[tokio::test]
 async fn projector_context_provides_current_sequence() {
-    // Given: event at sequence=3
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("proj-ctx-seq-agg");
 
-    // Append events at sequence 1, 2, 3 so the last processed sequence is 3
     for seq in 1..=3 {
         append_counted(&event_store, &agg_id, seq).await;
     }
@@ -329,7 +259,6 @@ async fn projector_context_provides_current_sequence() {
     let notify_c = Arc::clone(&notify);
     let last_seq_c = Arc::clone(&last_seq);
 
-    // When
     let _proxy = ProjectorProps::new(
         ProjectionId::new("proj-ctx-seq"),
         Arc::clone(&event_store) as Arc<dyn EventStore>,
@@ -349,7 +278,6 @@ async fn projector_context_provides_current_sequence() {
 
     wait_for_count(&count, &notify, 3).await;
 
-    // Then: the final project() call was for sequence=3
     assert_eq!(
         last_seq.load(Ordering::SeqCst),
         3,
@@ -357,15 +285,8 @@ async fn projector_context_provides_current_sequence() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test: multiple Projector<E> implementations on the same projector type
-// ---------------------------------------------------------------------------
-
-/// A single P implementing both Projector<Counted> and Projector<Labeled>
-/// dispatches each event type to the correct project() implementation.
 #[tokio::test]
 async fn projector_multiple_event_types_each_receives_correct_event() {
-    // Given: 2 Counted events and 1 Labeled event in the store
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
@@ -380,7 +301,6 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
     let lc_c = Arc::clone(&label_count);
     let notify_c = Arc::clone(&notify);
 
-    // When
     let _proxy = ProjectorProps::new(
         ProjectionId::new("proj-multi"),
         Arc::clone(&event_store) as Arc<dyn EventStore>,
@@ -399,11 +319,9 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
     .spawn(&system)
     .await;
 
-    // Wait for all 3 events (2 Counted + 1 Labeled)
-    wait_for_count(&count, &notify, 2).await; // wait for at least 2 Counted
-    wait_for_count(&label_count, &notify, 1).await; // wait for at least 1 Labeled
+    wait_for_count(&count, &notify, 2).await;
+    wait_for_count(&label_count, &notify, 1).await;
 
-    // Then
     assert_eq!(
         count.load(Ordering::SeqCst),
         2,
@@ -416,33 +334,19 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test: live event published after spawn is projected
-// ---------------------------------------------------------------------------
-
-/// A live event published to the subscribed Stream<EventEnvelope<Counted>>
-/// after spawning is projected by the process.
 #[tokio::test]
 async fn projector_live_event_is_projected_after_catchup() {
-    // Given: no stored events (empty catch-up), but a live stream subscribed
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("proj-live-agg");
     let projection_id = ProjectionId::new("proj-live");
 
-    // Spawn the live stream for EventEnvelope<Counted>
-    let stream = system
-        .spawn_stream::<EventEnvelope<Counted>>(ProcessName::new("proj-live-stream"))
-        .await
-        .expect("spawn_stream must succeed");
-
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    // When: spawn the projector subscribed to the live stream
     let _proxy = ProjectorProps::new(
         projection_id,
         Arc::clone(&event_store) as Arc<dyn EventStore>,
@@ -456,126 +360,16 @@ async fn projector_live_event_is_projected_after_catchup() {
         },
     )
     .with_event::<Counted>(Arc::new(UnitCodec))
-    .subscribe(stream.clone())
     .catchup_from_aggregate(agg_id.clone())
     .spawn(&system)
     .await;
 
-    // Publish a live event
-    stream
-        .publish(EventEnvelope {
-            aggregate_id: agg_id,
-            sequence: 1,
-            global_sequence: 1,
-            event: Counted,
-        })
-        .await
-        .expect("publish must succeed");
+    append_counted(&event_store, &agg_id, 1).await;
 
-    // Then: project() is called for the live event
     wait_for_count(&count, &notify, 1).await;
     assert_eq!(
         count.load(Ordering::SeqCst),
         1,
         "Projector<Counted>::project() must be called once for the live event"
     );
-}
-
-// ---------------------------------------------------------------------------
-// Re-prevention test: code-quality (ARCH-NEW-props-redundant-bounds-L119)
-//
-// `subscribe<E>` must compile with `where E: Event` alone.
-// `Event: Clone + Send + Sync + 'static`, so listing `Clone + Sync` explicitly
-// is redundant.  This test verifies that a type implementing only `Event`
-// (no additional explicit supertraits beyond those required by `Event`) works
-// with `subscribe`.  If the redundant `Clone + Sync` bounds are ever re-added
-// this test continues to compile (they are implied by `Event`), but the doc
-// comment and this marker keep the intent visible for reviewers.
-// ---------------------------------------------------------------------------
-
-/// Verifies that `subscribe` only requires `E: Event` — `Clone` and `Sync` come
-/// from `Event`'s supertraits, not from a separate bound on `subscribe`.
-#[tokio::test]
-async fn subscribe_requires_only_event_bound() {
-    // `Minimal` derives nothing beyond `Clone` (required by `Event: Clone`).
-    // No explicit `Sync` derive is needed because `Clone` structs are `Sync`
-    // by the auto-impl when all fields are `Sync`.
-    #[derive(Clone)]
-    struct Minimal;
-
-    impl Event for Minimal {
-        const EVENT_TYPE: EventType = EventType::from_str("Minimal");
-    }
-
-    struct MinimalProjector {
-        count: Arc<AtomicUsize>,
-        notify: Arc<Notify>,
-    }
-
-    #[async_trait]
-    impl Projector<Minimal> for MinimalProjector {
-        type Error = std::convert::Infallible;
-        async fn project(
-            &mut self,
-            _event: Minimal,
-            _ctx: &mut ProjectionContext<'_, ()>,
-        ) -> Result<(), Self::Error> {
-            self.count.fetch_add(1, Ordering::SeqCst);
-            self.notify.notify_one();
-            Ok(())
-        }
-    }
-
-    struct MinimalCodec;
-    impl Codec<Minimal> for MinimalCodec {
-        type Error = std::convert::Infallible;
-        fn encode(_event: &Minimal) -> Result<Bytes, Self::Error> {
-            Ok(Bytes::new())
-        }
-        fn decode(_payload: &[u8]) -> Result<Minimal, Self::Error> {
-            Ok(Minimal)
-        }
-    }
-
-    let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
-    let projection_id = ProjectionId::new("minimal-bounds");
-    let agg_id = AggregateId::new("minimal-agg");
-
-    let stream = system
-        .spawn_stream::<EventEnvelope<Minimal>>(ProcessName::new("minimal-stream"))
-        .await
-        .expect("spawn_stream must succeed");
-
-    let count = Arc::new(AtomicUsize::new(0));
-    let notify = Arc::new(Notify::new());
-    let count_c = Arc::clone(&count);
-    let notify_c = Arc::clone(&notify);
-
-    // This line must compile with `where E: Event` only — no extra `Clone + Sync`.
-    let _proxy = ProjectorProps::new(
-        projection_id,
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || MinimalProjector { count: Arc::clone(&count_c), notify: Arc::clone(&notify_c) },
-    )
-    .with_event::<Minimal>(Arc::new(MinimalCodec))
-    .subscribe(stream.clone())  // <-- compile-fails if `subscribe` requires `Clone + Sync` explicitly
-    .catchup_from_aggregate(agg_id.clone())
-    .spawn(&system)
-    .await;
-
-    stream
-        .publish(EventEnvelope {
-            aggregate_id: agg_id,
-            sequence: 1,
-            global_sequence: 1,
-            event: Minimal,
-        })
-        .await
-        .expect("publish must succeed");
-
-    wait_for_count(&count, &notify, 1).await;
-    assert_eq!(count.load(Ordering::SeqCst), 1);
 }

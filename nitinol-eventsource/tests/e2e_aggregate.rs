@@ -153,9 +153,7 @@ async fn e2e_persisted_event_survives_process_restart() {
     }
 
     // When: spawn process 2 for the same AggregateId — triggers replay in on_start
-    let proxy2 = system
-        .spawn_aggregate::<Counter>(id, store)
-        .await;
+    let proxy2 = system.spawn_aggregate::<Counter>(id, store).await;
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: state was fully restored from the persisted event

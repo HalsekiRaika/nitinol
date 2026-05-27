@@ -5,7 +5,9 @@
 
 use async_trait::async_trait;
 
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, Receive as EvtReceive, Snapshotable};
+use nitinol_eventsource::{
+    Aggregate, Context, Decider, Effect, Event, Receive as EvtReceive, Snapshotable,
+};
 use nitinol_persistence::EventType;
 
 #[derive(Clone, Debug, PartialEq)]

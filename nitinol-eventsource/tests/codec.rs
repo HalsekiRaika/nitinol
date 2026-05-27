@@ -85,7 +85,10 @@ fn assert_erased_codec<E: Send + Sync + 'static>(_: &Arc<dyn ErasedCodec<E>>) {}
 #[test]
 fn codec_encode_returns_ok_bytes_for_valid_event() {
     // Given
-    let event = MyEvent { value: 42, name: "hello".to_string() };
+    let event = MyEvent {
+        value: 42,
+        name: "hello".to_string(),
+    };
 
     // When
     // Qualified syntax required: the blanket impl `ErasedCodec<E> for C: Codec<E>`
@@ -93,21 +96,30 @@ fn codec_encode_returns_ok_bytes_for_valid_event() {
     let result = <JsonCodec as Codec<MyEvent>>::encode(&event);
 
     // Then
-    assert!(result.is_ok(), "encode must succeed for a valid, serialisable event");
+    assert!(
+        result.is_ok(),
+        "encode must succeed for a valid, serialisable event"
+    );
 }
 
 /// Codec::decode returns Ok(E) for a valid payload produced by encode.
 #[test]
 fn codec_decode_returns_ok_for_payload_from_encode() {
     // Given
-    let event = MyEvent { value: 7, name: "world".to_string() };
+    let event = MyEvent {
+        value: 7,
+        name: "world".to_string(),
+    };
     let bytes = <JsonCodec as Codec<MyEvent>>::encode(&event).expect("encode must succeed");
 
     // When
     let result: Result<MyEvent, _> = <JsonCodec as Codec<MyEvent>>::decode(&bytes);
 
     // Then
-    assert!(result.is_ok(), "decode must succeed for payload produced by encode");
+    assert!(
+        result.is_ok(),
+        "decode must succeed for payload produced by encode"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -118,28 +130,42 @@ fn codec_decode_returns_ok_for_payload_from_encode() {
 #[test]
 fn codec_encode_decode_roundtrip_preserves_value() {
     // Given
-    let original = MyEvent { value: 99, name: "roundtrip".to_string() };
+    let original = MyEvent {
+        value: 99,
+        name: "roundtrip".to_string(),
+    };
 
     // When
     let bytes = <JsonCodec as Codec<MyEvent>>::encode(&original).expect("encode must succeed");
-    let decoded: MyEvent = <JsonCodec as Codec<MyEvent>>::decode(&bytes).expect("decode must succeed");
+    let decoded: MyEvent =
+        <JsonCodec as Codec<MyEvent>>::decode(&bytes).expect("decode must succeed");
 
     // Then
-    assert_eq!(decoded, original, "decoded value must equal the original event");
+    assert_eq!(
+        decoded, original,
+        "decoded value must equal the original event"
+    );
 }
 
 /// Roundtrip over a zero-value event preserves zero.
 #[test]
 fn codec_roundtrip_zero_value_event_preserved() {
     // Given
-    let original = MyEvent { value: 0, name: String::new() };
+    let original = MyEvent {
+        value: 0,
+        name: String::new(),
+    };
 
     // When
     let bytes = <JsonCodec as Codec<MyEvent>>::encode(&original).expect("encode must succeed");
-    let decoded: MyEvent = <JsonCodec as Codec<MyEvent>>::decode(&bytes).expect("decode must succeed");
+    let decoded: MyEvent =
+        <JsonCodec as Codec<MyEvent>>::decode(&bytes).expect("decode must succeed");
 
     // Then
-    assert_eq!(decoded, original, "zero-value event must survive roundtrip unchanged");
+    assert_eq!(
+        decoded, original,
+        "zero-value event must survive roundtrip unchanged"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -162,14 +188,23 @@ fn codec_impl_can_be_upcast_to_arc_dyn_erased_codec() {
 fn erased_codec_encode_via_blanket_impl_succeeds() {
     // Given
     let codec: Arc<dyn ErasedCodec<MyEvent>> = Arc::new(JsonCodec);
-    let event = MyEvent { value: 5, name: "erased".to_string() };
+    let event = MyEvent {
+        value: 5,
+        name: "erased".to_string(),
+    };
 
     // When
     let result = codec.encode(&event);
 
     // Then
-    assert!(result.is_ok(), "ErasedCodec encode must succeed via blanket impl");
-    assert!(!result.unwrap().is_empty(), "encoded bytes must not be empty for a non-trivial event");
+    assert!(
+        result.is_ok(),
+        "ErasedCodec encode must succeed via blanket impl"
+    );
+    assert!(
+        !result.unwrap().is_empty(),
+        "encoded bytes must not be empty for a non-trivial event"
+    );
 }
 
 /// ErasedCodec roundtrip via blanket impl preserves the value.
@@ -177,14 +212,24 @@ fn erased_codec_encode_via_blanket_impl_succeeds() {
 fn erased_codec_roundtrip_via_blanket_impl_preserves_value() {
     // Given
     let codec: Arc<dyn ErasedCodec<MyEvent>> = Arc::new(JsonCodec);
-    let original = MyEvent { value: 123, name: "erased-roundtrip".to_string() };
+    let original = MyEvent {
+        value: 123,
+        name: "erased-roundtrip".to_string(),
+    };
 
     // When
-    let bytes = codec.encode(&original).expect("ErasedCodec encode must succeed");
-    let decoded = codec.decode(&bytes).expect("ErasedCodec decode must succeed");
+    let bytes = codec
+        .encode(&original)
+        .expect("ErasedCodec encode must succeed");
+    let decoded = codec
+        .decode(&bytes)
+        .expect("ErasedCodec decode must succeed");
 
     // Then
-    assert_eq!(decoded, original, "ErasedCodec roundtrip must preserve the event value");
+    assert_eq!(
+        decoded, original,
+        "ErasedCodec roundtrip must preserve the event value"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +277,10 @@ fn erased_codec_decode_wrong_shape_json_produces_codec_error_decode() {
 fn erased_codec_encode_failure_produces_codec_error_encode() {
     // Given
     let codec: Arc<dyn ErasedCodec<MyEvent>> = Arc::new(AlwaysFailCodec);
-    let event = MyEvent { value: 1, name: "x".to_string() };
+    let event = MyEvent {
+        value: 1,
+        name: "x".to_string(),
+    };
 
     // When
     let result = codec.encode(&event);

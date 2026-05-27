@@ -1,5 +1,5 @@
 mod common;
-use common::{Shape, TestMsg, TestProcess, shape_of};
+use common::{shape_of, Shape, TestMsg, TestProcess};
 use nitinol_eventsource::Effect;
 use nitinol_runtime::process::Props;
 use nitinol_runtime::ProcessSystem;

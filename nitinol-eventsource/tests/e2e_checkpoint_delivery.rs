@@ -161,9 +161,7 @@ async fn wait_for_checkpoint(
         }
     })
     .await
-    .unwrap_or_else(|_| {
-        panic!("timed out waiting for checkpoint to reach {:?}", expected)
-    });
+    .unwrap_or_else(|_| panic!("timed out waiting for checkpoint to reach {:?}", expected));
 }
 
 /// Poll until the counter reaches `expected` or the timeout elapses.
