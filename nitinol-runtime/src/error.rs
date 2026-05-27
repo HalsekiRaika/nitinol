@@ -22,4 +22,4 @@ pub struct SpawnError {
 
 #[derive(Debug, thiserror::Error)]
 #[error("handler returned an error")]
-pub(crate) struct HandlerError;
+pub struct HandlerError;

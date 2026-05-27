@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
+use crate::process::driver::{Driver, MessageDriver};
 use crate::process::props::SupervisionStrategy;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
@@ -45,12 +46,14 @@ pub(crate) async fn run<P: Process>(
         None => format!("process-{}", pid),
     };
 
+    let driver = MessageDriver::new(user_rx);
+
     let fut = lifecycle_loop(
         process,
         process_name,
         registry,
         pid,
-        user_rx,
+        driver,
         sys_tx,
         sys_rx,
         timeout,
@@ -73,12 +76,12 @@ pub(crate) async fn run<P: Process>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn lifecycle_loop<P: Process>(
+async fn lifecycle_loop<P: Process, D: Driver<P>>(
     process: P,
     process_name: Option<ProcessName>,
     registry: ProcessRegistry,
     pid: Pid,
-    user_rx: mpsc::Receiver<UserTask<P>>,
+    driver: D,
     sys_tx: mpsc::Sender<SystemSignal>,
     sys_rx: mpsc::Receiver<SystemSignal>,
     timeout: Option<Duration>,
@@ -86,7 +89,7 @@ async fn lifecycle_loop<P: Process>(
     supervision: SupervisionConfig<P>,
 ) {
     let mut state = process;
-    let mut user_rx = user_rx;
+    let mut driver = driver;
     let mut sys_rx = sys_rx;
     let mut watchers: HashSet<Pid> = HashSet::new();
     let mut restart_tracker = RestartTracker::new();
@@ -97,6 +100,15 @@ async fn lifecycle_loop<P: Process>(
         registry: registry.clone(),
         sys_tx: sys_tx.clone(),
         dead_letter: dead_letter.clone(),
+    };
+
+    // A driver that opts out (e.g. tick / poll sources) has no meaningful
+    // "idle" notion, so the idle-timeout timer must stay disarmed even when
+    // the caller configured `IdleTimeout::After(_)`.
+    let timeout = if driver.supports_idle_timeout() {
+        timeout
+    } else {
+        None
     };
 
     let timeout_fn = move || match timeout {
@@ -128,10 +140,10 @@ async fn lifecycle_loop<P: Process>(
                     }
                 }
             }
-            task = user_rx.recv() => {
-                match task {
-                    Some(task) => {
-                        let result = task.run(&mut state, &mut ctx).await;
+            event = driver.next() => {
+                match event {
+                    Some(ev) => {
+                        let result = driver.apply(&mut state, &mut ctx, ev).await;
                         timeout.set(timeout_fn());
                         if result.is_ok() {
                             continue;
@@ -144,7 +156,6 @@ async fn lifecycle_loop<P: Process>(
                                     state.on_stop(&mut ctx).await;
                                     state = (supervision.producer)();
                                     state.on_start(&mut ctx).await;
-                                    // Loop continues; watchers set is preserved.
                                 } else {
                                     break TerminatedReason::Stopped;
                                 }
@@ -182,6 +193,117 @@ async fn lifecycle_loop<P: Process>(
                     why: reason,
                 })
                 .await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::time::Duration;
+
+    use crate::error::HandlerError;
+    use crate::process::props::SupervisionStrategy;
+    use crate::process::supervision::SupervisionConfig;
+    use crate::process::task::UserTask;
+
+    struct NoOpProcess;
+    impl Process for NoOpProcess {}
+
+    struct PendingNeverIdleDriver;
+
+    impl Driver<NoOpProcess> for PendingNeverIdleDriver {
+        type Event = ();
+
+        fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
+            std::future::pending()
+        }
+
+        fn apply(
+            &mut self,
+            _state: &mut NoOpProcess,
+            _ctx: &mut ProcessContext,
+            _ev: (),
+        ) -> impl Future<Output = Result<(), HandlerError>> + Send {
+            async { Ok(()) }
+        }
+
+        fn supports_idle_timeout(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_loop_disarms_idle_timer_when_driver_opts_out() {
+        let registry = ProcessRegistry::new();
+        let pid = Pid::next();
+        let (sys_tx, sys_rx) = mpsc::channel::<SystemSignal>(32);
+
+        let watcher_pid = Pid::next();
+        let (watcher_user_tx, _watcher_user_rx) = mpsc::channel::<UserTask<NoOpProcess>>(32);
+        let (watcher_sys_tx, mut watcher_sys_rx) = mpsc::channel::<SystemSignal>(32);
+        let watcher_proxy = ProcessProxy::<NoOpProcess> {
+            pid: watcher_pid,
+            user_tx: watcher_user_tx,
+            sys_tx: watcher_sys_tx,
+            dead_letter: None,
+        };
+        registry
+            .register(watcher_pid, watcher_proxy.into(), None)
+            .await;
+
+        sys_tx
+            .send(SystemSignal::Watch { watcher_pid })
+            .await
+            .unwrap();
+
+        let supervision = SupervisionConfig {
+            producer: Box::new(|| NoOpProcess),
+            strategy: SupervisionStrategy::Stop,
+        };
+
+        let loop_handle = tokio::spawn(lifecycle_loop(
+            NoOpProcess,
+            None,
+            registry,
+            pid,
+            PendingNeverIdleDriver,
+            sys_tx.clone(),
+            sys_rx,
+            Some(Duration::from_millis(50)),
+            None,
+            supervision,
+        ));
+
+        // Wait well past the configured 50 ms timeout — if the timer were still
+        // armed, the loop would already be finished at this point.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(
+            !loop_handle.is_finished(),
+            "lifecycle_loop must not exit due to idle timeout when \
+             supports_idle_timeout() returns false"
+        );
+
+        sys_tx.send(SystemSignal::Stop).await.unwrap();
+        loop_handle.await.expect("lifecycle_loop task panicked");
+
+        let signal = watcher_sys_rx
+            .recv()
+            .await
+            .expect("watcher must receive a Terminated signal after Stop");
+        match signal {
+            SystemSignal::Terminated { who, why } => {
+                assert_eq!(who, pid, "Terminated.who must equal the target pid");
+                assert_eq!(
+                    why,
+                    TerminatedReason::Stopped,
+                    "expected TerminatedReason::Stopped, got {why:?}: \
+                     idle timer must not have fired when supports_idle_timeout() is false"
+                );
+            }
+            other => panic!("expected SystemSignal::Terminated, got {other:?}"),
         }
     }
 }

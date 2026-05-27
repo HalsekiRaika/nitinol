@@ -1,5 +1,6 @@
 mod context;
 mod dead_letter;
+mod driver;
 mod lifecycle;
 mod message;
 mod props;
@@ -15,6 +16,7 @@ pub(crate) mod watch;
 pub use self::{
     context::*,
     dead_letter::{DeadLetter, SuppressDeadLetterLog},
+    driver::Driver,
     message::*,
     props::*,
     proxy::*,
