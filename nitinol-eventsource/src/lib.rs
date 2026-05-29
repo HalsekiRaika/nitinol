@@ -47,8 +47,11 @@ pub use self::event::Event;
 pub use self::receive::Receive;
 
 pub use self::error::{AskError, ExecError, TellError};
-pub use self::process::{AggregateProps, AggregateProxy, CodecSet, CodecUnset};
+pub use self::process::{AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset};
 pub use self::process::{SnapshotPersistor, SnapshotPersistorProxy};
+
+#[cfg(feature = "test-helpers")]
+pub mod test_helpers;
 
 pub use self::projection::{
     EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, Projector,

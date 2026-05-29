@@ -4,7 +4,7 @@
 //! newtype — independent of `AggregateId` — so the type system can keep
 //! saga-owned streams and aggregate-owned streams distinct, even though both
 //! are persisted into the same physical `EventStore` via the shared
-//! `Borrow<str>` key abstraction (Issue #40, spec category F-21 (a)).
+//! `Borrow<str>` key abstraction.
 
 use std::borrow::Borrow;
 

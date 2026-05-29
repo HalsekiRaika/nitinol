@@ -7,6 +7,9 @@ authors.workspace = true
 repository.workspace = true
 description = "Effect ADT and event sourcing utilities for nitinol"
 
+[features]
+test-helpers = []
+
 [dependencies]
 nitinol-runtime = { path = "../nitinol-runtime" }
 nitinol-persistence = { path = "../nitinol-persistence" }

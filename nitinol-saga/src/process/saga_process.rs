@@ -83,7 +83,13 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
             return Ok(());
         }
 
-        let mut saga_ctx = SagaContext::new(self.saga_id.clone(), self.sequence);
+        let mut saga_ctx = SagaContext::new(
+            self.saga_id.clone(),
+            self.sequence,
+            msg.aggregate_id.clone(),
+            msg.sequence,
+            jiff::Timestamp::now(),
+        );
         let effect = match self.state.handle(msg.event, &mut saga_ctx).await {
             Ok(effect) => effect,
             Err(e) => {

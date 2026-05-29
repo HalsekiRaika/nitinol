@@ -1,4 +1,6 @@
-use nitinol_eventsource::{Aggregate, AggregateProxy, Decider};
+use std::marker::PhantomData;
+
+use nitinol_eventsource::{Aggregate, AggregateTellTarget, Decider};
 
 use crate::effect::core::{SagaEffect, SagaTellEffect};
 use crate::effect::tell::TypedSagaTell;
@@ -32,12 +34,17 @@ impl<E> SagaEffect<E> {
     /// fire-and-forget: if the send fails, the error is logged and the saga
     /// continues (consistent with `Effect::Side` semantics in
     /// `nitinol-eventsource`).
-    pub fn tell<A, C>(target: AggregateProxy<A>, cmd: C) -> Self
+    pub fn tell<A, C, T>(target: T, cmd: C) -> Self
     where
         A: Aggregate + Decider<C>,
         C: Send + Sync + 'static,
+        T: AggregateTellTarget<A>,
     {
-        Self::Tell(SagaTellEffect(Box::new(TypedSagaTell { target, cmd })))
+        Self::Tell(SagaTellEffect(Box::new(TypedSagaTell {
+            target,
+            cmd,
+            _phantom: PhantomData::<fn() -> A>,
+        })))
     }
 
     /// Associative binary operation of the Monoid.
