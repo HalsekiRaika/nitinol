@@ -7,10 +7,14 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::{ProcessSystem, Props};
+use tokio::sync::Mutex;
 
+use crate::effect::TellIntent;
 use crate::id::SagaId;
+use crate::outbox::RetryPolicy;
+use crate::process::pending_intents::PendingIntents;
 use crate::process::proxy::SagaProxy;
-use crate::process::saga_process::{RouteFn, SagaProcess};
+use crate::process::saga_process::{CrashRestartFactory, RouteFn, SagaProcess};
 use crate::saga::Saga;
 
 /// Marker: the event codec has not yet been provided.
@@ -45,6 +49,8 @@ pub struct SagaProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
     producer: Arc<dyn Fn() -> S + Send + Sync>,
     codec: C,
     subscription: Sub,
+    pending_intents: PendingIntents,
+    crash_restart_factory: Option<CrashRestartFactory>,
 }
 
 impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
@@ -65,6 +71,8 @@ impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
             producer: Arc::new(producer),
             codec: CodecUnset,
             subscription: SubscriptionUnset,
+            pending_intents: PendingIntents::new(),
+            crash_restart_factory: None,
         }
     }
 }
@@ -81,6 +89,8 @@ impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
             producer: self.producer,
             codec: CodecSet { codec },
             subscription: self.subscription,
+            pending_intents: self.pending_intents,
+            crash_restart_factory: self.crash_restart_factory,
         }
     }
 }
@@ -116,7 +126,49 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
                 cursor,
                 route_fn,
             },
+            pending_intents: self.pending_intents,
+            crash_restart_factory: self.crash_restart_factory,
         }
+    }
+}
+
+impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
+    /// Provide an external [`PendingIntents`] registry.
+    ///
+    /// By default [`spawn`][SagaProps::spawn] creates a fresh, saga-local
+    /// registry.  Providing one here enables sharing the registry across
+    /// multiple spawns of the same saga — used in crate-internal tests of
+    /// supervised restart behaviour.
+    #[cfg(test)]
+    pub(crate) fn with_pending_intents(mut self, pending_intents: PendingIntents) -> Self {
+        self.pending_intents = pending_intents;
+        self
+    }
+
+    /// Register a factory for crash-restart re-dispatch.
+    ///
+    /// When the saga process starts after a full OS-process crash, the
+    /// in-memory [`crate::process::pending_intents::PendingIntents`] registry
+    /// is gone.  This factory is called with the crash-restart bytes stored in
+    /// each pending `TellRequested` outbox marker (supplied at intent
+    /// construction time via [`TellIntent::new_with_crash_restart`]) and must
+    /// return a fresh [`TellIntent`] that re-sends the same command to the
+    /// same target.
+    ///
+    /// If the factory returns `None` for a given payload (e.g. the intent type
+    /// is not recognised), a synthetic `TellFailed` is appended to the saga
+    /// stream so the outbox reaches a consistent terminal state, and a warning
+    /// is emitted.
+    ///
+    /// `TellRequested` markers written without crash-restart bytes (via
+    /// [`TellIntent::new`]) are never passed to this factory; they fall through
+    /// to the synthetic `TellFailed` path.
+    pub fn with_crash_restart_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn(&[u8]) -> Option<TellIntent> + Send + Sync + 'static,
+    {
+        self.crash_restart_factory = Some(Arc::new(factory));
+        self
     }
 }
 
@@ -188,6 +240,8 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let route_fn_for_props = Arc::clone(&route_fn);
         let producer_for_props = Arc::clone(&producer);
         let ds_keepalive_for_props = Arc::clone(&ds_proxy);
+        let pending_intents_for_props = self.pending_intents;
+        let crash_restart_factory_for_props = self.crash_restart_factory;
 
         let props = Props::new(move || SagaProcess::<S> {
             state: producer_for_props(),
@@ -195,7 +249,11 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
             store: Arc::clone(&store_for_props),
             codec: Arc::clone(&codec_for_props),
             route_fn: Arc::clone(&route_fn_for_props),
-            sequence: 0,
+            sequence: Arc::new(Mutex::new(0)),
+            retry_policy: RetryPolicy::default(),
+            pending_intents: pending_intents_for_props.clone(),
+            crash_restart_factory: crash_restart_factory_for_props.clone(),
+            failed_tell_ids: Arc::new(Mutex::new(Vec::new())),
             _ds_keepalive: Arc::clone(&ds_keepalive_for_props),
         });
 

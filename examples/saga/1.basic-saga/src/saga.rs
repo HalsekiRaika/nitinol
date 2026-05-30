@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
 
 use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::EventType;
@@ -22,7 +19,6 @@ impl Event for ReservationRequested {
 
 pub struct ReservationSaga {
     pub inventory: AggregateProxy<Inventory>,
-    pub done_notify: Arc<Notify>,
 }
 
 #[async_trait]
@@ -42,13 +38,7 @@ impl Saga for ReservationSaga {
         let persist = SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
         });
-        let tell = SagaEffect::tell(
-            self.inventory.clone(),
-            Reserve {
-                sku: event.sku,
-                done_notify: Arc::clone(&self.done_notify),
-            },
-        );
+        let tell = SagaEffect::tell(self.inventory.clone(), Reserve { sku: event.sku });
         Ok(persist.combine(tell))
     }
 }

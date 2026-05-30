@@ -33,11 +33,12 @@ mod context;
 mod effect;
 mod error;
 mod id;
+mod outbox;
 mod process;
 mod saga;
 
 pub use self::context::SagaContext;
-pub use self::effect::{SagaEffect, SagaTellEffect};
+pub use self::effect::{SagaEffect, Schedule, TellIntent};
 pub use self::id::SagaId;
 pub use self::process::{
     CodecSet, CodecUnset, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset,

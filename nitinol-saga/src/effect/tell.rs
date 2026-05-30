@@ -9,8 +9,11 @@ use crate::error::SagaSideEffectError;
 /// A side effect that sends a typed command to a target aggregate process.
 ///
 /// The `A: Decider<C>` constraint is enforced at construction time
-/// (via [`crate::SagaEffect::tell`]), so a type mismatch becomes a compile
-/// error rather than a runtime failure.
+/// (via [`crate::SagaEffect::tell`] / [`crate::TellIntent::new`]), so a type
+/// mismatch becomes a compile error rather than a runtime failure.
+///
+/// `C: Clone` is required because the retry executor keeps the command in
+/// memory across attempts and re-`tell`s with a cloned copy on every retry.
 pub(crate) struct TypedSagaTell<A, C, T>
 where
     A: Aggregate,
@@ -24,13 +27,14 @@ where
 impl<A, C, T> SagaSideEffect for TypedSagaTell<A, C, T>
 where
     A: Aggregate + Decider<C>,
-    C: Send + Sync + 'static,
+    C: Clone + Send + Sync + 'static,
     T: AggregateTellTarget<A>,
 {
-    fn execute(self: Box<Self>) -> BoxFuture<'static, Result<(), SagaSideEffectError>> {
+    fn execute_once(&self) -> BoxFuture<'_, Result<(), SagaSideEffectError>> {
+        let cmd = self.cmd.clone();
         Box::pin(async move {
             self.target
-                .tell(self.cmd)
+                .tell(cmd)
                 .await
                 .map_err(|e| SagaSideEffectError::Send(Box::new(e)))
         })

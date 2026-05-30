@@ -1,0 +1,552 @@
+//! Spec C-9 / replay path — crash-restart re-dispatch via `SagaEffect::tell`.
+//!
+//! `SagaEffect::tell` serializes the command as JSON and stores the bytes as
+//! the crash-restart payload in the `TellRequested` outbox marker.  When the
+//! saga process restarts after a full OS-process crash (no `PendingIntents`),
+//! a factory registered via `SagaProps::with_crash_restart_factory` can
+//! deserialize those bytes and reconstruct the `TellIntent` for re-dispatch.
+//!
+//! This test seeds a `TellRequested` with JSON crash-restart bytes (matching
+//! what `SagaEffect::tell` produces), registers a factory that deserializes
+//! and reconstructs the intent, and verifies that `TellAcked` is produced
+//! (not `TellFailed`).
+
+mod common;
+use common::JsonCodec;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures_util::TryStreamExt;
+use serde::{Deserialize, Serialize};
+
+use nitinol_eventsource::test_helpers::MockAggregateProxy;
+use nitinol_eventsource::{
+    system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
+};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::{AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_runtime::ProcessSystem;
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
+
+const OUTBOX_TELL_ACKED: &str = "nitinol.saga.outbox.tell_acked";
+const OUTBOX_TELL_FAILED: &str = "nitinol.saga.outbox.tell_failed";
+
+// ---------------------------------------------------------------------------
+// Domain types
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OrderPlaced {
+    sku: String,
+}
+
+impl Event for OrderPlaced {
+    const EVENT_TYPE: EventType = EventType::from_str("tell_crash_restart.OrderPlaced");
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ReservationRequested {
+    sku: String,
+}
+
+impl Event for ReservationRequested {
+    const EVENT_TYPE: EventType = EventType::from_str("tell_crash_restart.ReservationRequested");
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct Reserved {
+    sku: String,
+}
+
+impl Event for Reserved {
+    const EVENT_TYPE: EventType = EventType::from_str("tell_crash_restart.Reserved");
+}
+
+#[derive(Default)]
+struct Inventory;
+
+impl Aggregate for Inventory {
+    type Event = Reserved;
+
+    fn apply(&mut self, _event: Reserved) {}
+}
+
+/// `Reserve` derives `Clone + Serialize + Deserialize` because `SagaEffect::tell`
+/// serializes the command as crash-restart payload into the `TellRequested` marker.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct Reserve {
+    sku: String,
+}
+
+#[async_trait]
+impl Decider<Reserve> for Inventory {
+    type Rejection = std::convert::Infallible;
+
+    async fn decide(
+        &self,
+        cmd: Reserve,
+        _ctx: &mut Context,
+    ) -> Result<Effect<Reserved>, Self::Rejection> {
+        Ok(Effect::persist(Reserved { sku: cmd.sku }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inert saga — only the on_start replay path is exercised.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct InertSaga;
+
+// ---------------------------------------------------------------------------
+// Active saga — calls SagaEffect::tell in handle so the full builder path
+// (helper.rs) is exercised.  Used by the payload-format regression test.
+// ---------------------------------------------------------------------------
+
+struct ActiveSaga {
+    inventory: MockAggregateProxy<Inventory>,
+}
+
+#[async_trait]
+impl Saga for ActiveSaga {
+    type SubscribedEvent = OrderPlaced;
+    type Event = ReservationRequested;
+    type State = ();
+    type Error = std::convert::Infallible;
+
+    fn apply(&mut self, _event: Self::Event) {}
+
+    async fn handle(
+        &mut self,
+        event: Self::SubscribedEvent,
+        _ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        Ok(SagaEffect::tell(
+            self.inventory.clone(),
+            Reserve { sku: event.sku },
+        ))
+    }
+}
+
+#[async_trait]
+impl Saga for InertSaga {
+    type SubscribedEvent = OrderPlaced;
+    type Event = ReservationRequested;
+    type State = ();
+    type Error = std::convert::Infallible;
+
+    fn apply(&mut self, _event: Self::Event) {}
+
+    async fn handle(
+        &mut self,
+        _event: Self::SubscribedEvent,
+        _ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        Ok(SagaEffect::None)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Append an `OrderPlaced` event to an upstream store so a subscribed saga
+/// will fire `handle`.
+async fn append_order_placed(store: &Arc<dyn EventStore>, stream_key: &str, sequence: u64, sku: &str) {
+    let payload = serde_json::to_vec(&OrderPlaced { sku: sku.to_owned() })
+        .map(Bytes::from)
+        .expect("encode OrderPlaced must succeed");
+    append_raw(
+        store,
+        stream_key,
+        sequence,
+        EventType::from_str("tell_crash_restart.OrderPlaced"),
+        payload,
+    )
+    .await;
+}
+
+/// Encode a `TellRequested` payload as `SagaEffect::tell` would: 8-byte
+/// big-endian `tell_id` followed by JSON-serialized command bytes.
+fn encode_tell_requested_with_json_cmd<C: Serialize>(tell_id: u64, cmd: &C) -> Bytes {
+    let mut buf = tell_id.to_be_bytes().to_vec();
+    let json = serde_json::to_vec(cmd).expect("command serialization must succeed");
+    buf.extend_from_slice(&json);
+    Bytes::from(buf)
+}
+
+async fn append_raw(
+    store: &Arc<dyn EventStore>,
+    stream_key: &str,
+    sequence: u64,
+    event_type: EventType,
+    payload: Bytes,
+) {
+    store
+        .append(
+            stream_key,
+            vec![AppendingEvent {
+                sequence,
+                event_type,
+                payload,
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("append must succeed");
+}
+
+async fn load_saga_events(
+    store: &Arc<dyn EventStore>,
+    saga_id: &SagaId,
+) -> Vec<LoadedEvent> {
+    store
+        .load(LoadQuery::by_stream(saga_id))
+        .await
+        .expect("load saga stream must succeed")
+        .try_collect()
+        .await
+        .expect("collect saga events must succeed")
+}
+
+// ---------------------------------------------------------------------------
+// Test
+// ---------------------------------------------------------------------------
+
+/// Regression for AI-45-001: `SagaEffect::tell` serializes the command as
+/// JSON crash-restart bytes in the `TellRequested` marker.  After a full
+/// OS-process crash (no `PendingIntents`), a factory registered via
+/// `SagaProps::with_crash_restart_factory` can deserialize those bytes and
+/// re-dispatch the intent.  A successful re-dispatch must produce `TellAcked`
+/// and zero `TellFailed`.
+#[tokio::test]
+async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
+    let mock = MockAggregateProxy::<Inventory>::new();
+
+    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::new(ps)
+        .with_codec::<JsonCodec>()
+        .build();
+
+    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_id = SagaId::new("tell-crash-restart-saga-1");
+
+    // Seed a TellRequested with tell_id = 1 and JSON crash-restart bytes that
+    // match the output of `SagaEffect::tell(target, Reserve { sku: "SKU-CR-1" })`.
+    let payload = encode_tell_requested_with_json_cmd(1, &Reserve {
+        sku: "SKU-CR-1".to_owned(),
+    });
+    append_raw(
+        &saga_store,
+        saga_id.as_str(),
+        1,
+        EventType::from_str("nitinol.saga.outbox.tell_requested"),
+        payload,
+    )
+    .await;
+
+    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+
+    let routed = saga_id.clone();
+    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
+
+    // Factory: deserialize the JSON bytes back into a `Reserve` command and
+    // reconstruct the `TellIntent` with the mock target.  This mirrors what
+    // the saga owner would register to re-dispatch `SagaEffect::tell` sends.
+    let mock_for_factory = mock.clone();
+    let factory = move |bytes: &[u8]| -> Option<TellIntent> {
+        let cmd: Reserve = serde_json::from_slice(bytes).ok()?;
+        Some(TellIntent::new::<Inventory, Reserve, _>(
+            mock_for_factory.clone(),
+            cmd,
+        ))
+    };
+
+    // No PendingIntents — simulates a full OS-process crash (in-memory state gone).
+    let _saga_proxy = SagaProps::<InertSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        InertSaga::default,
+    )
+    .with_codec(system.codec::<ReservationRequested>())
+    .with_subscription(
+        Arc::clone(&upstream_store),
+        system.codec::<OrderPlaced>(),
+        SequenceCursor::Stream {
+            key: "no-such-stream".to_owned(),
+            after: 0,
+        },
+        route_fn,
+    )
+    .with_crash_restart_factory(factory)
+    .spawn(system.process_system())
+    .await;
+
+    // Wait for the crash-restart re-dispatch to produce TellAcked.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let events = loop {
+        let events = load_saga_events(&saga_store, &saga_id).await;
+        let acked_count = events
+            .iter()
+            .filter(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED)
+            .count();
+        if acked_count >= 1 {
+            break events;
+        }
+        if std::time::Instant::now() >= deadline {
+            let event_types: Vec<_> = events.iter().map(|e| e.event_type.as_str()).collect();
+            panic!(
+                "timed out waiting for TellAcked after crash-restart re-dispatch \
+                 (event_types: {:?})",
+                event_types
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let acked_count = events
+        .iter()
+        .filter(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED)
+        .count();
+    let failed_count = events
+        .iter()
+        .filter(|e| e.event_type.as_str() == OUTBOX_TELL_FAILED)
+        .count();
+
+    assert_eq!(
+        acked_count, 1,
+        "crash-restart re-dispatch of a SagaEffect::tell must produce exactly one TellAcked"
+    );
+    assert_eq!(
+        failed_count, 0,
+        "crash-restart re-dispatch must NOT produce TellFailed — the factory \
+         successfully deserialized and reconstructed the TellIntent"
+    );
+
+    // Verify the mock received the command with the correct payload.
+    let captured = mock.drain_captured::<Reserve>();
+    assert_eq!(
+        captured.len(),
+        1,
+        "the mock must receive exactly one Reserve command via crash-restart re-dispatch"
+    );
+    assert_eq!(
+        captured[0].sku, "SKU-CR-1",
+        "the re-dispatched Reserve must carry the original sku serialized in the crash-restart bytes"
+    );
+}
+
+/// Regression for AI-45-008: verifies that `SagaEffect::tell` (the actual
+/// builder path in `helper.rs`) serializes the command as JSON and stores
+/// the result as the crash-restart payload in the `TellRequested` marker,
+/// then proves that a factory can use those exact bytes for redispatch.
+///
+/// Two phases:
+/// 1. Run a saga whose `handle` returns `SagaEffect::tell(...)`.  After
+///    `TellAcked` is observed, load the raw `TellRequested` payload and assert
+///    its format: first 8 bytes = big-endian `tell_id`, remaining bytes =
+///    `serde_json`-encoded `Reserve`.
+/// 2. Seed a fresh saga store with that same `TellRequested` payload, spawn
+///    an `InertSaga` with `with_crash_restart_factory`, and assert that
+///    `TellAcked` is produced and the mock receives the correct command.
+#[tokio::test]
+async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_redispatch() {
+    // -----------------------------------------------------------------------
+    // Phase 1 — run SagaEffect::tell through a real saga handle()
+    // -----------------------------------------------------------------------
+    let mock_p1 = MockAggregateProxy::<Inventory>::new();
+
+    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+
+    let saga_store_p1: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_id_p1 = SagaId::new("tell-payload-format-saga-1");
+
+    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_key = "tell-payload-format-upstream";
+    append_order_placed(&upstream_store, upstream_key, 1, "SKU-PAYLOAD-CHECK").await;
+
+    let routed_p1 = saga_id_p1.clone();
+    let route_fn_p1 = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed_p1.clone()) };
+
+    let mock_for_saga = mock_p1.clone();
+    let _saga_proxy_p1 = SagaProps::<ActiveSaga>::new(
+        saga_id_p1.clone(),
+        Arc::clone(&saga_store_p1),
+        move || ActiveSaga { inventory: mock_for_saga.clone() },
+    )
+    .with_codec(system.codec::<ReservationRequested>())
+    .with_subscription(
+        Arc::clone(&upstream_store),
+        system.codec::<OrderPlaced>(),
+        SequenceCursor::Stream {
+            key: upstream_key.to_owned(),
+            after: 0,
+        },
+        route_fn_p1,
+    )
+    .spawn(system.process_system())
+    .await;
+
+    // Wait for TellAcked to confirm that SagaEffect::tell completed its path.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let p1_events = loop {
+        let events = load_saga_events(&saga_store_p1, &saga_id_p1).await;
+        if events.iter().any(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED) {
+            break events;
+        }
+        if std::time::Instant::now() >= deadline {
+            let types: Vec<_> = events.iter().map(|e| e.event_type.as_str()).collect();
+            panic!(
+                "timed out waiting for TellAcked from SagaEffect::tell (events: {:?})",
+                types
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // -----------------------------------------------------------------------
+    // Verify payload format: 8-byte big-endian tell_id + JSON(Reserve)
+    // -----------------------------------------------------------------------
+    let tell_requested_event = p1_events
+        .iter()
+        .find(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_requested")
+        .expect("SagaEffect::tell must produce a TellRequested outbox marker");
+
+    assert!(
+        tell_requested_event.payload.len() > 8,
+        "TellRequested payload from SagaEffect::tell must be >8 bytes \
+         (8-byte tell_id header + JSON-encoded command); \
+         got {} bytes — helper.rs may have regressed to TellIntent::new without crash-restart payload",
+        tell_requested_event.payload.len()
+    );
+
+    let raw_payload = &tell_requested_event.payload;
+    // First 8 bytes: big-endian tell_id (a valid u64 is all we need here)
+    let _tell_id = u64::from_be_bytes(
+        raw_payload[..8]
+            .try_into()
+            .expect("first 8 bytes must decode as big-endian tell_id"),
+    );
+    // Remaining bytes: JSON-serialized Reserve command
+    let json_bytes = &raw_payload[8..];
+    let decoded_cmd: Reserve = serde_json::from_slice(json_bytes).unwrap_or_else(|e| {
+        panic!(
+            "bytes after tell_id in TellRequested payload must be valid JSON for \
+             Reserve command; serde_json error: {e} — \
+             raw bytes (hex): {:?}",
+            json_bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(
+        decoded_cmd.sku, "SKU-PAYLOAD-CHECK",
+        "JSON bytes in TellRequested payload must encode the original Reserve command \
+         as produced by SagaEffect::tell"
+    );
+
+    // -----------------------------------------------------------------------
+    // Phase 2 — crash-restart redispatch using the real SagaEffect::tell bytes
+    // -----------------------------------------------------------------------
+    let mock_p2 = MockAggregateProxy::<Inventory>::new();
+    let saga_store_p2: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_id_p2 = SagaId::new("tell-payload-format-saga-2");
+
+    // Seed a fresh saga store with the exact payload that SagaEffect::tell produced.
+    // This simulates a crash (in-memory PendingIntents are gone) while the
+    // TellRequested marker survives in durable storage.
+    append_raw(
+        &saga_store_p2,
+        saga_id_p2.as_str(),
+        1,
+        EventType::from_str("nitinol.saga.outbox.tell_requested"),
+        raw_payload.clone(),
+    )
+    .await;
+
+    let routed_p2 = saga_id_p2.clone();
+    let route_fn_p2 = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed_p2.clone()) };
+
+    // Factory: receives the JSON bytes (payload[8..]) and reconstructs Reserve.
+    let mock_for_factory = mock_p2.clone();
+    let factory = move |bytes: &[u8]| -> Option<TellIntent> {
+        let cmd: Reserve = serde_json::from_slice(bytes).ok()?;
+        Some(TellIntent::new::<Inventory, Reserve, _>(
+            mock_for_factory.clone(),
+            cmd,
+        ))
+    };
+
+    // No PendingIntents — simulates full OS-process crash (in-memory state lost).
+    let _saga_proxy_p2 = SagaProps::<InertSaga>::new(
+        saga_id_p2.clone(),
+        Arc::clone(&saga_store_p2),
+        InertSaga::default,
+    )
+    .with_codec(system.codec::<ReservationRequested>())
+    .with_subscription(
+        Arc::clone(&upstream_store),
+        system.codec::<OrderPlaced>(),
+        SequenceCursor::Stream {
+            key: "no-such-upstream-p2".to_owned(),
+            after: 0,
+        },
+        route_fn_p2,
+    )
+    .with_crash_restart_factory(factory)
+    .spawn(system.process_system())
+    .await;
+
+    // Wait for TellAcked to confirm redispatch succeeded.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let p2_events = loop {
+        let events = load_saga_events(&saga_store_p2, &saga_id_p2).await;
+        if events.iter().any(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED) {
+            break events;
+        }
+        if std::time::Instant::now() >= deadline {
+            let types: Vec<_> = events.iter().map(|e| e.event_type.as_str()).collect();
+            panic!(
+                "timed out waiting for TellAcked after crash-restart redispatch \
+                 using SagaEffect::tell payload (events: {:?})",
+                types
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let acked_count = p2_events
+        .iter()
+        .filter(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED)
+        .count();
+    let failed_count = p2_events
+        .iter()
+        .filter(|e| e.event_type.as_str() == OUTBOX_TELL_FAILED)
+        .count();
+
+    assert_eq!(
+        acked_count, 1,
+        "crash-restart redispatch using SagaEffect::tell payload must produce exactly one TellAcked"
+    );
+    assert_eq!(
+        failed_count, 0,
+        "crash-restart redispatch must NOT produce TellFailed — \
+         the factory successfully deserialized the SagaEffect::tell crash-restart bytes"
+    );
+
+    let captured = mock_p2.drain_captured::<Reserve>();
+    assert_eq!(
+        captured.len(),
+        1,
+        "crash-restart redispatch must deliver exactly one Reserve command to the mock"
+    );
+    assert_eq!(
+        captured[0].sku, "SKU-PAYLOAD-CHECK",
+        "redispatched Reserve must carry the original sku as encoded by SagaEffect::tell"
+    );
+}

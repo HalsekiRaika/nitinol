@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
 
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, Receive as EvtReceive};
 use nitinol_persistence::EventType;
@@ -29,9 +26,11 @@ impl Aggregate for Inventory {
     }
 }
 
+/// `Reserve` derives `Clone + Serialize + Deserialize` so `SagaEffect::tell`
+/// can serialize it as crash-restart payload in the outbox marker.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Reserve {
     pub sku: String,
-    pub done_notify: Arc<Notify>,
 }
 
 #[async_trait]
@@ -43,10 +42,7 @@ impl Decider<Reserve> for Inventory {
         cmd: Reserve,
         _ctx: &mut Context,
     ) -> Result<Effect<Reserved>, Self::Rejection> {
-        let done = cmd.done_notify.clone();
-        let effect = Effect::persist(Reserved { sku: cmd.sku });
-        done.notify_one();
-        Ok(effect)
+        Ok(Effect::persist(Reserved { sku: cmd.sku }))
     }
 }
 

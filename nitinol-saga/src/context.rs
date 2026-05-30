@@ -10,6 +10,11 @@ pub struct SagaContext {
     upstream_aggregate_id: AggregateId,
     upstream_sequence: u64,
     now: jiff::Timestamp,
+    /// `tell_id`s whose outbox executors appended `TellFailed` since the last
+    /// `handle` call, or whose `TellFailed` marker was seen during replay on
+    /// restart.  The saga inspects this slice to detect unrecoverable tell
+    /// failures and trigger compensation.
+    failed_tell_ids: Vec<u64>,
 }
 
 impl SagaContext {
@@ -19,6 +24,7 @@ impl SagaContext {
         upstream_aggregate_id: AggregateId,
         upstream_sequence: u64,
         now: jiff::Timestamp,
+        failed_tell_ids: Vec<u64>,
     ) -> Self {
         Self {
             saga_id,
@@ -26,6 +32,7 @@ impl SagaContext {
             upstream_aggregate_id,
             upstream_sequence,
             now,
+            failed_tell_ids,
         }
     }
 
@@ -36,6 +43,7 @@ impl SagaContext {
             upstream_aggregate_id: AggregateId::new(""),
             upstream_sequence: 0,
             now: jiff::Timestamp::UNIX_EPOCH,
+            failed_tell_ids: Vec::new(),
         }
     }
 
@@ -76,5 +84,16 @@ impl SagaContext {
 
     pub fn now(&self) -> jiff::Timestamp {
         self.now
+    }
+
+    /// `tell_id`s whose executor appended `TellFailed` since the last `handle`
+    /// call, or whose `TellFailed` marker was detected during replay on restart.
+    ///
+    /// The saga reads this slice to detect unrecoverable tell failures and
+    /// decide whether to trigger compensation.  The slice is drained every time
+    /// `handle` is invoked — successive calls will not see the same `tell_id`
+    /// twice.
+    pub fn failed_tell_ids(&self) -> &[u64] {
+        &self.failed_tell_ids
     }
 }

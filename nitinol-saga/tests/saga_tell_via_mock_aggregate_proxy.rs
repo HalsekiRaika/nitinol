@@ -1,5 +1,16 @@
+//! Mock-target integration tests for the new Outbox-backed Persist+Tell.
+//!
+//! Verifies:
+//! - `SagaEffect::tell(target, cmd)` builds the tell-shaped Persist branch
+//! - The interpreter dispatches the command to the (mock) target asynchronously
+//! - The Reserve command must implement `Clone` because the retry executor
+//!   re-`tell`s with a cloned copy each attempt
+//!
+//! Reserved-prefix invariant (`nitinol.saga.outbox.*`) is asserted separately
+//! in `saga_outbox_persist_atomicity.rs`.
+
 mod common;
-use common::JsonCodec;
+use common::{shape_of, JsonCodec, Shape};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +38,7 @@ impl Event for OrderPlaced {
     const EVENT_TYPE: EventType = EventType::from_str("saga.tell_mock.OrderPlaced");
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct ReservationRequested {
     sku: String,
 }
@@ -54,7 +65,10 @@ impl Aggregate for Inventory {
     fn apply(&mut self, _event: Reserved) {}
 }
 
-#[derive(Debug, PartialEq)]
+/// `Reserve` derives `Clone` because the retry executor re-`tell`s with a
+/// cloned copy on every attempt.  `Serialize + Deserialize` is required
+/// because `SagaEffect::tell` serializes the command as crash-restart payload.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Reserve {
     sku: String,
 }
@@ -128,17 +142,28 @@ async fn append_order_placed(
 }
 
 #[test]
-fn saga_effect_tell_constructor_accepts_mock_aggregate_proxy() {
+fn saga_effect_tell_constructor_returns_persist_with_single_tell_intent() {
+    // Given a mock target and a typed command
     let mock = MockAggregateProxy::<Inventory>::new();
+
+    // When the saga builds a Tell via the new Builder API
     let effect: SagaEffect<ReservationRequested> = SagaEffect::tell(
         mock,
         Reserve {
             sku: "SKU-tell-construct".into(),
         },
     );
-    assert!(
-        matches!(effect, SagaEffect::Tell(_)),
-        "SagaEffect::tell(mock, cmd) must construct the Tell variant"
+
+    // Then it is a Persist branch carrying exactly one tell intent and nothing else
+    assert_eq!(
+        shape_of(&effect),
+        Shape::Persist {
+            events: vec![],
+            tells: 1,
+            schedules: vec![],
+        },
+        "SagaEffect::tell(mock, cmd) must construct a Persist {{ events: [], tells: [1], schedules: [] }} \
+         branch — the obsolete top-level Tell variant must not be reintroduced"
     );
 }
 
@@ -185,8 +210,8 @@ async fn saga_tell_to_mock_dispatches_command_observable_via_drain_captured() {
         .await
         .expect("saga handle() must run within 3 seconds");
 
-    // The Tell side effect dispatches via `tokio::spawn` — give it a brief
-    // window to land in the mock buffer before draining.
+    // The Tell side effect dispatches via the retry executor's `tokio::spawn` —
+    // give it a brief window to land in the mock buffer before draining.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let captured = loop {
         let drained = mock.drain_captured::<Reserve>();
@@ -202,7 +227,8 @@ async fn saga_tell_to_mock_dispatches_command_observable_via_drain_captured() {
     assert_eq!(
         captured.len(),
         1,
-        "the saga must dispatch exactly one Reserve to the mock for one upstream event"
+        "the saga must dispatch exactly one Reserve to the mock for one upstream event \
+         (a single-attempt success must not double-dispatch even though the executor performs retries)"
     );
     assert_eq!(
         captured[0].sku, "SKU-MOCK-1",

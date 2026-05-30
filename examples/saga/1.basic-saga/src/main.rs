@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::Notify;
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
@@ -45,16 +44,13 @@ async fn main() {
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new("example-reservation-saga");
-    let done = Arc::new(Notify::new());
 
     let inventory_for_producer = inventory_proxy.clone();
-    let done_for_producer = Arc::clone(&done);
     let route_target = saga_id.clone();
 
     let _saga_proxy =
         SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || ReservationSaga {
             inventory: inventory_for_producer.clone(),
-            done_notify: Arc::clone(&done_for_producer),
         })
         .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
@@ -76,14 +72,21 @@ async fn main() {
         .await
         .expect("ask(PlaceOrder) must succeed");
 
-    tokio::time::timeout(Duration::from_secs(3), done.notified())
-        .await
-        .expect("saga must drive a Reserve into Inventory within 3 seconds");
-
-    let count = inventory_proxy
-        .exec(GetReservedCount)
-        .await
-        .expect("exec(GetReservedCount) must succeed");
+    // Poll until Inventory has processed the Reserve command dispatched by the saga.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let count = loop {
+        let c = inventory_proxy
+            .exec(GetReservedCount)
+            .await
+            .expect("exec(GetReservedCount) must succeed");
+        if c >= 1 {
+            break c;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("saga must drive a Reserve into Inventory within 3 seconds");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
     assert_eq!(count, 1, "Inventory must have received exactly one Reserve");
 
     info!(reserved_count = count, "saga example finished successfully");

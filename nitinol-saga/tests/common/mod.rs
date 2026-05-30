@@ -10,7 +10,7 @@ use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaEffect;
+use nitinol_saga::{Schedule, SagaEffect, TellIntent};
 
 // ---------------------------------------------------------------------------
 // JsonCodec — shared across all integration tests
@@ -54,6 +54,11 @@ impl Aggregate for TestTarget {
     fn apply(&mut self, _event: TestTargetEvent) {}
 }
 
+/// `NoopCmd` must implement `Clone` because the new ADT's `SagaEffect::tell`
+/// keeps the command around for staged retries (each retry re-`tell`s the
+/// target with a cloned copy).  `Serialize + Deserialize` is required because
+/// `SagaEffect::tell` serializes the command as crash-restart payload.
+#[derive(Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct NoopCmd;
 
@@ -70,10 +75,11 @@ impl Decider<NoopCmd> for TestTarget {
     }
 }
 
-/// Spin up a minimal system and return a `Tell` saga effect.
+/// Spin up a minimal system and return a `SagaEffect::tell(...)`.
 ///
-/// Used by unit tests that need to exercise the `Tell` variant of `SagaEffect`
-/// without triggering any real side effect.
+/// Used by unit tests that need to exercise the tell-shaped effect (a
+/// `Persist { events: [], tells: [_], schedules: [] }` value under the
+/// post-#45 ADT) without triggering any real side effect.
 #[allow(dead_code)]
 pub async fn make_tell_effect<E>() -> SagaEffect<E> {
     let ps = ProcessSystem::new().await;
@@ -85,18 +91,40 @@ pub async fn make_tell_effect<E>() -> SagaEffect<E> {
     SagaEffect::tell(proxy, NoopCmd)
 }
 
+/// Build a single [`TellIntent`] over a freshly spawned no-op aggregate
+/// target so tests can feed it into `SagaEffect::persist(...).with_tells(...)`
+/// without going through the `SagaEffect::tell` convenience helper.
+#[allow(dead_code)]
+pub async fn make_tell_intent() -> TellIntent {
+    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let proxy = system
+        .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-intent-target"), store)
+        .await;
+    TellIntent::new(proxy, NoopCmd)
+}
+
 // ---------------------------------------------------------------------------
-// Shape — a PartialEq + Debug mirror of SagaEffect<E> used for structural
-// comparison without requiring SagaEffect itself to implement PartialEq or
-// Debug. The Tell variant does not carry data because the inner side effect
-// is opaque.
+// Shape — a PartialEq + Debug mirror of the post-#45 `SagaEffect<E>` ADT used
+// for structural comparison without requiring `SagaEffect` itself to implement
+// PartialEq or Debug.
+//
+// `TellIntent` is opaque (its inner side effect cannot be matched against), so
+// `Persist` records only the *count* of tells.  `Schedule` carries a public
+// `at` timestamp, so we capture that.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum Shape<E> {
     None,
-    Persist(Vec<E>),
-    Tell,
+    Persist {
+        events: Vec<E>,
+        tells: usize,
+        schedules: Vec<jiff::Timestamp>,
+    },
+    End,
     Sequence(Vec<Shape<E>>),
 }
 
@@ -104,8 +132,29 @@ pub enum Shape<E> {
 pub fn shape_of<E: Clone>(effect: &SagaEffect<E>) -> Shape<E> {
     match effect {
         SagaEffect::None => Shape::None,
-        SagaEffect::Persist(events) => Shape::Persist(events.clone()),
-        SagaEffect::Tell(_) => Shape::Tell,
+        SagaEffect::Persist {
+            events,
+            tells,
+            schedules,
+        } => Shape::Persist {
+            events: events.clone(),
+            tells: tells.len(),
+            schedules: schedules.iter().map(schedule_at).collect(),
+        },
+        SagaEffect::End => Shape::End,
         SagaEffect::Sequence(children) => Shape::Sequence(children.iter().map(shape_of).collect()),
     }
+}
+
+#[allow(dead_code)]
+pub fn schedule_at(schedule: &Schedule) -> jiff::Timestamp {
+    schedule.at
+}
+
+/// Build a `Schedule` whose `at` field is `ts`.  Centralised so every test
+/// uses the same construction path (and breaks together if `Schedule`'s
+/// public shape ever changes).
+#[allow(dead_code)]
+pub fn schedule_at_ts(ts: jiff::Timestamp) -> Schedule {
+    Schedule { at: ts }
 }

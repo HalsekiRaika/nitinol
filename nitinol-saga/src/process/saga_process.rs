@@ -1,17 +1,33 @@
-use std::borrow::Borrow;
 use std::sync::Arc;
 
-use futures_util::StreamExt;
 use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::{DurableStreamProxy, EventEnvelope};
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{AppendingEvent, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
+use tokio::sync::Mutex;
 
 use crate::context::SagaContext;
-use crate::effect::{SagaEffect, SagaSideEffect, SagaTellEffect};
+use crate::effect::TellIntent;
 use crate::id::SagaId;
+use crate::outbox::RetryPolicy;
+use crate::process::interpreter::{run_saga_effect, InterpreterCtx};
+use crate::process::pending_intents::PendingIntents;
+use crate::process::replay::replay_and_redispatch;
 use crate::saga::Saga;
+
+/// Factory invoked during crash-restart replay to reconstruct a
+/// [`TellIntent`] from the crash-restart bytes stored in the `TellRequested`
+/// outbox marker.
+///
+/// The closure receives the bytes that were supplied via
+/// [`TellIntent::new_with_crash_restart`] at intent construction time and
+/// must return a fresh `TellIntent` that re-sends the same command to the
+/// same target, or `None` if reconstruction is not possible.
+///
+/// Registered on [`crate::SagaProps`] via
+/// [`crate::SagaProps::with_crash_restart_factory`].
+pub(crate) type CrashRestartFactory =
+    Arc<dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync>;
 
 pub(crate) type RouteFn<E> = Arc<dyn Fn(&E) -> Option<SagaId> + Send + Sync>;
 
@@ -21,7 +37,37 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) store: Arc<dyn EventStore>,
     pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
     pub(crate) route_fn: RouteFn<S::SubscribedEvent>,
-    pub(crate) sequence: u64,
+    /// Shared monotonic sequence cursor for the saga's own stream.
+    ///
+    /// Held behind an `Arc<Mutex<_>>` because the outbox retry executor (a
+    /// `tokio::spawn` task) needs to claim a fresh sequence number to append
+    /// its terminal `TellAcked` / `TellFailed` marker after the originating
+    /// `recv` has already returned.
+    pub(crate) sequence: Arc<Mutex<u64>>,
+    pub(crate) retry_policy: RetryPolicy,
+    /// Registry of in-flight [`TellIntent`]s.  Populated by the interpreter
+    /// before spawning each outbox executor; consumed (entry removed) by the
+    /// executor when it appends the terminal marker.  On supervised restart the
+    /// replay path checks this registry to re-dispatch any pending tells.
+    pub(crate) pending_intents: PendingIntents,
+    /// Optional factory for crash-restart re-dispatch.
+    ///
+    /// When the saga process starts after a full OS-process crash, the
+    /// in-memory [`PendingIntents`] registry is gone.  If this factory is
+    /// `Some`, the replay path calls it with the crash-restart bytes stored
+    /// in the `TellRequested` payload to reconstruct the [`TellIntent`] and
+    /// spawn the retry executor.  Registered via
+    /// [`crate::SagaProps::with_crash_restart_factory`].
+    pub(crate) crash_restart_factory: Option<CrashRestartFactory>,
+    /// Accumulator of `tell_id`s whose outbox executor durably appended a
+    /// `TellFailed` terminal marker since the last `Saga::handle` call.
+    ///
+    /// Outbox executors push here after a successful `TellFailed` append.
+    /// The replay path pre-populates it with tell_ids that had a `TellFailed`
+    /// marker in the event history on restart.  `recv` drains it before each
+    /// `handle` invocation and passes the drained slice as
+    /// `SagaContext::failed_tell_ids`.
+    pub(crate) failed_tell_ids: Arc<Mutex<Vec<u64>>>,
     /// Keeps the upstream `DurableStream` alive for exactly as long as this
     /// `SagaProcess` is alive.  Tied to the process, not to the external
     /// `SagaProxy` handle, so that dropping all `SagaProxy` clones never
@@ -31,38 +77,22 @@ pub struct SagaProcess<S: Saga> {
 
 impl<S: Saga> Process for SagaProcess<S> {
     async fn on_start(&mut self, _ctx: &mut ProcessContext) {
-        let query = LoadQuery {
-            stream_key: Some(self.saga_id.as_str().to_owned()),
-            from_stream_sequence: Some(self.sequence + 1),
-            ..Default::default()
-        };
-
-        let stream = match self.store.load(query).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = ?e, "saga event store load failed during replay");
-                return;
-            }
-        };
-
-        futures_util::pin_mut!(stream);
-        while let Some(item) = stream.next().await {
-            let loaded = match item {
-                Ok(ev) => ev,
-                Err(e) => {
-                    tracing::error!(error = ?e, "saga event store stream error during replay");
-                    return;
-                }
-            };
-            match self.codec.decode(&loaded.payload) {
-                Ok(event) => {
-                    self.state.apply(event);
-                    self.sequence = loaded.sequence;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "saga event decode failed; skipping event");
-                }
-            }
+        // Convert Option<Arc<dyn Fn(...)>> to Option<&dyn Fn(...)> for replay.
+        let factory_ref = self.crash_restart_factory.as_ref().map(|f| f.as_ref());
+        let scan_failed = replay_and_redispatch(
+            &self.saga_id,
+            &mut self.state,
+            self.codec.as_ref(),
+            &self.store,
+            &self.sequence,
+            &self.pending_intents,
+            factory_ref,
+            self.retry_policy.clone(),
+            Arc::clone(&self.failed_tell_ids),
+        )
+        .await;
+        if !scan_failed.is_empty() {
+            self.failed_tell_ids.lock().await.extend(scan_failed);
         }
     }
 }
@@ -74,7 +104,7 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
     async fn recv(
         &mut self,
         msg: EventEnvelope<S::SubscribedEvent>,
-        _ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext,
     ) -> Result<(), std::convert::Infallible> {
         let Some(target_id) = (self.route_fn)(&msg.event) else {
             return Ok(());
@@ -83,12 +113,19 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
             return Ok(());
         }
 
+        let current_sequence = *self.sequence.lock().await;
+        // Drain accumulated failed tell IDs and surface them to this handle call.
+        let drained_failed = {
+            let mut guard = self.failed_tell_ids.lock().await;
+            std::mem::take(&mut *guard)
+        };
         let mut saga_ctx = SagaContext::new(
             self.saga_id.clone(),
-            self.sequence,
+            current_sequence,
             msg.aggregate_id.clone(),
             msg.sequence,
             jiff::Timestamp::now(),
+            drained_failed,
         );
         let effect = match self.state.handle(msg.event, &mut saga_ctx).await {
             Ok(effect) => effect,
@@ -98,90 +135,18 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
             }
         };
 
-        run_saga_effect(
-            effect,
-            &mut self.state,
-            &self.saga_id,
-            &mut self.sequence,
-            self.store.as_ref(),
-            self.codec.as_ref(),
-        )
-        .await;
+        let mut ictx = InterpreterCtx {
+            state: &mut self.state,
+            saga_id: self.saga_id.clone(),
+            sequence: Arc::clone(&self.sequence),
+            store: Arc::clone(&self.store),
+            codec: Arc::clone(&self.codec),
+            retry_policy: self.retry_policy.clone(),
+            process_ctx: ctx,
+            pending_intents: self.pending_intents.clone(),
+            failed_tell_ids: Arc::clone(&self.failed_tell_ids),
+        };
+        let _ = run_saga_effect(effect, &mut ictx).await;
         Ok(())
     }
-}
-
-fn run_saga_effect<'a, S: Saga>(
-    effect: SagaEffect<S::Event>,
-    state: &'a mut S,
-    saga_id: &'a SagaId,
-    sequence: &'a mut u64,
-    store: &'a dyn EventStore,
-    codec: &'a dyn ErasedCodec<S::Event>,
-) -> futures_core::future::BoxFuture<'a, ()> {
-    Box::pin(async move {
-        match effect {
-            SagaEffect::None => {}
-
-            SagaEffect::Persist(events) => {
-                persist_events(events, state, saga_id, sequence, store, codec).await;
-            }
-
-            SagaEffect::Tell(SagaTellEffect(side)) => {
-                dispatch_tell(side);
-            }
-
-            SagaEffect::Sequence(effects) => {
-                for sub in effects {
-                    run_saga_effect(sub, state, saga_id, sequence, store, codec).await;
-                }
-            }
-        }
-    })
-}
-
-async fn persist_events<S: Saga>(
-    events: Vec<S::Event>,
-    state: &mut S,
-    saga_id: &SagaId,
-    sequence: &mut u64,
-    store: &dyn EventStore,
-    codec: &dyn ErasedCodec<S::Event>,
-) {
-    let mut next_sequence = *sequence;
-    let mut appending = Vec::with_capacity(events.len());
-    for event in &events {
-        next_sequence += 1;
-        let payload = match codec.encode(event) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "saga event encode failed; skipping persist");
-                return;
-            }
-        };
-        appending.push(AppendingEvent {
-            sequence: next_sequence,
-            event_type: <S::Event as nitinol_eventsource::Event>::EVENT_TYPE,
-            payload,
-            occurred_at: jiff::Timestamp::now(),
-        });
-    }
-
-    if let Err(e) = store.append(saga_id.borrow(), appending).await {
-        tracing::warn!(error = %e, "saga event append failed; skipping apply");
-        return;
-    }
-
-    *sequence = next_sequence;
-    for event in events {
-        state.apply(event);
-    }
-}
-
-fn dispatch_tell(side: Box<dyn SagaSideEffect>) {
-    tokio::spawn(async move {
-        if let Err(e) = side.execute().await {
-            tracing::warn!(error = %e, "saga side effect failed");
-        }
-    });
 }

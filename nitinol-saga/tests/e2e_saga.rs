@@ -1,3 +1,10 @@
+//! End-to-end test: an upstream aggregate's event drives the saga to issue a
+//! command against a downstream aggregate.  Verifies that the new ADT's
+//! `Persist`-with-tells branch correctly:
+//!   1. Persists the user event AND a TellRequested outbox marker atomically
+//!   2. Dispatches the typed command (with `C: Clone`) to the target
+//!   3. Appends a TellAcked outbox marker once the dispatch succeeds
+
 mod common;
 use common::JsonCodec;
 
@@ -9,16 +16,17 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Context, Decider, Effect, Event,
     Receive as EvtReceive, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+
+const OUTBOX_PREFIX: &str = "nitinol.saga.outbox.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -86,9 +94,12 @@ impl Aggregate for Inventory {
     }
 }
 
+/// `Reserve` derives `Clone` + `Serialize` + `Deserialize` because
+/// `SagaEffect::tell` keeps the command across retry attempts and serializes
+/// it as crash-restart payload into the `TellRequested` outbox marker.
+#[derive(Clone, Serialize, Deserialize)]
 struct Reserve {
     sku: String,
-    done_notify: Arc<Notify>,
 }
 
 #[async_trait]
@@ -100,10 +111,7 @@ impl Decider<Reserve> for Inventory {
         cmd: Reserve,
         _ctx: &mut Context,
     ) -> Result<Effect<Reserved>, Self::Rejection> {
-        let done = cmd.done_notify.clone();
-        let effect = Effect::persist(Reserved { sku: cmd.sku });
-        done.notify_one();
-        Ok(effect)
+        Ok(Effect::persist(Reserved { sku: cmd.sku }))
     }
 }
 
@@ -127,7 +135,6 @@ struct CapturedContext {
 
 struct ReservationSaga {
     inventory: AggregateProxy<Inventory>,
-    done_notify: Arc<Notify>,
     captured: Arc<Mutex<Vec<CapturedContext>>>,
     handle_count: Arc<Mutex<u64>>,
 }
@@ -157,12 +164,43 @@ impl Saga for ReservationSaga {
         });
         let tell_inventory = SagaEffect::tell(
             self.inventory.clone(),
-            Reserve {
-                sku: event.sku,
-                done_notify: Arc::clone(&self.done_notify),
-            },
+            Reserve { sku: event.sku },
         );
         Ok(persist_own_event.combine(tell_inventory))
+    }
+}
+
+fn count_user_events(events: &[LoadedEvent], expected: EventType) -> usize {
+    events
+        .iter()
+        .filter(|e| e.event_type == expected)
+        .count()
+}
+
+fn count_outbox_events(events: &[LoadedEvent], suffix: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            let s = e.event_type.as_str();
+            s.starts_with(OUTBOX_PREFIX) && s.ends_with(suffix)
+        })
+        .count()
+}
+
+async fn wait_until_outbox_acked(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let events = load_saga_events(store, saga_id).await;
+        if count_outbox_events(&events, "tell_acked") >= 1 {
+            return events;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for TellAcked outbox event in saga stream (event_types: {:?})",
+                events.iter().map(|e| e.event_type.as_str()).collect::<Vec<_>>()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -186,7 +224,6 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let saga_store_for_assert = Arc::clone(&saga_store);
 
     let saga_id = SagaId::new("saga-e2e-reservation-1");
-    let done = Arc::new(Notify::new());
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
     let handle_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
 
@@ -194,14 +231,12 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(route_target.clone()) };
 
     let inventory_for_producer = inventory_proxy.clone();
-    let done_for_producer = Arc::clone(&done);
     let captured_for_producer = Arc::clone(&captured);
     let handle_count_for_producer = Arc::clone(&handle_count);
 
     let _saga_proxy =
         SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || ReservationSaga {
             inventory: inventory_for_producer.clone(),
-            done_notify: Arc::clone(&done_for_producer),
             captured: Arc::clone(&captured_for_producer),
             handle_count: Arc::clone(&handle_count_for_producer),
         })
@@ -225,17 +260,25 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
         .await
         .expect("ask(PlaceOrder) must succeed");
 
-    tokio::time::timeout(Duration::from_secs(3), done.notified())
-        .await
-        .expect("saga must drive a Reserve into Inventory within 3 seconds");
-
-    let count = inventory_proxy
-        .exec(GetReservedCount)
-        .await
-        .expect("exec(GetReservedCount) must succeed");
+    // Poll until Inventory has processed the Reserve command.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let count = loop {
+        let c = inventory_proxy
+            .exec(GetReservedCount)
+            .await
+            .expect("exec(GetReservedCount) must succeed");
+        if c >= 1 {
+            break c;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("saga must drive a Reserve into Inventory within 3 seconds");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
     assert_eq!(
         count, 1,
-        "Inventory must have received exactly one Reserve command"
+        "Inventory must have received exactly one Reserve command — \
+         a single-attempt success must not double-dispatch even though the executor performs retries"
     );
 
     let captured = captured.lock().unwrap();
@@ -254,20 +297,49 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
         "fresh saga has sequence 0 before its first SagaEffect::Persist"
     );
 
-    let saga_events = load_saga_events(&saga_store_for_assert, &saga_id).await;
+    let saga_events = wait_until_outbox_acked(&saga_store_for_assert, &saga_id).await;
+
     assert_eq!(
-        saga_events.len(),
+        count_user_events(&saga_events, ReservationRequested::EVENT_TYPE),
         1,
-        "saga must persist exactly one ReservationRequested event"
+        "saga must persist exactly one ReservationRequested user event"
     );
     assert_eq!(
-        saga_events[0].event_type,
-        ReservationRequested::EVENT_TYPE,
-        "saga's persisted event must be ReservationRequested"
+        count_outbox_events(&saga_events, "tell_requested"),
+        1,
+        "Persist with one tell must append exactly one TellRequested outbox event"
     );
     assert_eq!(
-        saga_events[0].sequence, 1,
-        "saga's first persisted event must be at sequence 1"
+        count_outbox_events(&saga_events, "tell_acked"),
+        1,
+        "a successful tell dispatch must result in exactly one TellAcked outbox event"
+    );
+    assert_eq!(
+        count_outbox_events(&saga_events, "tell_failed"),
+        0,
+        "a successful tell must not produce a TellFailed event"
+    );
+
+    // The user event must be appended at sequence 1.  The TellRequested marker
+    // must share the same atomic append batch, so it lands at sequence 2.
+    let user_event = saga_events
+        .iter()
+        .find(|e| e.event_type == ReservationRequested::EVENT_TYPE)
+        .expect("ReservationRequested user event must exist in saga stream");
+    let requested = saga_events
+        .iter()
+        .find(|e| {
+            let s = e.event_type.as_str();
+            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
+        })
+        .expect("TellRequested outbox event must exist in saga stream");
+    assert_eq!(
+        user_event.sequence, 1,
+        "the user event must be appended at sequence 1"
+    );
+    assert_eq!(
+        requested.sequence, 2,
+        "TellRequested must share the same atomic batch as the user event and land at sequence 2"
     );
 }
 
@@ -289,7 +361,6 @@ async fn saga_skips_events_not_routed_to_its_instance() {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let matched_id = SagaId::new("saga-route-match");
-    let done = Arc::new(Notify::new());
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
     let handle_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
 
@@ -303,7 +374,6 @@ async fn saga_skips_events_not_routed_to_its_instance() {
     };
 
     let inventory_for_producer = inventory_proxy.clone();
-    let done_for_producer = Arc::clone(&done);
     let captured_for_producer = Arc::clone(&captured);
     let handle_count_for_producer = Arc::clone(&handle_count);
 
@@ -311,7 +381,6 @@ async fn saga_skips_events_not_routed_to_its_instance() {
         SagaProps::<ReservationSaga>::new(matched_id.clone(), saga_store, move || {
             ReservationSaga {
                 inventory: inventory_for_producer.clone(),
-                done_notify: Arc::clone(&done_for_producer),
                 captured: Arc::clone(&captured_for_producer),
                 handle_count: Arc::clone(&handle_count_for_producer),
             }
@@ -329,9 +398,21 @@ async fn saga_skips_events_not_routed_to_its_instance() {
         .spawn(system.process_system())
         .await;
 
-    tokio::time::timeout(Duration::from_secs(3), done.notified())
-        .await
-        .expect("the matched event must reach Inventory within 3 seconds");
+    // Poll until Inventory has processed the Reserve command for the MATCH event.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let c = inventory_proxy
+            .exec(GetReservedCount)
+            .await
+            .expect("exec(GetReservedCount) must succeed");
+        if c >= 1 {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("the matched event must reach Inventory within 3 seconds");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 

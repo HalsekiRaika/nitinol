@@ -9,11 +9,14 @@ description = "Event-sourced process manager (Saga) for nitinol"
 
 [dependencies]
 async-trait = "0.1"
+bytes = "1"
 futures-core = "0.3"
 futures-util = "0.3"
 jiff = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"] }
 tracing = "0.1"
 nitinol-runtime = { path = "../nitinol-runtime" }
 nitinol-persistence = { path = "../nitinol-persistence" }
