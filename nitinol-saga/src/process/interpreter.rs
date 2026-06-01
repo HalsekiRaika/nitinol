@@ -121,7 +121,7 @@ async fn persist_batch<S: Saga>(
         ictx.state.apply(event);
     }
 
-    for (intent, tell_id) in tells.into_iter().zip(tell_ids.into_iter()) {
+    for (intent, tell_id) in tells.into_iter().zip(tell_ids) {
         ictx.pending_intents.register(tell_id, intent.clone()).await;
         spawn_outbox_executor(
             intent,
