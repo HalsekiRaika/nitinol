@@ -47,7 +47,9 @@ pub use self::event::Event;
 pub use self::receive::Receive;
 
 pub use self::error::{AskError, ExecError, TellError};
-pub use self::process::{AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset};
+pub use self::process::{
+    AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset,
+};
 pub use self::process::{SnapshotPersistor, SnapshotPersistorProxy};
 
 #[cfg(feature = "test-helpers")]

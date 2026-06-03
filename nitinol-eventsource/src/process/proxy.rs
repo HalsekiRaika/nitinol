@@ -19,6 +19,12 @@ impl<A: Aggregate> Clone for AggregateProxy<A> {
     }
 }
 
+impl<A: Aggregate> From<ProcessProxy<AggregateProcess<A>>> for AggregateProxy<A> {
+    fn from(inner: ProcessProxy<AggregateProcess<A>>) -> Self {
+        Self(inner)
+    }
+}
+
 impl<A: Aggregate> AggregateProxy<A> {
     /// Send a command and wait for the persisted events.
     ///

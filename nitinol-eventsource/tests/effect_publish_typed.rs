@@ -40,7 +40,11 @@ impl Receive<TypedMsg> for MsgReceiver {
     type Response = ();
     type Error = std::convert::Infallible;
 
-    async fn recv(&mut self, msg: TypedMsg, _ctx: &mut ProcessContext) -> Result<(), Self::Error> {
+    async fn recv(
+        &mut self,
+        msg: TypedMsg,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), Self::Error> {
         *self.received.lock().unwrap() = Some(msg);
         self.notify.notify_one();
         Ok(())

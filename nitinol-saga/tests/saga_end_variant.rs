@@ -1,7 +1,7 @@
 //! Spec D-13: the `End` variant is the single-responsibility termination
 //! marker.  Interpreting it must stop the saga process (`ctx.stop_self()`),
-//! which in turn drops the `_ds_keepalive` and tears down the upstream
-//! subscription.
+//! which causes the subscriber to stop via the direct poller's subscriber
+//! watch, and in turn tears down the upstream subscription.
 //!
 //! Also exercises the Sequence short-circuit invariant: effects placed after
 //! `End` inside a Sequence are not interpreted (the interpreter must break).
@@ -138,26 +138,25 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     let routed = saga_id.clone();
     let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
-    let _saga_proxy = SagaProps::<PersistThenEndSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || PersistThenEndSaga {
-            handle_count: Arc::clone(&handle_count_clone),
-            handled_first: Arc::clone(&handled_first_clone),
-        },
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-        route_fn,
-    )
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy =
+        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            PersistThenEndSaga {
+                handle_count: Arc::clone(&handle_count_clone),
+                handled_first: Arc::clone(&handled_first_clone),
+            }
+        })
+        .with_codec(system.codec::<ReservationRequested>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<OrderPlaced>(),
+            SequenceCursor::Stream {
+                key: order_id.as_str().to_owned(),
+                after: 0,
+            },
+            route_fn,
+        )
+        .spawn(system.process_system())
+        .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled_first.notified())
         .await

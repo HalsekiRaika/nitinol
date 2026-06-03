@@ -53,7 +53,7 @@ impl Receive<EventEnvelope<Evt>> for RecordingSubscriber {
     async fn recv(
         &mut self,
         msg: EventEnvelope<Evt>,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), Self::Error> {
         self.sequences.lock().unwrap().push(msg.sequence);
         self.globals.lock().unwrap().push(msg.global_sequence);
@@ -854,8 +854,16 @@ async fn durable_stream_direct_poller_observable_via_registry_lookup_by_name() {
     );
 }
 
+/// After Issue #52 the `DirectPollerProcess` watches only its subscriber, not
+/// the parent `DurableStreamProxy`'s shared poller. This frees saga and
+/// projection consumers from holding a `_ds_keepalive` Arc — when the
+/// subscriber stops, the direct poller stops; otherwise it keeps delivering
+/// regardless of whether the original `DurableStreamProxy` handle was dropped.
+///
+/// This test pins down the new contract: dropping the proxy by itself does
+/// NOT stop the direct poller, but stopping the subscriber does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn durable_stream_drop_proxy_stops_direct_poller() {
+async fn durable_stream_drop_proxy_keeps_direct_poller_until_subscriber_stops() {
     let system = ProcessSystem::new().await;
     let store = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("ds-drop-direct-agg");
@@ -891,6 +899,7 @@ async fn durable_stream_drop_proxy_stops_direct_poller() {
 
     let recorder = Recorder::new();
     let sub = system.spawn(Props::new(recorder.producer())).await;
+    let sub_for_stop = sub.clone();
 
     ds.subscribe_from(
         &system,
@@ -909,17 +918,29 @@ async fn durable_stream_drop_proxy_stops_direct_poller() {
     drop(ds);
     tokio::time::sleep(TEST_POLL_INTERVAL * 6).await;
 
+    // After ds is dropped the direct poller must keep delivering to the
+    // subscriber — saga / projection rely on this contract because they drop
+    // their own ds_proxy immediately after spawn.
+    append_evt(&store, agg_id.as_str(), 2).await;
+    wait_for_count(&recorder, 2).await;
+
+    // Now stop the subscriber. The direct poller watches the subscriber and
+    // must stop within a couple of poll cycles.
+    sub_for_stop
+        .stop()
+        .await
+        .expect("subscriber stop must succeed");
+    tokio::time::sleep(TEST_POLL_INTERVAL * 6).await;
     let baseline = transform_calls.load(Ordering::SeqCst);
 
-    append_evt(&store, agg_id.as_str(), 2).await;
     append_evt(&store, agg_id.as_str(), 3).await;
     tokio::time::sleep(TEST_POLL_INTERVAL * 6).await;
 
     assert_eq!(
         transform_calls.load(Ordering::SeqCst),
         baseline,
-        "dropping DurableStreamProxy must stop the direct poller; instead it \
-         kept calling the transform after the proxy was dropped"
+        "after the subscriber stops, the direct poller must stop too; \
+         instead it kept calling the transform"
     );
 }
 
@@ -963,31 +984,21 @@ async fn durable_stream_subscribe_from_twice_new_poller_stays_in_registry() {
     );
 }
 
+/// `subscribe_from` invoked twice for the same subscriber must stop the
+/// previous direct poller — otherwise both pollers would deliver duplicate
+/// events to the same subscriber. The behaviour is independent of the parent
+/// `DurableStreamProxy`'s lifetime (per Issue #52 the direct poller no
+/// longer watches the proxy).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
     let system = ProcessSystem::new().await;
     let store = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("ds-resubscribe-agg");
 
-    let transform_calls = Arc::new(AtomicUsize::new(0));
-    let transform_calls_inner = Arc::clone(&transform_calls);
-    let counting_transform = move |loaded: LoadedEvent| -> Option<EventEnvelope<Evt>> {
-        transform_calls_inner.fetch_add(1, Ordering::SeqCst);
-        if loaded.event_type != Evt::EVENT_TYPE {
-            return None;
-        }
-        Some(EventEnvelope {
-            aggregate_id: AggregateId::new(loaded.stream_key),
-            sequence: loaded.sequence,
-            global_sequence: loaded.global_sequence,
-            event: Evt,
-        })
-    };
-
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-resubscribe-topic"),
         Arc::clone(&store) as Arc<dyn EventStore>,
-        counting_transform,
+        to_envelope,
     )
     .cursor(SequenceCursor::Stream {
         key: agg_id.as_str().to_owned(),
@@ -1000,6 +1011,8 @@ async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
 
     let recorder = Recorder::new();
     let sub = system.spawn(Props::new(recorder.producer())).await;
+    let sub_pid = sub.pid();
+    let poller_name = ProcessName::new(format!("direct-poller-{sub_pid}"));
 
     ds.subscribe_from(
         &system,
@@ -1012,6 +1025,13 @@ async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
     .await
     .expect("first subscribe_from must succeed");
 
+    // Capture the first direct poller's AnyProxy so we can later verify it
+    // is no longer the one registered under the alias.
+    let first_poller = system
+        .lookup_by_name(&poller_name)
+        .await
+        .expect("first direct poller must be registered");
+
     ds.subscribe_from(
         &system,
         sub,
@@ -1023,20 +1043,35 @@ async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
     .await
     .expect("second subscribe_from must succeed");
 
-    tokio::time::sleep(TEST_POLL_INTERVAL * 4).await;
-    drop(ds);
-    tokio::time::sleep(TEST_POLL_INTERVAL * 4).await;
-
-    let baseline = transform_calls.load(Ordering::SeqCst);
-
-    append_evt(&store, agg_id.as_str(), 1).await;
-    append_evt(&store, agg_id.as_str(), 2).await;
     tokio::time::sleep(TEST_POLL_INTERVAL * 6).await;
 
+    let second_poller = system
+        .lookup_by_name(&poller_name)
+        .await
+        .expect("a direct poller must still be registered after the second subscribe_from");
+
+    // The new poller must have taken over the alias. The two AnyProxy
+    // instances back distinct underlying processes — comparing PIDs through
+    // a typed downcast is not possible here without exposing the concrete P,
+    // so the regression for this is provided by the dedicated registry test
+    // `durable_stream_subscribe_from_twice_new_poller_stays_in_registry`.
+    // Here we additionally exercise the explicit `existing.stop()` path:
+    // delivering an event after the second subscribe_from must still reach
+    // the subscriber via exactly one poller (one delivery), not duplicated.
+    let _ = first_poller;
+    let _ = second_poller;
+
+    append_evt(&store, agg_id.as_str(), 1).await;
+    wait_for_count(&recorder, 1).await;
+
+    // Verify only one delivery, not two. Sleep long enough for any orphan
+    // poller to also re-deliver if it were still running.
+    tokio::time::sleep(TEST_POLL_INTERVAL * 6).await;
     assert_eq!(
-        transform_calls.load(Ordering::SeqCst),
-        baseline,
-        "re-calling subscribe_from must not leave an orphan direct poller that \
-         keeps running after the proxy is dropped"
+        recorder.current_count(),
+        1,
+        "re-calling subscribe_from must result in exactly one direct poller \
+         delivering each event; observed duplicate delivery suggests an \
+         orphan poller from the first subscribe_from is still running"
     );
 }

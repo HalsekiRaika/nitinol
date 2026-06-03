@@ -12,16 +12,17 @@ mod subscriber;
 pub(crate) mod supervision;
 pub(crate) mod task;
 pub(crate) mod watch;
+mod wiring;
 
 pub use self::{
-    context::*,
+    context::ProcessContext,
     dead_letter::{DeadLetter, SuppressDeadLetterLog},
     driver::Driver,
     message::*,
     props::*,
     proxy::*,
     stream::Stream,
-    subscriber::Subscriber,
+    subscriber::{Subscriber, SubscriberContext},
     watch::{Terminated, TerminatedReason},
 };
 
@@ -33,17 +34,26 @@ use std::future::Future;
 
 #[allow(unused_variables)]
 pub trait Process: 'static + Sync + Send {
-    fn on_start(&mut self, ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_start(&mut self, ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send
+    where
+        Self: Sized,
+    {
         async {}
     }
-    fn on_stop(&mut self, ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_stop(&mut self, ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send
+    where
+        Self: Sized,
+    {
         async {}
     }
     fn on_terminated(
         &mut self,
         terminated: Terminated,
-        ctx: &mut ProcessContext,
-    ) -> impl Future<Output = ()> + Send {
+        ctx: &mut ProcessContext<Self>,
+    ) -> impl Future<Output = ()> + Send
+    where
+        Self: Sized,
+    {
         async {}
     }
 }
@@ -54,6 +64,8 @@ pub trait Receive<M>: Process {
     fn recv(
         &mut self,
         msg: M,
-        ctx: &mut ProcessContext,
-    ) -> impl Future<Output = Result<Self::Response, Self::Error>> + Send;
+        ctx: &mut ProcessContext<Self>,
+    ) -> impl Future<Output = Result<Self::Response, Self::Error>> + Send
+    where
+        Self: Sized;
 }

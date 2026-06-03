@@ -149,10 +149,7 @@ async fn append_raw(
         .expect("append must succeed");
 }
 
-async fn load_saga_events(
-    store: &Arc<dyn EventStore>,
-    saga_id: &SagaId,
-) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -177,9 +174,7 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
     let mock = MockAggregateProxy::<Inventory>::new();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new("crash-restart-saga-1");
@@ -213,24 +208,21 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
 
     // No PendingIntents provided — the default is a fresh empty registry,
     // which simulates a crash restart (in-memory state is gone).
-    let _saga_proxy = SagaProps::<InertSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        InertSaga::default,
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: "no-such-stream".to_owned(),
-            after: 0,
-        },
-        route_fn,
-    )
-    .with_crash_restart_factory(factory)
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy =
+        SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
+            .with_codec(system.codec::<ReservationRequested>())
+            .with_subscription(
+                Arc::clone(&upstream_store),
+                system.codec::<OrderPlaced>(),
+                SequenceCursor::Stream {
+                    key: "no-such-stream".to_owned(),
+                    after: 0,
+                },
+                route_fn,
+            )
+            .with_crash_restart_factory(factory)
+            .spawn(system.process_system())
+            .await;
 
     // Wait for the crash-restart re-dispatch to produce TellAcked.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

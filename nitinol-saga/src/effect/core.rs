@@ -60,7 +60,7 @@ pub enum SagaEffect<E> {
 /// command on every attempt.
 ///
 /// `TellIntent` is `Clone` (cheap — the inner `Arc` is reference-counted).
-/// This enables [`crate::process::pending_intents::PendingIntents`] to store a
+/// This enables the in-memory `pending_intents` registry to store a
 /// clone before transferring ownership to the outbox executor.
 ///
 /// # Crash-restart re-dispatch
@@ -80,7 +80,7 @@ pub struct TellIntent {
     /// reconstruct the `TellIntent` after a full OS-process crash.
     ///
     /// `None` means crash-restart re-dispatch is not supported for this intent
-    /// (supervised restart via [`crate::process::pending_intents::PendingIntents`]
+    /// (supervised restart via the in-memory `pending_intents` registry
     /// still works).
     pub(crate) crash_restart_payload: Option<Bytes>,
 }
@@ -129,11 +129,7 @@ impl TellIntent {
     ///
     /// The factory receives exactly the bytes supplied here and must return a
     /// `TellIntent` that re-sends the same command to the same target.
-    pub fn new_with_crash_restart<A, C, T>(
-        target: T,
-        cmd: C,
-        crash_restart_payload: Bytes,
-    ) -> Self
+    pub fn new_with_crash_restart<A, C, T>(target: T, cmd: C, crash_restart_payload: Bytes) -> Self
     where
         A: Aggregate + Decider<C>,
         C: Clone + Send + Sync + 'static,

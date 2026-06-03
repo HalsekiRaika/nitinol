@@ -7,6 +7,7 @@
 //! process and short-circuits any enclosing `Sequence`.
 
 use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -15,31 +16,34 @@ use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
-use nitinol_runtime::process::ProcessContext;
-use tokio::sync::Mutex;
+use nitinol_runtime::process::{ProcessContext, ProcessProxy};
 
 use crate::effect::{Schedule, TellIntent};
 use crate::id::SagaId;
 use crate::outbox::{OutboxAppender, RetryPolicy};
 use crate::process::outbox_executor::spawn_outbox_executor;
-use crate::process::pending_intents::PendingIntents;
+use crate::process::saga_process::SagaProcess;
 use crate::saga::Saga;
 use crate::SagaEffect;
 
 pub(crate) struct InterpreterCtx<'a, S: Saga> {
     pub(crate) state: &'a mut S,
     pub(crate) saga_id: SagaId,
-    pub(crate) sequence: Arc<Mutex<u64>>,
+    pub(crate) sequence: &'a mut u64,
     pub(crate) store: Arc<dyn EventStore>,
     pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
     pub(crate) retry_policy: RetryPolicy,
-    pub(crate) process_ctx: &'a ProcessContext,
-    pub(crate) pending_intents: PendingIntents,
-    /// Shared accumulator that the outbox executor pushes `tell_id` into when
-    /// it appends a `TellFailed` terminal marker.  The saga process drains this
-    /// before each `Saga::handle` invocation so the handler can inspect
-    /// `SagaContext::failed_tell_ids()`.
-    pub(crate) failed_tell_ids: Arc<Mutex<Vec<u64>>>,
+    pub(crate) process_ctx: &'a mut ProcessContext<SagaProcess<S>>,
+    pub(crate) pending_intents: &'a mut HashMap<u64, TellIntent>,
+    /// Mirror of `SagaProcess::pending_end`.  Set to `true` when `End` is
+    /// encountered with in-flight outbox executors; `stop_self()` fires once
+    /// `pending_executor_count` reaches zero.
+    pub(crate) pending_end: &'a mut bool,
+    /// Mirror of `SagaProcess::pending_executor_count`.  Incremented for every
+    /// executor spawned in `persist_batch`; decremented by both
+    /// `OutboxTerminalSettled` and `OutboxTerminalAppendFailed`.
+    pub(crate) pending_executor_count: &'a mut usize,
+    pub(crate) self_proxy: ProcessProxy<SagaProcess<S>>,
 }
 
 pub(crate) enum InterpretOutcome {
@@ -60,8 +64,17 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
                 schedules,
             } => persist_batch(events, tells, schedules, ictx).await,
             SagaEffect::End => {
-                if let Err(e) = ictx.process_ctx.stop_self().await {
-                    tracing::warn!(error = %e, "saga End: stop_self signal failed");
+                if *ictx.pending_executor_count == 0 {
+                    // No executors in-flight: stop immediately.
+                    if let Err(e) = ictx.process_ctx.stop_self().await {
+                        tracing::warn!(error = %e, "saga End: stop_self signal failed");
+                    }
+                } else {
+                    // Executors are still in-flight.  Defer stop until every
+                    // executor reports via OutboxTerminalSettled or
+                    // OutboxTerminalAppendFailed, reducing pending_executor_count
+                    // to zero.
+                    *ictx.pending_end = true;
                 }
                 InterpretOutcome::Stop
             }
@@ -93,8 +106,7 @@ async fn persist_batch<S: Saga>(
     };
 
     let now = jiff::Timestamp::now();
-    let mut seq_guard = ictx.sequence.lock().await;
-    let mut next_seq = *seq_guard;
+    let mut next_seq = *ictx.sequence;
 
     let mut appending: Vec<AppendingEvent> =
         Vec::with_capacity(encoded_events.len() + tells.len() + schedules.len());
@@ -102,36 +114,27 @@ async fn persist_batch<S: Saga>(
     let tell_ids = append_tell_requested(&mut appending, &tells, &mut next_seq, now);
     append_scheduled(&mut appending, &schedules, &mut next_seq, now);
 
-    if let Err(e) = ictx
-        .store
-        .append(ictx.saga_id.borrow(), appending)
-        .await
-    {
+    if let Err(e) = ictx.store.append(ictx.saga_id.borrow(), appending).await {
         // Sequence stays at its pre-batch value so the next attempt does not
         // skip sequence numbers.
-        drop(seq_guard);
         tracing::warn!(error = %e, "saga atomic persist batch failed; skipping apply");
         return InterpretOutcome::Continue;
     }
 
-    *seq_guard = next_seq;
-    drop(seq_guard);
+    *ictx.sequence = next_seq;
 
     for event in events {
         ictx.state.apply(event);
     }
 
     for (intent, tell_id) in tells.into_iter().zip(tell_ids) {
-        ictx.pending_intents.register(tell_id, intent.clone()).await;
+        ictx.pending_intents.insert(tell_id, intent.clone());
+        *ictx.pending_executor_count += 1;
         spawn_outbox_executor(
             intent,
             tell_id,
             ictx.retry_policy.clone(),
-            ictx.saga_id.clone(),
-            Arc::clone(&ictx.store),
-            Arc::clone(&ictx.sequence),
-            ictx.pending_intents.clone(),
-            Arc::clone(&ictx.failed_tell_ids),
+            ictx.self_proxy.clone(),
         );
     }
 
@@ -201,10 +204,6 @@ fn append_scheduled(
 ) {
     for schedule in schedules {
         *next_seq += 1;
-        appending.push(OutboxAppender::build_scheduled(
-            *next_seq,
-            schedule.at,
-            now,
-        ));
+        appending.push(OutboxAppender::build_scheduled(*next_seq, schedule.at, now));
     }
 }

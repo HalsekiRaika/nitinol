@@ -82,6 +82,7 @@ pub(crate) async fn run_with_driver<P: Process, D: Driver<P>>(
         timeout,
         dead_letter,
         supervision,
+        proxy.clone(),
     );
 
     #[cfg(not(tokio_unstable))]
@@ -110,6 +111,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
     timeout: Option<Duration>,
     dead_letter: Option<DeadLetterProxy>,
     supervision: SupervisionConfig<P>,
+    self_proxy: ProcessProxy<P>,
 ) {
     let mut state = process;
     let mut driver = driver;
@@ -123,6 +125,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
         registry: registry.clone(),
         sys_tx: sys_tx.clone(),
         dead_letter: dead_letter.clone(),
+        self_proxy,
     };
 
     // A driver that opts out (e.g., tick / poll sources) has no meaningful
@@ -246,7 +249,7 @@ mod tests {
         async fn apply(
             &mut self,
             _state: &mut NoOpProcess,
-            _ctx: &mut ProcessContext,
+            _ctx: &mut ProcessContext<NoOpProcess>,
             _ev: (),
         ) -> Result<(), HandlerError> {
             Ok(())
@@ -286,6 +289,14 @@ mod tests {
             strategy: SupervisionStrategy::Stop,
         };
 
+        let (self_user_tx, _self_user_rx) = mpsc::channel::<UserTask<NoOpProcess>>(32);
+        let self_proxy = ProcessProxy::<NoOpProcess> {
+            pid,
+            user_tx: self_user_tx,
+            sys_tx: sys_tx.clone(),
+            dead_letter: None,
+        };
+
         let loop_handle = tokio::spawn(lifecycle_loop(
             NoOpProcess,
             None,
@@ -297,6 +308,7 @@ mod tests {
             Some(Duration::from_millis(50)),
             None,
             supervision,
+            self_proxy,
         ));
 
         // Wait well past the configured 50 ms timeout — if the timer were still

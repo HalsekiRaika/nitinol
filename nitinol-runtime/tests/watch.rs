@@ -24,12 +24,12 @@ struct TargetProcess {
 }
 
 impl Process for TargetProcess {
-    fn on_start(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_start(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.started.store(true, Ordering::SeqCst);
         async {}
     }
 
-    fn on_stop(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.stopped.store(true, Ordering::SeqCst);
         async {}
     }
@@ -54,13 +54,17 @@ struct FailTarget;
 impl Receive<FailTarget> for FaultyTarget {
     type Response = ();
     type Error = TestError;
-    async fn recv(&mut self, _: FailTarget, _ctx: &mut ProcessContext) -> Result<(), TestError> {
+    async fn recv(
+        &mut self,
+        _: FailTarget,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), TestError> {
         Err(TestError("intentional failure".to_string()))
     }
 }
 
 impl Process for FaultyTarget {
-    fn on_start(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_start(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.start_count.fetch_add(1, Ordering::SeqCst);
         self.started.store(true, Ordering::SeqCst);
         async {}
@@ -91,7 +95,7 @@ impl Receive<UnwatchPid> for WatcherProcess {
     async fn recv(
         &mut self,
         msg: UnwatchPid,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         ctx.unwatch(msg.pid).await;
         Ok(())

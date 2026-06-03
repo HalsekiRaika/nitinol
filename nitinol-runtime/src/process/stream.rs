@@ -75,7 +75,7 @@ where
     fn on_terminated(
         &mut self,
         terminated: Terminated,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> impl Future<Output = ()> + Send {
         self.subscribers.remove(&terminated.who);
         async {}
@@ -97,7 +97,7 @@ where
     async fn recv(
         &mut self,
         msg: PublishMsg<T>,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         for dispatcher in self.subscribers.values() {
             if dispatcher.dispatch(msg.0.clone()).await.is_err() {
@@ -128,7 +128,7 @@ where
     async fn recv(
         &mut self,
         msg: SubscribeMsg<T>,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         let pid = msg.0.pid();
         self.subscribers.insert(pid, msg.0);
@@ -148,7 +148,7 @@ where
     async fn recv(
         &mut self,
         msg: UnsubscribeMsg,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         if self.subscribers.remove(&msg.0).is_some() {
             ctx.unwatch(msg.0).await;

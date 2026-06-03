@@ -25,7 +25,11 @@ impl Receive<Ping> for TargetProcess {
     type Response = ();
     type Error = std::convert::Infallible;
 
-    async fn recv(&mut self, _msg: Ping, _ctx: &mut ProcessContext) -> Result<(), Self::Error> {
+    async fn recv(
+        &mut self,
+        _msg: Ping,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -36,7 +40,11 @@ impl Receive<Query> for TargetProcess {
     type Response = u32;
     type Error = std::convert::Infallible;
 
-    async fn recv(&mut self, _msg: Query, _ctx: &mut ProcessContext) -> Result<u32, Self::Error> {
+    async fn recv(
+        &mut self,
+        _msg: Query,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<u32, Self::Error> {
         Ok(0)
     }
 }
@@ -47,7 +55,11 @@ impl Receive<Hush> for TargetProcess {
     type Response = ();
     type Error = std::convert::Infallible;
 
-    async fn recv(&mut self, _msg: Hush, _ctx: &mut ProcessContext) -> Result<(), Self::Error> {
+    async fn recv(
+        &mut self,
+        _msg: Hush,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 }

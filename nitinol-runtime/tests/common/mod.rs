@@ -37,12 +37,12 @@ impl TrackedProcess {
 }
 
 impl Process for TrackedProcess {
-    fn on_start(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_start(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.started.store(true, Ordering::SeqCst);
         async {}
     }
 
-    fn on_stop(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.stopped.store(true, Ordering::SeqCst);
         async {}
     }
@@ -57,7 +57,7 @@ impl Receive<Increment> for TrackedProcess {
     async fn recv(
         &mut self,
         _msg: Increment,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         self.counter.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -73,7 +73,7 @@ impl Receive<GetCount> for TrackedProcess {
     async fn recv(
         &mut self,
         _msg: GetCount,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<u32, std::convert::Infallible> {
         let count = self.counter.load(Ordering::SeqCst);
         Ok(count)
@@ -89,7 +89,7 @@ impl Receive<FailingMessage> for TrackedProcess {
     async fn recv(
         &mut self,
         _msg: FailingMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), TestError> {
         Err(TestError("intentional failure".to_string()))
     }
@@ -153,7 +153,7 @@ impl Receive<WatchPid> for WatcherProcess {
     async fn recv(
         &mut self,
         msg: WatchPid,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         ctx.watch(msg.pid).await;
         Ok(())
@@ -166,7 +166,7 @@ impl Receive<Barrier> for WatcherProcess {
     async fn recv(
         &mut self,
         _: Barrier,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }
@@ -176,7 +176,7 @@ impl Process for WatcherProcess {
     fn on_terminated(
         &mut self,
         terminated: Terminated,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> impl Future<Output = ()> + Send {
         let received = self.received.clone();
         async move {

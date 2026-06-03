@@ -214,7 +214,10 @@ async fn wait_for_tell_failed(
         if std::time::Instant::now() >= deadline {
             panic!(
                 "timed out waiting for TellFailed outbox event in saga stream (event_types: {:?})",
-                events.iter().map(|e| e.event_type.as_str()).collect::<Vec<_>>()
+                events
+                    .iter()
+                    .map(|e| e.event_type.as_str())
+                    .collect::<Vec<_>>()
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

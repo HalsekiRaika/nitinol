@@ -67,13 +67,17 @@ impl<E> SagaEffect<E> {
         C: Clone + serde::Serialize + Send + Sync + 'static,
         T: AggregateTellTarget<A>,
     {
-        let crash_restart_payload = serde_json::to_vec(&cmd)
-            .map(bytes::Bytes::from)
-            .expect("SagaEffect::tell: command serialization failed; \
-                     ensure the command type implements serde::Serialize correctly");
+        let crash_restart_payload = serde_json::to_vec(&cmd).map(bytes::Bytes::from).expect(
+            "SagaEffect::tell: command serialization failed; \
+                     ensure the command type implements serde::Serialize correctly",
+        );
         Self::Persist {
             events: Vec::new(),
-            tells: vec![TellIntent::new_with_crash_restart::<A, C, T>(target, cmd, crash_restart_payload)],
+            tells: vec![TellIntent::new_with_crash_restart::<A, C, T>(
+                target,
+                cmd,
+                crash_restart_payload,
+            )],
             schedules: Vec::new(),
         }
     }

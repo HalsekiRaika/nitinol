@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use nitinol_runtime::error::AskError;
 use nitinol_runtime::ident::Pid;
-use nitinol_runtime::process::ProcessContext;
+use nitinol_runtime::process::SubscriberContext;
 use nitinol_runtime::{BoxedMessage, DeadLetter, ProcessSystem, Props, Subscriber};
 
 use dead_letters::message::{Hush, Ping, Query};
@@ -51,7 +51,7 @@ impl Subscriber<BoxedMessage> for DestPidCapture {
     fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let count = self.count.clone();
         let pid = self.pid.clone();
@@ -82,7 +82,7 @@ impl<T: 'static + Send + Sync> Subscriber<BoxedMessage> for InnerMessageIs<T> {
     fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let count = self.count.clone();
         let matched = self.matched.clone();
@@ -108,7 +108,7 @@ impl Subscriber<BoxedMessage> for SenderNoneCheck {
     fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let count = self.count.clone();
         let sender_is_none = self.sender_is_none.clone();

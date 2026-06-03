@@ -64,12 +64,12 @@ impl DataTransformer {
 }
 
 impl Process for DataTransformer {
-    async fn on_start(&mut self, ctx: &mut ProcessContext) {
+    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         info!("[pid={pid}] DataTransformer started (success_count=0)");
     }
 
-    async fn on_stop(&mut self, ctx: &mut ProcessContext) {
+    async fn on_stop(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         let count = self.success_count;
         info!("[pid={pid}] DataTransformer stopped (final success_count={count})");
@@ -82,7 +82,11 @@ impl Receive<Parse> for DataTransformer {
     type Response = String;
     type Error = ParseError;
 
-    async fn recv(&mut self, msg: Parse, _ctx: &mut ProcessContext) -> Result<String, ParseError> {
+    async fn recv(
+        &mut self,
+        msg: Parse,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<String, ParseError> {
         let n: i64 = msg.0.parse().map_err(|_| ParseError {
             input: msg.0.clone(),
         })?;
@@ -100,7 +104,7 @@ impl Receive<GetSuccessCount> for DataTransformer {
     async fn recv(
         &mut self,
         _msg: GetSuccessCount,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<u32, std::convert::Infallible> {
         Ok(self.success_count)
     }

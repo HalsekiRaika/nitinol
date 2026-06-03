@@ -23,7 +23,7 @@ use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, Schedule, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, Schedule};
 
 const OUTBOX_PREFIX: &str = "nitinol.saga.outbox.";
 
@@ -108,7 +108,8 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 }
 
 #[tokio::test]
-async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_takes_no_other_action() {
+async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_takes_no_other_action()
+{
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
@@ -193,7 +194,10 @@ async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_take
         })
         .count();
 
-    assert_eq!(user_count, 1, "exactly one ReservationRequested must be persisted");
+    assert_eq!(
+        user_count, 1,
+        "exactly one ReservationRequested must be persisted"
+    );
     assert_eq!(
         scheduled_count, 2,
         "two Schedules in the Persist branch must yield two `scheduled` outbox events"
@@ -216,11 +220,10 @@ async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_take
     let mut atomic_batch: Vec<&LoadedEvent> = events
         .iter()
         .filter(|e| {
-            e.event_type == ReservationRequested::EVENT_TYPE
-                || {
-                    let s = e.event_type.as_str();
-                    s.starts_with(OUTBOX_PREFIX) && s.ends_with("scheduled")
-                }
+            e.event_type == ReservationRequested::EVENT_TYPE || {
+                let s = e.event_type.as_str();
+                s.starts_with(OUTBOX_PREFIX) && s.ends_with("scheduled")
+            }
         })
         .collect();
     atomic_batch.sort_by_key(|e| e.sequence);

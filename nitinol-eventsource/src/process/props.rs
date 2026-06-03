@@ -89,8 +89,7 @@ impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
             snapshot_restore: snapshot_restore.clone(),
         });
 
-        let proxy = system.spawn(props).await;
-        AggregateProxy(proxy)
+        system.spawn(props).await.into()
     }
 }
 

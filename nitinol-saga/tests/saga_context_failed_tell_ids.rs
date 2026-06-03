@@ -247,11 +247,7 @@ async fn append_raw(
 }
 
 /// Append an upstream `OrderPlaced` event to trigger `handle`.
-async fn publish_order_placed(
-    upstream_store: &Arc<dyn EventStore>,
-    order_id: &str,
-    sequence: u64,
-) {
+async fn publish_order_placed(upstream_store: &Arc<dyn EventStore>, order_id: &str, sequence: u64) {
     let payload = serde_json::to_vec(&OrderPlaced {
         order_id: order_id.to_owned(),
     })
@@ -311,25 +307,24 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let routed = saga_id.clone();
     let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
-    let _saga_proxy = SagaProps::<RecordingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || RecordingSaga {
-            captured: Arc::clone(&captured_for_saga),
-        },
-    )
-    .with_codec(system.codec::<OrderProcessed>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: "upstream".to_owned(),
-            after: 0,
-        },
-        route_fn,
-    )
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy =
+        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            RecordingSaga {
+                captured: Arc::clone(&captured_for_saga),
+            }
+        })
+        .with_codec(system.codec::<OrderProcessed>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<OrderPlaced>(),
+            SequenceCursor::Stream {
+                key: "upstream".to_owned(),
+                after: 0,
+            },
+            route_fn,
+        )
+        .spawn(system.process_system())
+        .await;
 
     // Allow on_start (replay) to complete before publishing the upstream event.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -413,25 +408,24 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     // Spawn without crash-restart factory and without pre-populated PendingIntents.
     // The replay path must append synthetic TellFailed(tell_id=5) AND push tell_id
     // to the shared accumulator.
-    let _saga_proxy = SagaProps::<RecordingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || RecordingSaga {
-            captured: Arc::clone(&captured_for_saga),
-        },
-    )
-    .with_codec(system.codec::<OrderProcessed>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: "upstream".to_owned(),
-            after: 0,
-        },
-        route_fn,
-    )
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy =
+        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            RecordingSaga {
+                captured: Arc::clone(&captured_for_saga),
+            }
+        })
+        .with_codec(system.codec::<OrderProcessed>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<OrderPlaced>(),
+            SequenceCursor::Stream {
+                key: "upstream".to_owned(),
+                after: 0,
+            },
+            route_fn,
+        )
+        .spawn(system.process_system())
+        .await;
 
     // Allow on_start (replay + synthetic TellFailed append) to complete before
     // triggering the first handle call.
@@ -494,23 +488,22 @@ async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
     let routed = saga_id.clone();
     let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
-    let _saga_proxy = SagaProps::<RuntimeSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || RuntimeSaga::new(Arc::clone(&captured_for_saga)),
-    )
-    .with_codec(system.codec::<OrderProcessed>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: "upstream".to_owned(),
-            after: 0,
-        },
-        route_fn,
-    )
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy =
+        SagaProps::<RuntimeSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            RuntimeSaga::new(Arc::clone(&captured_for_saga))
+        })
+        .with_codec(system.codec::<OrderProcessed>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<OrderPlaced>(),
+            SequenceCursor::Stream {
+                key: "upstream".to_owned(),
+                after: 0,
+            },
+            route_fn,
+        )
+        .spawn(system.process_system())
+        .await;
 
     // First event: saga emits a tell that always fails.
     publish_order_placed(&upstream_store, "order-runtime-1", 1).await;

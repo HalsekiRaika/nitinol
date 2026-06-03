@@ -155,10 +155,17 @@ impl Saga for InertSaga {
 
 /// Append an `OrderPlaced` event to an upstream store so a subscribed saga
 /// will fire `handle`.
-async fn append_order_placed(store: &Arc<dyn EventStore>, stream_key: &str, sequence: u64, sku: &str) {
-    let payload = serde_json::to_vec(&OrderPlaced { sku: sku.to_owned() })
-        .map(Bytes::from)
-        .expect("encode OrderPlaced must succeed");
+async fn append_order_placed(
+    store: &Arc<dyn EventStore>,
+    stream_key: &str,
+    sequence: u64,
+    sku: &str,
+) {
+    let payload = serde_json::to_vec(&OrderPlaced {
+        sku: sku.to_owned(),
+    })
+    .map(Bytes::from)
+    .expect("encode OrderPlaced must succeed");
     append_raw(
         store,
         stream_key,
@@ -199,10 +206,7 @@ async fn append_raw(
         .expect("append must succeed");
 }
 
-async fn load_saga_events(
-    store: &Arc<dyn EventStore>,
-    saga_id: &SagaId,
-) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -227,18 +231,19 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
     let mock = MockAggregateProxy::<Inventory>::new();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new("tell-crash-restart-saga-1");
 
     // Seed a TellRequested with tell_id = 1 and JSON crash-restart bytes that
     // match the output of `SagaEffect::tell(target, Reserve { sku: "SKU-CR-1" })`.
-    let payload = encode_tell_requested_with_json_cmd(1, &Reserve {
-        sku: "SKU-CR-1".to_owned(),
-    });
+    let payload = encode_tell_requested_with_json_cmd(
+        1,
+        &Reserve {
+            sku: "SKU-CR-1".to_owned(),
+        },
+    );
     append_raw(
         &saga_store,
         saga_id.as_str(),
@@ -266,24 +271,21 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
     };
 
     // No PendingIntents — simulates a full OS-process crash (in-memory state gone).
-    let _saga_proxy = SagaProps::<InertSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        InertSaga::default,
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: "no-such-stream".to_owned(),
-            after: 0,
-        },
-        route_fn,
-    )
-    .with_crash_restart_factory(factory)
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy =
+        SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
+            .with_codec(system.codec::<ReservationRequested>())
+            .with_subscription(
+                Arc::clone(&upstream_store),
+                system.codec::<OrderPlaced>(),
+                SequenceCursor::Stream {
+                    key: "no-such-stream".to_owned(),
+                    after: 0,
+                },
+                route_fn,
+            )
+            .with_crash_restart_factory(factory)
+            .spawn(system.process_system())
+            .await;
 
     // Wait for the crash-restart re-dispatch to produce TellAcked.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -373,29 +375,33 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     let route_fn_p1 = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed_p1.clone()) };
 
     let mock_for_saga = mock_p1.clone();
-    let _saga_proxy_p1 = SagaProps::<ActiveSaga>::new(
-        saga_id_p1.clone(),
-        Arc::clone(&saga_store_p1),
-        move || ActiveSaga { inventory: mock_for_saga.clone() },
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: upstream_key.to_owned(),
-            after: 0,
-        },
-        route_fn_p1,
-    )
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy_p1 =
+        SagaProps::<ActiveSaga>::new(saga_id_p1.clone(), Arc::clone(&saga_store_p1), move || {
+            ActiveSaga {
+                inventory: mock_for_saga.clone(),
+            }
+        })
+        .with_codec(system.codec::<ReservationRequested>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<OrderPlaced>(),
+            SequenceCursor::Stream {
+                key: upstream_key.to_owned(),
+                after: 0,
+            },
+            route_fn_p1,
+        )
+        .spawn(system.process_system())
+        .await;
 
     // Wait for TellAcked to confirm that SagaEffect::tell completed its path.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let p1_events = loop {
         let events = load_saga_events(&saga_store_p1, &saga_id_p1).await;
-        if events.iter().any(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED) {
+        if events
+            .iter()
+            .any(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED)
+        {
             break events;
         }
         if std::time::Instant::now() >= deadline {
@@ -506,7 +512,10 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let p2_events = loop {
         let events = load_saga_events(&saga_store_p2, &saga_id_p2).await;
-        if events.iter().any(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED) {
+        if events
+            .iter()
+            .any(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED)
+        {
             break events;
         }
         if std::time::Instant::now() >= deadline {

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use nitinol_runtime::error::AskError;
 use nitinol_runtime::ident::{Pid, ProcessName};
-use nitinol_runtime::process::{Process, ProcessContext, Receive};
+use nitinol_runtime::process::{Process, ProcessContext, Receive, SubscriberContext};
 use nitinol_runtime::{
     BoxedMessage, DeadLetter, ProcessSystem, Props, Stream, Subscriber, SuppressDeadLetterLog,
 };
@@ -35,7 +35,7 @@ impl Subscriber<BoxedMessage> for DeadLetterCountSubscriber {
     fn recv(
         &mut self,
         _msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let count = self.count.clone();
         async move {
@@ -53,7 +53,7 @@ impl Subscriber<BoxedMessage> for DeadLetterDestCapture {
     fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let captured = self.captured.clone();
         async move {
@@ -76,7 +76,7 @@ impl Subscriber<BoxedMessage> for DeadLetterRawCapture {
     fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let captured = self.captured.clone();
         async move {
@@ -99,12 +99,12 @@ struct SilentProcess {
 }
 
 impl Process for SilentProcess {
-    fn on_start(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_start(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.started.store(true, Ordering::SeqCst);
         async {}
     }
 
-    fn on_stop(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.stopped.store(true, Ordering::SeqCst);
         async {}
     }
@@ -116,7 +116,7 @@ impl Receive<SilentMessage> for SilentProcess {
     async fn recv(
         &mut self,
         _msg: SilentMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }

@@ -11,12 +11,12 @@ use tracing::info;
 pub struct Greeter;
 
 impl Process for Greeter {
-    async fn on_start(&mut self, ctx: &mut ProcessContext) {
+    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         info!("[pid={pid}] Greeter started");
     }
 
-    async fn on_stop(&mut self, ctx: &mut ProcessContext) {
+    async fn on_stop(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         info!("[pid={pid}] Greeter stopped");
     }
@@ -29,7 +29,11 @@ impl Receive<Greet> for Greeter {
     type Response = String;
     type Error = Infallible;
 
-    async fn recv(&mut self, msg: Greet, _ctx: &mut ProcessContext) -> Result<String, Infallible> {
+    async fn recv(
+        &mut self,
+        msg: Greet,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<String, Infallible> {
         Ok(format!("Hello, {}!", msg.0))
     }
 }

@@ -145,8 +145,8 @@ fn with_schedules_attaches_schedules_to_persist_branch() {
     let ts_b = jiff::Timestamp::from_second(1_700_000_060)
         .expect("constructing a valid jiff::Timestamp must succeed");
 
-    let effect = SagaEffect::persist(13u32)
-        .with_schedules(vec![schedule_at_ts(ts_a), schedule_at_ts(ts_b)]);
+    let effect =
+        SagaEffect::persist(13u32).with_schedules(vec![schedule_at_ts(ts_a), schedule_at_ts(ts_b)]);
 
     assert_eq!(
         shape_of(&effect),

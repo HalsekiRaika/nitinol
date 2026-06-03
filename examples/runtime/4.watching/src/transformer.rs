@@ -30,19 +30,19 @@ impl Transformer {
 }
 
 impl Process for Transformer {
-    async fn on_start(&mut self, ctx: &mut ProcessContext) {
+    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         let collector = self.collector_pid;
         info!("[pid={pid}] Transformer started, watching collector pid={collector}");
         ctx.watch(self.collector_pid).await;
     }
 
-    async fn on_stop(&mut self, ctx: &mut ProcessContext) {
+    async fn on_stop(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         info!("[pid={pid}] Transformer stopped");
     }
 
-    async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext) {
+    async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         let who = terminated.who;
         let why = terminated.why;
@@ -90,7 +90,7 @@ impl Receive<Transform> for Transformer {
     async fn recv(
         &mut self,
         msg: Transform,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<String, DownstreamTerminated> {
         if !self.downstream_alive {
             return Err(DownstreamTerminated);
@@ -106,7 +106,7 @@ impl Receive<DetachDownstream> for Transformer {
     async fn recv(
         &mut self,
         _msg: DetachDownstream,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         ctx.unwatch(self.collector_pid).await;
         Ok(())
@@ -120,7 +120,7 @@ impl Receive<CheckDownstream> for Transformer {
     async fn recv(
         &mut self,
         _msg: CheckDownstream,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<Option<TerminatedReason>, std::convert::Infallible> {
         Ok(self.downstream_terminated_reason)
     }

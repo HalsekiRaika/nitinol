@@ -29,7 +29,7 @@ impl Producer {
 }
 
 impl Process for Producer {
-    async fn on_start(&mut self, ctx: &mut ProcessContext) {
+    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         let n = self.items.len();
         let transformer = self.transformer_pid;
@@ -37,12 +37,12 @@ impl Process for Producer {
         ctx.watch(self.transformer_pid).await;
     }
 
-    async fn on_stop(&mut self, ctx: &mut ProcessContext) {
+    async fn on_stop(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         info!("[pid={pid}] Producer stopped");
     }
 
-    async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext) {
+    async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         let who = terminated.who;
         let why = terminated.why;
@@ -65,7 +65,7 @@ impl Receive<Pull> for Producer {
     async fn recv(
         &mut self,
         _msg: Pull,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<Option<String>, Infallible> {
         Ok(self.items.pop_front())
     }
@@ -78,7 +78,7 @@ impl Receive<CheckDownstream> for Producer {
     async fn recv(
         &mut self,
         _msg: CheckDownstream,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<Option<TerminatedReason>, Infallible> {
         Ok(self.downstream_terminated_reason)
     }

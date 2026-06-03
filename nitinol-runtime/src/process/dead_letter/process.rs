@@ -71,7 +71,7 @@ impl Receive<DeadLetterEnvelopeMsg> for DeadLetterProcess {
     async fn recv(
         &mut self,
         msg: DeadLetterEnvelopeMsg,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         let envelope = msg.0;
         let suppress =

@@ -23,7 +23,7 @@ impl Driver<DummyProcess> for IntDriver {
     async fn apply(
         &mut self,
         _state: &mut DummyProcess,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<DummyProcess>,
         _ev: Self::Event,
     ) -> Result<(), HandlerError> {
         Ok(())
@@ -42,7 +42,7 @@ impl Driver<DummyProcess> for AlwaysFailingDriver {
     async fn apply(
         &mut self,
         _state: &mut DummyProcess,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<DummyProcess>,
         _ev: Self::Event,
     ) -> Result<(), HandlerError> {
         Err(HandlerError)
@@ -61,7 +61,7 @@ impl Driver<DummyProcess> for NeverIdleDriver {
     async fn apply(
         &mut self,
         _state: &mut DummyProcess,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<DummyProcess>,
         _ev: Self::Event,
     ) -> Result<(), HandlerError> {
         Ok(())
@@ -84,7 +84,7 @@ impl Driver<DummyProcess> for DefaultDriver {
     async fn apply(
         &mut self,
         _state: &mut DummyProcess,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<DummyProcess>,
         _ev: Self::Event,
     ) -> Result<(), HandlerError> {
         Ok(())

@@ -17,11 +17,11 @@ struct TickProcess {
 }
 
 impl Process for TickProcess {
-    fn on_start(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_start(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.started.store(true, Ordering::SeqCst);
         async {}
     }
-    fn on_stop(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.stopped.store(true, Ordering::SeqCst);
         async {}
     }
@@ -54,7 +54,7 @@ impl Driver<TickProcess> for ChannelDriver {
     async fn apply(
         &mut self,
         state: &mut TickProcess,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<TickProcess>,
         _ev: (),
     ) -> Result<(), HandlerError> {
         state.ticks.fetch_add(1, Ordering::SeqCst);
@@ -288,7 +288,7 @@ impl nitinol_runtime::process::Receive<u32> for TellableProcess {
     async fn recv(
         &mut self,
         _msg: u32,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }
@@ -304,7 +304,7 @@ impl Driver<TellableProcess> for NeverDriver {
     async fn apply(
         &mut self,
         _state: &mut TellableProcess,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<TellableProcess>,
         _ev: (),
     ) -> Result<(), HandlerError> {
         Ok(())

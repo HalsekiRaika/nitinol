@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nitinol_runtime::ident::{Pid, ProcessName};
-use nitinol_runtime::process::{Process, ProcessContext, Receive};
+use nitinol_runtime::process::{Process, ProcessContext, Receive, SubscriberContext};
 use nitinol_runtime::{
     BoxedMessage, DeadLetter, Message, ProcessSystem, Props, Stream, Subscriber,
     SupervisionStrategy,
@@ -28,7 +28,7 @@ impl Receive<BoxedMessage> for ReceivingProcess {
     async fn recv(
         &mut self,
         _msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         self.count.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -50,7 +50,7 @@ impl Subscriber<BoxedMessage> for CountingSubscriber {
     fn recv(
         &mut self,
         _msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let count = self.count.clone();
         async move {
@@ -429,7 +429,7 @@ async fn subscriber_recv_uses_all_parameters() {
         fn recv(
             &mut self,
             msg: BoxedMessage,
-            _ctx: &mut ProcessContext,
+            _ctx: &mut SubscriberContext<'_, BoxedMessage>,
         ) -> impl Future<Output = ()> + Send {
             // Use `msg` to prove the parameter is needed
             let value = msg.downcast_ref::<u32>().copied().unwrap_or(0);
@@ -595,7 +595,7 @@ struct StopTrackingReceivingProcess {
 }
 
 impl Process for StopTrackingReceivingProcess {
-    fn on_stop(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.stopped.store(true, Ordering::SeqCst);
         async {}
     }
@@ -607,7 +607,7 @@ impl Receive<BoxedMessage> for StopTrackingReceivingProcess {
     async fn recv(
         &mut self,
         _msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         self.count.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -633,7 +633,7 @@ struct FaultyReceivingProcess {
 }
 
 impl Process for FaultyReceivingProcess {
-    fn on_start(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_start(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.start_count.fetch_add(1, Ordering::SeqCst);
         async {}
     }
@@ -645,7 +645,7 @@ impl Receive<BoxedMessage> for FaultyReceivingProcess {
     async fn recv(
         &mut self,
         _msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), RecvTestError> {
         if self.fail_next.swap(false, Ordering::SeqCst) {
             return Err(RecvTestError("intentional failure".to_string()));
@@ -1034,7 +1034,7 @@ impl Receive<KillChannel> for ChannelKillerSubscriber {
     async fn recv(
         &mut self,
         _msg: KillChannel,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         panic!("deliberate channel kill for dead-letter routing test");
     }
@@ -1046,7 +1046,7 @@ impl Receive<BoxedMessage> for ChannelKillerSubscriber {
     async fn recv(
         &mut self,
         _msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }
@@ -1061,7 +1061,7 @@ impl Subscriber<BoxedMessage> for DeadLetterCountSub {
     fn recv(
         &mut self,
         _msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let count = self.count.clone();
         async move {
@@ -1079,7 +1079,7 @@ impl Subscriber<BoxedMessage> for DeadLetterDestinationCapture {
     fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let captured = self.captured.clone();
         async move {
@@ -1105,7 +1105,7 @@ impl Subscriber<BoxedMessage> for DeadLetterSenderCapture {
     fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let captured = self.captured.clone();
         async move {

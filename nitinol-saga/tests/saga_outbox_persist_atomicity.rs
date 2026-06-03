@@ -290,11 +290,10 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
     let mut atomic_batch: Vec<&LoadedEvent> = events
         .iter()
         .filter(|e| {
-            e.event_type == ReservationRequested::EVENT_TYPE
-                || {
-                    let s = e.event_type.as_str();
-                    s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
-                }
+            e.event_type == ReservationRequested::EVENT_TYPE || {
+                let s = e.event_type.as_str();
+                s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
+            }
         })
         .collect();
     atomic_batch.sort_by_key(|e| e.sequence);
@@ -413,7 +412,10 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
         outbox_events.is_empty(),
         "no outbox markers must be emitted when the Persist branch has no tells / no schedules; \
          got: {:?}",
-        outbox_events.iter().map(|e| e.event_type.as_str()).collect::<Vec<_>>()
+        outbox_events
+            .iter()
+            .map(|e| e.event_type.as_str())
+            .collect::<Vec<_>>()
     );
     assert_eq!(events[0].event_type, ReservationRequested::EVENT_TYPE);
 }

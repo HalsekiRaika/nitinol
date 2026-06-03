@@ -4,7 +4,6 @@ use nitinol_persistence::store::{CheckpointStore, DeliveryMode};
 use nitinol_persistence::{AggregateId, LoadedEvent, ProjectionId};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
-use crate::durable_stream::DurableStreamProxy;
 use crate::projection::delivery;
 use crate::projection::handler::EventTypeHandler;
 use crate::projection::tx_provider::ErasedTxProvider;
@@ -27,7 +26,6 @@ pub struct ProjectorProcess<P, Cs, Tx = ()> {
     pub(crate) handlers: Vec<Arc<dyn EventTypeHandler<P, Tx>>>,
     pub(crate) tx_provider: Option<Arc<dyn ErasedTxProvider<Tx> + Send + Sync>>,
     pub(crate) checkpoint_sequence: u64,
-    pub(crate) _ds_keepalive: Arc<DurableStreamProxy<LoadedEvent>>,
 }
 
 impl<P, Cs, Tx> Process for ProjectorProcess<P, Cs, Tx>
@@ -50,7 +48,7 @@ where
     async fn recv(
         &mut self,
         loaded: LoadedEvent,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         let event_sequence = match &self.catchup_origin {
             CatchupOrigin::Aggregate(_) => loaded.sequence,

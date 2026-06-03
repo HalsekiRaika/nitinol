@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nitinol_runtime::process::ProcessContext;
+use nitinol_runtime::process::SubscriberContext;
 use nitinol_runtime::{BoxedMessage, DeadLetter, ProcessSystem, Props, Subscriber};
 
 use dead_letters::message::Query;
@@ -38,7 +38,7 @@ impl Subscriber<BoxedMessage> for QueryTypeCheck {
     fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let count = self.count.clone();
         let is_query = self.is_query.clone();

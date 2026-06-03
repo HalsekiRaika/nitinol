@@ -9,7 +9,6 @@ use futures_util::{FutureExt, StreamExt};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadedEvent;
 use nitinol_runtime::error::HandlerError;
-use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::{
     Driver, Process, ProcessContext, ProcessProxy, Receive, Terminated,
 };
@@ -22,8 +21,10 @@ pub(crate) type TransformFn<T> = Arc<dyn Fn(LoadedEvent) -> Option<T> + Send + S
 pub(crate) trait Poll: Process {
     fn poll_tick(
         &mut self,
-        ctx: &mut ProcessContext,
-    ) -> impl Future<Output = Result<(), HandlerError>> + Send;
+        ctx: &mut ProcessContext<Self>,
+    ) -> impl Future<Output = Result<(), HandlerError>> + Send
+    where
+        Self: Sized;
 }
 
 pub(crate) struct IntervalDriver<P> {
@@ -57,7 +58,7 @@ where
     async fn apply(
         &mut self,
         state: &mut P,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<P>,
         _ev: (),
     ) -> Result<(), HandlerError> {
         AssertUnwindSafe(state.poll_tick(ctx))
@@ -88,7 +89,7 @@ impl<T> Poll for DurablePollerProcess<T>
 where
     T: 'static + Send + Sync + Clone,
 {
-    async fn poll_tick(&mut self, _ctx: &mut ProcessContext) -> Result<(), HandlerError> {
+    async fn poll_tick(&mut self, _ctx: &mut ProcessContext<Self>) -> Result<(), HandlerError> {
         if !self.start_open.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -107,7 +108,6 @@ pub(crate) struct DirectPollerProcess<T, P> {
     pub(crate) subscriber: ProcessProxy<P>,
     pub(crate) transform: TransformFn<T>,
     pub(crate) cursor: SequenceCursor,
-    pub(crate) owner_pid: Pid,
 }
 
 impl<T, P> Process for DirectPollerProcess<T, P>
@@ -115,13 +115,12 @@ where
     T: 'static + Send + Sync,
     P: Process + Receive<T, Response = ()>,
 {
-    async fn on_start(&mut self, ctx: &mut ProcessContext) {
+    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         ctx.watch(self.subscriber.pid()).await;
-        ctx.watch(self.owner_pid).await;
     }
 
-    async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext) {
-        if terminated.who == self.subscriber.pid() || terminated.who == self.owner_pid {
+    async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext<Self>) {
+        if terminated.who == self.subscriber.pid() {
             let _ = ctx.stop_self().await;
         }
     }
@@ -132,7 +131,7 @@ where
     T: 'static + Send + Sync,
     P: Process + Receive<T, Response = ()>,
 {
-    async fn poll_tick(&mut self, _ctx: &mut ProcessContext) -> Result<(), HandlerError> {
+    async fn poll_tick(&mut self, _ctx: &mut ProcessContext<Self>) -> Result<(), HandlerError> {
         poll_direct_once(
             &self.store,
             &self.subscriber,

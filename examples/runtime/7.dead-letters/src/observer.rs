@@ -13,7 +13,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use nitinol_runtime::process::ProcessContext;
+use nitinol_runtime::process::SubscriberContext;
 use nitinol_runtime::{BoxedMessage, DeadLetter, Subscriber};
 use tracing::info;
 
@@ -39,7 +39,7 @@ impl Subscriber<BoxedMessage> for DeadLetterObserver {
     fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut SubscriberContext<'_, BoxedMessage>,
     ) -> impl Future<Output = ()> + Send {
         let received = self.received.clone();
         async move {
@@ -63,7 +63,7 @@ impl Subscriber<BoxedMessage> for DeadLetterObserver {
 pub struct DeadLetterInspector;
 
 impl Subscriber<BoxedMessage> for DeadLetterInspector {
-    async fn recv(&mut self, msg: BoxedMessage, _ctx: &mut ProcessContext) {
+    async fn recv(&mut self, msg: BoxedMessage, _ctx: &mut SubscriberContext<'_, BoxedMessage>) {
         // Two-stage downcast: BoxedMessage → DeadLetter (outer)
         let Some(dl) = msg.downcast_ref::<DeadLetter>() else {
             return;

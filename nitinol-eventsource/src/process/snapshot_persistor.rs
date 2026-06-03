@@ -39,7 +39,7 @@ impl Receive<SaveSnapshot> for SnapshotPersistor {
     async fn recv(
         &mut self,
         msg: SaveSnapshot,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), SnapshotError> {
         self.store.save(msg.snapshot).await
     }
@@ -52,7 +52,7 @@ impl Receive<LoadLatestSnapshot> for SnapshotPersistor {
     async fn recv(
         &mut self,
         msg: LoadLatestSnapshot,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<Option<PersistedSnapshot>, SnapshotError> {
         self.store.load_latest(&msg.aggregate_id).await
     }
@@ -72,7 +72,13 @@ impl SnapshotPersistor {
         });
         props.with_supervision_strategy(SupervisionStrategy::Resume);
         props.with_idle_timeout(IdleTimeout::Persistent);
-        SnapshotPersistorProxy(system.spawn(props).await)
+        system.spawn(props).await.into()
+    }
+}
+
+impl From<ProcessProxy<SnapshotPersistor>> for SnapshotPersistorProxy {
+    fn from(inner: ProcessProxy<SnapshotPersistor>) -> Self {
+        Self(inner)
     }
 }
 

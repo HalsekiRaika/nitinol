@@ -10,7 +10,7 @@ use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Schedule, SagaEffect, TellIntent};
+use nitinol_saga::{SagaEffect, Schedule, TellIntent};
 
 // ---------------------------------------------------------------------------
 // JsonCodec — shared across all integration tests

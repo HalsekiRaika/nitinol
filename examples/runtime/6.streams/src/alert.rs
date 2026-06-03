@@ -9,11 +9,10 @@
 //! runtime wraps it in an internal `SubscriberProcess` adapter that implements
 //! the full `Receive<BoxedMessage>` trait behind the scenes.
 
-use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use nitinol_runtime::process::ProcessContext;
+use nitinol_runtime::process::SubscriberContext;
 use nitinol_runtime::{BoxedMessage, Subscriber};
 use tracing::info;
 
@@ -44,7 +43,7 @@ impl AlertSubscriber {
 // ─── Subscriber<BoxedMessage> ─────────────────────────────────────────────────
 
 impl Subscriber<BoxedMessage> for AlertSubscriber {
-    async fn recv(&mut self, msg: BoxedMessage, _ctx: &mut ProcessContext) {
+    async fn recv(&mut self, msg: BoxedMessage, _ctx: &mut SubscriberContext<'_, BoxedMessage>) {
         let Some(reading) = msg.downcast_ref::<TemperatureReading>() else {
             return;
         };

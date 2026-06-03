@@ -154,23 +154,20 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
     let routed = saga_id.clone();
     let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
-    let _saga_proxy = SagaProps::<InertSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        InertSaga::default,
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: "no-such-stream".to_owned(),
-            after: 0,
-        },
-        route_fn,
-    )
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy =
+        SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
+            .with_codec(system.codec::<ReservationRequested>())
+            .with_subscription(
+                Arc::clone(&upstream_store),
+                system.codec::<OrderPlaced>(),
+                SequenceCursor::Stream {
+                    key: "no-such-stream".to_owned(),
+                    after: 0,
+                },
+                route_fn,
+            )
+            .spawn(system.process_system())
+            .await;
 
     // Give the replay path time to (correctly) do nothing
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -230,23 +227,20 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
 
     // Spawn without crash-restart factory and without pre-populated PendingIntents.
     // This simulates a full OS-process crash restart where no in-memory state survives.
-    let _saga_proxy = SagaProps::<InertSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        InertSaga::default,
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: "no-such-stream".to_owned(),
-            after: 0,
-        },
-        route_fn,
-    )
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy =
+        SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
+            .with_codec(system.codec::<ReservationRequested>())
+            .with_subscription(
+                Arc::clone(&upstream_store),
+                system.codec::<OrderPlaced>(),
+                SequenceCursor::Stream {
+                    key: "no-such-stream".to_owned(),
+                    after: 0,
+                },
+                route_fn,
+            )
+            .spawn(system.process_system())
+            .await;
 
     // Wait for the replay path to append the synthetic TellFailed.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

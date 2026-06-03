@@ -6,32 +6,30 @@
 //! with exponential backoff.  On success appends a `TellAcked` outbox marker;
 //! on exhaustion appends a `TellFailed` marker.
 //!
-//! When the terminal marker is appended **successfully**, the executor also
-//! removes the entry from the
-//! [`crate::process::pending_intents::PendingIntents`] registry so that a
-//! subsequent supervised restart does not re-dispatch an already-settled tell.
-//! If `append_terminal` fails the registry entry is kept intact so that the
-//! next supervised restart can still re-dispatch.
+//! When the terminal marker is appended **successfully**, the executor sends
+//! [`OutboxTerminalSettled`] back to the saga's own mailbox via `self_proxy`.
+//! The saga's handler removes the entry from the in-memory `pending_intents`
+//! registry and, when `failed == true`, records the `tell_id` so that the next
+//! [`Saga::handle`] invocation can observe the failure.  If `append_terminal`
+//! fails the executor sends [`OutboxTerminalAppendFailed`] instead: the saga
+//! decrements its `pending_executor_count` without removing the
+//! `pending_intents` entry, so the intent survives for supervised-restart
+//! re-dispatch while a deferred `End` can still complete.
 
-use std::sync::Arc;
-
-use nitinol_persistence::store::EventStore;
-use tokio::sync::Mutex;
+use nitinol_runtime::process::ProcessProxy;
 
 use crate::effect::TellIntent;
-use crate::id::SagaId;
-use crate::outbox::{OutboxAppender, RetryPolicy, TerminalKind};
-use crate::process::pending_intents::PendingIntents;
+use crate::outbox::{RetryPolicy, TerminalKind};
+use crate::process::saga_process::{
+    AppendTerminalAndClaim, OutboxTerminalAppendFailed, OutboxTerminalSettled, SagaProcess,
+};
+use crate::saga::Saga;
 
-pub(crate) fn spawn_outbox_executor(
+pub(crate) fn spawn_outbox_executor<S: Saga>(
     intent: TellIntent,
     tell_id: u64,
     policy: RetryPolicy,
-    saga_id: SagaId,
-    store: Arc<dyn EventStore>,
-    sequence: Arc<Mutex<u64>>,
-    pending_intents: PendingIntents,
-    failed_tell_ids: Arc<Mutex<Vec<u64>>>,
+    saga_proxy: ProcessProxy<SagaProcess<S>>,
 ) {
     tokio::spawn(async move {
         let succeeded = run_attempts(&intent, &policy, tell_id).await;
@@ -40,17 +38,54 @@ pub(crate) fn spawn_outbox_executor(
         } else {
             TerminalKind::Failed
         };
-        let appended =
-            OutboxAppender::append_terminal(&store, &saga_id, &sequence, kind, tell_id).await;
+        // Ask the saga's own loop to append the terminal marker and advance the
+        // sequence cursor atomically.  The sequence only advances on a
+        // successful store call, so a failure here never skips a sequence number.
+        let appended = match saga_proxy
+            .ask(AppendTerminalAndClaim { tell_id, kind })
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!(
+                    error = ?e,
+                    tell_id,
+                    "saga outbox executor failed to append terminal; saga process may be stopping"
+                );
+                return;
+            }
+        };
         if appended {
-            // Remove from the registry only when the terminal marker was durably
-            // persisted.  If append failed, keep the entry so a subsequent
-            // supervised restart can still re-dispatch this tell.
-            pending_intents.take(tell_id).await;
-            if !succeeded {
-                // TellFailed was durably appended — surface this to the next
-                // Saga::handle call via the shared failed-tell-ids accumulator.
-                failed_tell_ids.lock().await.push(tell_id);
+            // Tell the saga to remove the entry from `pending_intents`.  If the
+            // append failed we deliberately skip this notification so the
+            // entry survives and a subsequent supervised restart can still
+            // re-dispatch the tell.
+            let failed = !succeeded;
+            if let Err(e) = saga_proxy
+                .tell(OutboxTerminalSettled { tell_id, failed })
+                .await
+            {
+                tracing::warn!(
+                    error = ?e,
+                    tell_id,
+                    "saga outbox executor failed to notify saga of settled terminal"
+                );
+            }
+        } else {
+            // Terminal append failed.  Notify the saga so it can decrement
+            // `pending_executor_count` and complete a deferred End if one is
+            // pending.  The `pending_intents` entry is deliberately preserved
+            // (handled inside `OutboxTerminalAppendFailed`) so a subsequent
+            // supervised restart can re-dispatch the tell.
+            if let Err(e) = saga_proxy
+                .tell(OutboxTerminalAppendFailed { tell_id })
+                .await
+            {
+                tracing::warn!(
+                    error = ?e,
+                    tell_id,
+                    "saga outbox executor failed to notify saga of terminal append failure"
+                );
             }
         }
     });
@@ -79,149 +114,4 @@ async fn run_attempts(intent: &TellIntent, policy: &RetryPolicy, tell_id: u64) -
         "saga tell exhausted retries; appending TellFailed"
     );
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-
-    use async_trait::async_trait;
-    use futures_core::Stream;
-    use futures_util::stream;
-    use nitinol_eventsource::test_helpers::MockAggregateProxy;
-    use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
-    use nitinol_persistence::error::{AppendError, LoadError};
-    use nitinol_persistence::store::EventStream;
-    use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType, LoadQuery};
-
-    use crate::outbox::RetryPolicy;
-    use crate::process::pending_intents::PendingIntents;
-    use crate::{SagaId, TellIntent};
-
-    // -----------------------------------------------------------------------
-    // Minimal domain types — only used to construct a TellIntent
-    // -----------------------------------------------------------------------
-
-    #[derive(Clone)]
-    struct OkCmd;
-
-    #[derive(Clone)]
-    struct DummyEvent;
-
-    impl Event for DummyEvent {
-        const EVENT_TYPE: EventType = EventType::from_str("executor_test.DummyEvent");
-    }
-
-    #[derive(Default)]
-    struct DummyAggregate;
-
-    impl Aggregate for DummyAggregate {
-        type Event = DummyEvent;
-        fn apply(&mut self, _: DummyEvent) {}
-    }
-
-    #[async_trait]
-    impl Decider<OkCmd> for DummyAggregate {
-        type Rejection = std::convert::Infallible;
-
-        async fn decide(
-            &self,
-            _: OkCmd,
-            _: &mut Context,
-        ) -> Result<Effect<DummyEvent>, Self::Rejection> {
-            Ok(Effect::persist(DummyEvent))
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // An EventStore that fails the first `append` call, then succeeds.
-    // -----------------------------------------------------------------------
-
-    struct FailOnceStore {
-        has_failed: AtomicBool,
-    }
-
-    impl FailOnceStore {
-        fn new() -> Self {
-            Self {
-                has_failed: AtomicBool::new(false),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl EventStore for FailOnceStore {
-        async fn append(
-            &self,
-            _key: &str,
-            _events: Vec<AppendingEvent>,
-        ) -> Result<AppendOutcome, AppendError> {
-            if !self.has_failed.swap(true, Ordering::SeqCst) {
-                Err(AppendError::Backend("injected failure".into()))
-            } else {
-                Ok(AppendOutcome {
-                    assigned_sequences: vec![],
-                    stream_version: 0,
-                })
-            }
-        }
-
-        async fn load(&self, _query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-            let s: Pin<Box<dyn Stream<Item = Result<nitinol_persistence::LoadedEvent, LoadError>> + Send + '_>> =
-                Box::pin(stream::empty());
-            Ok(s)
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Regression test: AI-45-006
-    // -----------------------------------------------------------------------
-
-    /// When `append_terminal` fails (store returns an error), the
-    /// `PendingIntents` registry entry must **not** be removed.  Removing it
-    /// unconditionally would make a subsequent supervised restart unable to
-    /// re-dispatch the tell, leaving the outbox in an orphaned state.
-    #[tokio::test]
-    async fn terminal_append_failure_leaves_pending_intent_intact() {
-        let mock = MockAggregateProxy::<DummyAggregate>::new();
-
-        // Pre-register an intent so we can verify it survives the failed append.
-        let pending = PendingIntents::new();
-        pending
-            .register(
-                1,
-                TellIntent::new::<DummyAggregate, OkCmd, _>(mock.clone(), OkCmd),
-            )
-            .await;
-
-        // Spawn an executor that will: succeed at the tell attempt, then fail
-        // at `append_terminal` (FailOnceStore's first call).
-        let store: Arc<dyn EventStore> = Arc::new(FailOnceStore::new());
-        let sequence = Arc::new(Mutex::new(0u64));
-
-        spawn_outbox_executor(
-            TellIntent::new::<DummyAggregate, OkCmd, _>(mock, OkCmd),
-            1,
-            RetryPolicy::default(),
-            SagaId::new("test-pending-intents-integrity"),
-            store,
-            sequence,
-            pending.clone(),
-            Arc::new(Mutex::new(Vec::new())),
-        );
-
-        // Wait for the spawned task to complete (no backoff since first attempt
-        // succeeds, and the append failure is immediate).
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        let entry_present = pending.0.lock().await.contains_key(&1);
-        assert!(
-            entry_present,
-            "PendingIntents entry must remain when append_terminal fails; \
-             a subsequent supervised restart must still be able to re-dispatch"
-        );
-    }
 }

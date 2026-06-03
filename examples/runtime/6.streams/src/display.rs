@@ -39,12 +39,12 @@ impl DisplaySubscriber {
 }
 
 impl Process for DisplaySubscriber {
-    async fn on_start(&mut self, ctx: &mut ProcessContext) {
+    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         info!("[pid={pid}] DisplaySubscriber started");
     }
 
-    async fn on_stop(&mut self, ctx: &mut ProcessContext) {
+    async fn on_stop(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         let total = self.received_count.load(Ordering::SeqCst);
         info!("[pid={pid}] DisplaySubscriber stopped (total received: {total})");
@@ -60,7 +60,7 @@ impl Receive<BoxedMessage> for DisplaySubscriber {
     async fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         self.received_count.fetch_add(1, Ordering::SeqCst);
         if let Some(reading) = msg.downcast_ref::<TemperatureReading>() {

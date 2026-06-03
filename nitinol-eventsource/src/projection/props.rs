@@ -9,7 +9,7 @@ use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{ProcessSystem, Props};
 
 use crate::codec::ErasedCodec;
-use crate::durable_stream::{DurableStream, DurableStreamProxy, SequenceCursor};
+use crate::durable_stream::{DurableStream, SequenceCursor};
 use crate::event::Event;
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};
 use crate::projection::process::{CatchupOrigin, ProjectorProcess};
@@ -281,15 +281,13 @@ where
             UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
 
-        let ds_proxy: Arc<DurableStreamProxy<nitinol_persistence::LoadedEvent>> = Arc::new(
+        let ds_proxy =
             DurableStream::<nitinol_persistence::LoadedEvent>::new(topic, Arc::clone(&store), Some)
                 .cursor(cursor.clone())
                 .spawn(system)
                 .await
-                .expect("DurableStream::spawn must succeed for projector"),
-        );
+                .expect("DurableStream::spawn must succeed for projector");
 
-        let ds_for_props = Arc::clone(&ds_proxy);
         let runtime_props = Props::new(move || ProjectorProcess {
             projector: producer(),
             projection_id: projection_id.clone(),
@@ -299,7 +297,6 @@ where
             handlers: handlers.clone(),
             tx_provider: tx_provider.clone(),
             checkpoint_sequence: checkpoint,
-            _ds_keepalive: Arc::clone(&ds_for_props),
         });
 
         let proxy = system.spawn(runtime_props).await;
@@ -309,6 +306,11 @@ where
             .await
             .expect("DurableStream::subscribe_from must succeed for projector");
 
+        // `ds_proxy` is dropped here. The shared_poller of a projector-private
+        // DurableStream is idle (no topic subscribers in `subscribe`), and the
+        // DirectPollerProcess spawned by `subscribe_from` watches the projector
+        // process directly — so the projector's lifetime drives the poller's,
+        // and the keepalive `Arc` is no longer needed.
         proxy
     }
 }

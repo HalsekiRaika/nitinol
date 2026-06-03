@@ -26,8 +26,7 @@
 //! # Re-dispatch on restart
 //!
 //! - **Supervised restart** (same OS process): the replay path re-dispatches
-//!   via the in-memory [`crate::process::pending_intents::PendingIntents`]
-//!   registry.
+//!   via the in-memory `pending_intents` registry inside `SagaProcess`.
 //! - **Crash restart** (fresh OS process): if the `TellRequested` payload
 //!   contains crash-restart bytes **and** the saga was configured with
 //!   [`crate::SagaProps::with_crash_restart_factory`], the factory is invoked

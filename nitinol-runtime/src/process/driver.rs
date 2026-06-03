@@ -30,7 +30,7 @@ pub trait Driver<P: Process>: Send + 'static {
     fn apply(
         &mut self,
         state: &mut P,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<P>,
         ev: Self::Event,
     ) -> impl Future<Output = Result<(), HandlerError>> + Send;
 

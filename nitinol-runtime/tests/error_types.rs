@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use nitinol_runtime::error::{AskError, SendError, SpawnError};
 use nitinol_runtime::ident::ProcessName;
-use nitinol_runtime::process::{Process, ProcessContext, Receive};
+use nitinol_runtime::process::{Process, ProcessContext, Receive, SubscriberContext};
 use nitinol_runtime::{BoxedMessage, ProcessSystem, Props, Subscriber};
 
 use common::{test_props, tracked_state, wait_for_flag, GetCount, Increment};
@@ -26,7 +26,11 @@ struct FailMsg;
 impl Receive<FailMsg> for FailingProcess {
     type Response = ();
     type Error = HandlerTestError;
-    async fn recv(&mut self, _: FailMsg, _: &mut ProcessContext) -> Result<(), HandlerTestError> {
+    async fn recv(
+        &mut self,
+        _: FailMsg,
+        _: &mut ProcessContext<Self>,
+    ) -> Result<(), HandlerTestError> {
         Err(HandlerTestError("deliberate failure".to_string()))
     }
 }
@@ -39,7 +43,7 @@ impl Receive<SuccessMsg> for FailingProcess {
     async fn recv(
         &mut self,
         _: SuccessMsg,
-        _: &mut ProcessContext,
+        _: &mut ProcessContext<Self>,
     ) -> Result<u32, std::convert::Infallible> {
         Ok(42)
     }
@@ -282,7 +286,7 @@ async fn dead_letter_stream_subscribe_succeeds() {
     struct DummySubscriber;
 
     impl Subscriber<BoxedMessage> for DummySubscriber {
-        async fn recv(&mut self, _: BoxedMessage, _: &mut ProcessContext) {}
+        async fn recv(&mut self, _: BoxedMessage, _: &mut SubscriberContext<'_, BoxedMessage>) {}
     }
 
     // Given: a freshly created ProcessSystem
@@ -304,7 +308,7 @@ async fn dead_letter_stream_unsubscribe_succeeds() {
     struct DummySubscriber;
 
     impl Subscriber<BoxedMessage> for DummySubscriber {
-        async fn recv(&mut self, _: BoxedMessage, _: &mut ProcessContext) {}
+        async fn recv(&mut self, _: BoxedMessage, _: &mut SubscriberContext<'_, BoxedMessage>) {}
     }
 
     // Given: a subscriber already registered to the dead-letter stream
@@ -340,7 +344,7 @@ async fn dead_letter_stream_unsubscribed_subscriber_receives_no_further_events()
         fn recv(
             &mut self,
             _: BoxedMessage,
-            _: &mut ProcessContext,
+            _: &mut SubscriberContext<'_, BoxedMessage>,
         ) -> impl Future<Output = ()> + Send {
             let count = self.count.clone();
             async move {
@@ -420,7 +424,7 @@ async fn props_subscriber_creates_working_subscriber() {
         fn recv(
             &mut self,
             _: BoxedMessage,
-            _: &mut ProcessContext,
+            _: &mut SubscriberContext<'_, BoxedMessage>,
         ) -> impl Future<Output = ()> + Send {
             let count = self.count.clone();
             async move {
@@ -475,7 +479,7 @@ async fn props_subscriber_caller_does_not_name_subscriber_process_type() {
     struct MySubscriber;
 
     impl Subscriber<BoxedMessage> for MySubscriber {
-        async fn recv(&mut self, _: BoxedMessage, _: &mut ProcessContext) {}
+        async fn recv(&mut self, _: BoxedMessage, _: &mut SubscriberContext<'_, BoxedMessage>) {}
     }
 
     // Given / When: Props::subscriber is called — the return type is inferred

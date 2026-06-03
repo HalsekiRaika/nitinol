@@ -1,30 +1,39 @@
-use std::any::TypeId;
-
 use tokio::sync::mpsc;
 
 use crate::error::SendError;
 use crate::ident::{Pid, ProcessName};
-use crate::process::dead_letter::{DeadLetterEnvelope, DeadLetterProxy};
-use crate::process::message::BoxedMessage;
+use crate::process::dead_letter::DeadLetterProxy;
+use crate::process::proxy::ProcessProxy;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
-use crate::process::watch::{TerminatedReason, WatchRequest};
+use crate::process::Process;
 
-pub struct ProcessContext {
+use super::wiring;
+
+pub struct ProcessContext<P: Process> {
     pub(crate) pid: Pid,
     pub(crate) name: Option<ProcessName>,
     pub(crate) registry: ProcessRegistry,
     pub(crate) sys_tx: mpsc::Sender<SystemSignal>,
     pub(crate) dead_letter: Option<DeadLetterProxy>,
+    pub(crate) self_proxy: ProcessProxy<P>,
 }
 
-impl ProcessContext {
+impl<P: Process> ProcessContext<P> {
     pub fn pid(&self) -> Pid {
         self.pid
     }
 
     pub fn name(&self) -> Option<&ProcessName> {
         self.name.as_ref()
+    }
+
+    /// Immutable reference to this process's own proxy.
+    ///
+    /// Clone if you need an owned handle (e.g. for Pipe-to-Self where a handler
+    /// captures the proxy to schedule a follow-up `tell` to itself).
+    pub fn self_proxy(&self) -> &ProcessProxy<P> {
+        &self.self_proxy
     }
 
     /// Start watching the process at `target_pid` for termination.
@@ -34,71 +43,24 @@ impl ProcessContext {
     /// routed through `DeadLetterProcess`, which responds with
     /// `Terminated { why: NotFound }`.
     pub async fn watch(&self, target_pid: Pid) {
-        match self.registry.lookup(target_pid).await {
-            Some(proxy) => {
-                let result = proxy
-                    .send_system_signal(SystemSignal::Watch {
-                        watcher_pid: self.pid,
-                    })
-                    .await;
-                if result.is_err() {
-                    // Target stopped between lookup and signal delivery.
-                    self.deliver_not_found(target_pid).await;
-                }
-            }
-            None => {
-                self.deliver_not_found(target_pid).await;
-            }
-        }
+        wiring::watch(
+            self.pid,
+            target_pid,
+            &self.registry,
+            &self.sys_tx,
+            self.dead_letter.as_ref(),
+        )
+        .await;
     }
 
     pub async fn stop_self(&self) -> Result<(), SendError> {
-        self.sys_tx
-            .send(SystemSignal::Stop)
-            .await
-            .map_err(|_| SendError)
+        wiring::stop_self(&self.sys_tx).await
     }
 
     /// Stop watching the process at `target_pid`.
     ///
     /// No-op if the target is no longer in the registry.
     pub async fn unwatch(&self, target_pid: Pid) {
-        if let Some(proxy) = self.registry.lookup(target_pid).await {
-            let _ = proxy
-                .send_system_signal(SystemSignal::Unwatch {
-                    watcher_pid: self.pid,
-                })
-                .await;
-        }
-    }
-
-    /// Route a `WatchRequest` through the dead-letter path to trigger
-    /// `Terminated { why: NotFound }` back to this process.
-    async fn deliver_not_found(&self, target_pid: Pid) {
-        match &self.dead_letter {
-            Some(dl) => {
-                let envelope = DeadLetterEnvelope {
-                    destination: target_pid,
-                    message: BoxedMessage::new(WatchRequest {
-                        watched: target_pid,
-                        watcher: self.pid,
-                    }),
-                    sender: Some(self.pid),
-                    suppress_log: true,
-                    message_type_id: TypeId::of::<WatchRequest>(),
-                };
-                dl.send(envelope).await;
-            }
-            None => {
-                // No dead-letter process available; send Terminated directly.
-                let _ = self
-                    .sys_tx
-                    .send(SystemSignal::Terminated {
-                        who: target_pid,
-                        why: TerminatedReason::NotFound,
-                    })
-                    .await;
-            }
-        }
+        wiring::unwatch(self.pid, target_pid, &self.registry).await;
     }
 }

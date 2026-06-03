@@ -68,7 +68,7 @@ impl RuntimeReceive<DummyMsg> for DummyProcess {
     async fn recv(
         &mut self,
         _msg: DummyMsg,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }

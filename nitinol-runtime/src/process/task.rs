@@ -16,7 +16,7 @@ pub(crate) trait Task<P: Process>: 'static + Sync + Send {
     async fn run(
         self: Box<Self>,
         state: &mut P,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<P>,
     ) -> Result<(), HandlerError>;
     fn into_dead_letter_envelope(
         self: Box<Self>,
@@ -63,7 +63,7 @@ where
     async fn run(
         self: Box<Self>,
         state: &mut P,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<P>,
     ) -> Result<(), HandlerError> {
         state
             .recv(self.msg, ctx)
@@ -104,7 +104,7 @@ where
     async fn run(
         self: Box<Self>,
         state: &mut P,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<P>,
     ) -> Result<(), HandlerError> {
         let result = state.recv(self.msg, ctx).await;
         let failed = result.is_err();

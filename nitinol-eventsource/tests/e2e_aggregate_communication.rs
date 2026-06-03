@@ -227,7 +227,7 @@ impl Receive<BoxedMessage> for NotificationSubscriber {
     async fn recv(
         &mut self,
         msg: BoxedMessage,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), Self::Error> {
         if msg.downcast_ref::<Notification>().is_some() {
             self.count.fetch_add(1, Ordering::SeqCst);

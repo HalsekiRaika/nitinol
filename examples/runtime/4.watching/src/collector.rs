@@ -13,12 +13,12 @@ pub struct Collector {
 }
 
 impl Process for Collector {
-    async fn on_start(&mut self, ctx: &mut ProcessContext) {
+    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         info!("[pid={pid}] Collector started");
     }
 
-    async fn on_stop(&mut self, ctx: &mut ProcessContext) {
+    async fn on_stop(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();
         let n = self.items.len();
         info!("[pid={pid}] Collector stopped ({n} items collected)");
@@ -35,7 +35,11 @@ impl Receive<Collect> for Collector {
     type Response = ();
     type Error = Infallible;
 
-    async fn recv(&mut self, msg: Collect, _ctx: &mut ProcessContext) -> Result<(), Infallible> {
+    async fn recv(
+        &mut self,
+        msg: Collect,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), Infallible> {
         self.items.push(msg.0);
         Ok(())
     }
@@ -48,7 +52,7 @@ impl Receive<GetCollected> for Collector {
     async fn recv(
         &mut self,
         _msg: GetCollected,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<Vec<String>, Infallible> {
         Ok(self.items.clone())
     }

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendingEvent, EventType};
-use tokio::sync::Mutex;
 
 use crate::id::SagaId;
 use crate::outbox::event_types::{
@@ -38,10 +37,7 @@ pub(crate) fn decode_tell_id(payload: &[u8]) -> Option<u64> {
 /// When `crash_restart_payload` is `None` the payload is exactly 8 bytes,
 /// keeping backward compatibility with streams written before crash-restart
 /// support was added.
-pub(crate) fn encode_tell_requested(
-    tell_id: u64,
-    crash_restart_payload: Option<&[u8]>,
-) -> Bytes {
+pub(crate) fn encode_tell_requested(tell_id: u64, crash_restart_payload: Option<&[u8]>) -> Bytes {
     let mut buf = tell_id.to_be_bytes().to_vec();
     if let Some(extra) = crash_restart_payload {
         buf.extend_from_slice(extra);
@@ -157,22 +153,22 @@ impl OutboxAppender {
         }
     }
 
-    /// Append a `TellAcked` or `TellFailed` marker claiming a fresh sequence.
+    /// Append a `TellAcked` or `TellFailed` marker at the given pre-claimed
+    /// sequence number.
     ///
-    /// Locks the saga's sequence mutex, computes the next sequence, appends the
-    /// marker, and **only then** commits the incremented sequence back to the
-    /// shared cursor.  If `EventStore::append` fails the cursor is left
-    /// unchanged so the next append attempt does not skip sequence numbers.
+    /// The caller (outbox retry executor) sends `AppendTerminalAndClaim` to the
+    /// saga via `self_proxy.ask`, which atomically appends the terminal marker
+    /// and advances the sequence cursor inside the saga's single-threaded loop.
     ///
     /// Returns `true` when the marker was durably appended, `false` on failure.
-    /// Callers **must** check the return value before removing the associated
-    /// entry from the [`crate::process::pending_intents::PendingIntents`]
-    /// registry — removing it on failure would make a subsequent supervised
-    /// restart unable to re-dispatch the tell.
+    /// Callers **must** check the return value before notifying the saga
+    /// process to remove the matching `pending_intents` entry — removing it on
+    /// failure would make a subsequent supervised restart unable to re-dispatch
+    /// the tell.
     pub(crate) async fn append_terminal(
         store: &Arc<dyn EventStore>,
         saga_id: &SagaId,
-        sequence: &Arc<Mutex<u64>>,
+        sequence: u64,
         kind: TerminalKind,
         tell_id: u64,
     ) -> bool {
@@ -180,23 +176,16 @@ impl OutboxAppender {
             TerminalKind::Acked => OUTBOX_TELL_ACKED,
             TerminalKind::Failed => OUTBOX_TELL_FAILED,
         };
-        let mut guard = sequence.lock().await;
-        let next_seq = *guard + 1;
         let event = AppendingEvent {
-            sequence: next_seq,
+            sequence,
             event_type,
             payload: encode_tell_id(tell_id),
             occurred_at: jiff::Timestamp::now(),
         };
         if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
-            // Release the lock before the warn so a slow logger does not hold
-            // the sequence mutex open.  The cursor is unchanged — no rollback
-            // needed because we never incremented it.
-            drop(guard);
             tracing::warn!(error = %e, ?kind, "saga outbox terminal marker append failed");
             return false;
         }
-        *guard = next_seq;
         true
     }
 }
@@ -216,8 +205,8 @@ mod tests {
     use async_trait::async_trait;
     use futures_core::Stream;
     use nitinol_persistence::error::{AppendError, LoadError};
-    use nitinol_persistence::AppendOutcome;
     use nitinol_persistence::store::EventStream;
+    use nitinol_persistence::AppendOutcome;
 
     /// An `EventStore` that fails the first `append` call, then succeeds.
     struct FailOnceStore {
@@ -249,38 +238,40 @@ mod tests {
             }
         }
 
-        async fn load(&self, _query: nitinol_persistence::LoadQuery) -> Result<EventStream<'_>, LoadError> {
-            let stream: Pin<Box<dyn Stream<Item = Result<nitinol_persistence::LoadedEvent, LoadError>> + Send + '_>> =
-                Box::pin(futures_util::stream::empty());
+        async fn load(
+            &self,
+            _query: nitinol_persistence::LoadQuery,
+        ) -> Result<EventStream<'_>, LoadError> {
+            let stream: Pin<
+                Box<
+                    dyn Stream<Item = Result<nitinol_persistence::LoadedEvent, LoadError>>
+                        + Send
+                        + '_,
+                >,
+            > = Box::pin(futures_util::stream::empty());
             Ok(stream)
         }
     }
 
     #[tokio::test]
-    async fn append_terminal_does_not_advance_sequence_on_store_failure() {
-        // Regression for AI-45-002: sequence must not be incremented when
-        // EventStore::append returns an error.
+    async fn append_terminal_returns_false_on_store_failure_and_true_on_success() {
+        // The caller claims the sequence number before invoking
+        // `append_terminal`. This test exercises the bare contract: the function
+        // must surface a true / false outcome that the caller uses to decide
+        // whether to commit the pending-intent removal in the saga state.
         let store: Arc<dyn EventStore> = Arc::new(FailOnceStore::new());
-        let sequence = Arc::new(Mutex::new(5u64));
-        let saga_id = SagaId::new("seq-integrity-saga");
+        let saga_id = SagaId::new("append-terminal-contract");
 
-        // First call → store fails → must return false and leave cursor at 5.
-        let ok = OutboxAppender::append_terminal(&store, &saga_id, &sequence, TerminalKind::Acked, 1).await;
-        assert!(!ok, "append_terminal must return false when EventStore::append fails");
-        assert_eq!(
-            *sequence.lock().await,
-            5,
-            "sequence must not advance when EventStore::append returns an error"
+        let ok = OutboxAppender::append_terminal(&store, &saga_id, 1, TerminalKind::Acked, 1).await;
+        assert!(
+            !ok,
+            "append_terminal must return false when EventStore::append fails"
         );
 
-        // Second call → store succeeds → must return true and advance cursor to 6, not 7.
-        let ok = OutboxAppender::append_terminal(&store, &saga_id, &sequence, TerminalKind::Acked, 1).await;
-        assert!(ok, "append_terminal must return true when EventStore::append succeeds");
-        assert_eq!(
-            *sequence.lock().await,
-            6,
-            "sequence must advance by exactly 1 (to 6) after a successful append, \
-             not skip to 7 as a pre-increment-then-rollback-missed bug would produce"
+        let ok = OutboxAppender::append_terminal(&store, &saga_id, 2, TerminalKind::Acked, 1).await;
+        assert!(
+            ok,
+            "append_terminal must return true when EventStore::append succeeds"
         );
     }
 }

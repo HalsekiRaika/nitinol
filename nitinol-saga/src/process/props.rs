@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -7,12 +8,10 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::{ProcessSystem, Props};
-use tokio::sync::Mutex;
 
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
-use crate::process::pending_intents::PendingIntents;
 use crate::process::proxy::SagaProxy;
 use crate::process::saga_process::{CrashRestartFactory, RouteFn, SagaProcess};
 use crate::saga::Saga;
@@ -49,8 +48,11 @@ pub struct SagaProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
     producer: Arc<dyn Fn() -> S + Send + Sync>,
     codec: C,
     subscription: Sub,
-    pending_intents: PendingIntents,
     crash_restart_factory: Option<CrashRestartFactory>,
+    /// Pre-seeded `pending_intents` entries injected at construction time.
+    /// Always empty in production; populated in tests via
+    /// `with_initial_pending_intents`.
+    initial_pending_intents: HashMap<u64, TellIntent>,
 }
 
 impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
@@ -71,8 +73,8 @@ impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
             producer: Arc::new(producer),
             codec: CodecUnset,
             subscription: SubscriptionUnset,
-            pending_intents: PendingIntents::new(),
             crash_restart_factory: None,
+            initial_pending_intents: HashMap::new(),
         }
     }
 }
@@ -89,8 +91,8 @@ impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
             producer: self.producer,
             codec: CodecSet { codec },
             subscription: self.subscription,
-            pending_intents: self.pending_intents,
             crash_restart_factory: self.crash_restart_factory,
+            initial_pending_intents: self.initial_pending_intents,
         }
     }
 }
@@ -98,12 +100,6 @@ impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
 impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
     /// Subscribe this saga instance to an upstream `EventStore` via an
     /// internal [`DurableStream`] (catchup + live, at-least-once).
-    ///
-    /// `upstream_store` is the event store whose events drive the saga,
-    /// `upstream_codec` decodes the persisted bytes into `S::SubscribedEvent`,
-    /// `cursor` is the initial resume point, and `route_fn` decides which
-    /// saga instance an event belongs to.  The runtime drops events whose
-    /// route maps to a different `SagaId` (or to `None`).
     pub fn with_subscription<F>(
         self,
         upstream_store: Arc<dyn EventStore>,
@@ -126,43 +122,14 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
                 cursor,
                 route_fn,
             },
-            pending_intents: self.pending_intents,
             crash_restart_factory: self.crash_restart_factory,
+            initial_pending_intents: self.initial_pending_intents,
         }
     }
 }
 
 impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
-    /// Provide an external [`PendingIntents`] registry.
-    ///
-    /// By default [`spawn`][SagaProps::spawn] creates a fresh, saga-local
-    /// registry.  Providing one here enables sharing the registry across
-    /// multiple spawns of the same saga — used in crate-internal tests of
-    /// supervised restart behaviour.
-    #[cfg(test)]
-    pub(crate) fn with_pending_intents(mut self, pending_intents: PendingIntents) -> Self {
-        self.pending_intents = pending_intents;
-        self
-    }
-
     /// Register a factory for crash-restart re-dispatch.
-    ///
-    /// When the saga process starts after a full OS-process crash, the
-    /// in-memory [`crate::process::pending_intents::PendingIntents`] registry
-    /// is gone.  This factory is called with the crash-restart bytes stored in
-    /// each pending `TellRequested` outbox marker (supplied at intent
-    /// construction time via [`TellIntent::new_with_crash_restart`]) and must
-    /// return a fresh [`TellIntent`] that re-sends the same command to the
-    /// same target.
-    ///
-    /// If the factory returns `None` for a given payload (e.g. the intent type
-    /// is not recognised), a synthetic `TellFailed` is appended to the saga
-    /// stream so the outbox reaches a consistent terminal state, and a warning
-    /// is emitted.
-    ///
-    /// `TellRequested` markers written without crash-restart bytes (via
-    /// [`TellIntent::new`]) are never passed to this factory; they fall through
-    /// to the synthetic `TellFailed` path.
     pub fn with_crash_restart_factory<F>(mut self, factory: F) -> Self
     where
         F: Fn(&[u8]) -> Option<TellIntent> + Send + Sync + 'static,
@@ -170,15 +137,26 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
         self.crash_restart_factory = Some(Arc::new(factory));
         self
     }
+
+    /// Pre-seed the `pending_intents` registry of the first spawned
+    /// `SagaProcess` instance.
+    ///
+    /// Used in tests to simulate the scenario where a `SagaProcess` already
+    /// has in-flight `TellIntent`s at start (e.g. pre-registered for
+    /// supervised-restart re-dispatch via the persistent outbox).
+    #[cfg(test)]
+    pub(crate) fn with_initial_pending_intents(
+        mut self,
+        intents: HashMap<u64, TellIntent>,
+    ) -> Self {
+        self.initial_pending_intents = intents;
+        self
+    }
 }
 
 impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
     /// Spawn the saga process and wire its internal `DurableStream` against
     /// the upstream `EventStore`.
-    ///
-    /// Both [`with_codec`][Self::with_codec] and
-    /// [`with_subscription`][Self::with_subscription] must be called before
-    /// `spawn` — calling it earlier is a compile error.
     pub async fn spawn(self, system: &ProcessSystem) -> SagaProxy<S> {
         let saga_id = self.saga_id;
         let store = self.store;
@@ -189,10 +167,6 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let upstream_codec = self.subscription.upstream_codec;
         let cursor = self.subscription.cursor;
 
-        // Build the upstream DurableStream first so its keepalive Arc can be
-        // moved into SagaProcess.  Tying the lifetime to the process (not to
-        // the external SagaProxy handle) ensures the poller is never stopped
-        // while the saga is still alive.
         let codec_for_transform = Arc::clone(&upstream_codec);
         let transform = move |loaded: nitinol_persistence::LoadedEvent| {
             if loaded.event_type != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE {
@@ -222,26 +196,23 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
             UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
 
-        let ds_proxy = Arc::new(
-            DurableStream::<EventEnvelope<S::SubscribedEvent>>::new(
-                topic,
-                upstream_store,
-                transform,
-            )
-            .cursor(cursor.clone())
-            .spawn(system)
-            .await
-            .expect("DurableStream::spawn must succeed for saga upstream subscription"),
-        );
+        let ds_proxy = DurableStream::<EventEnvelope<S::SubscribedEvent>>::new(
+            topic,
+            upstream_store,
+            transform,
+        )
+        .cursor(cursor.clone())
+        .spawn(system)
+        .await
+        .expect("DurableStream::spawn must succeed for saga upstream subscription");
 
         let saga_id_for_props = saga_id.clone();
         let store_for_props = Arc::clone(&store);
         let codec_for_props = Arc::clone(&codec);
         let route_fn_for_props = Arc::clone(&route_fn);
         let producer_for_props = Arc::clone(&producer);
-        let ds_keepalive_for_props = Arc::clone(&ds_proxy);
-        let pending_intents_for_props = self.pending_intents;
         let crash_restart_factory_for_props = self.crash_restart_factory;
+        let initial_pending_intents_for_props = self.initial_pending_intents;
 
         let props = Props::new(move || SagaProcess::<S> {
             state: producer_for_props(),
@@ -249,12 +220,13 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
             store: Arc::clone(&store_for_props),
             codec: Arc::clone(&codec_for_props),
             route_fn: Arc::clone(&route_fn_for_props),
-            sequence: Arc::new(Mutex::new(0)),
+            sequence: 0,
             retry_policy: RetryPolicy::default(),
-            pending_intents: pending_intents_for_props.clone(),
+            pending_intents: initial_pending_intents_for_props.clone(),
             crash_restart_factory: crash_restart_factory_for_props.clone(),
-            failed_tell_ids: Arc::new(Mutex::new(Vec::new())),
-            _ds_keepalive: Arc::clone(&ds_keepalive_for_props),
+            failed_tell_ids: Vec::new(),
+            pending_end: false,
+            pending_executor_count: 0,
         });
 
         let saga_proxy = system.spawn(props).await;
@@ -264,6 +236,12 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
             .await
             .expect("DurableStream::subscribe_from must succeed for saga upstream subscription");
 
-        SagaProxy::new(saga_proxy)
+        // `ds_proxy` is dropped at the end of this scope. The DurableStream's
+        // shared poller is idle for the saga upstream wiring (no topic
+        // subscribers), and the DirectPollerProcess spawned by
+        // `subscribe_from` watches the saga process directly — so the
+        // saga's lifetime drives the upstream poller's lifetime, and no
+        // explicit keepalive Arc is needed inside `SagaProcess`.
+        saga_proxy.into()
     }
 }

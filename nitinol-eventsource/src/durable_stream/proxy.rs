@@ -87,14 +87,12 @@ where
         let transform = Arc::clone(&self.transform);
         let subscriber = proxy.clone();
         let initial_cursor = cursor;
-        let owner_pid = self.shared_poller.pid();
 
         let mut props = Props::new(move || DirectPollerProcess {
             store: Arc::clone(&store),
             subscriber: subscriber.clone(),
             transform: Arc::clone(&transform),
             cursor: initial_cursor.clone(),
-            owner_pid,
         });
         props.with_supervision_strategy(SupervisionStrategy::Restart {
             max_retries: POLLER_RESTART_MAX_RETRIES,

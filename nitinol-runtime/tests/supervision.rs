@@ -17,12 +17,12 @@ struct SupervisedProcess {
 }
 
 impl Process for SupervisedProcess {
-    fn on_start(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_start(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.start_count.fetch_add(1, Ordering::SeqCst);
         async {}
     }
 
-    fn on_stop(&mut self, _ctx: &mut ProcessContext) -> impl Future<Output = ()> + Send {
+    fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         self.stop_count.fetch_add(1, Ordering::SeqCst);
         async {}
     }
@@ -34,7 +34,7 @@ struct Fail;
 impl Receive<Fail> for SupervisedProcess {
     type Response = ();
     type Error = TestError;
-    async fn recv(&mut self, _: Fail, _ctx: &mut ProcessContext) -> Result<(), TestError> {
+    async fn recv(&mut self, _: Fail, _ctx: &mut ProcessContext<Self>) -> Result<(), TestError> {
         Err(TestError("intentional failure".to_string()))
     }
 }
@@ -48,7 +48,7 @@ impl Receive<Ping> for SupervisedProcess {
     async fn recv(
         &mut self,
         _: Ping,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }

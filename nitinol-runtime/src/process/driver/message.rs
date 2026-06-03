@@ -31,7 +31,7 @@ impl<P: Process> Driver<P> for MessageDriver<P> {
     async fn apply(
         &mut self,
         state: &mut P,
-        ctx: &mut ProcessContext,
+        ctx: &mut ProcessContext<P>,
         ev: Self::Event,
     ) -> Result<(), HandlerError> {
         ev.run(state, ctx).await

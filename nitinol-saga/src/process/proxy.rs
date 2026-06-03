@@ -17,8 +17,8 @@ use crate::saga::Saga;
 /// exposes only the saga's pid — sagas are reactive and are driven by their
 /// subscription, not by direct calls from application code.
 ///
-/// The upstream `DurableStream` lifetime is owned by `SagaProcess` itself,
-/// so dropping all copies of this handle does not affect the subscription.
+/// The upstream `DurableStream` poller watches the saga process, so dropping
+/// all copies of this handle does not affect the subscription.
 pub struct SagaProxy<S: Saga> {
     inner: ProcessProxy<SagaProcess<S>>,
 }
@@ -32,10 +32,6 @@ impl<S: Saga> Clone for SagaProxy<S> {
 }
 
 impl<S: Saga> SagaProxy<S> {
-    pub(crate) fn new(inner: ProcessProxy<SagaProcess<S>>) -> Self {
-        Self { inner }
-    }
-
     /// Returns the runtime pid of the underlying saga process.
     pub fn pid(&self) -> Pid {
         self.inner.pid()
@@ -43,11 +39,16 @@ impl<S: Saga> SagaProxy<S> {
 
     /// Stops the underlying saga process.
     ///
-    /// Stopping the process releases the `DurableStream` keepalive held inside
-    /// `SagaProcess`, which in turn stops the upstream poller.  This is the
-    /// correct way to terminate a saga; dropping all `SagaProxy` handles alone
-    /// is not sufficient because the process is not owned by the handle.
+    /// Stopping the process causes the upstream `DirectPollerProcess` (which
+    /// watches the saga process) to terminate, which in turn stops the
+    /// upstream `DurableStream` poller.
     pub async fn stop(&self) -> Result<(), nitinol_runtime::error::SendError> {
         self.inner.stop().await
+    }
+}
+
+impl<S: Saga> From<ProcessProxy<SagaProcess<S>>> for SagaProxy<S> {
+    fn from(inner: ProcessProxy<SagaProcess<S>>) -> Self {
+        Self { inner }
     }
 }

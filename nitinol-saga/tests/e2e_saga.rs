@@ -162,19 +162,13 @@ impl Saga for ReservationSaga {
         let persist_own_event = SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
         });
-        let tell_inventory = SagaEffect::tell(
-            self.inventory.clone(),
-            Reserve { sku: event.sku },
-        );
+        let tell_inventory = SagaEffect::tell(self.inventory.clone(), Reserve { sku: event.sku });
         Ok(persist_own_event.combine(tell_inventory))
     }
 }
 
 fn count_user_events(events: &[LoadedEvent], expected: EventType) -> usize {
-    events
-        .iter()
-        .filter(|e| e.event_type == expected)
-        .count()
+    events.iter().filter(|e| e.event_type == expected).count()
 }
 
 fn count_outbox_events(events: &[LoadedEvent], suffix: &str) -> usize {
@@ -187,7 +181,10 @@ fn count_outbox_events(events: &[LoadedEvent], suffix: &str) -> usize {
         .count()
 }
 
-async fn wait_until_outbox_acked(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn wait_until_outbox_acked(
+    store: &Arc<dyn EventStore>,
+    saga_id: &SagaId,
+) -> Vec<LoadedEvent> {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         let events = load_saga_events(store, saga_id).await;
@@ -197,7 +194,10 @@ async fn wait_until_outbox_acked(store: &Arc<dyn EventStore>, saga_id: &SagaId) 
         if std::time::Instant::now() >= deadline {
             panic!(
                 "timed out waiting for TellAcked outbox event in saga stream (event_types: {:?})",
-                events.iter().map(|e| e.event_type.as_str()).collect::<Vec<_>>()
+                events
+                    .iter()
+                    .map(|e| e.event_type.as_str())
+                    .collect::<Vec<_>>()
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

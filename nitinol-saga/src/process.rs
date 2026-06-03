@@ -1,6 +1,5 @@
 mod interpreter;
 mod outbox_executor;
-pub(crate) mod pending_intents;
 mod props;
 mod proxy;
 mod replay;

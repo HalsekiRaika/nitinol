@@ -125,21 +125,15 @@ async fn drain_captured_preserves_insertion_order() {
 #[tokio::test]
 async fn drain_captured_returns_only_matching_type_and_leaves_others() {
     let mock = MockAggregateProxy::<Inventory>::new();
-    mock.tell(Reserve {
-        sku: "R-1".into(),
-    })
-    .await
-    .expect("tell Reserve must succeed");
-    mock.tell(Cancel {
-        sku: "C-1".into(),
-    })
-    .await
-    .expect("tell Cancel must succeed");
-    mock.tell(Reserve {
-        sku: "R-2".into(),
-    })
-    .await
-    .expect("tell Reserve must succeed");
+    mock.tell(Reserve { sku: "R-1".into() })
+        .await
+        .expect("tell Reserve must succeed");
+    mock.tell(Cancel { sku: "C-1".into() })
+        .await
+        .expect("tell Cancel must succeed");
+    mock.tell(Reserve { sku: "R-2".into() })
+        .await
+        .expect("tell Reserve must succeed");
 
     let reserves = mock.drain_captured::<Reserve>();
     let reserve_skus: Vec<String> = reserves.into_iter().map(|c| c.sku).collect();
@@ -161,11 +155,9 @@ async fn drain_captured_returns_only_matching_type_and_leaves_others() {
 #[tokio::test]
 async fn drain_captured_consumes_matching_commands_so_second_call_is_empty() {
     let mock = MockAggregateProxy::<Inventory>::new();
-    mock.tell(Reserve {
-        sku: "only".into(),
-    })
-    .await
-    .expect("tell must succeed");
+    mock.tell(Reserve { sku: "only".into() })
+        .await
+        .expect("tell must succeed");
     let first = mock.drain_captured::<Reserve>();
     let second = mock.drain_captured::<Reserve>();
     assert_eq!(

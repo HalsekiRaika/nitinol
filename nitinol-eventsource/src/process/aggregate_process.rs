@@ -62,7 +62,7 @@ pub struct AggregateProcess<A: Aggregate> {
 }
 
 impl<A: Aggregate> Process for AggregateProcess<A> {
-    async fn on_start(&mut self, _ctx: &mut ProcessContext) {
+    async fn on_start(&mut self, _ctx: &mut ProcessContext<Self>) {
         if let (Some(restore_fn), Some(snapshot_proxy)) =
             (self.snapshot_restore.clone(), self.snapshot_ref.clone())
         {
@@ -135,7 +135,7 @@ where
     async fn recv(
         &mut self,
         msg: AskCmd<C>,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<Self::Response, Self::Error> {
         let mut ctx = Context::new(self.aggregate_id.clone(), self.sequence);
         let effect = self
@@ -172,7 +172,7 @@ where
     async fn recv(
         &mut self,
         msg: ExecMsg<M>,
-        _ctx: &mut ProcessContext,
+        _ctx: &mut ProcessContext<Self>,
     ) -> Result<Self::Response, Self::Error> {
         let mut ctx = Context::new(self.aggregate_id.clone(), self.sequence);
         self.state

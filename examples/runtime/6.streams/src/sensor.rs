@@ -38,7 +38,11 @@ impl Receive<Measure> for TemperatureSensor {
     type Response = ();
     type Error = SendError;
 
-    async fn recv(&mut self, msg: Measure, _ctx: &mut ProcessContext) -> Result<(), SendError> {
+    async fn recv(
+        &mut self,
+        msg: Measure,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), SendError> {
         let reading = TemperatureReading {
             sensor: self.name.clone(),
             celsius: msg.0,
