@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
-use crate::process::driver::{Driver, MessageDriver};
+use crate::process::driver::{Combine, Driver, MessageDriver, PipeDriver};
 use crate::process::props::SupervisionStrategy;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
@@ -24,7 +24,12 @@ pub(crate) async fn run<P: Process>(
     supervision: SupervisionConfig<P>,
 ) -> ProcessProxy<P> {
     let (user_tx, user_rx) = mpsc::channel::<UserTask<P>>(32);
-    let driver = MessageDriver::new(user_rx);
+    // `spawn` / `spawn_named` auto-compose the PipeDriver so that
+    // `ctx.pipe_to_self` is wired without the user having to remember to
+    // do it themselves. `spawn_with_driver` stays explicit (per plan): if
+    // a caller wants pipe support there, they must include `PipeDriver` via
+    // `combine_drivers!`.
+    let driver = Combine::new(MessageDriver::new(user_rx), PipeDriver::<P>::new());
     run_with_driver(
         process,
         process_name,
@@ -119,6 +124,12 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
     let mut watchers: HashSet<Pid> = HashSet::new();
     let mut restart_tracker = RestartTracker::new();
 
+    // Extract the pipe handle (if any) from the driver tree once, at start.
+    // `Combine` surfaces the first non-`None` handle in its subtree; drivers
+    // without `PipeDriver` composed will yield `None` here, and any later
+    // call to `ctx.pipe_to_self` will panic (programmer-error behavior).
+    let pipe_handle = driver.pipe_handle();
+
     let mut ctx = ProcessContext {
         pid,
         name: process_name.clone(),
@@ -126,6 +137,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
         sys_tx: sys_tx.clone(),
         dead_letter: dead_letter.clone(),
         self_proxy,
+        pipe_handle,
     };
 
     // A driver that opts out (e.g., tick / poll sources) has no meaningful

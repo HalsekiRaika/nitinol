@@ -1,5 +1,9 @@
+mod combine;
 mod message;
+mod pipe;
 
+pub use self::combine::Combine;
+pub use self::pipe::{PipeDriver, PipeHandle, PipePanic, PipedTask};
 pub(crate) use self::message::MessageDriver;
 
 use std::future::Future;
@@ -16,6 +20,10 @@ use crate::process::{Process, ProcessContext};
 /// `next` does NOT borrow `&mut state`, so it can be awaited inside
 /// `tokio::select!` alongside the system-signal receiver. `apply` borrows
 /// `&mut state` and handles exactly one delivered event.
+///
+/// Multiple Drivers can be composed into one via [`Combine`] (and the
+/// [`combine_drivers!`](crate::combine_drivers) macro). The lifecycle loop
+/// still drives a single Driver — multiplexing is the Driver tree's job.
 pub trait Driver<P: Process>: Send + 'static {
     /// One unit of work delivered by `next` and consumed by `apply`.
     type Event: Send;
@@ -41,5 +49,18 @@ pub trait Driver<P: Process>: Send + 'static {
     /// "idle" has no meaning for a scheduled source.
     fn supports_idle_timeout(&self) -> bool {
         true
+    }
+
+    /// The pipe-to-self handle this driver contributes, if any.
+    ///
+    /// `None` (the default) means this driver does not service
+    /// `ProcessContext::pipe_to_self`. `PipeDriver` overrides this to return
+    /// `Some(_)`, and `Combine<L, R>` propagates the first non-`None` handle
+    /// it finds (preferring the left child). The lifecycle loop reads this
+    /// during process startup to wire `ctx.pipe_to_self` — if the resolved
+    /// value is `None`, calling `pipe_to_self` panics with a misuse message
+    /// rather than silently dropping the future.
+    fn pipe_handle(&self) -> Option<PipeHandle<P>> {
+        None
     }
 }

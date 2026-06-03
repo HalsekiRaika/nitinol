@@ -17,7 +17,7 @@ mod wiring;
 pub use self::{
     context::ProcessContext,
     dead_letter::{DeadLetter, SuppressDeadLetterLog},
-    driver::Driver,
+    driver::{Combine, Driver, PipeDriver, PipeHandle, PipePanic},
     message::*,
     props::*,
     proxy::*,

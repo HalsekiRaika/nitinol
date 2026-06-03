@@ -15,7 +15,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
 [dependencies]
 tokio = { version = "1", default-features = false, features = ["sync", "macros", "time", "rt-multi-thread"] }
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 async-trait = "0.1"
 thiserror = "2"
 tracing = "0.1"
