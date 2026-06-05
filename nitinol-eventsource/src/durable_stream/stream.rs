@@ -14,11 +14,6 @@ use crate::durable_stream::cursor::SequenceCursor;
 use crate::durable_stream::poller::{DurablePollerProcess, IntervalDriver, TransformFn};
 use crate::durable_stream::proxy::{shared_poller_name, DurableStreamProxy};
 
-/// Polling cadence used when [`with_poll_interval`][DurableStream::with_poll_interval]
-/// is not called.  Chosen as a balance between catch-up latency and event
-/// store load; callers driving high-throughput workloads should override it.
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
-
 const POLLER_RESTART_MAX_RETRIES: u32 = 5;
 const POLLER_RESTART_WITHIN: Duration = Duration::from_secs(60);
 
@@ -85,7 +80,7 @@ where
             topic,
             store,
             transform: Arc::new(transform),
-            poll_interval: DEFAULT_POLL_INTERVAL,
+            poll_interval: super::DEFAULT_POLL_INTERVAL,
             cursor: CursorUnset,
             _phantom: PhantomData,
         }

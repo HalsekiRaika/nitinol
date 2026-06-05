@@ -1,12 +1,10 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use nitinol_eventsource::codec::ErasedCodec;
-use nitinol_eventsource::{DurableStream, EventEnvelope, SequenceCursor};
+use nitinol_eventsource::{DurableSubscription, EventEnvelope, SequenceCursor};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::{ProcessSystem, Props};
 
 use crate::effect::TellIntent;
@@ -34,8 +32,6 @@ pub struct SubscriptionSet<S: Saga> {
     pub(crate) cursor: SequenceCursor,
     pub(crate) route_fn: RouteFn<S::SubscribedEvent>,
 }
-
-static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Builder for a saga spawn.
 ///
@@ -98,8 +94,11 @@ impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
 }
 
 impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
-    /// Subscribe this saga instance to an upstream `EventStore` via an
-    /// internal [`DurableStream`] (catchup + live, at-least-once).
+    /// Subscribe this saga instance to an upstream `EventStore`.
+    ///
+    /// At spawn time the saga starts a runtime child `DirectPollerProcess`
+    /// (catchup + live, at-least-once).  The poller is cascade-stopped when
+    /// the saga stops.
     pub fn with_subscription<F>(
         self,
         upstream_store: Arc<dyn EventStore>,
@@ -155,8 +154,12 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
 }
 
 impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
-    /// Spawn the saga process and wire its internal `DurableStream` against
-    /// the upstream `EventStore`.
+    /// Spawn the saga process.
+    ///
+    /// The saga's upstream subscription is wired as a direct poller child
+    /// process — no shared [`nitinol_eventsource::DurableStream`] fan-out
+    /// channel is created.  The poller's lifetime is bound to the saga
+    /// process; when the saga stops the runtime cascade-stops the poller.
     pub async fn spawn(self, system: &ProcessSystem) -> SagaProxy<S> {
         let saga_id = self.saga_id;
         let store = self.store;
@@ -190,21 +193,10 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
             }
         };
 
-        let topic = ProcessName::new(format!(
-            "saga-upstream-{}-{}",
-            saga_id.as_str(),
-            UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-
-        let ds_proxy = DurableStream::<EventEnvelope<S::SubscribedEvent>>::new(
-            topic,
+        let upstream_config = DurableSubscription::<EventEnvelope<S::SubscribedEvent>>::new(
             upstream_store,
             transform,
-        )
-        .cursor(cursor.clone())
-        .spawn(system)
-        .await
-        .expect("DurableStream::spawn must succeed for saga upstream subscription");
+        );
 
         let saga_id_for_props = saga_id.clone();
         let store_for_props = Arc::clone(&store);
@@ -213,6 +205,8 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let producer_for_props = Arc::clone(&producer);
         let crash_restart_factory_for_props = self.crash_restart_factory;
         let initial_pending_intents_for_props = self.initial_pending_intents;
+        let upstream_config_for_props = upstream_config;
+        let cursor_for_props = cursor;
 
         let props = Props::new(move || SagaProcess::<S> {
             state: producer_for_props(),
@@ -227,21 +221,12 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
             failed_tell_ids: Vec::new(),
             pending_end: false,
             pending_executor_count: 0,
+            upstream_config: upstream_config_for_props.clone(),
+            upstream_cursor: cursor_for_props.clone(),
         });
 
         let saga_proxy = system.spawn(props).await;
 
-        ds_proxy
-            .subscribe_from(system, saga_proxy.clone(), cursor)
-            .await
-            .expect("DurableStream::subscribe_from must succeed for saga upstream subscription");
-
-        // `ds_proxy` is dropped at the end of this scope. The DurableStream's
-        // shared poller is idle for the saga upstream wiring (no topic
-        // subscribers), and the DirectPollerProcess spawned by
-        // `subscribe_from` watches the saga process directly — so the
-        // saga's lifetime drives the upstream poller's lifetime, and no
-        // explicit keepalive Arc is needed inside `SagaProcess`.
         saga_proxy.into()
     }
 }

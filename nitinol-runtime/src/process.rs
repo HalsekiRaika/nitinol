@@ -3,10 +3,12 @@ mod dead_letter;
 mod driver;
 mod lifecycle;
 mod message;
+mod pid_set;
 mod props;
 mod proxy;
 mod registry;
 mod signal;
+pub(crate) mod spawn;
 mod stream;
 mod subscriber;
 pub(crate) mod supervision;
@@ -19,6 +21,7 @@ pub use self::{
     dead_letter::{DeadLetter, SuppressDeadLetterLog},
     driver::{Combine, Driver, PipeDriver, PipeHandle, PipePanic},
     message::*,
+    pid_set::PidSet,
     props::*,
     proxy::*,
     stream::Stream,
@@ -27,7 +30,7 @@ pub use self::{
 };
 
 pub(crate) use self::dead_letter::{DeadLetterProcess, DeadLetterProxy};
-pub(crate) use self::lifecycle::{run, run_with_driver};
+pub(crate) use self::lifecycle::{run, LifecycleInit};
 pub(crate) use self::registry::*;
 
 use std::future::Future;

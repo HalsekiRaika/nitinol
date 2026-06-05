@@ -389,16 +389,16 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     let agg_id = AggregateId::new("dm-alo-restart-agg");
     let projection_id = ProjectionId::new("dm-alo-restart");
 
-    // Two events: seq=1 (succeeds), seq=2 (fails on first run)
+    // seq=1 is appended before spawn; seq=2 is deferred until after should_fail is
+    // set so the projector cannot process seq=2 before the failure flag is armed.
     append_evt(&event_store, &agg_id, 1).await;
-    append_evt(&event_store, &agg_id, 2).await;
 
     let should_fail = Arc::new(AtomicBool::new(false));
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
 
     // First run: succeed on seq=1, fail on seq=2
-    {
+    let proxy = {
         let sf_c = Arc::clone(&should_fail);
         let count_c = Arc::clone(&count);
         let notify_c = Arc::clone(&notify);
@@ -407,40 +407,50 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
         let checkpoint_store_c = Arc::clone(&checkpoint_store);
         let agg_id_c = agg_id.clone();
 
-        let _proxy = ProjectorProps::new(
+        ProjectorProps::new(
             projection_id_c,
             event_store_c,
             checkpoint_store_c,
-            move || {
-                // Configure to fail after the first project() call (seq=2)
-                let inner_sf = Arc::clone(&sf_c);
-                let inner_count = Arc::clone(&count_c);
-                let inner_notify = Arc::clone(&notify_c);
-                ConditionallyFailingProjector {
-                    // We use a wrapper that fails starting from the 2nd call.
-                    // Since ConditionallyFailingProjector checks should_fail each time,
-                    // we set it to false initially and flip it after the first successful call.
-                    should_fail: Arc::clone(&inner_sf),
-                    count: Arc::clone(&inner_count),
-                    notify: Arc::clone(&inner_notify),
-                }
+            move || ConditionallyFailingProjector {
+                should_fail: Arc::clone(&sf_c),
+                count: Arc::clone(&count_c),
+                notify: Arc::clone(&notify_c),
             },
         )
         .with_event::<Evt>(Arc::new(UnitCodec))
         .delivery_mode(DeliveryMode::AtLeastOnce)
         .catchup_from_aggregate(agg_id_c)
         .spawn(&system)
-        .await;
+        .await
+    };
 
-        // Wait for seq=1 to be processed (count=1), then set should_fail before seq=2
-        wait_for_count(&count, &notify, 1).await;
-        should_fail.store(true, Ordering::SeqCst);
+    // Wait for seq=1 to be processed, then arm the failure flag and add seq=2.
+    // Appending seq=2 only after the flag is set eliminates the race where the
+    // projector processes seq=2 before should_fail becomes true.
+    wait_for_count(&count, &notify, 1).await;
+    should_fail.store(true, Ordering::SeqCst);
+    append_evt(&event_store, &agg_id, 2).await;
 
-        // Wait for seq=2 attempt (count=2, failure)
-        wait_for_count(&count, &notify, 2).await;
+    // Wait for seq=2 to be attempted and fail.
+    wait_for_count(&count, &notify, 2).await;
 
-        // Give time for checkpoint save to be skipped
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    // Stop the first projector and wait for it to fully deregister before
+    // starting the second run; without this, both projectors can race on
+    // the checkpoint store.
+    let proxy_pid = proxy.pid();
+    let _ = proxy.stop().await;
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if system.lookup(proxy_pid).await.is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for projector to fully stop"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
 
     // Verify: checkpoint is at seq=1 (seq=2 was not saved due to failure)

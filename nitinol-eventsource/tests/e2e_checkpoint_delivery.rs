@@ -199,20 +199,21 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
     let agg_id = AggregateId::new("e2e-ckpt-alo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-alo");
 
+    // Only append seq=1 initially; seq=2 is appended after the failure flag is set
+    // to eliminate the race where the projector processes seq=2 before the flag is tripped.
     append_evt(&event_store, &agg_id, 1).await;
-    append_evt(&event_store, &agg_id, 2).await;
 
     let should_fail = Arc::new(AtomicBool::new(false));
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
 
     // First run: succeed on seq=1, fail on seq=2
-    {
+    let proxy = {
         let sf_c = Arc::clone(&should_fail);
         let count_c = Arc::clone(&count);
         let notify_c = Arc::clone(&notify);
 
-        let _proxy = ProjectorProps::new(
+        ProjectorProps::new(
             projection_id.clone(),
             Arc::clone(&event_store) as Arc<dyn EventStore>,
             Arc::clone(&checkpoint_store),
@@ -226,15 +227,33 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
         .delivery_mode(DeliveryMode::AtLeastOnce)
         .catchup_from_aggregate(agg_id.clone())
         .spawn(&system)
-        .await;
+        .await
+    };
 
-        // Wait for seq=1 to succeed, then trip the failure flag before seq=2
-        wait_for_count(&count, &notify, 1).await;
-        should_fail.store(true, Ordering::SeqCst);
+    // Wait for seq=1 to succeed, set the failure flag, then append seq=2.
+    // This ordering ensures the flag is already true when the projector sees seq=2.
+    wait_for_count(&count, &notify, 1).await;
+    should_fail.store(true, Ordering::SeqCst);
+    append_evt(&event_store, &agg_id, 2).await;
 
-        // Wait for the seq=2 failure attempt
-        wait_for_count(&count, &notify, 2).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait for the seq=2 failure attempt
+    wait_for_count(&count, &notify, 2).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Explicitly stop the first projector and wait for it to leave the registry
+    // before starting the second — ensures a true restart rather than two concurrent projectors.
+    let proxy_pid = proxy.pid();
+    proxy.stop().await.expect("first projector stop");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if system.lookup(proxy_pid).await.is_none() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "first projector must unregister within 5s"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
     // Verify checkpoint is at seq=1 (seq=2 was not saved due to failure)

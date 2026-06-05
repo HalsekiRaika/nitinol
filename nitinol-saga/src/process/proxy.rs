@@ -17,8 +17,11 @@ use crate::saga::Saga;
 /// exposes only the saga's pid — sagas are reactive and are driven by their
 /// subscription, not by direct calls from application code.
 ///
-/// The upstream `DurableStream` poller watches the saga process, so dropping
-/// all copies of this handle does not affect the subscription.
+/// The upstream `DirectPollerProcess` is spawned during the saga's `on_start`
+/// as a runtime **child** of the saga process, so its lifetime is bound to
+/// the saga's. Dropping every copy of this handle does not affect
+/// the subscription — only stopping the saga (e.g. via [`Self::stop`] or
+/// supervision) cascade-stops the upstream poller.
 pub struct SagaProxy<S: Saga> {
     inner: ProcessProxy<SagaProcess<S>>,
 }
@@ -39,9 +42,8 @@ impl<S: Saga> SagaProxy<S> {
 
     /// Stops the underlying saga process.
     ///
-    /// Stopping the process causes the upstream `DirectPollerProcess` (which
-    /// watches the saga process) to terminate, which in turn stops the
-    /// upstream `DurableStream` poller.
+    /// Stopping the process cascade-stops the upstream catchup poller, which
+    /// was spawned as a runtime child during the saga's `on_start`.
     pub async fn stop(&self) -> Result<(), nitinol_runtime::error::SendError> {
         self.inner.stop().await
     }

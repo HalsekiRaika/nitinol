@@ -1,5 +1,8 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
@@ -7,12 +10,14 @@ use tokio::sync::mpsc;
 use crate::error::SendError;
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
-use crate::process::driver::{PipeHandle, PipePanic, PipedTask};
+use crate::process::driver::{Driver, PipeHandle, PipePanic, PipedTask};
+use crate::process::pid_set::PidSet;
 use crate::process::proxy::ProcessProxy;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
+use crate::process::spawn::SpawnEnv;
 use crate::process::task::{TellTask, UserTask};
-use crate::process::{Process, Receive};
+use crate::process::{Process, Props, Receive};
 
 use super::wiring;
 
@@ -24,6 +29,16 @@ pub struct ProcessContext<P: Process> {
     pub(crate) dead_letter: Option<DeadLetterProxy>,
     pub(crate) self_proxy: ProcessProxy<P>,
     pub(crate) pipe_handle: Option<PipeHandle<P>>,
+    pub(crate) parent: Option<Pid>,
+    pub(crate) children: PidSet,
+    pub(crate) default_idle_timeout: Option<Duration>,
+    /// PIDs this process explicitly registered for DeathWatch via `ctx.watch`.
+    ///
+    /// Used by the lifecycle loop to distinguish hierarchy-only children (where
+    /// `on_terminated` must NOT fire) from explicitly-watched children (where it
+    /// MUST fire).  Maintained as interior-mutable state so `watch`/`unwatch` can
+    /// keep `&self` signatures required by ARCH-REVIEW-004.
+    pub(crate) explicit_watches: Mutex<HashSet<Pid>>,
 }
 
 impl<P: Process> ProcessContext<P> {
@@ -35,6 +50,22 @@ impl<P: Process> ProcessContext<P> {
         self.name.as_ref()
     }
 
+    /// Pid of the process that spawned this one via `ctx.spawn_child*`.
+    ///
+    /// Returns `None` for top-level processes (those spawned via
+    /// `ProcessSystem::spawn*`).
+    pub fn parent(&self) -> Option<&Pid> {
+        self.parent.as_ref()
+    }
+
+    /// The set of Pids spawned by this process via `ctx.spawn_child*`.
+    ///
+    /// Read-only — the runtime maintains the membership during the process's
+    /// lifecycle (entries are auto-removed when a child terminates).
+    pub fn children(&self) -> &PidSet {
+        &self.children
+    }
+
     /// Immutable reference to this process's own proxy.
     ///
     /// Clone if you need an owned handle (e.g. for Pipe-to-Self where a handler
@@ -43,13 +74,89 @@ impl<P: Process> ProcessContext<P> {
         &self.self_proxy
     }
 
+    /// Spawn `props` as a child of this process.
+    ///
+    /// The new process inherits the parent's [`ProcessRegistry`] (flat
+    /// registry — no path information attached to the Pid) and the system
+    /// default idle timeout used by [`crate::ProcessSystem::spawn`]. Its
+    /// `ctx.parent()` returns this process's Pid. When this process stops,
+    /// the runtime cascade-stops every child (reverse insertion order) and
+    /// waits for their `Terminated` before exiting.
+    pub async fn spawn_child<C: Process>(&mut self, props: Props<C>) -> ProcessProxy<C> {
+        let env = SpawnEnv::child(
+            self.registry.clone(),
+            self.dead_letter.clone(),
+            self.default_idle_timeout,
+            self.pid,
+        );
+        let proxy = env.spawn(None, props).await;
+        self.register_child(&proxy).await;
+        proxy
+    }
+
+    /// Spawn `props` as a child of this process, driven by `driver`.
+    ///
+    /// Same parent/child semantics as [`Self::spawn_child`], but the caller
+    /// supplies the driver tree — used for tick / poll sources where the
+    /// default `MessageDriver + PipeDriver` composition is not appropriate
+    /// (e.g. `IntervalDriver` backing a `DurableStream` poller).
+    pub async fn spawn_child_with_driver<C, D>(
+        &mut self,
+        props: Props<C>,
+        driver: D,
+    ) -> ProcessProxy<C>
+    where
+        C: Process,
+        D: Driver<C>,
+    {
+        let env = SpawnEnv::child(
+            self.registry.clone(),
+            self.dead_letter.clone(),
+            self.default_idle_timeout,
+            self.pid,
+        );
+        let proxy = env.spawn_with_driver(None, props, driver).await;
+        self.register_child(&proxy).await;
+        proxy
+    }
+
+    /// Record `proxy` as a child of this process.
+    ///
+    /// Adds the child Pid to `self.children` and registers this process as an
+    /// implicit watcher so the child sends `Terminated` on exit (needed for
+    /// `stop_children_and_wait` and `ctx.children` bookkeeping). NOT recorded
+    /// in `explicit_watches`, so `on_terminated` is not triggered unless the
+    /// user also calls `ctx.watch`.
+    ///
+    /// Uses `wiring::watch` rather than a direct signal send so that if the
+    /// child has already terminated before the Watch is processed, a
+    /// `Terminated { why: NotFound }` is delivered to this process's `sys_tx`.
+    /// That guarantees `stop_children_and_wait` can drain the child even when
+    /// it exits before the Watch registration completes.
+    async fn register_child<C: Process>(&mut self, proxy: &ProcessProxy<C>) {
+        let child_pid = proxy.pid();
+        self.children.add(child_pid);
+        wiring::watch(
+            self.pid,
+            child_pid,
+            &self.registry,
+            &self.sys_tx,
+            self.dead_letter.as_ref(),
+        )
+        .await;
+    }
+
     /// Start watching the process at `target_pid` for termination.
     ///
     /// If the target is alive, a `Watch` signal is sent to its lifecycle loop.
     /// If it is absent from the registry (already stopped), a `WatchRequest` is
     /// routed through `DeadLetterProcess`, which responds with
     /// `Terminated { why: NotFound }`.
+    ///
+    /// Calling `watch` causes `on_terminated` to be invoked when the target
+    /// terminates, regardless of whether the target is also a child process.
     pub async fn watch(&self, target_pid: Pid) {
+        self.explicit_watches.lock().unwrap().insert(target_pid);
         wiring::watch(
             self.pid,
             target_pid,
@@ -68,6 +175,7 @@ impl<P: Process> ProcessContext<P> {
     ///
     /// No-op if the target is no longer in the registry.
     pub async fn unwatch(&self, target_pid: Pid) {
+        self.explicit_watches.lock().unwrap().remove(&target_pid);
         wiring::unwatch(self.pid, target_pid, &self.registry).await;
     }
 

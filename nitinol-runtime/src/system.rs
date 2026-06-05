@@ -1,13 +1,11 @@
 use std::time::Duration;
 
-use tokio::sync::mpsc;
-
 use crate::error::{SendError, SpawnError};
 use crate::ident::{Pid, ProcessName};
-use crate::process::task::UserTask;
-use crate::process::{run, run_with_driver, Driver};
+use crate::process::spawn::SpawnEnv;
+use crate::process::{run, Driver, LifecycleInit};
 use crate::process::{
-    AnyProxy, BoxedMessage, DeadLetterProcess, DeadLetterProxy, IdleTimeout, Process, ProcessProxy,
+    AnyProxy, BoxedMessage, DeadLetterProcess, DeadLetterProxy, Process, ProcessProxy,
     ProcessRegistry, Props, Receive, Stream, SupervisionStrategy,
 };
 
@@ -63,6 +61,7 @@ impl ProcessSystem {
             None,
             None,
             dl_stream_supervision,
+            LifecycleInit { parent: None, default_idle_timeout: None },
         )
         .await;
 
@@ -84,6 +83,7 @@ impl ProcessSystem {
             None,
             None,
             dl_process_supervision,
+            LifecycleInit { parent: None, default_idle_timeout: None },
         )
         .await;
 
@@ -108,17 +108,12 @@ impl ProcessSystem {
     }
 
     pub async fn spawn<P: Process>(&self, props: Props<P>) -> ProcessProxy<P> {
-        let (process, idle_timeout, supervision) = props.into_parts();
-        let timeout = self.resolve_idle_timeout(idle_timeout);
-        run(
-            process,
-            None,
+        let env = SpawnEnv::top_level(
             self.registry.clone(),
-            timeout,
-            Some(self.dead_letter_proxy.clone()),
-            supervision,
-        )
-        .await
+            self.dead_letter_proxy.clone(),
+            self.default_idle_timeout,
+        );
+        env.spawn(None, props).await
     }
 
     pub async fn spawn_named<P: Process>(
@@ -126,17 +121,12 @@ impl ProcessSystem {
         name: ProcessName,
         props: Props<P>,
     ) -> ProcessProxy<P> {
-        let (process, idle_timeout, supervision) = props.into_parts();
-        let timeout = self.resolve_idle_timeout(idle_timeout);
-        run(
-            process,
-            Some(name),
+        let env = SpawnEnv::top_level(
             self.registry.clone(),
-            timeout,
-            Some(self.dead_letter_proxy.clone()),
-            supervision,
-        )
-        .await
+            self.dead_letter_proxy.clone(),
+            self.default_idle_timeout,
+        );
+        env.spawn(Some(name), props).await
     }
 
     pub async fn spawn_with_driver<P, D>(&self, props: Props<P>, driver: D) -> ProcessProxy<P>
@@ -144,7 +134,12 @@ impl ProcessSystem {
         P: Process,
         D: Driver<P>,
     {
-        self.spawn_with_driver_inner(None, props, driver).await
+        let env = SpawnEnv::top_level(
+            self.registry.clone(),
+            self.dead_letter_proxy.clone(),
+            self.default_idle_timeout,
+        );
+        env.spawn_with_driver(None, props, driver).await
     }
 
     pub async fn spawn_named_with_driver<P, D>(
@@ -157,34 +152,12 @@ impl ProcessSystem {
         P: Process,
         D: Driver<P>,
     {
-        self.spawn_with_driver_inner(Some(name), props, driver)
-            .await
-    }
-
-    async fn spawn_with_driver_inner<P, D>(
-        &self,
-        name: Option<ProcessName>,
-        props: Props<P>,
-        driver: D,
-    ) -> ProcessProxy<P>
-    where
-        P: Process,
-        D: Driver<P>,
-    {
-        let (process, idle_timeout, supervision) = props.into_parts();
-        let timeout = self.resolve_idle_timeout(idle_timeout);
-        let (user_tx, _user_rx) = mpsc::channel::<UserTask<P>>(32);
-        run_with_driver(
-            process,
-            name,
+        let env = SpawnEnv::top_level(
             self.registry.clone(),
-            user_tx,
-            driver,
-            timeout,
-            Some(self.dead_letter_proxy.clone()),
-            supervision,
-        )
-        .await
+            self.dead_letter_proxy.clone(),
+            self.default_idle_timeout,
+        );
+        env.spawn_with_driver(Some(name), props, driver).await
     }
 
     /// Spawn a `Stream<T>` process registered under `topic`.
@@ -204,17 +177,12 @@ impl ProcessSystem {
         }
         let mut stream_props: Props<Stream<T>> = Props::new(Stream::new);
         stream_props.with_supervision_strategy(SupervisionStrategy::Resume);
-        let (process, idle_timeout, supervision) = stream_props.into_parts();
-        let timeout = self.resolve_idle_timeout(idle_timeout);
-        let proxy = run(
-            process,
-            Some(topic),
+        let env = SpawnEnv::top_level(
             self.registry.clone(),
-            timeout,
-            Some(self.dead_letter_proxy.clone()),
-            supervision,
-        )
-        .await;
+            self.dead_letter_proxy.clone(),
+            self.default_idle_timeout,
+        );
+        let proxy = env.spawn(Some(topic), stream_props).await;
         Ok(proxy)
     }
 
@@ -224,14 +192,5 @@ impl ProcessSystem {
 
     pub async fn lookup_by_name(&self, name: &ProcessName) -> Option<AnyProxy> {
         self.registry.lookup_by_name(name).await
-    }
-
-    /// Resolve an `IdleTimeout` policy to a concrete `Option<Duration>`.
-    fn resolve_idle_timeout(&self, idle_timeout: IdleTimeout) -> Option<Duration> {
-        match idle_timeout {
-            IdleTimeout::After(dur) => Some(dur),
-            IdleTimeout::Persistent => None,
-            IdleTimeout::Inherit => self.default_idle_timeout,
-        }
     }
 }

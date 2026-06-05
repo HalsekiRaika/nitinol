@@ -68,3 +68,20 @@ pub enum SupervisionStrategy {
     /// Ignore the handler error and continue processing later messages.
     Resume,
 }
+
+/// Resolve an `IdleTimeout` policy against the system-level default to a
+/// concrete `Option<Duration>`.
+///
+/// Defined here (and re-used by `ProcessSystem::spawn*` and
+/// `ProcessContext::spawn_child*`) so child processes inherit the system
+/// default consistently with top-level spawns.
+pub(crate) fn resolve_idle_timeout(
+    idle_timeout: IdleTimeout,
+    default_idle_timeout: Option<Duration>,
+) -> Option<Duration> {
+    match idle_timeout {
+        IdleTimeout::After(dur) => Some(dur),
+        IdleTimeout::Persistent => None,
+        IdleTimeout::Inherit => default_idle_timeout,
+    }
+}

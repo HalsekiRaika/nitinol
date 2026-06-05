@@ -1,15 +1,13 @@
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore};
 use nitinol_persistence::{AggregateId, ProjectionId};
-use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{ProcessSystem, Props};
 
 use crate::codec::ErasedCodec;
-use crate::durable_stream::{DurableStream, SequenceCursor};
+use crate::durable_stream::{DurableSubscription, SequenceCursor};
 use crate::event::Event;
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};
 use crate::projection::process::{CatchupOrigin, ProjectorProcess};
@@ -20,8 +18,6 @@ pub struct EventUnset;
 pub struct EventSet;
 pub struct OriginUnset;
 pub struct OriginSet(pub(crate) CatchupOrigin);
-
-static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct ProjectorProps<P, Cs, Tx = (), E = EventUnset, O = OriginUnset> {
     projection_id: ProjectionId,
@@ -275,18 +271,11 @@ where
             CatchupOrigin::Global => SequenceCursor::Global { after: checkpoint },
         };
 
-        let topic = ProcessName::new(format!(
-            "projection-stream-{}-{}",
-            projection_id.as_str(),
-            UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
+        let upstream_config =
+            DurableSubscription::<nitinol_persistence::LoadedEvent>::new(Arc::clone(&store), Some);
 
-        let ds_proxy =
-            DurableStream::<nitinol_persistence::LoadedEvent>::new(topic, Arc::clone(&store), Some)
-                .cursor(cursor.clone())
-                .spawn(system)
-                .await
-                .expect("DurableStream::spawn must succeed for projector");
+        let upstream_config_for_props = upstream_config;
+        let cursor_for_props = cursor;
 
         let runtime_props = Props::new(move || ProjectorProcess {
             projector: producer(),
@@ -297,20 +286,10 @@ where
             handlers: handlers.clone(),
             tx_provider: tx_provider.clone(),
             checkpoint_sequence: checkpoint,
+            upstream_config: upstream_config_for_props.clone(),
+            upstream_cursor: cursor_for_props.clone(),
         });
 
-        let proxy = system.spawn(runtime_props).await;
-
-        ds_proxy
-            .subscribe_from(system, proxy.clone(), cursor)
-            .await
-            .expect("DurableStream::subscribe_from must succeed for projector");
-
-        // `ds_proxy` is dropped here. The shared_poller of a projector-private
-        // DurableStream is idle (no topic subscribers in `subscribe`), and the
-        // DirectPollerProcess spawned by `subscribe_from` watches the projector
-        // process directly — so the projector's lifetime drives the poller's,
-        // and the keepalive `Arc` is no longer needed.
-        proxy
+        system.spawn(runtime_props).await
     }
 }

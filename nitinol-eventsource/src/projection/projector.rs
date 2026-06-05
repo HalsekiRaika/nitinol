@@ -16,9 +16,10 @@ use crate::projection::context::ProjectionContext;
 ///
 /// # Catch-up and live delivery
 ///
-/// A projector process subscribes to an internal `DurableStream<LoadedEvent>` that
+/// A projector process spawns a runtime child `DirectPollerProcess` that
 /// performs catch-up from the last saved checkpoint and then continues with live
-/// polling — both phases flow through the same channel.  Events are handed to
+/// polling.  The child's lifetime is bound to the projector process; when the
+/// projector stops the runtime cascade-stops the poller.  Events are handed to
 /// `project` in sequence order.
 ///
 /// # Idempotency

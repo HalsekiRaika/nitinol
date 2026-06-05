@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use futures_util::future::Either;
@@ -7,6 +8,7 @@ use tokio::sync::mpsc;
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
 use crate::process::driver::{Combine, Driver, MessageDriver, PipeDriver};
+use crate::process::pid_set::PidSet;
 use crate::process::props::SupervisionStrategy;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
@@ -15,6 +17,16 @@ use crate::process::task::UserTask;
 use crate::process::watch::{Terminated, TerminatedReason};
 use crate::process::{Process, ProcessContext, ProcessProxy};
 
+/// Lifecycle-initialization parameters bundled as a single contract.
+///
+/// Groups the two fields that are constant across all spawns within one
+/// call site (`parent` and `default_idle_timeout`) so they travel together
+/// rather than as separate positional arguments.
+pub(crate) struct LifecycleInit {
+    pub(crate) parent: Option<Pid>,
+    pub(crate) default_idle_timeout: Option<Duration>,
+}
+
 pub(crate) async fn run<P: Process>(
     process: P,
     process_name: Option<ProcessName>,
@@ -22,6 +34,7 @@ pub(crate) async fn run<P: Process>(
     timeout: Option<Duration>,
     dead_letter: Option<DeadLetterProxy>,
     supervision: SupervisionConfig<P>,
+    init: LifecycleInit,
 ) -> ProcessProxy<P> {
     let (user_tx, user_rx) = mpsc::channel::<UserTask<P>>(32);
     // `spawn` / `spawn_named` auto-compose the PipeDriver so that
@@ -39,6 +52,7 @@ pub(crate) async fn run<P: Process>(
         timeout,
         dead_letter,
         supervision,
+        init,
     )
     .await
 }
@@ -53,6 +67,7 @@ pub(crate) async fn run_with_driver<P: Process, D: Driver<P>>(
     timeout: Option<Duration>,
     dead_letter: Option<DeadLetterProxy>,
     supervision: SupervisionConfig<P>,
+    init: LifecycleInit,
 ) -> ProcessProxy<P> {
     let (sys_tx, sys_rx) = mpsc::channel::<SystemSignal>(32);
 
@@ -88,6 +103,7 @@ pub(crate) async fn run_with_driver<P: Process, D: Driver<P>>(
         dead_letter,
         supervision,
         proxy.clone(),
+        init,
     );
 
     #[cfg(not(tokio_unstable))]
@@ -117,6 +133,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
     dead_letter: Option<DeadLetterProxy>,
     supervision: SupervisionConfig<P>,
     self_proxy: ProcessProxy<P>,
+    init: LifecycleInit,
 ) {
     let mut state = process;
     let mut driver = driver;
@@ -138,6 +155,10 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
         dead_letter: dead_letter.clone(),
         self_proxy,
         pipe_handle,
+        parent: init.parent,
+        children: PidSet::new(),
+        default_idle_timeout: init.default_idle_timeout,
+        explicit_watches: Mutex::new(HashSet::new()),
     };
 
     // A driver that opts out (e.g., tick / poll sources) has no meaningful
@@ -160,6 +181,10 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
 
     state.on_start(&mut ctx).await;
 
+    // Set when `on_stop` is called at the start of a restart sequence so the
+    // post-loop cleanup knows not to call it again for the same state.
+    let mut on_stop_called_in_restart = false;
+
     let reason: TerminatedReason = loop {
         tokio::select! {
             biased;
@@ -174,7 +199,17 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
                         watchers.remove(&watcher_pid);
                     }
                     SystemSignal::Terminated { who, why } => {
-                        state.on_terminated(Terminated { who, why }, &mut ctx).await;
+                        if ctx.children.contains(&who) {
+                            ctx.children.remove(&who);
+                            let was_explicit =
+                                ctx.explicit_watches.lock().unwrap().remove(&who);
+                            if was_explicit {
+                                state.on_terminated(Terminated { who, why }, &mut ctx).await;
+                            }
+                        } else {
+                            ctx.explicit_watches.lock().unwrap().remove(&who);
+                            state.on_terminated(Terminated { who, why }, &mut ctx).await;
+                        }
                     }
                 }
             }
@@ -192,8 +227,25 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
                             SupervisionStrategy::Restart { max_retries, within } => {
                                 if restart_tracker.should_restart(*max_retries, *within) {
                                     state.on_stop(&mut ctx).await;
+                                    on_stop_called_in_restart = true;
+                                    let deferred = stop_children_for_restart(
+                                        &mut ctx,
+                                        &mut sys_rx,
+                                        &mut watchers,
+                                    )
+                                    .await;
+                                    if let Some(abort_reason) = deferred.abort {
+                                        // Stop/Poison arrived during the child-drain wait.
+                                        // on_stop was already called above; the post-loop
+                                        // must not call it again.
+                                        break abort_reason;
+                                    }
                                     state = (supervision.producer)();
+                                    on_stop_called_in_restart = false;
                                     state.on_start(&mut ctx).await;
+                                    for (who, why) in deferred.pending_terminated {
+                                        state.on_terminated(Terminated { who, why }, &mut ctx).await;
+                                    }
                                 } else {
                                     break TerminatedReason::Stopped;
                                 }
@@ -209,9 +261,11 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
         }
     };
 
-    if reason != TerminatedReason::Poisoned {
+    if reason != TerminatedReason::Poisoned && !on_stop_called_in_restart {
         state.on_stop(&mut ctx).await;
     }
+
+    stop_children_and_wait(&mut ctx, &mut sys_rx, &mut watchers).await;
 
     registry.unregister(pid, process_name.as_ref()).await;
 
@@ -223,8 +277,8 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
         }
     }
 
-    for watcher_pid in watchers {
-        if let Some(proxy) = registry.lookup(watcher_pid).await {
+    for watcher_pid in &watchers {
+        if let Some(proxy) = registry.lookup(*watcher_pid).await {
             let _ = proxy
                 .send_system_signal(SystemSignal::Terminated {
                     who: pid,
@@ -232,6 +286,148 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
                 })
                 .await;
         }
+    }
+
+    // Always notify the parent (if any) so that `stop_children_and_wait`
+    // can complete even when the parent has previously called `unwatch` on
+    // this child.
+    //
+    // - Parent is in `watchers` (either from spawn_child's implicit Watch or from
+    //   an explicit ctx.watch call): the watcher loop above already sent
+    //   `Terminated`; skip the extra notification to avoid a duplicate.
+    // - Parent is NOT in `watchers` (parent called ctx.unwatch): send `Terminated`
+    //   via this fallback so the parent's stop_children_and_wait can still drain.
+    if let Some(parent_pid) = init.parent {
+        if !watchers.contains(&parent_pid) {
+            if let Some(proxy) = registry.lookup(parent_pid).await {
+                let _ = proxy
+                    .send_system_signal(SystemSignal::Terminated { who: pid, why: reason })
+                    .await;
+            }
+        }
+    }
+}
+
+async fn send_stop_to_children<P: Process>(ctx: &mut ProcessContext<P>) {
+    let child_pids: Vec<Pid> = ctx.children.iter_rev().copied().collect();
+
+    for cpid in &child_pids {
+        match ctx.registry.lookup(*cpid).await {
+            Some(proxy) => {
+                let _ = proxy.send_system_signal(SystemSignal::Stop).await;
+            }
+            None => {
+                ctx.children.remove(cpid);
+            }
+        }
+    }
+}
+
+/// Drain `ctx.children`: send `Stop` to each child (reverse order),
+/// then block on `sys_rx` until every child has reported `Terminated`.
+///
+/// `Watch` / `Unwatch` signals arriving during the wait are recorded in
+/// `watchers` so the eventual termination notification reaches them. The
+/// user's `on_terminated` is **not** invoked here — `on_stop` has already run
+/// and re-entering user code while the lifecycle is being torn down would
+/// invalidate the user's reasoning about reentrancy.
+async fn stop_children_and_wait<P: Process>(
+    ctx: &mut ProcessContext<P>,
+    sys_rx: &mut mpsc::Receiver<SystemSignal>,
+    watchers: &mut HashSet<Pid>,
+) {
+    send_stop_to_children(ctx).await;
+
+    while !ctx.children.is_empty() {
+        match sys_rx.recv().await {
+            Some(SystemSignal::Terminated { who, .. }) if ctx.children.contains(&who) => {
+                ctx.children.remove(&who);
+                ctx.explicit_watches.lock().unwrap().remove(&who);
+            }
+            Some(SystemSignal::Watch { watcher_pid }) => {
+                watchers.insert(watcher_pid);
+            }
+            Some(SystemSignal::Unwatch { watcher_pid }) => {
+                watchers.remove(&watcher_pid);
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+}
+
+/// Signals deferred during a supervision-restart child drain that must be
+/// handled after the children have stopped.
+struct RestartDeferred {
+    /// `Some` if a `Stop` or `Poison` signal arrived while waiting — the
+    /// restart should be aborted and the process should exit with this reason.
+    abort: Option<TerminatedReason>,
+    /// Non-child `Terminated` notifications received during the wait; replayed
+    /// to the new process state after a successful restart.
+    pending_terminated: Vec<(Pid, TerminatedReason)>,
+}
+
+/// Variant of `stop_children_and_wait` used during supervision restart.
+///
+/// Unlike the normal-termination path, this function preserves signals that
+/// would otherwise be lost while waiting for children to stop:
+///
+/// - `Stop` / `Poison` → stored in [`RestartDeferred::abort`] so the caller
+///   can abort the restart and propagate the reason.
+/// - `Terminated` for an explicit-watch child → collected in
+///   [`RestartDeferred::pending_terminated`] for replay to the new state.
+/// - `Terminated` for a hierarchy-only child (not in explicit_watches) → bookkeeping
+///   only; removed from `ctx.children` but not replayed.
+/// - `Terminated` for an external death-watch (not a child) → collected for replay.
+///
+/// `on_stop` is intentionally **not** called here; the caller must invoke it
+/// **before** calling this function (spec order: `on_stop` → stop children →
+/// await `Terminated`).  The caller tracks whether `on_stop` was already called
+/// so the post-loop cleanup does not call it a second time.
+async fn stop_children_for_restart<P: Process>(
+    ctx: &mut ProcessContext<P>,
+    sys_rx: &mut mpsc::Receiver<SystemSignal>,
+    watchers: &mut HashSet<Pid>,
+) -> RestartDeferred {
+    send_stop_to_children(ctx).await;
+
+    let mut abort: Option<TerminatedReason> = None;
+    let mut pending_terminated: Vec<(Pid, TerminatedReason)> = Vec::new();
+
+    while !ctx.children.is_empty() {
+        match sys_rx.recv().await {
+            Some(SystemSignal::Terminated { who, why }) if ctx.children.contains(&who) => {
+                ctx.children.remove(&who);
+                let was_explicit = ctx.explicit_watches.lock().unwrap().remove(&who);
+                if was_explicit {
+                    pending_terminated.push((who, why));
+                }
+            }
+            Some(SystemSignal::Terminated { who, why }) => {
+                ctx.explicit_watches.lock().unwrap().remove(&who);
+                pending_terminated.push((who, why));
+            }
+            Some(SystemSignal::Stop) => {
+                if abort.is_none() {
+                    abort = Some(TerminatedReason::Stopped);
+                }
+            }
+            Some(SystemSignal::Poison) => {
+                abort = Some(TerminatedReason::Poisoned);
+            }
+            Some(SystemSignal::Watch { watcher_pid }) => {
+                watchers.insert(watcher_pid);
+            }
+            Some(SystemSignal::Unwatch { watcher_pid }) => {
+                watchers.remove(&watcher_pid);
+            }
+            None => break,
+        }
+    }
+
+    RestartDeferred {
+        abort,
+        pending_terminated,
     }
 }
 
@@ -321,6 +517,7 @@ mod tests {
             None,
             supervision,
             self_proxy,
+            LifecycleInit { parent: None, default_idle_timeout: None },
         ));
 
         // Wait well past the configured 50 ms timeout — if the timer were still
@@ -352,5 +549,17 @@ mod tests {
             }
             other => panic!("expected SystemSignal::Terminated, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ARCH-REVIEW-004 regression: watch / unwatch must take &self, not &mut self.
+    // If either method required exclusive access, this function would fail to
+    // compile, catching the regression before any runtime test runs.
+    // -----------------------------------------------------------------------
+    #[allow(dead_code)]
+    fn _assert_watch_unwatch_are_shared_ref(ctx: &ProcessContext<NoOpProcess>, pid: Pid) {
+        // Calling these on a *shared* reference is the compile-time proof.
+        let _w = ctx.watch(pid);
+        let _u = ctx.unwatch(pid);
     }
 }

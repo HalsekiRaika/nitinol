@@ -23,7 +23,9 @@
 //! # MVP scope
 //!
 //! - Subscription-driven: the saga subscribes to an upstream [`nitinol_persistence::store::EventStore`]
-//!   via an internal `DurableStream<EventEnvelope<E>>` (catchup + live, at-least-once delivery).
+//!   via a runtime child `DirectPollerProcess` (catchup + live, at-least-once delivery).
+//!   The poller's lifetime is bound to the saga process; when the saga stops the runtime
+//!   cascade-stops the child poller automatically.
 //! - No scheduler, no compensation, no snapshotting.
 //! - Routing is a single closure `Fn(&SubscribedEvent) -> Option<SagaId>`.
 //! - Side-effect failures and persistence failures are logged, not

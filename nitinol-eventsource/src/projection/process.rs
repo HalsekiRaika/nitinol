@@ -4,6 +4,7 @@ use nitinol_persistence::store::{CheckpointStore, DeliveryMode};
 use nitinol_persistence::{AggregateId, LoadedEvent, ProjectionId};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
+use crate::durable_stream::{DurableSubscription, SequenceCursor};
 use crate::projection::delivery;
 use crate::projection::handler::EventTypeHandler;
 use crate::projection::tx_provider::ErasedTxProvider;
@@ -26,6 +27,8 @@ pub struct ProjectorProcess<P, Cs, Tx = ()> {
     pub(crate) handlers: Vec<Arc<dyn EventTypeHandler<P, Tx>>>,
     pub(crate) tx_provider: Option<Arc<dyn ErasedTxProvider<Tx> + Send + Sync>>,
     pub(crate) checkpoint_sequence: u64,
+    pub(crate) upstream_config: DurableSubscription<LoadedEvent>,
+    pub(crate) upstream_cursor: SequenceCursor,
 }
 
 impl<P, Cs, Tx> Process for ProjectorProcess<P, Cs, Tx>
@@ -34,6 +37,11 @@ where
     Cs: CheckpointStore<Tx = Tx> + Send + Sync + 'static,
     Tx: Send + 'static,
 {
+    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
+        self.upstream_config
+            .spawn_child(ctx, self.upstream_cursor.clone())
+            .await;
+    }
 }
 
 impl<P, Cs, Tx> Receive<LoadedEvent> for ProjectorProcess<P, Cs, Tx>

@@ -5,11 +5,19 @@
 //!
 //! [`EventStore`]: nitinol_persistence::store::EventStore
 
+use std::time::Duration;
+
 mod cursor;
 mod poller;
 mod proxy;
 mod stream;
 
+/// Polling cadence shared by [`DurableStream`] and [`DurableSubscription`].
+///
+/// Chosen as a balance between catch-up latency and event-store load.
+/// Override via `with_poll_interval` on either builder.
+pub(self) const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
 pub use self::cursor::SequenceCursor;
-pub use self::proxy::DurableStreamProxy;
+pub use self::proxy::{DurableStreamProxy, DurableSubscription};
 pub use self::stream::{CursorSet, CursorUnset, DurableStream};

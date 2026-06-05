@@ -61,5 +61,5 @@ pub use self::projection::{
 };
 
 pub use self::durable_stream::{
-    CursorSet, CursorUnset, DurableStream, DurableStreamProxy, SequenceCursor,
+    CursorSet, CursorUnset, DurableStream, DurableStreamProxy, DurableSubscription, SequenceCursor,
 };

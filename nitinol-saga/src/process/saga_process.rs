@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use nitinol_eventsource::codec::ErasedCodec;
-use nitinol_eventsource::EventEnvelope;
+use nitinol_eventsource::{DurableSubscription, EventEnvelope, SequenceCursor};
 use nitinol_persistence::store::EventStore;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
@@ -74,6 +74,8 @@ pub struct SagaProcess<S: Saga> {
     /// and `OutboxTerminalAppendFailed`.  The deferred-stop condition is
     /// `pending_end && pending_executor_count == 0`.
     pub(crate) pending_executor_count: usize,
+    pub(crate) upstream_config: DurableSubscription<EventEnvelope<S::SubscribedEvent>>,
+    pub(crate) upstream_cursor: SequenceCursor,
 }
 
 impl<S: Saga> Process for SagaProcess<S> {
@@ -100,6 +102,10 @@ impl<S: Saga> Process for SagaProcess<S> {
         // condition works correctly if End is not encountered in this run, and
         // also for the unusual case where a supervised restart is followed by End.
         self.pending_executor_count = self.pending_intents.len();
+
+        self.upstream_config
+            .spawn_child(ctx, self.upstream_cursor.clone())
+            .await;
     }
 }
 

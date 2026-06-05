@@ -116,7 +116,19 @@ where
     P: Process + Receive<T, Response = ()>,
 {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
-        ctx.watch(self.subscriber.pid()).await;
+        // When this poller is spawned as a child of the subscriber (the common
+        // case via `DurableSubscription::spawn_child`), the parent/child
+        // hierarchy already guarantees the poller stops when the subscriber
+        // stops — registering an explicit DeathWatch here would cause each
+        // subscriber restart to accumulate a stale poller PID in the
+        // subscriber's watcher set (ARCH-REVIEW-006).
+        //
+        // Only register the watch when the poller was spawned as a top-level
+        // process (subscriber is NOT the parent) so that it still self-stops
+        // when the subscriber terminates.
+        if ctx.parent() != Some(&self.subscriber.pid()) {
+            ctx.watch(self.subscriber.pid()).await;
+        }
     }
 
     async fn on_terminated(&mut self, terminated: Terminated, ctx: &mut ProcessContext<Self>) {

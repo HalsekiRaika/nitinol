@@ -41,8 +41,8 @@ pub enum SagaEffect<E> {
         tells: Vec<TellIntent>,
         schedules: Vec<Schedule>,
     },
-    /// Stop the saga process.  Released here so the runtime can drop the
-    /// upstream `DurableStream` keepalive and prevent further `handle` calls.
+    /// Stop the saga process.  The runtime cascade-stops the upstream
+    /// `DirectPollerProcess` child, preventing further `handle` calls.
     End,
     /// An ordered collection of effects executed sequentially.
     Sequence(Vec<SagaEffect<E>>),
