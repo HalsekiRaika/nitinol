@@ -81,9 +81,9 @@ where
             AskHandlerError::Rejection(r) => AskError::Rejection(r),
             AskHandlerError::Effect(eff) => AskError::Effect(eff),
         },
-        RuntimeAskError::DeadLetter { .. } | RuntimeAskError::ReplyDropped => {
-            AskError::Send(nitinol_runtime::error::SendError)
-        }
+        RuntimeAskError::DeadLetter { .. }
+        | RuntimeAskError::ReplyDropped
+        | RuntimeAskError::Timeout { .. } => AskError::Send(nitinol_runtime::error::SendError),
     }
 }
 
@@ -95,8 +95,8 @@ where
         RuntimeAskError::Handler(h) => match h {
             ExecHandlerError::Domain(e) => ExecError::Domain(e),
         },
-        RuntimeAskError::DeadLetter { .. } | RuntimeAskError::ReplyDropped => {
-            ExecError::Send(nitinol_runtime::error::SendError)
-        }
+        RuntimeAskError::DeadLetter { .. }
+        | RuntimeAskError::ReplyDropped
+        | RuntimeAskError::Timeout { .. } => ExecError::Send(nitinol_runtime::error::SendError),
     }
 }

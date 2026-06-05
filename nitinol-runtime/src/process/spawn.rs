@@ -66,6 +66,21 @@ impl SpawnEnv {
         }
     }
 
+    /// Construct an environment for detached (parentless) spawns with no
+    /// system-level default idle timeout. Used for temporary one-shot processes
+    /// (e.g. ask proxies) that are independent of any actor hierarchy.
+    pub(crate) fn detached(
+        registry: ProcessRegistry,
+        dead_letter: Option<DeadLetterProxy>,
+    ) -> Self {
+        Self {
+            registry,
+            dead_letter,
+            default_idle_timeout: None,
+            parent: None,
+        }
+    }
+
     pub(crate) async fn spawn<P: Process>(
         &self,
         name: Option<ProcessName>,

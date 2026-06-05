@@ -78,6 +78,7 @@ pub(crate) async fn run_with_driver<P: Process, D: Driver<P>>(
         user_tx,
         sys_tx: sys_tx.clone(),
         dead_letter: dead_letter.clone(),
+        registry: registry.clone(),
     };
 
     let any_proxy = proxy.clone().into();
@@ -482,6 +483,7 @@ mod tests {
             user_tx: watcher_user_tx,
             sys_tx: watcher_sys_tx,
             dead_letter: None,
+            registry: registry.clone(),
         };
         registry
             .register(watcher_pid, watcher_proxy.into(), None)
@@ -503,6 +505,7 @@ mod tests {
             user_tx: self_user_tx,
             sys_tx: sys_tx.clone(),
             dead_letter: None,
+            registry: registry.clone(),
         };
 
         let loop_handle = tokio::spawn(lifecycle_loop(

@@ -1,6 +1,8 @@
 mod any;
+mod temp_ask;
 
 use std::any::Any;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
@@ -10,6 +12,7 @@ pub use self::any::*;
 use crate::error::{AskError, SendError};
 use crate::ident::Pid;
 use crate::process::dead_letter::{suppress_log, DeadLetterProxy};
+use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
 use crate::process::task::{AskTask, TellTask, UserTask};
 use crate::process::{Process, Receive};
@@ -19,6 +22,7 @@ pub struct ProcessProxy<P> {
     pub(crate) user_tx: mpsc::Sender<UserTask<P>>,
     pub(crate) sys_tx: mpsc::Sender<SystemSignal>,
     pub(crate) dead_letter: Option<DeadLetterProxy>,
+    pub(crate) registry: ProcessRegistry,
 }
 
 impl<P> Clone for ProcessProxy<P> {
@@ -28,6 +32,7 @@ impl<P> Clone for ProcessProxy<P> {
             user_tx: self.user_tx.clone(),
             sys_tx: self.sys_tx.clone(),
             dead_letter: self.dead_letter.clone(),
+            registry: self.registry.clone(),
         }
     }
 }
@@ -89,6 +94,47 @@ impl<P: Process> ProcessProxy<P> {
         match rx.await {
             Ok(Ok(r)) => Ok(r),
             Ok(Err(e)) => Err(AskError::Handler(e)),
+            Err(_) => Err(AskError::ReplyDropped),
+        }
+    }
+
+    /// Send `msg` and wait for a reply, failing with `AskError::Timeout` if no
+    /// reply arrives within `duration`.
+    pub async fn ask_with_timeout<M>(
+        &self,
+        msg: M,
+        duration: Duration,
+    ) -> Result<<P as Receive<M>>::Response, AskError<<P as Receive<M>>::Error>>
+    where
+        P: Receive<M>,
+        M: 'static + Send + Sync,
+        <P as Receive<M>>::Response: 'static + Send,
+        <P as Receive<M>>::Error: 'static + Send,
+    {
+        let suppress = suppress_log::<M>();
+        let (in_tx, in_rx) =
+            oneshot::channel::<Result<<P as Receive<M>>::Response, <P as Receive<M>>::Error>>();
+        let (out_tx, out_rx) = oneshot::channel::<
+            Result<<P as Receive<M>>::Response, AskError<<P as Receive<M>>::Error>>,
+        >();
+        let task: UserTask<P> = Box::new(AskTask::new(msg, in_tx));
+        if let Err(send_err) = self.user_tx.send(task).await {
+            self.route_to_dead_letter(send_err.0, suppress).await;
+            return Err(AskError::DeadLetter {
+                destination: self.pid,
+            });
+        }
+        temp_ask::spawn_temp_ask(
+            self.registry.clone(),
+            self.dead_letter.clone(),
+            self.pid,
+            in_rx,
+            out_tx,
+            duration,
+        )
+        .await;
+        match out_rx.await {
+            Ok(result) => result,
             Err(_) => Err(AskError::ReplyDropped),
         }
     }

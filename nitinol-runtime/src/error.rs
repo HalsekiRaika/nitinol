@@ -10,6 +10,8 @@ pub enum AskError<E: std::error::Error> {
     DeadLetter { destination: Pid },
     #[error("process dropped reply")]
     ReplyDropped,
+    #[error("ask timed out: no reply from pid {destination}")]
+    Timeout { destination: Pid },
     #[error(transparent)]
     Handler(E),
 }
