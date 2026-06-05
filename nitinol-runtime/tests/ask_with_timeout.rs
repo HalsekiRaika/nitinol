@@ -1,6 +1,5 @@
 mod common;
 
-use std::future::Future;
 use std::time::Duration;
 
 use nitinol_runtime::error::AskError;
@@ -21,15 +20,13 @@ struct SlowMessage {
 impl Receive<SlowMessage> for SlowProcess {
     type Response = u32;
     type Error = std::convert::Infallible;
-    fn recv(
+    async fn recv(
         &mut self,
         msg: SlowMessage,
         _ctx: &mut ProcessContext<Self>,
-    ) -> impl Future<Output = Result<u32, std::convert::Infallible>> + Send {
-        async move {
-            tokio::time::sleep(msg.duration).await;
-            Ok(msg.value)
-        }
+    ) -> Result<u32, std::convert::Infallible> {
+        tokio::time::sleep(msg.duration).await;
+        Ok(msg.value)
     }
 }
 
