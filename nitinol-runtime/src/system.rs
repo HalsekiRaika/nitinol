@@ -138,7 +138,7 @@ impl ProcessSystem {
     /// # use nitinol_runtime::ProcessSystem;
     /// # async fn bad() {
     /// let system = ProcessSystem::new().await;
-    /// // compile error: `spawn_with_driver` was removed — use `props.add_driver(driver)` instead
+    /// // compile error: `spawn_with_driver` was removed — use `props.with_driver(driver)` instead
     /// system.spawn_with_driver(todo!(), todo!()).await;
     /// # }
     /// ```

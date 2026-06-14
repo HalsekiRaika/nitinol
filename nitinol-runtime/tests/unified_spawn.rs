@@ -9,8 +9,8 @@
 //! |-------------------------------------------|--------------------------------------------|
 //! | `ps.spawn(props)`                         | `ps.spawn(props)`                          |
 //! | `ps.spawn_named(name, props)`             | `ps.spawn(props.with_name(name))`          |
-//! | `ps.spawn_with_driver(props, driver)`     | `ps.spawn(props.add_driver(driver))`       |
-//! | `ps.spawn_named_with_driver(...)`         | `ps.spawn(props.with_name(...).add_driver(...))` |
+//! | `ps.spawn_with_driver(props, driver)`     | `ps.spawn(props.with_driver(driver))`       |
+//! | `ps.spawn_named_with_driver(...)`         | `ps.spawn(props.with_name(...).with_driver(...))` |
 //! | `ps.spawn(nitinol_runtime::StreamProps::<T>::new(topic))`             | `ps.spawn(StreamProps::<T>::new(topic))`   |
 //!
 //! These tests pin down:
@@ -18,7 +18,7 @@
 //! - `ps.spawn(stream_props)` accepts a `StreamProps<T>` and returns
 //!   `ProcessProxy<Stream<T>>` — same `spawn` method, different argument type
 //!   (the spec's `Spawnable` unification).
-//! - A child spawned via `ctx.spawn_child(props.add_driver(...))` works —
+//! - A child spawned via `ctx.spawn_child(props.with_driver(...))` works —
 //!   `spawn_child_with_driver` is collapsed too.
 //! - Spawning a `StreamProps` whose topic is already registered surfaces a
 //!   `SpawnError` (the same uniqueness contract `spawn_stream` provided
@@ -161,10 +161,10 @@ async fn spawn_resolves_with_name_alias_in_registry() {
 }
 
 // ---------------------------------------------------------------------------
-// `ps.spawn(props.add_driver(driver))` — replaces spawn_with_driver
+// `ps.spawn(props.with_driver(driver))` — replaces spawn_with_driver
 // ---------------------------------------------------------------------------
 
-/// Given `Props::add_driver(ChannelDriver)`,
+/// Given `Props::with_driver(ChannelDriver)`,
 /// when spawned via the unified entry and three events are pushed onto the
 /// driver's channel,
 /// then the driver's `apply` runs three times — proving the unified entry
@@ -179,7 +179,7 @@ async fn spawn_with_added_driver_runs_custom_apply() {
 
     let _proxy = system
         .spawn(
-            tick_props(Arc::clone(&ticks), Arc::clone(&started)).add_driver(ChannelDriver { rx }),
+            tick_props(Arc::clone(&ticks), Arc::clone(&started)).with_driver(ChannelDriver { rx }),
         )
         .await;
     wait_for_flag(&started).await;
@@ -192,10 +192,10 @@ async fn spawn_with_added_driver_runs_custom_apply() {
 }
 
 // ---------------------------------------------------------------------------
-// `ps.spawn(props.with_name(...).add_driver(...))` — fully unified
+// `ps.spawn(props.with_name(...).with_driver(...))` — fully unified
 // ---------------------------------------------------------------------------
 
-/// Given `Props::with_name(...).add_driver(...)` (the spec's collapsing of
+/// Given `Props::with_name(...).with_driver(...)` (the spec's collapsing of
 /// `spawn_named_with_driver`),
 /// when spawned via the unified entry,
 /// then the process is both discoverable by name AND driven by the custom
@@ -212,7 +212,7 @@ async fn spawn_with_name_and_added_driver_runs_both_features() {
         .spawn(
             tick_props(Arc::clone(&ticks), Arc::clone(&started))
                 .with_name(name.clone())
-                .add_driver(ChannelDriver { rx }),
+                .with_driver(ChannelDriver { rx }),
         )
         .await;
     wait_for_flag(&started).await;
@@ -290,11 +290,11 @@ async fn spawn_with_stream_props_rejects_duplicate_topic() {
 }
 
 // ---------------------------------------------------------------------------
-// `ctx.spawn_child(props.add_driver(...))` — child path mirrors the system
+// `ctx.spawn_child(props.with_driver(...))` — child path mirrors the system
 // path (no `spawn_child_with_driver`).
 // ---------------------------------------------------------------------------
 
-/// Child process whose Driver bumps a counter through `add_driver`.
+/// Child process whose Driver bumps a counter through `with_driver`.
 struct ChildTick {
     ticks: Arc<AtomicU32>,
 }
@@ -321,7 +321,7 @@ impl Driver<ChildTick> for ChildTickDriver {
     }
 }
 
-/// Parent process that spawns one child via `ctx.spawn_child(props.add_driver(driver))`.
+/// Parent process that spawns one child via `ctx.spawn_child(props.with_driver(driver))`.
 struct Parent {
     ticks: Arc<AtomicU32>,
     started: Arc<AtomicBool>,
@@ -353,7 +353,7 @@ impl Receive<SpawnChild> for Parent {
         let child_props = Props::new(move || ChildTick {
             ticks: ticks.clone(),
         })
-        .add_driver(ChildTickDriver { rx });
+        .with_driver(ChildTickDriver { rx });
         let _child_proxy = ctx.spawn_child(child_props).await;
         *self.child_tx.lock().await = Some(tx);
         Ok(())
@@ -377,10 +377,10 @@ impl Receive<GetChildSender> for Parent {
     }
 }
 
-/// Given a parent process that calls `ctx.spawn_child(props.add_driver(driver))`,
+/// Given a parent process that calls `ctx.spawn_child(props.with_driver(driver))`,
 /// when a tick is sent on the captured driver channel,
 /// then the child's `apply` runs — proving the child path accepts
-/// `add_driver` the same way the system path does (so `spawn_child_with_driver`
+/// `with_driver` the same way the system path does (so `spawn_child_with_driver`
 /// is genuinely redundant after the unification).
 #[tokio::test]
 async fn ctx_spawn_child_with_added_driver_runs_apply() {

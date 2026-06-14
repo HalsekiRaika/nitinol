@@ -75,7 +75,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         subscriber: ProcessProxy<S>,
         cursor: SequenceCursor,
         name: Option<ProcessName>,
-    ) -> Props<DirectPollerProcess<T, S>>
+    ) -> Props<DirectPollerProcess<T, S>, IntervalDriver<DirectPollerProcess<T, S>>>
     where
         S: Process + Receive<T, Response = ()>,
     {
@@ -95,7 +95,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
             cursor: initial_cursor.clone(),
         })
         .with_supervision_strategy(restart_strategy)
-        .add_driver(driver);
+        .with_driver(driver);
         if let Some(n) = name {
             props = props.with_name(n);
         }

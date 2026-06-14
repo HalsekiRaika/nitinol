@@ -1,15 +1,15 @@
 mod combine;
-mod dyn_driver;
-mod dyn_set;
+mod default;
+mod fused;
 mod message;
 mod pipe;
 mod stash;
 
 pub use self::combine::Combine;
+pub use self::default::DefaultDriver;
 pub use self::pipe::{PipeDriver, PipeHandle, PipePanic, PipedTask};
 
-pub(crate) use self::dyn_driver::{boxed_dyn_driver, DynDriver};
-pub(crate) use self::dyn_set::DynDriverSet;
+pub(crate) use self::fused::FusedDriver;
 pub(crate) use self::message::MessageDriver;
 pub(crate) use self::stash::StashDriver;
 
@@ -39,7 +39,10 @@ use crate::process::{Process, ProcessContext};
 /// - `PipeDriver`    — backs `ctx.pipe_to_self`
 /// - `StashDriver`   — backs `ctx.stash` / `ctx.unstash_all`
 ///
-/// Additional drivers added via `Props::add_driver` are composed on top.
+/// The driver installed via [`Props::with_driver`](crate::process::Props::with_driver)
+/// occupies a single slot composed on top of the Core trio. For multi-driver
+/// composition, build a single combined driver with
+/// [`combine_drivers!`](crate::combine_drivers) and pass it to `with_driver`.
 pub trait Driver<P: Process>: Send + 'static {
     /// One unit of work delivered by `next` and consumed by `apply`.
     type Event: Send;

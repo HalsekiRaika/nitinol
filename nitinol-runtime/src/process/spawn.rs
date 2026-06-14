@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::ident::Pid;
 use crate::process::dead_letter::DeadLetterProxy;
+use crate::process::driver::Driver;
 use crate::process::lifecycle::{run, LifecycleConfig};
 use crate::process::props::{
     resolve_idle_timeout, resolve_mailbox, resolve_pipe, resolve_stash, MailboxCapacity,
@@ -103,7 +104,10 @@ impl SpawnEnv {
         &self.registry
     }
 
-    pub(crate) async fn spawn<P: Process>(&self, props: Props<P>) -> ProcessProxy<P> {
+    pub(crate) async fn spawn<P: Process, D: Driver<P>>(
+        &self,
+        props: Props<P, D>,
+    ) -> ProcessProxy<P> {
         let parts = props.into_parts();
         let timeout = resolve_idle_timeout(parts.idle_timeout, self.default_idle_timeout);
         let mailbox_capacity =
@@ -117,7 +121,7 @@ impl SpawnEnv {
             mailbox_capacity,
             pipe_capacity,
             stash_capacity,
-            custom_drivers: parts.custom_drivers,
+            driver: parts.driver,
             timeout,
             dead_letter: self.dead_letter.clone(),
             supervision: parts.supervision,

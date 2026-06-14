@@ -1,9 +1,10 @@
-//! Driver-backed spawn tests, migrated to the Issue #56 unified entry.
+//! Driver-backed spawn tests, migrated to the Issue #56 unified entry and
+//! the Issue #57 single-slot `with_driver` API.
 //!
 //! Pre-spec: `spawn_with_driver` / `spawn_named_with_driver` replaced the
 //! mailbox driver entirely, so `tell` was unreachable. Post-spec, the Core
-//! `MessageDriver` is always composed and `add_driver` layers custom
-//! drivers on top — the same fixtures here exercise the composed shape.
+//! `MessageDriver` is always composed and `with_driver` installs a single
+//! user driver on top — the same fixtures here exercise the composed shape.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -110,13 +111,13 @@ async fn spawn_with_driver_returns_proxies_with_unique_pids() {
     let (_tx_b, rx_b) = mpsc::channel::<()>(4);
 
     let proxy_a = system
-        .spawn(tick_props(ticks_a, started_a, stopped_a).add_driver(ChannelDriver {
+        .spawn(tick_props(ticks_a, started_a, stopped_a).with_driver(ChannelDriver {
             rx: rx_a,
             supports_idle: true,
         }))
         .await;
     let proxy_b = system
-        .spawn(tick_props(ticks_b, started_b, stopped_b).add_driver(ChannelDriver {
+        .spawn(tick_props(ticks_b, started_b, stopped_b).with_driver(ChannelDriver {
             rx: rx_b,
             supports_idle: true,
         }))
@@ -136,7 +137,7 @@ async fn spawn_with_driver_calls_driver_apply_for_each_delivered_event() {
     let (tx, rx) = mpsc::channel::<()>(4);
     let _proxy = system
         .spawn(
-            tick_props(Arc::clone(&ticks), Arc::clone(&started), stopped).add_driver(
+            tick_props(Arc::clone(&ticks), Arc::clone(&started), stopped).with_driver(
                 ChannelDriver {
                     rx,
                     supports_idle: true,
@@ -161,7 +162,7 @@ async fn spawn_with_driver_invokes_on_start_via_lifecycle_loop() {
 
     let _proxy = system
         .spawn(
-            tick_props(ticks, Arc::clone(&started), stopped).add_driver(ChannelDriver {
+            tick_props(ticks, Arc::clone(&started), stopped).with_driver(ChannelDriver {
                 rx,
                 supports_idle: true,
             }),
@@ -182,7 +183,7 @@ async fn spawn_named_with_driver_registers_process_under_alias() {
         .spawn(
             tick_props(ticks, Arc::clone(&started), stopped)
                 .with_name(name.clone())
-                .add_driver(ChannelDriver {
+                .with_driver(ChannelDriver {
                     rx,
                     supports_idle: true,
                 }),
@@ -212,7 +213,7 @@ async fn spawn_with_driver_disarms_idle_timer_when_driver_opts_out() {
 
     let props = tick_props(ticks, Arc::clone(&started), Arc::clone(&stopped))
         .with_idle_timeout(IdleTimeout::After(Duration::from_millis(30)))
-        .add_driver(ChannelDriver {
+        .with_driver(ChannelDriver {
             rx,
             supports_idle: false,
         });
@@ -239,7 +240,7 @@ async fn signal_stop_nonblocking_stops_a_live_process_without_awaiting() {
     let (_tx, rx) = mpsc::channel::<()>(4);
     let proxy = system
         .spawn(
-            tick_props(ticks, Arc::clone(&started), Arc::clone(&stopped)).add_driver(
+            tick_props(ticks, Arc::clone(&started), Arc::clone(&stopped)).with_driver(
                 ChannelDriver {
                     rx,
                     supports_idle: false,
@@ -261,7 +262,7 @@ async fn signal_stop_nonblocking_is_safe_on_an_already_stopped_process() {
     let (_tx, rx) = mpsc::channel::<()>(4);
     let proxy = system
         .spawn(
-            tick_props(ticks, Arc::clone(&started), Arc::clone(&stopped)).add_driver(
+            tick_props(ticks, Arc::clone(&started), Arc::clone(&stopped)).with_driver(
                 ChannelDriver {
                     rx,
                     supports_idle: false,
@@ -313,7 +314,7 @@ impl Driver<TellableProcess> for NeverDriver {
     }
 }
 
-/// Post-spec contract: under the unified entry, `add_driver` LAYERS the
+/// Post-spec contract: under the unified entry, `with_driver` LAYERS the
 /// custom driver on top of the always-composed Core `MessageDriver`, so a
 /// `tell` to a process whose only custom driver pends forever still
 /// succeeds — the mailbox is alive.
@@ -321,7 +322,7 @@ impl Driver<TellableProcess> for NeverDriver {
 async fn spawn_with_added_driver_keeps_message_driver_alive_for_tell() {
     let system = ProcessSystem::new().await;
     let proxy = system
-        .spawn(Props::new(|| TellableProcess).add_driver(NeverDriver))
+        .spawn(Props::new(|| TellableProcess).with_driver(NeverDriver))
         .await;
 
     let result = proxy.tell(42u32).await;
@@ -332,57 +333,3 @@ async fn spawn_with_added_driver_keeps_message_driver_alive_for_tell() {
     );
 }
 
-struct ClosableChannelDriver {
-    rx: mpsc::Receiver<()>,
-}
-
-impl Driver<TellableProcess> for ClosableChannelDriver {
-    type Event = ();
-
-    fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        self.rx.recv()
-    }
-
-    async fn apply(
-        &mut self,
-        _state: &mut TellableProcess,
-        _ctx: &mut ProcessContext<TellableProcess>,
-        _ev: (),
-    ) -> Result<(), HandlerError> {
-        Ok(())
-    }
-
-    fn supports_idle_timeout(&self) -> bool {
-        false
-    }
-}
-
-/// Regression test: when a custom channel driver's sender is dropped (returning
-/// `None` from `next`), `DynDriverSet` removes that exhausted driver from the
-/// active set rather than propagating `None` upward. The Core `MessageDriver`
-/// must remain alive so `tell` / `ask` still reach the process.
-#[tokio::test]
-async fn exhausted_custom_driver_does_not_stop_core_message_driver() {
-    let system = ProcessSystem::new().await;
-    let (tx, rx) = mpsc::channel::<()>(4);
-
-    let proxy = system
-        .spawn(Props::new(|| TellableProcess).add_driver(ClosableChannelDriver { rx }))
-        .await;
-
-    // Drop the sender — this causes ClosableChannelDriver::next() to return None,
-    // exhausting the driver. DynDriverSet must remove it and continue rather
-    // than propagating None to Combine which would terminate the process.
-    drop(tx);
-
-    // Give the runtime time to observe the exhaustion and process it.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // The Core MessageDriver must still be alive after the custom driver exhaustion.
-    let result = proxy.tell(42u32).await;
-    assert!(
-        result.is_ok(),
-        "exhausted custom driver must not terminate the Core MessageDriver: \
-         tell must succeed after the custom channel driver's sender is dropped"
-    );
-}

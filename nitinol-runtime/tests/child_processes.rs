@@ -1076,7 +1076,7 @@ async fn spawn_child_with_driver_propagates_parent_pid_and_stops_with_parent() {
                     parent_observed: obs.clone(),
                 })
                 .with_idle_timeout(IdleTimeout::Persistent)
-                .add_driver(NeverDriver);
+                .with_driver(NeverDriver);
                 let proxy = ctx.spawn_child(props).await;
                 *child_pid.lock().await = Some(proxy.pid());
             }

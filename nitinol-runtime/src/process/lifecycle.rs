@@ -8,9 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
-use crate::process::driver::{
-    Combine, Driver, DynDriverSet, MessageDriver, PipeDriver, StashDriver,
-};
+use crate::process::driver::{Combine, Driver, FusedDriver, MessageDriver, PipeDriver, StashDriver};
 use crate::process::pid_set::PidSet;
 use crate::process::props::{MailboxCapacity, PipeCapacity, StashCapacity, SupervisionStrategy};
 use crate::process::registry::ProcessRegistry;
@@ -24,14 +22,14 @@ use crate::process::{Process, ProcessContext, ProcessProxy};
 ///
 /// Collapses the pre-spec 11-arg `lifecycle_loop` signature (`P8`) into a
 /// single named struct so adding a new resource axis touches one place.
-pub(crate) struct LifecycleConfig<P: Process> {
+pub(crate) struct LifecycleConfig<P: Process, D: Driver<P>> {
     pub(crate) process: P,
     pub(crate) process_name: Option<ProcessName>,
     pub(crate) registry: ProcessRegistry,
     pub(crate) mailbox_capacity: NonZeroUsize,
     pub(crate) pipe_capacity: NonZeroUsize,
     pub(crate) stash_capacity: NonZeroUsize,
-    pub(crate) custom_drivers: Vec<Box<dyn crate::process::driver::DynDriver<P>>>,
+    pub(crate) driver: D,
     pub(crate) timeout: Option<Duration>,
     pub(crate) dead_letter: Option<DeadLetterProxy>,
     pub(crate) supervision: SupervisionConfig<P>,
@@ -42,7 +40,7 @@ pub(crate) struct LifecycleConfig<P: Process> {
     pub(crate) default_pipe_capacity: PipeCapacity,
 }
 
-pub(crate) async fn run<P: Process>(cfg: LifecycleConfig<P>) -> ProcessProxy<P> {
+pub(crate) async fn run<P: Process, D: Driver<P>>(cfg: LifecycleConfig<P, D>) -> ProcessProxy<P> {
     let LifecycleConfig {
         process,
         process_name,
@@ -50,7 +48,7 @@ pub(crate) async fn run<P: Process>(cfg: LifecycleConfig<P>) -> ProcessProxy<P> 
         mailbox_capacity,
         pipe_capacity,
         stash_capacity,
-        custom_drivers,
+        driver: user_driver,
         timeout,
         dead_letter,
         supervision,
@@ -80,9 +78,15 @@ pub(crate) async fn run<P: Process>(cfg: LifecycleConfig<P>) -> ProcessProxy<P> 
         .await;
 
     // Compose the Core trio (Message + Pipe + Stash) into a single
-    // Combine tree, then layer the user's custom drivers on top via
-    // `DynDriverSet`. This is the "always operational" guarantee for
+    // Combine tree, then layer the user-supplied driver on top via another
+    // `Combine`. This is the "always operational" guarantee for
     // `ctx.pipe_to_self` / `ctx.stash` / `ctx.unstash_all`.
+    //
+    // The user driver is wrapped in `FusedDriver` so that if it exhausts
+    // (`next()` returns `None`), the exhaustion is absorbed rather than
+    // propagated to the lifecycle loop. This preserves the pre-#57 contract:
+    // a user driver running dry is non-fatal; the Core trio keeps the process
+    // alive until an explicit Stop/Poison signal arrives.
     let core = Combine::new(
         MessageDriver::new(user_rx),
         Combine::new(
@@ -90,7 +94,7 @@ pub(crate) async fn run<P: Process>(cfg: LifecycleConfig<P>) -> ProcessProxy<P> 
             StashDriver::<P>::new(stash_capacity),
         ),
     );
-    let driver_tree = Combine::new(core, DynDriverSet::new(custom_drivers));
+    let driver_tree = Combine::new(core, FusedDriver::new(user_driver));
 
     let fut = lifecycle_loop(LifecycleLoopArgs {
         process,

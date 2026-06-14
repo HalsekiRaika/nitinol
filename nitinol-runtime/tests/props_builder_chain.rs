@@ -13,17 +13,18 @@
 //!     .with_supervision_strategy(SupervisionStrategy::restart(3, d)?)
 //!     .with_idle_timeout(IdleTimeout::After(d))
 //!     .with_name(ProcessName::new("my-process"))
-//!     .add_driver(IntervalDriver::new(d));
+//!     .with_driver(IntervalDriver::new(d));
 //! ```
 //!
 //! These tests pin down:
-//! - Each `with_*` and `add_driver` takes `self` by value and returns `Self`
-//!   (type-level: the chain assigns into a `Props<P>` binding).
+//! - Each `with_*` setter takes `self` by value; the non-driver setters
+//!   return `Self`, while `with_driver` is the single type-transitioning
+//!   setter that returns `Props<P, D2>`.
 //! - The chain compiles for all 7 setters in one expression.
 //! - Round-trip through observable behavior: `with_name` makes the process
 //!   discoverable by the supplied name; `with_idle_timeout` triggers the
 //!   configured timeout; `with_supervision_strategy` enforces the policy.
-//! - `add_driver<D: Driver<P>>` accepts any `Driver<P>` implementor.
+//! - `with_driver<D: Driver<P>>` accepts any `Driver<P>` implementor.
 //!
 //! Round-trip checks for capacity fields are in `system_defaults_inherit.rs`
 //! (because the observable effect is buffer bounded-ness, which needs a
@@ -197,7 +198,7 @@ async fn with_idle_timeout_after_triggers_stop_within_window() {
 }
 
 // ---------------------------------------------------------------------------
-// add_driver: a custom Driver<P> can be attached via the builder chain. The
+// with_driver: a custom Driver<P> can be attached via the builder chain. The
 // spawn path composes it with the Core drivers (Message + Pipe + Stash).
 // ---------------------------------------------------------------------------
 
@@ -249,14 +250,14 @@ async fn wait_for_count(counter: &AtomicU32, expected: u32) {
     }
 }
 
-/// Given a `Props::add_driver(TickDriver)` value,
+/// Given a `Props::with_driver(TickDriver)` value,
 /// when the process is spawned and the test sends 3 events on the driver's
 /// channel,
 /// then the driver's `apply` runs 3 times — proving the custom driver is
 /// actually composed into the lifecycle loop alongside the Core drivers,
 /// not silently ignored.
 #[tokio::test]
-async fn add_driver_attaches_custom_driver_and_runs_apply() {
+async fn with_driver_attaches_custom_driver_and_runs_apply() {
     let system = ProcessSystem::new().await;
     let ticks = Arc::new(AtomicU32::new(0));
     let started = Arc::new(AtomicBool::new(false));
@@ -270,7 +271,7 @@ async fn add_driver_attaches_custom_driver_and_runs_apply() {
             started: started.clone(),
         }
     })
-    .add_driver(TickDriver { rx });
+    .with_driver(TickDriver { rx });
 
     let _proxy = system.spawn(props).await;
 
@@ -284,8 +285,8 @@ async fn add_driver_attaches_custom_driver_and_runs_apply() {
 }
 
 // ---------------------------------------------------------------------------
-// add_driver composes ON TOP OF the Core drivers — the user mailbox (tell/ask)
-// still works on a process whose Props had `add_driver` applied.
+// with_driver composes ON TOP OF the Core drivers — the user mailbox (tell/ask)
+// still works on a process whose Props had `with_driver` applied.
 // ---------------------------------------------------------------------------
 
 /// `tell` arrives at a `Receive<...>` handler defined on the user process.
@@ -312,7 +313,7 @@ impl nitinol_runtime::process::Receive<Ping> for MessageCounter {
 
 /// A custom driver whose `next` never produces — it should not steal mailbox
 /// messages from the Core MessageDriver. Used to prove the two driver classes
-/// coexist after `add_driver`.
+/// coexist after `with_driver`.
 struct NeverDriver;
 
 impl Driver<MessageCounter> for NeverDriver {
@@ -333,13 +334,13 @@ impl Driver<MessageCounter> for NeverDriver {
     }
 }
 
-/// Given a `Props::add_driver(NeverDriver)` value,
+/// Given a `Props::with_driver(NeverDriver)` value,
 /// when the process is spawned and a `Ping` is told,
 /// then the user's `Receive<Ping>` handler runs — proving the Core
 /// `MessageDriver` is still composed alongside the custom driver and that
-/// `add_driver` does not REPLACE the message path.
+/// `with_driver` does not REPLACE the message path.
 #[tokio::test]
-async fn add_driver_composes_with_core_message_driver() {
+async fn with_driver_composes_with_core_message_driver() {
     let system = ProcessSystem::new().await;
     let received = Arc::new(AtomicU32::new(0));
     let props = Props::new({
@@ -348,7 +349,7 @@ async fn add_driver_composes_with_core_message_driver() {
             received: received.clone(),
         }
     })
-    .add_driver(NeverDriver);
+    .with_driver(NeverDriver);
 
     let proxy = system.spawn(props).await;
     proxy

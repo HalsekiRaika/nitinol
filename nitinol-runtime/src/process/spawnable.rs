@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::ident::Pid;
+use crate::process::driver::Driver;
 use crate::process::spawn::SpawnEnv;
 use crate::process::{Process, ProcessProxy};
 
@@ -42,13 +43,13 @@ pub(crate) trait SpawnDispatch: Spawnable {
     fn child_pid(output: &Self::Output) -> Option<Pid>;
 }
 
-impl<P: Process> sealed::Sealed for crate::process::Props<P> {}
+impl<P: Process, D: Driver<P>> sealed::Sealed for crate::process::Props<P, D> {}
 
-impl<P: Process> Spawnable for crate::process::Props<P> {
+impl<P: Process, D: Driver<P>> Spawnable for crate::process::Props<P, D> {
     type Output = ProcessProxy<P>;
 }
 
-impl<P: Process> SpawnDispatch for crate::process::Props<P> {
+impl<P: Process, D: Driver<P>> SpawnDispatch for crate::process::Props<P, D> {
     fn spawn_with<'a>(
         self,
         env: &'a SpawnEnv,

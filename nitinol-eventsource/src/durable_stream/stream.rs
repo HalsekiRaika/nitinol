@@ -151,7 +151,7 @@ where
         })
         .with_supervision_strategy(restart_strategy)
         .with_name(poller_name)
-        .add_driver(driver);
+        .with_driver(driver);
         let shared_poller = system.spawn(props).await;
 
         Ok(DurableStreamProxy::new(

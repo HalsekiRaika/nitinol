@@ -571,7 +571,7 @@ impl Driver<ProbeProcess> for ProbeDriver {
     }
 }
 
-/// Given a process spawned with `Props::add_driver(ProbeDriver)`,
+/// Given a process spawned with `Props::with_driver(ProbeDriver)`,
 /// when the driver's `apply` calls `ctx.pipe_to_self(...)`,
 /// then the always-composed Core `PipeDriver` accepts the future and the
 /// call returns normally — no panic, no silent drop on the happy path.
@@ -583,7 +583,7 @@ async fn pipe_to_self_does_not_panic_under_unified_spawn_entry() {
     let ok_taken: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     let (tx, rx) = mpsc::channel::<()>(4);
 
-    let props = Props::new(|| ProbeProcess).add_driver(ProbeDriver {
+    let props = Props::new(|| ProbeProcess).with_driver(ProbeDriver {
         rx,
         captured: captured.clone(),
         ok_path_taken: ok_taken.clone(),
