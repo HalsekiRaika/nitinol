@@ -1,5 +1,3 @@
-use std::future::Future;
-
 use crate::error::HandlerError;
 use crate::process::driver::{Driver, DynDriver, PipeHandle};
 use crate::process::{Process, ProcessContext};
@@ -29,34 +27,32 @@ impl<P: Process> DynDriverSet<P> {
 impl<P: Process> Driver<P> for DynDriverSet<P> {
     type Event = usize;
 
-    fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        async move {
-            loop {
-                if self.drivers.is_empty() {
-                    // Hang forever rather than reporting None — the Core trio
-                    // owns process termination.
-                    std::future::pending::<()>().await;
-                    unreachable!()
-                }
-                // Build a fresh BoxFuture per child for this `next()` call and
-                // race them via `select_all`. The futures stay alive across
-                // internal polls inside `select_all`, so sources like
-                // `tokio::time::sleep` are NOT restarted each waker firing.
-                let futures: Vec<_> = self.drivers.iter_mut().map(|d| d.next_dyn()).collect();
-                let (result, idx, remaining) = futures_util::future::select_all(futures).await;
-                // Drop `remaining` before any mutation of `self.drivers` so
-                // the borrow checker sees that the mutable borrows from
-                // `iter_mut()` are released before `swap_remove`.
-                drop(remaining);
-                match result {
-                    Some(()) => return Some(idx),
-                    None => {
-                        // Driver at `idx` is exhausted — remove it and retry
-                        // with the remaining drivers so the Core trio stays
-                        // alive. swap_remove is O(1); ordering does not matter
-                        // because `futures` is rebuilt from scratch each iteration.
-                        self.drivers.swap_remove(idx);
-                    }
+    async fn next(&mut self) -> Option<Self::Event> {
+        loop {
+            if self.drivers.is_empty() {
+                // Hang forever rather than reporting None — the Core trio
+                // owns process termination.
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+            // Build a fresh BoxFuture per child for this `next()` call and
+            // race them via `select_all`. The futures stay alive across
+            // internal polls inside `select_all`, so sources like
+            // `tokio::time::sleep` are NOT restarted each waker firing.
+            let futures: Vec<_> = self.drivers.iter_mut().map(|d| d.next_dyn()).collect();
+            let (result, idx, remaining) = futures_util::future::select_all(futures).await;
+            // Drop `remaining` before any mutation of `self.drivers` so
+            // the borrow checker sees that the mutable borrows from
+            // `iter_mut()` are released before `swap_remove`.
+            drop(remaining);
+            match result {
+                Some(()) => return Some(idx),
+                None => {
+                    // Driver at `idx` is exhausted — remove it and retry
+                    // with the remaining drivers so the Core trio stays
+                    // alive. swap_remove is O(1); ordering does not matter
+                    // because `futures` is rebuilt from scratch each iteration.
+                    self.drivers.swap_remove(idx);
                 }
             }
         }

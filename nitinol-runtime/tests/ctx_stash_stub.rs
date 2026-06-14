@@ -20,7 +20,6 @@
 //! - Whether `stash`ed messages are re-delivered.
 //! - Stash capacity-overflow behavior.
 
-use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -162,10 +161,4 @@ async fn ctx_unstash_all_is_no_op_stub_and_actor_survives() {
 async fn _compile_assert_stash_api_shape(ctx: &mut ProcessContext<StashingProcess>) {
     ctx.stash(StashOne).await;
     ctx.unstash_all().await;
-}
-
-// Suppress unused-import warnings if Future ever drifts out of use.
-#[allow(dead_code)]
-fn _future_in_scope() -> impl Future<Output = ()> {
-    async {}
 }

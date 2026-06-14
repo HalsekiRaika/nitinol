@@ -18,7 +18,7 @@ pub(crate) trait DynDriver<P: Process>: Send + 'static {
     /// Drive the underlying source and stash the resulting event internally.
     /// Returns `Some(())` when an event is buffered (caller should call
     /// `apply_dyn`), `None` when the source is exhausted.
-    fn next_dyn<'a>(&'a mut self) -> BoxFuture<'a, Option<()>>;
+    fn next_dyn(&'_ mut self) -> BoxFuture<'_, Option<()>>;
 
     /// Run the buffered event against the actor state.
     ///
@@ -41,7 +41,7 @@ struct DynAdapter<P: Process, D: Driver<P>> {
 }
 
 impl<P: Process, D: Driver<P>> DynDriver<P> for DynAdapter<P, D> {
-    fn next_dyn<'a>(&'a mut self) -> BoxFuture<'a, Option<()>> {
+    fn next_dyn(&'_ mut self) -> BoxFuture<'_, Option<()>> {
         Box::pin(async move {
             match self.inner.next().await {
                 Some(ev) => {

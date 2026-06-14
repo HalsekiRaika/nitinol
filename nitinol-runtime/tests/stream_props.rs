@@ -24,7 +24,6 @@
 //! - Type-level: `StreamProps<T>` does NOT expose `with_supervision_strategy`,
 //!   so user code cannot override `Resume` via the StreamProps surface.
 
-use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -223,13 +222,4 @@ fn _stream_props_setters_compile() {
 #[allow(dead_code)]
 fn _stream_props_new_returns_stream_props_of_t() {
     let _sp: StreamProps<u32> = StreamProps::<u32>::new(ProcessName::new("t"));
-}
-
-// ---------------------------------------------------------------------------
-// Helper to silence unused warning if no other test in this file uses Future.
-// ---------------------------------------------------------------------------
-
-#[allow(dead_code)]
-fn _future_trait_used_somewhere() -> impl Future<Output = ()> {
-    async {}
 }
