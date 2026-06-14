@@ -7,9 +7,9 @@ use nitinol_persistence::LoadedEvent;
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ident::{Pid, ProcessName};
 use nitinol_runtime::process::{
-    Process, ProcessContext, ProcessProxy, Props, Receive, SupervisionStrategy,
+    Process, ProcessContext, ProcessProxy, Receive, SupervisionStrategy,
 };
-use nitinol_runtime::{ProcessSystem, Stream};
+use nitinol_runtime::{ProcessSystem, Props, Stream};
 
 use crate::durable_stream::cursor::SequenceCursor;
 use crate::durable_stream::poller::{
@@ -75,7 +75,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         subscriber: ProcessProxy<S>,
         cursor: SequenceCursor,
         name: Option<ProcessName>,
-    ) -> Props<DirectPollerProcess<T, S>, IntervalDriver<DirectPollerProcess<T, S>>>
+    ) -> Props![DirectPollerProcess<T, S>; IntervalDriver]
     where
         S: Process + Receive<T, Response = ()>,
     {

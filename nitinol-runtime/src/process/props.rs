@@ -138,3 +138,52 @@ impl<P: Process, D: Driver<P>> Props<P, D> {
         }
     }
 }
+
+/// Type-position shortcut for `Props<P, ...>` with one or more drivers.
+///
+/// `Props![P; D1, D2, ..., Dn]` expands to
+/// `Props<P, Combine<D1<P>, Combine<D2<P>, ..., D{n-1}<P>, Dn<P>>...>>`
+/// — the same right-fold shape [`combine_drivers!`](crate::combine_drivers)
+/// produces at the value level. With a single driver, `Props![P; D]` is
+/// `Props<P, D<P>>` (no `Combine` wrapping).
+///
+/// - `P` may be a generic type (e.g. `MyProc<T, U>`).
+/// - `D1..Dn` are driver type-constructors that take `P` as their only type
+///   argument; they must be in scope as identifiers.
+/// - At least one driver is required. `Props![P]` and `Props![P;]` are
+///   compile errors — write the bare `Props<P>` instead.
+/// - Type-position only. The macro does not construct values; build the
+///   driver value with [`combine_drivers!`](crate::combine_drivers) and pass
+///   it to [`Props::with_driver`].
+///
+/// ```compile_fail
+/// # use nitinol_runtime::Props;
+/// # use nitinol_runtime::process::Process;
+/// # struct MyProc;
+/// # impl Process for MyProc {}
+/// // No drivers — must be a compile error.
+/// type Bad = Props![MyProc];
+/// ```
+///
+/// ```compile_fail
+/// # use nitinol_runtime::Props;
+/// # use nitinol_runtime::process::Process;
+/// # struct MyProc;
+/// # impl Process for MyProc {}
+/// // Empty driver list — must be a compile error.
+/// type Bad = Props![MyProc;];
+/// ```
+#[macro_export]
+macro_rules! Props {
+    // Internal: type-level right-fold of `Combine` for 1+ drivers.
+    (@drivers $p:ty; $single:ident) => {
+        $single<$p>
+    };
+    (@drivers $p:ty; $head:ident, $($rest:ident),+) => {
+        $crate::process::Combine<$head<$p>, $crate::Props!(@drivers $p; $($rest),+)>
+    };
+    // Public: 1+ drivers required.
+    ($p:ty; $($drivers:ident),+ $(,)?) => {
+        $crate::process::Props<$p, $crate::Props!(@drivers $p; $($drivers),+)>
+    };
+}
