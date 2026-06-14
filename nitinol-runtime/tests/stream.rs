@@ -129,7 +129,7 @@ async fn spawn_stream_returns_valid_proxy() {
     let topic = ProcessName::new("ss-valid");
 
     // When: a Boxed stream is spawned for the topic
-    let result = system.spawn_stream::<BoxedMessage>(topic).await;
+    let result = system.spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic)).await;
 
     // Then: a proxy is returned successfully
     assert!(result.is_ok());
@@ -141,12 +141,12 @@ async fn spawn_stream_duplicate_topic_returns_error() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("ss-dup");
     system
-        .spawn_stream::<BoxedMessage>(topic.clone())
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic.clone()))
         .await
         .expect("first spawn_stream should succeed");
 
     // When: a second stream is spawned with the same topic
-    let result = system.spawn_stream::<BoxedMessage>(topic).await;
+    let result = system.spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic)).await;
 
     // Then: an error is returned (uniqueness constraint violated)
     assert!(result.is_err());
@@ -160,8 +160,8 @@ async fn spawn_stream_different_topics_both_succeed() {
     let topic_b = ProcessName::new("ss-diff-b");
 
     // When: two streams are spawned with different topics
-    let result_a = system.spawn_stream::<BoxedMessage>(topic_a).await;
-    let result_b = system.spawn_stream::<BoxedMessage>(topic_b).await;
+    let result_a = system.spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic_a)).await;
+    let result_b = system.spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic_b)).await;
 
     // Then: both succeed
     assert!(result_a.is_ok());
@@ -174,7 +174,7 @@ async fn publish_with_no_subscribers_succeeds() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-no-sub");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -191,7 +191,7 @@ async fn publish_delivers_message_to_subscriber() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-deliver");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -219,7 +219,7 @@ async fn publish_delivers_to_all_subscribers() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-multi");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -252,7 +252,7 @@ async fn publish_multiple_messages_all_delivered_in_order() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("pub-multi-msg");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -288,7 +288,7 @@ async fn stream_lookup_by_name_finds_stream() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-stream");
     let _stream = system
-        .spawn_stream::<BoxedMessage>(topic.clone())
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic.clone()))
         .await
         .expect("spawn_stream should succeed");
 
@@ -318,7 +318,7 @@ async fn stream_any_proxy_downcasts_to_stream_proxy() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-cast");
     let _stream = system
-        .spawn_stream::<BoxedMessage>(topic.clone())
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic.clone()))
         .await
         .expect("spawn_stream should succeed");
 
@@ -340,7 +340,7 @@ async fn stream_downcast_proxy_can_publish() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-pub");
     let _stream = system
-        .spawn_stream::<BoxedMessage>(topic.clone())
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic.clone()))
         .await
         .expect("spawn_stream should succeed");
 
@@ -382,7 +382,7 @@ async fn public_api_does_not_require_subscriber_process_type() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("api-surface");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -443,7 +443,7 @@ async fn subscriber_recv_uses_all_parameters() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("param-check");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -477,7 +477,7 @@ async fn subscriber_trait_and_props_flow_receives_message() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("sub-trait-basic");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -511,7 +511,7 @@ async fn subscriber_trait_receives_multiple_publishes() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("sub-trait-multi");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -553,7 +553,7 @@ async fn mixed_subscriber_types_all_receive_published_message() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("sub-mixed");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -661,12 +661,12 @@ fn faulty_receiving_props(
     fail_next: Arc<AtomicBool>,
     strategy: SupervisionStrategy,
 ) -> Props<FaultyReceivingProcess> {
-    let mut props = Props::new(move || FaultyReceivingProcess {
+    let props = Props::new(move || FaultyReceivingProcess {
         count: count.clone(),
         start_count: start_count.clone(),
         fail_next: fail_next.clone(),
     });
-    props.with_supervision_strategy(strategy);
+    let props = props.with_supervision_strategy(strategy);
     props
 }
 
@@ -691,7 +691,7 @@ async fn terminated_subscriber_is_auto_removed_from_stream() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-term-1");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -738,7 +738,7 @@ async fn only_terminated_subscriber_is_removed_remaining_stays_active() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-term-2");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -806,7 +806,7 @@ async fn restarted_subscriber_continues_receiving_messages_after_failure() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-restart");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -817,10 +817,7 @@ async fn restarted_subscriber_continues_receiving_messages_after_failure() {
         count.clone(),
         start_count.clone(),
         fail_next.clone(),
-        SupervisionStrategy::Restart {
-            max_retries: 5,
-            within: Duration::from_secs(10),
-        },
+        SupervisionStrategy::restart(5, Duration::from_secs(10)).expect("valid restart config"),
     );
     let proxy = system.spawn(props).await;
     stream
@@ -856,7 +853,7 @@ async fn unsubscribed_subscriber_no_longer_receives_messages() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-unsub-1");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -900,7 +897,7 @@ async fn only_unsubscribed_subscriber_stops_receiving_other_stays_active() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-unsub-2");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -962,7 +959,7 @@ async fn subscriber_permanently_stopped_by_rate_limit_is_auto_removed_from_strea
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lifecycle-ratelimit");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -973,10 +970,7 @@ async fn subscriber_permanently_stopped_by_rate_limit_is_auto_removed_from_strea
         count.clone(),
         start_count.clone(),
         fail_next.clone(),
-        SupervisionStrategy::Restart {
-            max_retries: 1,
-            within: Duration::from_secs(10),
-        },
+        SupervisionStrategy::restart(1, Duration::from_secs(10)).expect("valid restart config"),
     );
     let proxy = system.spawn(props).await;
     stream
@@ -1164,7 +1158,7 @@ async fn publish_to_dead_subscriber_routes_to_dead_letter_stream() {
     // And: a stream with one subscriber whose channel is killed via panic
     let topic = ProcessName::new("dl-pub-fail-count");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -1213,7 +1207,7 @@ async fn dead_letter_from_failed_publish_contains_subscriber_pid() {
     // And: a stream with a subscriber whose channel is killed (PID recorded)
     let topic = ProcessName::new("dl-pub-fail-dest");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -1266,7 +1260,7 @@ async fn dead_letter_from_failed_publish_contains_stream_pid_as_sender() {
     // And: a stream with a subscriber whose channel is killed (stream PID recorded)
     let topic = ProcessName::new("dl-pub-fail-sender");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
     let expected_stream_pid = stream.pid();
@@ -1317,7 +1311,7 @@ async fn publish_to_dead_subscriber_still_delivers_to_live_subscribers() {
 
     let topic = ProcessName::new("dl-pub-fail-mixed");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -1379,7 +1373,7 @@ async fn failed_publish_generates_exactly_one_dead_letter() {
     // And: a stream with one dead subscriber
     let topic = ProcessName::new("dl-pub-fail-once");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 

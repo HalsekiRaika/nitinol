@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -7,9 +8,11 @@ use tokio::sync::mpsc;
 
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
-use crate::process::driver::{Combine, Driver, MessageDriver, PipeDriver};
+use crate::process::driver::{
+    Combine, Driver, DynDriverSet, MessageDriver, PipeDriver, StashDriver,
+};
 use crate::process::pid_set::PidSet;
-use crate::process::props::SupervisionStrategy;
+use crate::process::props::{MailboxCapacity, PipeCapacity, StashCapacity, SupervisionStrategy};
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
 use crate::process::supervision::{RestartTracker, SupervisionConfig};
@@ -17,58 +20,48 @@ use crate::process::task::UserTask;
 use crate::process::watch::{Terminated, TerminatedReason};
 use crate::process::{Process, ProcessContext, ProcessProxy};
 
-/// Lifecycle-initialization parameters bundled as a single contract.
+/// Resolved parameters every spawn needs to wire into the lifecycle loop.
 ///
-/// Groups the two fields that are constant across all spawns within one
-/// call site (`parent` and `default_idle_timeout`) so they travel together
-/// rather than as separate positional arguments.
-pub(crate) struct LifecycleInit {
+/// Collapses the pre-spec 11-arg `lifecycle_loop` signature (`P8`) into a
+/// single named struct so adding a new resource axis touches one place.
+pub(crate) struct LifecycleConfig<P: Process> {
+    pub(crate) process: P,
+    pub(crate) process_name: Option<ProcessName>,
+    pub(crate) registry: ProcessRegistry,
+    pub(crate) mailbox_capacity: NonZeroUsize,
+    pub(crate) pipe_capacity: NonZeroUsize,
+    pub(crate) stash_capacity: NonZeroUsize,
+    pub(crate) custom_drivers: Vec<Box<dyn crate::process::driver::DynDriver<P>>>,
+    pub(crate) timeout: Option<Duration>,
+    pub(crate) dead_letter: Option<DeadLetterProxy>,
+    pub(crate) supervision: SupervisionConfig<P>,
     pub(crate) parent: Option<Pid>,
     pub(crate) default_idle_timeout: Option<Duration>,
+    pub(crate) default_mailbox_capacity: MailboxCapacity,
+    pub(crate) default_stash_capacity: StashCapacity,
+    pub(crate) default_pipe_capacity: PipeCapacity,
 }
 
-pub(crate) async fn run<P: Process>(
-    process: P,
-    process_name: Option<ProcessName>,
-    registry: ProcessRegistry,
-    timeout: Option<Duration>,
-    dead_letter: Option<DeadLetterProxy>,
-    supervision: SupervisionConfig<P>,
-    init: LifecycleInit,
-) -> ProcessProxy<P> {
-    let (user_tx, user_rx) = mpsc::channel::<UserTask<P>>(32);
-    // `spawn` / `spawn_named` auto-compose the PipeDriver so that
-    // `ctx.pipe_to_self` is wired without the user having to remember to
-    // do it themselves. `spawn_with_driver` stays explicit (per plan): if
-    // a caller wants pipe support there, they must include `PipeDriver` via
-    // `combine_drivers!`.
-    let driver = Combine::new(MessageDriver::new(user_rx), PipeDriver::<P>::new());
-    run_with_driver(
+pub(crate) async fn run<P: Process>(cfg: LifecycleConfig<P>) -> ProcessProxy<P> {
+    let LifecycleConfig {
         process,
         process_name,
         registry,
-        user_tx,
-        driver,
+        mailbox_capacity,
+        pipe_capacity,
+        stash_capacity,
+        custom_drivers,
         timeout,
         dead_letter,
         supervision,
-        init,
-    )
-    .await
-}
+        parent,
+        default_idle_timeout,
+        default_mailbox_capacity,
+        default_stash_capacity,
+        default_pipe_capacity,
+    } = cfg;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_with_driver<P: Process, D: Driver<P>>(
-    process: P,
-    process_name: Option<ProcessName>,
-    registry: ProcessRegistry,
-    user_tx: mpsc::Sender<UserTask<P>>,
-    driver: D,
-    timeout: Option<Duration>,
-    dead_letter: Option<DeadLetterProxy>,
-    supervision: SupervisionConfig<P>,
-    init: LifecycleInit,
-) -> ProcessProxy<P> {
+    let (user_tx, user_rx) = mpsc::channel::<UserTask<P>>(mailbox_capacity.get());
     let (sys_tx, sys_rx) = mpsc::channel::<SystemSignal>(32);
 
     let pid = Pid::next();
@@ -86,26 +79,43 @@ pub(crate) async fn run_with_driver<P: Process, D: Driver<P>>(
         .register(pid, any_proxy, process_name.as_ref())
         .await;
 
-    #[cfg(tokio_unstable)]
-    let task_name = match &process_name {
-        Some(name) => format!("process-{}", name),
-        None => format!("process-{}", pid),
-    };
+    // Compose the Core trio (Message + Pipe + Stash) into a single
+    // Combine tree, then layer the user's custom drivers on top via
+    // `DynDriverSet`. This is the "always operational" guarantee for
+    // `ctx.pipe_to_self` / `ctx.stash` / `ctx.unstash_all`.
+    let core = Combine::new(
+        MessageDriver::new(user_rx),
+        Combine::new(
+            PipeDriver::<P>::with_capacity(pipe_capacity),
+            StashDriver::<P>::new(stash_capacity),
+        ),
+    );
+    let driver_tree = Combine::new(core, DynDriverSet::new(custom_drivers));
 
-    let fut = lifecycle_loop(
+    let fut = lifecycle_loop(LifecycleLoopArgs {
         process,
-        process_name,
-        registry,
+        process_name: process_name.clone(),
+        registry: registry.clone(),
         pid,
-        driver,
+        driver: driver_tree,
         sys_tx,
         sys_rx,
         timeout,
         dead_letter,
         supervision,
-        proxy.clone(),
-        init,
-    );
+        self_proxy: proxy.clone(),
+        parent,
+        default_idle_timeout,
+        default_mailbox_capacity,
+        default_stash_capacity,
+        default_pipe_capacity,
+    });
+
+    #[cfg(tokio_unstable)]
+    let task_name = match &process_name {
+        Some(name) => format!("process-{}", name),
+        None => format!("process-{}", pid),
+    };
 
     #[cfg(not(tokio_unstable))]
     tokio::spawn(fut);
@@ -121,8 +131,10 @@ pub(crate) async fn run_with_driver<P: Process, D: Driver<P>>(
     proxy
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn lifecycle_loop<P: Process, D: Driver<P>>(
+/// Per-loop arguments. Same collapsing rationale as `LifecycleConfig` but
+/// scoped to the loop itself so the long-lived loop function does not need
+/// to peel each field off positionally.
+struct LifecycleLoopArgs<P: Process, D: Driver<P>> {
     process: P,
     process_name: Option<ProcessName>,
     registry: ProcessRegistry,
@@ -134,18 +146,42 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
     dead_letter: Option<DeadLetterProxy>,
     supervision: SupervisionConfig<P>,
     self_proxy: ProcessProxy<P>,
-    init: LifecycleInit,
-) {
+    parent: Option<Pid>,
+    default_idle_timeout: Option<Duration>,
+    default_mailbox_capacity: MailboxCapacity,
+    default_stash_capacity: StashCapacity,
+    default_pipe_capacity: PipeCapacity,
+}
+
+async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>) {
+    let LifecycleLoopArgs {
+        process,
+        process_name,
+        registry,
+        pid,
+        driver,
+        sys_tx,
+        mut sys_rx,
+        timeout,
+        dead_letter,
+        supervision,
+        self_proxy,
+        parent,
+        default_idle_timeout,
+        default_mailbox_capacity,
+        default_stash_capacity,
+        default_pipe_capacity,
+    } = args;
+
     let mut state = process;
     let mut driver = driver;
-    let mut sys_rx = sys_rx;
     let mut watchers: HashSet<Pid> = HashSet::new();
     let mut restart_tracker = RestartTracker::new();
 
     // Extract the pipe handle (if any) from the driver tree once, at start.
-    // `Combine` surfaces the first non-`None` handle in its subtree; drivers
-    // without `PipeDriver` composed will yield `None` here, and any later
-    // call to `ctx.pipe_to_self` will panic (programmer-error behavior).
+    // `Combine` surfaces the first non-`None` handle in its subtree; the
+    // Core trio always contributes one, so this is `Some(_)` for every
+    // process spawned via the unified path.
     let pipe_handle = driver.pipe_handle();
 
     let mut ctx = ProcessContext {
@@ -156,9 +192,12 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
         dead_letter: dead_letter.clone(),
         self_proxy,
         pipe_handle,
-        parent: init.parent,
+        parent,
         children: PidSet::new(),
-        default_idle_timeout: init.default_idle_timeout,
+        default_idle_timeout,
+        default_mailbox_capacity,
+        default_stash_capacity,
+        default_pipe_capacity,
         explicit_watches: Mutex::new(HashSet::new()),
     };
 
@@ -225,8 +264,8 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
                         match &supervision.strategy {
                             SupervisionStrategy::Resume => continue,
                             SupervisionStrategy::Stop => break TerminatedReason::Stopped,
-                            SupervisionStrategy::Restart { max_retries, within } => {
-                                if restart_tracker.should_restart(*max_retries, *within) {
+                            SupervisionStrategy::Restart(config) => {
+                                if restart_tracker.should_restart(config.max_retries(), config.within()) {
                                     state.on_stop(&mut ctx).await;
                                     on_stop_called_in_restart = true;
                                     let deferred = stop_children_for_restart(
@@ -298,7 +337,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(
     //   `Terminated`; skip the extra notification to avoid a duplicate.
     // - Parent is NOT in `watchers` (parent called ctx.unwatch): send `Terminated`
     //   via this fallback so the parent's stop_children_and_wait can still drain.
-    if let Some(parent_pid) = init.parent {
+    if let Some(parent_pid) = parent {
         if !watchers.contains(&parent_pid) {
             if let Some(proxy) = registry.lookup(parent_pid).await {
                 let _ = proxy
@@ -508,20 +547,26 @@ mod tests {
             registry: registry.clone(),
         };
 
-        let loop_handle = tokio::spawn(lifecycle_loop(
-            NoOpProcess,
-            None,
+        let args = LifecycleLoopArgs {
+            process: NoOpProcess,
+            process_name: None,
             registry,
             pid,
-            PendingNeverIdleDriver,
-            sys_tx.clone(),
+            driver: PendingNeverIdleDriver,
+            sys_tx: sys_tx.clone(),
             sys_rx,
-            Some(Duration::from_millis(50)),
-            None,
+            timeout: Some(Duration::from_millis(50)),
+            dead_letter: None,
             supervision,
             self_proxy,
-            LifecycleInit { parent: None, default_idle_timeout: None },
-        ));
+            parent: None,
+            default_idle_timeout: None,
+            default_mailbox_capacity: MailboxCapacity::Inherit,
+            default_stash_capacity: StashCapacity::Inherit,
+            default_pipe_capacity: PipeCapacity::Inherit,
+        };
+
+        let loop_handle = tokio::spawn(lifecycle_loop(args));
 
         // Wait well past the configured 50 ms timeout — if the timer were still
         // armed, the loop would already be finished at this point.

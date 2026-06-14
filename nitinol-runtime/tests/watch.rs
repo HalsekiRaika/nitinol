@@ -76,11 +76,11 @@ fn faulty_target_props(
     started: Arc<AtomicBool>,
     strategy: SupervisionStrategy,
 ) -> Props<FaultyTarget> {
-    let mut props = Props::new(move || FaultyTarget {
+    let props = Props::new(move || FaultyTarget {
         start_count: start_count.clone(),
         started: started.clone(),
     });
-    props.with_supervision_strategy(strategy);
+    let props = props.with_supervision_strategy(strategy);
     props
 }
 
@@ -346,10 +346,7 @@ async fn restart_does_not_send_terminated_to_watchers() {
         .spawn(faulty_target_props(
             target_start_count.clone(),
             target_started.clone(),
-            SupervisionStrategy::Restart {
-                max_retries: 5,
-                within: Duration::from_secs(10),
-            },
+            SupervisionStrategy::restart(5, Duration::from_secs(10)).expect("valid restart config"),
         ))
         .await;
     let target_pid = target_proxy.pid();
@@ -404,10 +401,7 @@ async fn rate_limit_stop_sends_terminated_to_watchers() {
         .spawn(faulty_target_props(
             target_start_count.clone(),
             target_started.clone(),
-            SupervisionStrategy::Restart {
-                max_retries: 1,
-                within: Duration::from_secs(10),
-            },
+            SupervisionStrategy::restart(1, Duration::from_secs(10)).expect("valid restart config"),
         ))
         .await;
     let target_pid = target_proxy.pid();
@@ -453,10 +447,7 @@ async fn watch_persists_across_restart() {
         .spawn(faulty_target_props(
             target_start_count.clone(),
             target_started.clone(),
-            SupervisionStrategy::Restart {
-                max_retries: 5,
-                within: Duration::from_secs(10),
-            },
+            SupervisionStrategy::restart(5, Duration::from_secs(10)).expect("valid restart config"),
         ))
         .await;
     let target_pid = target_proxy.pid();

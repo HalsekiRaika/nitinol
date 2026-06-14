@@ -33,7 +33,7 @@ async fn spawn_named_returns_proxy() {
     let name = ProcessName::new("test-process");
 
     // When: a named process is spawned
-    let proxy = system.spawn_named(name, props).await;
+    let proxy = system.spawn(props.with_name(name)).await;
 
     // Then: the proxy has a valid Pid
     let _pid = proxy.pid();
@@ -56,13 +56,13 @@ async fn props_new_creates_with_producer() {
 async fn props_builder_sets_supervision_strategy() {
     // Given: Props with default strategy
     let (started, stopped, counter) = tracked_state();
-    let mut props = test_props(started, stopped, counter);
+    let props = test_props(started, stopped, counter);
 
     // When: supervision strategy is changed via builder
-    props.with_supervision_strategy(SupervisionStrategy::Restart {
-        max_retries: 3,
-        within: Duration::from_secs(60),
-    });
+    let _props = props.with_supervision_strategy(
+        SupervisionStrategy::restart(3, Duration::from_secs(60))
+            .expect("restart with positive duration must succeed"),
+    );
 
     // Then: no panic (strategy configured successfully)
 }
@@ -79,19 +79,14 @@ async fn supervision_strategy_stop_variant_exists() {
 #[tokio::test]
 async fn supervision_strategy_restart_holds_configuration() {
     // Given/When: Restart variant with configuration
-    let strategy = SupervisionStrategy::Restart {
-        max_retries: 5,
-        within: Duration::from_secs(120),
-    };
+    let strategy = SupervisionStrategy::restart(5, Duration::from_secs(120))
+        .expect("valid restart config");
 
     // Then: fields hold the provided values
     match strategy {
-        SupervisionStrategy::Restart {
-            max_retries,
-            within,
-        } => {
-            assert_eq!(max_retries, 5);
-            assert_eq!(within, Duration::from_secs(120));
+        SupervisionStrategy::Restart(config) => {
+            assert_eq!(config.max_retries(), 5);
+            assert_eq!(config.within(), Duration::from_secs(120));
         }
         _ => panic!("expected Restart variant"),
     }

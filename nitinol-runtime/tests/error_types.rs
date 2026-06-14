@@ -222,12 +222,12 @@ async fn spawn_stream_duplicate_returns_spawn_error() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("se-dup");
     system
-        .spawn_stream::<BoxedMessage>(topic.clone())
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic.clone()))
         .await
         .expect("first spawn_stream should succeed");
 
     // When: a second stream is spawned with the same topic
-    let result = system.spawn_stream::<BoxedMessage>(topic).await;
+    let result = system.spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic)).await;
 
     // Then: Err(SpawnError) is returned and error type is statically known
     let err: SpawnError = match result {
@@ -445,7 +445,7 @@ async fn props_subscriber_creates_working_subscriber() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("props-sub-test");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -486,7 +486,7 @@ async fn props_subscriber_caller_does_not_name_subscriber_process_type() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("props-sub-type");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 

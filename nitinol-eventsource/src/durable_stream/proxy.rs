@@ -65,38 +65,41 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         self
     }
 
-    /// Build a [`DirectPollerProcess`] props + driver pair.
-    ///
-    /// Single authoritative place for supervision strategy, default interval,
-    /// and process construction.  Both [`Self::spawn_child`] and
+    /// Build a fully-wired `Props` for a [`DirectPollerProcess`] — supervision
+    /// strategy, custom interval driver, and process construction in one
+    /// place. Both [`Self::spawn_child`] and
     /// [`DurableStreamProxy::subscribe_from`] delegate here so that changes
     /// to any of these values are made exactly once.
-    fn make_direct_poller<S>(
+    fn make_direct_poller_props<S>(
         &self,
         subscriber: ProcessProxy<S>,
         cursor: SequenceCursor,
-    ) -> (
-        Props<DirectPollerProcess<T, S>>,
-        IntervalDriver<DirectPollerProcess<T, S>>,
-    )
+        name: Option<ProcessName>,
+    ) -> Props<DirectPollerProcess<T, S>>
     where
         S: Process + Receive<T, Response = ()>,
     {
         let store = Arc::clone(&self.store);
         let transform = Arc::clone(&self.transform);
         let initial_cursor = cursor;
+        let driver = IntervalDriver::<DirectPollerProcess<T, S>>::new(self.poll_interval);
+        let restart_strategy = SupervisionStrategy::restart(
+            POLLER_RESTART_MAX_RETRIES,
+            POLLER_RESTART_WITHIN,
+        )
+        .expect("POLLER_RESTART_WITHIN is a positive duration constant");
         let mut props = Props::new(move || DirectPollerProcess {
             store: Arc::clone(&store),
             subscriber: subscriber.clone(),
             transform: Arc::clone(&transform),
             cursor: initial_cursor.clone(),
-        });
-        props.with_supervision_strategy(SupervisionStrategy::Restart {
-            max_retries: POLLER_RESTART_MAX_RETRIES,
-            within: POLLER_RESTART_WITHIN,
-        });
-        let driver = IntervalDriver::<DirectPollerProcess<T, S>>::new(self.poll_interval);
-        (props, driver)
+        })
+        .with_supervision_strategy(restart_strategy)
+        .add_driver(driver);
+        if let Some(n) = name {
+            props = props.with_name(n);
+        }
+        props
     }
 
     /// Spawn a [`DirectPollerProcess`] as a runtime **child** of `ctx`'s
@@ -110,8 +113,8 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         S: Process + Receive<T, Response = ()>,
     {
         let subscriber = ctx.self_proxy().clone();
-        let (props, driver) = self.make_direct_poller(subscriber, cursor);
-        ctx.spawn_child_with_driver(props, driver).await;
+        let props = self.make_direct_poller_props(subscriber, cursor, None);
+        ctx.spawn_child(props).await;
     }
 }
 
@@ -197,10 +200,8 @@ where
             transform: Arc::clone(&self.transform),
             poll_interval: self.poll_interval,
         };
-        let (props, driver) = config.make_direct_poller(proxy, cursor);
-        system
-            .spawn_named_with_driver(direct_poller_name(pid), props, driver)
-            .await;
+        let props = config.make_direct_poller_props(proxy, cursor, Some(direct_poller_name(pid)));
+        system.spawn(props).await;
 
         Ok(())
     }

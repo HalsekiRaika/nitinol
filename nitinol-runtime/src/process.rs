@@ -9,6 +9,7 @@ mod proxy;
 mod registry;
 mod signal;
 pub(crate) mod spawn;
+pub(crate) mod spawnable;
 mod stream;
 mod subscriber;
 pub(crate) mod supervision;
@@ -24,13 +25,12 @@ pub use self::{
     pid_set::PidSet,
     props::*,
     proxy::*,
-    stream::Stream,
+    stream::{Stream, StreamProps},
     subscriber::{Subscriber, SubscriberContext},
     watch::{Terminated, TerminatedReason},
 };
 
 pub(crate) use self::dead_letter::{DeadLetterProcess, DeadLetterProxy};
-pub(crate) use self::lifecycle::{run, LifecycleInit};
 pub(crate) use self::registry::*;
 
 use std::future::Future;

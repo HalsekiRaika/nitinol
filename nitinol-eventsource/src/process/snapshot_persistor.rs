@@ -67,11 +67,11 @@ impl SnapshotPersistor {
         system: &ProcessSystem,
         store: Arc<dyn SnapshotStore>,
     ) -> SnapshotPersistorProxy {
-        let mut props = Props::new(move || SnapshotPersistor {
+        let props = Props::new(move || SnapshotPersistor {
             store: Arc::clone(&store),
-        });
-        props.with_supervision_strategy(SupervisionStrategy::Resume);
-        props.with_idle_timeout(IdleTimeout::Persistent);
+        })
+        .with_supervision_strategy(SupervisionStrategy::Resume)
+        .with_idle_timeout(IdleTimeout::Persistent);
         system.spawn(props).await.into()
     }
 }

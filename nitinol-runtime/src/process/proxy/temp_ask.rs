@@ -116,9 +116,9 @@ pub(crate) async fn spawn_temp_ask<R, E>(
         in_rx: in_rx_slot.lock().unwrap().take(),
         destination,
     };
-    let mut props: Props<TempAskProcess<R, E>> = Props::new(producer);
-    props.with_idle_timeout(IdleTimeout::After(duration));
+    let props: Props<TempAskProcess<R, E>> =
+        Props::new(producer).with_idle_timeout(IdleTimeout::After(duration));
     let _ = SpawnEnv::detached(registry, dead_letter)
-        .spawn(None, props)
+        .spawn(props)
         .await;
 }

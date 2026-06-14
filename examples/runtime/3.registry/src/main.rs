@@ -62,10 +62,10 @@ async fn main() {
     let greeter_name = ProcessName::new("greeter");
 
     let counter_proxy = system
-        .spawn_named(counter_name.clone(), Props::new(|| Counter::new(0)))
+        .spawn(Props::new(|| Counter::new(0)).with_name(counter_name.clone()))
         .await;
     let greeter_proxy = system
-        .spawn_named(greeter_name.clone(), Props::new(|| Greeter))
+        .spawn(Props::new(|| Greeter).with_name(greeter_name.clone()))
         .await;
 
     let counter_pid = counter_proxy.pid();

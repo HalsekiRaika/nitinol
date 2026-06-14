@@ -145,10 +145,10 @@ fn watcher_props(
     received: Arc<Mutex<Option<Terminated>>>,
     idle_timeout: IdleTimeout,
 ) -> Props<WatcherProcess> {
-    let mut props = Props::new(move || WatcherProcess {
+    let props = Props::new(move || WatcherProcess {
         received: received.clone(),
     });
-    props.with_idle_timeout(idle_timeout);
+    let props = props.with_idle_timeout(idle_timeout);
     props
 }
 
@@ -195,10 +195,10 @@ impl Process for ChildProcess {
 }
 
 fn child_props(state: ChildState) -> Props<ChildProcess> {
-    let mut props = Props::new(move || ChildProcess {
+    let props = Props::new(move || ChildProcess {
         state: state.clone(),
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
+    let props = props.with_idle_timeout(IdleTimeout::Persistent);
     props
 }
 
@@ -311,7 +311,7 @@ fn parent_props(config: ParentConfig) -> Props<ParentProcess> {
     let parent_stopped = config.parent_stopped.clone();
     let stop_order = config.stop_order.clone();
     let children = config.children.clone();
-    let mut props = Props::new(move || ParentProcess {
+    let props = Props::new(move || ParentProcess {
         config: ParentConfig {
             children: children.clone(),
             captured: captured.clone(),
@@ -319,7 +319,7 @@ fn parent_props(config: ParentConfig) -> Props<ParentProcess> {
             stop_order: stop_order.clone(),
         },
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
+    let props = props.with_idle_timeout(IdleTimeout::Persistent);
     props
 }
 
@@ -696,12 +696,12 @@ async fn natural_child_death_removes_pid_from_parent_children_set() {
     let children_specs = vec![child_state.clone()];
     let captured_clone = captured_snapshot.clone();
     let otc_clone = on_terminated_called.clone();
-    let mut props = Props::new(move || WatchedParent {
+    let props = Props::new(move || WatchedParent {
         children_specs: children_specs.clone(),
         captured: captured_clone.clone(),
         on_terminated_called: otc_clone.clone(),
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
+    let props = props.with_idle_timeout(IdleTimeout::Persistent);
 
     let parent_proxy = system.spawn(props).await;
     wait_until_async(
@@ -797,11 +797,11 @@ async fn three_generation_cascading_stop_runs_root_on_stop_first() {
     }
 
     fn gc_props(stopped: Arc<AtomicBool>, order: Arc<Mutex<Vec<&'static str>>>) -> Props<GC> {
-        let mut props = Props::new(move || GC {
+        let props = Props::new(move || GC {
             stopped: stopped.clone(),
             order: order.clone(),
         });
-        props.with_idle_timeout(IdleTimeout::Persistent);
+        let props = props.with_idle_timeout(IdleTimeout::Persistent);
         props
     }
 
@@ -841,13 +841,13 @@ async fn three_generation_cascading_stop_runs_root_on_stop_first() {
         order: Arc<Mutex<Vec<&'static str>>>,
         gc_started: Arc<AtomicBool>,
     ) -> Props<P> {
-        let mut props = Props::new(move || P {
+        let props = Props::new(move || P {
             gc_stopped: gc_stopped.clone(),
             p_stopped: p_stopped.clone(),
             order: order.clone(),
             gc_started: gc_started.clone(),
         });
-        props.with_idle_timeout(IdleTimeout::Persistent);
+        let props = props.with_idle_timeout(IdleTimeout::Persistent);
         props
     }
 
@@ -892,7 +892,7 @@ async fn three_generation_cascading_stop_runs_root_on_stop_first() {
 
     let p_started = Arc::new(AtomicBool::new(false));
     let gc_started = Arc::new(AtomicBool::new(false));
-    let mut gp_props = Props::new({
+    let gp_props = Props::new({
         let gc_stopped = gc_stopped.clone();
         let p_stopped = p_stopped.clone();
         let gp_stopped = gp_stopped.clone();
@@ -908,7 +908,7 @@ async fn three_generation_cascading_stop_runs_root_on_stop_first() {
             gc_started: gc_started.clone(),
         }
     });
-    gp_props.with_idle_timeout(IdleTimeout::Persistent);
+    let gp_props = gp_props.with_idle_timeout(IdleTimeout::Persistent);
 
     let gp_proxy = system.spawn(gp_props).await;
     wait_for_flag(&p_started).await;
@@ -1070,13 +1070,14 @@ async fn spawn_child_with_driver_propagates_parent_pid_and_stops_with_parent() {
             let obs = self.child_parent_observed.clone();
             let child_pid = self.child_pid.clone();
             async move {
-                let mut props = Props::new(move || TickChild {
+                let props = Props::new(move || TickChild {
                     started: s.clone(),
                     stopped: st.clone(),
                     parent_observed: obs.clone(),
-                });
-                props.with_idle_timeout(IdleTimeout::Persistent);
-                let proxy = ctx.spawn_child_with_driver(props, NeverDriver).await;
+                })
+                .with_idle_timeout(IdleTimeout::Persistent)
+                .add_driver(NeverDriver);
+                let proxy = ctx.spawn_child(props).await;
                 *child_pid.lock().await = Some(proxy.pid());
             }
         }
@@ -1096,14 +1097,14 @@ async fn spawn_child_with_driver_propagates_parent_pid_and_stops_with_parent() {
             let obs = child_parent_observed.clone();
             let ps = parent_stopped.clone();
             let cps = child_pid_slot.clone();
-            let mut props = Props::new(move || DriverParent {
+            let props = Props::new(move || DriverParent {
                 child_started: cs.clone(),
                 child_stopped: cst.clone(),
                 child_parent_observed: obs.clone(),
                 parent_stopped: ps.clone(),
                 child_pid: cps.clone(),
             });
-            props.with_idle_timeout(IdleTimeout::Persistent);
+            let props = props.with_idle_timeout(IdleTimeout::Persistent);
             props
         })
         .await;
@@ -1177,7 +1178,7 @@ async fn spawn_child_with_inherit_idle_timeout_uses_system_default() {
     let child_started = Arc::new(AtomicBool::new(false));
     let child_stopped = Arc::new(AtomicBool::new(false));
 
-    let mut parent_props = Props::new({
+    let parent_props = Props::new({
         let s = child_started.clone();
         let st = child_stopped.clone();
         move || InheritParent {
@@ -1185,7 +1186,7 @@ async fn spawn_child_with_inherit_idle_timeout_uses_system_default() {
             child_stopped: st.clone(),
         }
     });
-    parent_props.with_idle_timeout(IdleTimeout::Persistent);
+    let parent_props = parent_props.with_idle_timeout(IdleTimeout::Persistent);
     let _parent_proxy = system.spawn(parent_props).await;
     wait_for_flag(&child_started).await;
 
@@ -1274,13 +1275,13 @@ async fn child_natural_death_does_not_invoke_on_terminated() {
     let cs = child_started.clone();
     let pid_slot = child_pid_slot.clone();
     let proxy_slot = child_proxy_slot.clone();
-    let mut props = Props::new(move || NonWatchingParent {
+    let props = Props::new(move || NonWatchingParent {
         on_terminated_called: otc.clone(),
         child_started: cs.clone(),
         child_pid_slot: pid_slot.clone(),
         child_proxy_slot: proxy_slot.clone(),
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
+    let props = props.with_idle_timeout(IdleTimeout::Persistent);
     let parent_proxy = system.spawn(props).await;
     wait_for_flag(&child_started).await;
 
@@ -1379,14 +1380,14 @@ async fn explicitly_watched_child_on_terminated_is_called() {
     let cs = child_started.clone();
     let pid_slot = child_pid_slot.clone();
     let proxy_slot = child_proxy_slot.clone();
-    let mut props = Props::new(move || WatchingParent {
+    let props = Props::new(move || WatchingParent {
         on_terminated_called: otc.clone(),
         on_terminated_who: otw.clone(),
         child_started: cs.clone(),
         child_pid_slot: pid_slot.clone(),
         child_proxy_slot: proxy_slot.clone(),
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
+    let props = props.with_idle_timeout(IdleTimeout::Persistent);
     let _parent_proxy = system.spawn(props).await;
     wait_for_flag(&child_started).await;
 
@@ -1639,8 +1640,8 @@ impl Process for RestartableWithChild {
             let snapshot: Vec<Pid> = ctx.children().iter().copied().collect();
             cbs.lock().await.push(snapshot);
 
-            let mut p = Props::new(move || NoOpChild);
-            p.with_idle_timeout(IdleTimeout::Persistent);
+            let p = Props::new(move || NoOpChild);
+            let p = p.with_idle_timeout(IdleTimeout::Persistent);
             let proxy = ctx.spawn_child(p).await;
             pids.lock().await.push(proxy.pid());
         }
@@ -1668,15 +1669,12 @@ async fn restart_stops_old_children_before_on_start_reruns() {
 
     let pids_clone = child_pids.clone();
     let cbs_clone = children_before_spawn.clone();
-    let mut props = Props::new(move || RestartableWithChild {
+    let props = Props::new(move || RestartableWithChild {
         child_pids: pids_clone.clone(),
         children_before_spawn: cbs_clone.clone(),
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
-    props.with_supervision_strategy(SupervisionStrategy::Restart {
-        max_retries: 3,
-        within: Duration::from_secs(10),
-    });
+    let props = props.with_idle_timeout(IdleTimeout::Persistent)
+        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
 
     let proxy = system.spawn(props).await;
 
@@ -1846,12 +1844,12 @@ async fn unwatch_child_does_not_prevent_parent_stop_completion() {
     let ps = parent_stopped.clone();
     let cps = child_pid_slot.clone();
     let osd = on_start_done.clone();
-    let mut props = Props::new(move || UnwatchingParent {
+    let props = Props::new(move || UnwatchingParent {
         parent_stopped: ps.clone(),
         child_pid: cps.clone(),
         on_start_done: osd.clone(),
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
+    let props = props.with_idle_timeout(IdleTimeout::Persistent);
     let parent_proxy = system.spawn(props).await;
     let parent_pid = parent_proxy.pid();
 
@@ -1890,7 +1888,7 @@ async fn restart_on_stop_fires_before_child_on_stop() {
     let child_state = fresh_child_state(1, stop_order.clone());
     let on_start_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    let mut props = Props::new({
+    let props = Props::new({
         let so = stop_order.clone();
         let cs = child_state.clone();
         let count = on_start_count.clone();
@@ -1900,11 +1898,8 @@ async fn restart_on_stop_fires_before_child_on_stop() {
             on_start_count: count.clone(),
         }
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
-    props.with_supervision_strategy(SupervisionStrategy::Restart {
-        max_retries: 3,
-        within: Duration::from_secs(10),
-    });
+    let props = props.with_idle_timeout(IdleTimeout::Persistent)
+        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
 
     let proxy = system.spawn(props).await;
 
@@ -1990,11 +1985,11 @@ impl Process for PoisonableRestarter {
         let gate = self.stop_gate.clone();
         let started = self.child_stop_started.clone();
         async move {
-            let mut p = Props::new(move || StallingChild {
+            let p = Props::new(move || StallingChild {
                 stop_gate: gate.clone(),
                 stop_started: started.clone(),
             });
-            p.with_idle_timeout(IdleTimeout::Persistent);
+            let p = p.with_idle_timeout(IdleTimeout::Persistent);
             ctx.spawn_child(p).await;
         }
     }
@@ -2037,7 +2032,7 @@ async fn poison_during_restart_aborts_restart_and_exits_poisoned() {
         .spawn(watcher_props(received.clone(), IdleTimeout::Persistent))
         .await;
 
-    let mut props = Props::new({
+    let props = Props::new({
         let gate = stop_gate.clone();
         let started = child_stop_started.clone();
         let on_stop = on_stop_called.clone();
@@ -2047,11 +2042,8 @@ async fn poison_during_restart_aborts_restart_and_exits_poisoned() {
             on_stop_called: on_stop.clone(),
         }
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
-    props.with_supervision_strategy(SupervisionStrategy::Restart {
-        max_retries: 3,
-        within: Duration::from_secs(10),
-    });
+    let props = props.with_idle_timeout(IdleTimeout::Persistent)
+        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
 
     let proxy = system.spawn(props).await;
 
@@ -2126,11 +2118,11 @@ impl Process for RestartableWatcher {
                     ctx.watch(pid).await;
                 }
             }
-            let mut p = Props::new(move || StallingChild {
+            let p = Props::new(move || StallingChild {
                 stop_gate: gate.clone(),
                 stop_started: started.clone(),
             });
-            p.with_idle_timeout(IdleTimeout::Persistent);
+            let p = p.with_idle_timeout(IdleTimeout::Persistent);
             ctx.spawn_child(p).await;
         }
     }
@@ -2168,8 +2160,8 @@ async fn non_child_terminated_during_restart_replayed_to_new_state() {
     let system = ProcessSystem::new().await;
 
     // Spawn the external process W that P will watch.
-    let mut w_props = Props::new(|| NoOpChild);
-    w_props.with_idle_timeout(IdleTimeout::Persistent);
+    let w_props = Props::new(|| NoOpChild);
+    let w_props = w_props.with_idle_timeout(IdleTimeout::Persistent);
     let w_proxy = system.spawn(w_props).await;
     let w_pid = w_proxy.pid();
 
@@ -2179,7 +2171,7 @@ async fn non_child_terminated_during_restart_replayed_to_new_state() {
         Arc::new(Mutex::new(Vec::new()));
     let first_start_done = Arc::new(AtomicBool::new(false));
 
-    let mut props = Props::new({
+    let props = Props::new({
         let gate = stop_gate.clone();
         let started = child_stop_started.clone();
         let events = terminated_events.clone();
@@ -2192,11 +2184,8 @@ async fn non_child_terminated_during_restart_replayed_to_new_state() {
             first_start_done: fsd.clone(),
         }
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
-    props.with_supervision_strategy(SupervisionStrategy::Restart {
-        max_retries: 3,
-        within: Duration::from_secs(10),
-    });
+    let props = props.with_idle_timeout(IdleTimeout::Persistent)
+        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
 
     let proxy = system.spawn(props).await;
 
@@ -2298,11 +2287,11 @@ async fn non_watched_child_terminated_during_restart_not_replayed() {
                     // Second start (post-restart) — signal so the test can proceed.
                     second.store(true, Ordering::SeqCst);
                 }
-                let mut p = Props::new(move || StallingChild {
+                let p = Props::new(move || StallingChild {
                     stop_gate: gate.clone(),
                     stop_started: started.clone(),
                 });
-                p.with_idle_timeout(IdleTimeout::Persistent);
+                let p = p.with_idle_timeout(IdleTimeout::Persistent);
                 // Explicitly no ctx.watch — this is the condition under test.
                 ctx.spawn_child(p).await;
             }
@@ -2350,18 +2339,15 @@ async fn non_watched_child_terminated_during_restart_not_replayed() {
     let ssd = second_start_done.clone();
     let otc = on_terminated_called.clone();
 
-    let mut props = Props::new(move || RestartableNoWatch {
+    let props = Props::new(move || RestartableNoWatch {
         stop_gate: sg.clone(),
         child_stop_started: css.clone(),
         first_start_done: fsd.clone(),
         second_start_done: ssd.clone(),
         on_terminated_called: otc.clone(),
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
-    props.with_supervision_strategy(SupervisionStrategy::Restart {
-        max_retries: 3,
-        within: Duration::from_secs(10),
-    });
+    let props = props.with_idle_timeout(IdleTimeout::Persistent)
+        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
 
     let proxy = system.spawn(props).await;
 
@@ -2449,8 +2435,8 @@ async fn child_terminating_before_watch_registered_does_not_deadlock_parent_stop
         ) -> impl Future<Output = ()> + Send {
             let stopped = self.child_stopped.clone();
             async move {
-                let mut props = Props::new(move || QuickDyingChild { stopped: stopped.clone() });
-                props.with_idle_timeout(IdleTimeout::Persistent);
+                let props = Props::new(move || QuickDyingChild { stopped: stopped.clone() });
+                let props = props.with_idle_timeout(IdleTimeout::Persistent);
                 // The child may terminate before or during register_child's
                 // wiring::watch call. Either way, the parent must not deadlock.
                 ctx.spawn_child(props).await;
@@ -2467,11 +2453,11 @@ async fn child_terminating_before_watch_registered_does_not_deadlock_parent_stop
 
     let ps = parent_stopped.clone();
     let cs = child_stopped.clone();
-    let mut props = Props::new(move || QuickChildParent {
+    let props = Props::new(move || QuickChildParent {
         child_stopped: cs.clone(),
         parent_stopped: ps.clone(),
     });
-    props.with_idle_timeout(IdleTimeout::Persistent);
+    let props = props.with_idle_timeout(IdleTimeout::Persistent);
     let parent_proxy = system.spawn(props).await;
 
     // Wait for the child to have self-stopped.

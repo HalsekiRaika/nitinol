@@ -26,7 +26,7 @@ async fn spawn_named_returns_usable_proxy() {
 
     // When: a Counter is spawned with that name
     let proxy = system
-        .spawn_named(name, Props::new(|| Counter::new(0)))
+        .spawn(Props::new(|| Counter::new(0)).with_name(name))
         .await;
     // on_start runs asynchronously; wait before sending messages
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -47,7 +47,7 @@ async fn lookup_by_name_finds_named_process() {
     let system = ProcessSystem::new().await;
     let name = ProcessName::new("counter");
     let _proxy = system
-        .spawn_named(name.clone(), Props::new(|| Counter::new(0)))
+        .spawn(Props::new(|| Counter::new(0)).with_name(name.clone()))
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -78,7 +78,7 @@ async fn lookup_by_pid_finds_process() {
     // Given: a Greeter process registered under "greeter"
     let system = ProcessSystem::new().await;
     let name = ProcessName::new("greeter");
-    let proxy = system.spawn_named(name, Props::new(|| Greeter)).await;
+    let proxy = system.spawn(Props::new(|| Greeter).with_name(name)).await;
     let pid = proxy.pid();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -99,7 +99,7 @@ async fn downcast_to_correct_type_succeeds() {
     let system = ProcessSystem::new().await;
     let name = ProcessName::new("counter");
     let _proxy = system
-        .spawn_named(name.clone(), Props::new(|| Counter::new(0)))
+        .spawn(Props::new(|| Counter::new(0)).with_name(name.clone()))
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     let any_proxy: AnyProxy = system
@@ -120,7 +120,7 @@ async fn downcast_to_wrong_type_returns_none() {
     let system = ProcessSystem::new().await;
     let name = ProcessName::new("counter");
     let _proxy = system
-        .spawn_named(name.clone(), Props::new(|| Counter::new(0)))
+        .spawn(Props::new(|| Counter::new(0)).with_name(name.clone()))
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     let counter_any: AnyProxy = system
@@ -143,7 +143,7 @@ async fn discovered_counter_can_communicate() {
     let system = ProcessSystem::new().await;
     let name = ProcessName::new("counter");
     let _proxy = system
-        .spawn_named(name.clone(), Props::new(|| Counter::new(0)))
+        .spawn(Props::new(|| Counter::new(0)).with_name(name.clone()))
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -174,7 +174,7 @@ async fn discovered_greeter_can_communicate() {
     let system = ProcessSystem::new().await;
     let name = ProcessName::new("greeter");
     let proxy = system
-        .spawn_named(name.clone(), Props::new(|| Greeter))
+        .spawn(Props::new(|| Greeter).with_name(name.clone()))
         .await;
     let pid = proxy.pid();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -207,10 +207,10 @@ async fn multiple_named_processes_coexist() {
     let counter_name = ProcessName::new("counter");
     let greeter_name = ProcessName::new("greeter");
     let counter_proxy = system
-        .spawn_named(counter_name.clone(), Props::new(|| Counter::new(10)))
+        .spawn(Props::new(|| Counter::new(10)).with_name(counter_name.clone()))
         .await;
     let greeter_proxy = system
-        .spawn_named(greeter_name.clone(), Props::new(|| Greeter))
+        .spawn(Props::new(|| Greeter).with_name(greeter_name.clone()))
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 

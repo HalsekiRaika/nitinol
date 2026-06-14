@@ -583,9 +583,11 @@ async fn durable_stream_spawn_with_duplicate_topic_returns_error() {
     let system = ProcessSystem::new().await;
     let store = Arc::new(InMemoryEventStore::default());
     let _existing = system
-        .spawn_stream::<EventEnvelope<Evt>>(ProcessName::new("ds-dup-topic"))
+        .spawn(nitinol_runtime::StreamProps::<EventEnvelope<Evt>>::new(
+            ProcessName::new("ds-dup-topic"),
+        ))
         .await
-        .expect("initial spawn_stream must succeed");
+        .expect("initial spawn must succeed");
 
     let result = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-dup-topic"),

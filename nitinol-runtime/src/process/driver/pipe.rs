@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::fmt;
+use std::num::NonZeroUsize;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -9,6 +10,13 @@ use crate::error::HandlerError;
 use crate::process::driver::Driver;
 use crate::process::task::UserTask;
 use crate::process::{Process, ProcessContext};
+
+/// Default bounded capacity for `PipeDriver::new()` (the parameterless
+/// constructor). Kept at the historical hardcoded width so existing call
+/// sites that build a driver tree manually (e.g. via `combine_drivers!`)
+/// keep the same behavior; `ProcessSystem::spawn` resolves the configured
+/// capacity through `PipeCapacity` and uses the explicit constructor.
+const DEFAULT_PIPE_CAPACITY: usize = 32;
 
 /// Opaque envelope carrying a piped task from the `FuturesUnordered` queue
 /// to the driver's `apply`.
@@ -43,6 +51,14 @@ pub(crate) type PipeFuture<P> = BoxFuture<'static, PipedTask<P>>;
 /// single-threaded guarantee is preserved. `PipeDriver` never calls
 /// `tokio::spawn`.
 ///
+/// ## Bounded channel
+///
+/// `PipeDriver::with_capacity(n)` configures the underlying tokio mpsc
+/// channel with capacity `n`. `ctx.pipe_to_self` enqueues via `try_send`:
+/// when the buffer is full or the receiving channel is closed, the future
+/// is dropped silently and the actor keeps running. The bounded shape
+/// replaces the pre-spec unbounded channel (Pain-Point P2).
+///
 /// ## CPU-bound work is unsupported
 ///
 /// A pipe future that blocks the runtime (long CPU-bound computation,
@@ -66,14 +82,25 @@ pub(crate) type PipeFuture<P> = BoxFuture<'static, PipedTask<P>>;
 pub struct PipeDriver<P: Process> {
     // Keep our own clone of the sender so the channel does not close
     // even when no `PipeHandle` is currently alive elsewhere.
-    tx: mpsc::UnboundedSender<PipeFuture<P>>,
-    rx: mpsc::UnboundedReceiver<PipeFuture<P>>,
+    tx: mpsc::Sender<PipeFuture<P>>,
+    rx: mpsc::Receiver<PipeFuture<P>>,
     in_flight: FuturesUnordered<PipeFuture<P>>,
 }
 
 impl<P: Process> PipeDriver<P> {
+    /// Build a `PipeDriver` with the default bounded capacity.
+    ///
+    /// Use [`Self::with_capacity`] to override (e.g. from a `Props`-resolved
+    /// `PipeCapacity::Bounded(n)`).
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        Self::with_capacity(
+            NonZeroUsize::new(DEFAULT_PIPE_CAPACITY).expect("DEFAULT_PIPE_CAPACITY must be > 0"),
+        )
+    }
+
+    /// Build a `PipeDriver` with the supplied bounded channel capacity.
+    pub fn with_capacity(capacity: NonZeroUsize) -> Self {
+        let (tx, rx) = mpsc::channel(capacity.get());
         Self {
             tx,
             rx,
@@ -128,7 +155,7 @@ impl<P: Process> Driver<P> for PipeDriver<P> {
 /// Surfaced to the lifecycle loop via [`Driver::pipe_handle`]. Not a
 /// user-facing type — users interact only through `ctx.pipe_to_self(...)`.
 pub struct PipeHandle<P: Process> {
-    pub(crate) tx: mpsc::UnboundedSender<PipeFuture<P>>,
+    pub(crate) tx: mpsc::Sender<PipeFuture<P>>,
 }
 
 // Manual `Clone` impl: `#[derive(Clone)]` would (incorrectly) require

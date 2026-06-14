@@ -97,17 +97,17 @@ async fn idle_timeout_after_holds_duration() {
     }
 }
 
-/// Props::with_idle_timeout returns `&mut Self`, enabling builder chaining.
+/// Props::with_idle_timeout consumes self and returns Self, enabling chained configuration.
 #[tokio::test]
 async fn props_with_idle_timeout_builder_is_chainable() {
     // Given: freshly created Props
     let (started, stopped, counter) = tracked_state();
-    let mut props = test_props(started, stopped, counter);
+    let props = test_props(started, stopped, counter);
 
-    // When: with_idle_timeout is called as a builder method
+    // When: with_idle_timeout is called as a self-consuming builder method
     let result = props.with_idle_timeout(IdleTimeout::After(Duration::from_secs(10)));
 
-    // Then: the return type is &mut Props (compiles; no panic)
+    // Then: the return type is Props (self-consuming; compiles and does not panic)
     let _ = result;
 }
 
@@ -137,8 +137,8 @@ async fn idle_timeout_after_calls_on_stop_when_idle() {
     // Given: a process with a 50ms idle timeout
     let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
-    let mut props = test_props(started.clone(), stopped.clone(), counter);
-    props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
+    let props = test_props(started.clone(), stopped.clone(), counter);
+    let props = props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
 
     // When: the process is spawned and no messages are sent
     let _proxy = system.spawn(props).await;
@@ -155,8 +155,8 @@ async fn idle_timeout_after_notifies_watcher_with_timeout_reason() {
     // Given: a target process with a 50ms idle timeout
     let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
-    let mut target_props = test_props(started.clone(), stopped.clone(), counter);
-    target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
+    let target_props = test_props(started.clone(), stopped.clone(), counter);
+    let target_props = target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
     let target_proxy = system.spawn(target_props).await;
     let target_pid = target_proxy.pid();
     wait_for_flag(&started).await;
@@ -236,8 +236,8 @@ async fn idle_timeout_persistent_ignores_system_default() {
 
     // And: a process explicitly set to Persistent
     let (started, stopped, counter) = tracked_state();
-    let mut target_props = test_props(started.clone(), stopped.clone(), counter);
-    target_props.with_idle_timeout(IdleTimeout::Persistent);
+    let target_props = test_props(started.clone(), stopped.clone(), counter);
+    let target_props = target_props.with_idle_timeout(IdleTimeout::Persistent);
     let target_proxy = system.spawn(target_props).await;
     let target_pid = target_proxy.pid();
     wait_for_flag(&started).await;
@@ -315,8 +315,8 @@ async fn idle_timeout_after_overrides_longer_system_default() {
 
     // And: a process with its own 50ms timeout (much shorter than the system default)
     let (started, stopped, counter) = tracked_state();
-    let mut target_props = test_props(started.clone(), stopped.clone(), counter);
-    target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
+    let target_props = test_props(started.clone(), stopped.clone(), counter);
+    let target_props = target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
 
     let _proxy = system.spawn(target_props).await;
     wait_for_flag(&started).await;
@@ -334,8 +334,8 @@ async fn idle_message_resets_timeout_timer() {
     // Given: a process with a 100ms idle timeout
     let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
-    let mut target_props = test_props(started.clone(), stopped.clone(), counter);
-    target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(100)));
+    let target_props = test_props(started.clone(), stopped.clone(), counter);
+    let target_props = target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(100)));
     let target_proxy = system.spawn(target_props).await;
     wait_for_flag(&started).await;
 

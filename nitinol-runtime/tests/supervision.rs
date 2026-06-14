@@ -72,11 +72,11 @@ fn supervised_props(
     stop_count: Arc<AtomicU32>,
     strategy: SupervisionStrategy,
 ) -> Props<SupervisedProcess> {
-    let mut props = Props::new(move || SupervisedProcess {
+    let props = Props::new(move || SupervisedProcess {
         start_count: start_count.clone(),
         stop_count: stop_count.clone(),
     });
-    props.with_supervision_strategy(strategy);
+    let props = props.with_supervision_strategy(strategy);
     props
 }
 
@@ -143,10 +143,7 @@ async fn restart_strategy_failure_restarts_process() {
     let props = supervised_props(
         start_count.clone(),
         stop_count.clone(),
-        SupervisionStrategy::Restart {
-            max_retries: 5,
-            within: Duration::from_secs(10),
-        },
+        SupervisionStrategy::restart(5, Duration::from_secs(10)).expect("valid restart config"),
     );
     let proxy = system.spawn(props).await;
     wait_for_count(&start_count, 1).await;
@@ -169,10 +166,7 @@ async fn restart_strategy_calls_on_stop_before_restart() {
     let props = supervised_props(
         start_count.clone(),
         stop_count.clone(),
-        SupervisionStrategy::Restart {
-            max_retries: 5,
-            within: Duration::from_secs(10),
-        },
+        SupervisionStrategy::restart(5, Duration::from_secs(10)).expect("valid restart config"),
     );
     let proxy = system.spawn(props).await;
     wait_for_count(&start_count, 1).await;
@@ -195,10 +189,7 @@ async fn restart_preserves_pid() {
     let props = supervised_props(
         start_count.clone(),
         stop_count.clone(),
-        SupervisionStrategy::Restart {
-            max_retries: 5,
-            within: Duration::from_secs(10),
-        },
+        SupervisionStrategy::restart(5, Duration::from_secs(10)).expect("valid restart config"),
     );
     let proxy = system.spawn(props).await;
     let original_pid = proxy.pid();
@@ -222,10 +213,7 @@ async fn restart_process_remains_in_registry() {
     let props = supervised_props(
         start_count.clone(),
         stop_count.clone(),
-        SupervisionStrategy::Restart {
-            max_retries: 5,
-            within: Duration::from_secs(10),
-        },
+        SupervisionStrategy::restart(5, Duration::from_secs(10)).expect("valid restart config"),
     );
     let proxy = system.spawn(props).await;
     let pid = proxy.pid();
@@ -253,10 +241,7 @@ async fn restarted_process_handles_subsequent_messages() {
     let props = supervised_props(
         start_count.clone(),
         stop_count.clone(),
-        SupervisionStrategy::Restart {
-            max_retries: 5,
-            within: Duration::from_secs(10),
-        },
+        SupervisionStrategy::restart(5, Duration::from_secs(10)).expect("valid restart config"),
     );
     let proxy = system.spawn(props).await;
     wait_for_count(&start_count, 1).await;
@@ -288,10 +273,7 @@ async fn restart_rate_limit_exceeded_causes_permanent_stop() {
     let props = supervised_props(
         start_count.clone(),
         stop_count.clone(),
-        SupervisionStrategy::Restart {
-            max_retries: 2,
-            within: Duration::from_secs(10),
-        },
+        SupervisionStrategy::restart(2, Duration::from_secs(10)).expect("valid restart config"),
     );
     let proxy = system.spawn(props).await;
     let pid = proxy.pid();
@@ -332,10 +314,7 @@ async fn restart_rate_limit_resets_after_window_expires() {
     let props = supervised_props(
         start_count.clone(),
         stop_count.clone(),
-        SupervisionStrategy::Restart {
-            max_retries: 1,
-            within: Duration::from_millis(50),
-        },
+        SupervisionStrategy::restart(1, Duration::from_millis(50)).expect("valid restart config"),
     );
     let proxy = system.spawn(props).await;
     wait_for_count(&start_count, 1).await;
@@ -370,10 +349,7 @@ async fn restart_at_exact_rate_limit_boundary() {
     let props = supervised_props(
         start_count.clone(),
         stop_count.clone(),
-        SupervisionStrategy::Restart {
-            max_retries: 1,
-            within: Duration::from_secs(10),
-        },
+        SupervisionStrategy::restart(1, Duration::from_secs(10)).expect("valid restart config"),
     );
     let proxy = system.spawn(props).await;
     let pid = proxy.pid();
@@ -442,23 +418,20 @@ async fn failure_in_one_process_does_not_affect_sibling() {
     );
 }
 
-/// Props::into_parts panics when `within` is Duration::ZERO, preventing silent
-/// rate-limit bypass where retain drops all timestamps and the limit is never enforced.
+/// Post-spec: `SupervisionStrategy::restart(_, Duration::ZERO)` rejects the
+/// invalid window at the smart-constructor boundary via `ConfigError`. The
+/// pre-spec runtime `assert!` is gone, so the rejection is now a typed
+/// `Result` error (Issue #56).
 #[tokio::test]
-#[should_panic(expected = "SupervisionStrategy::Restart requires `within` > 0")]
-async fn restart_strategy_with_zero_within_panics() {
-    let system = ProcessSystem::new().await;
-    let start_count = Arc::new(AtomicU32::new(0));
-    let stop_count = Arc::new(AtomicU32::new(0));
-    let props = supervised_props(
-        start_count,
-        stop_count,
-        SupervisionStrategy::Restart {
-            max_retries: 3,
-            within: Duration::ZERO,
-        },
+async fn restart_strategy_with_zero_within_returns_config_error() {
+    let result = SupervisionStrategy::restart(3, Duration::ZERO);
+    assert!(
+        matches!(
+            result,
+            Err(nitinol_runtime::error::ConfigError::InvalidRestartWithin),
+        ),
+        "restart(_, ZERO) must surface ConfigError::InvalidRestartWithin; got {result:?}"
     );
-    system.spawn(props).await;
 }
 
 /// Resume strategy: a handler failure is ignored and the process continues running.
@@ -588,7 +561,7 @@ async fn resume_strategy_keeps_process_in_registry() {
     );
 }
 
-/// Props::with_supervision_strategy is a builder method returning &mut Self,
+/// Props::with_supervision_strategy consumes self and returns Self,
 /// enabling chained configuration.
 #[tokio::test]
 async fn props_supervision_strategy_builder_is_chainable() {
@@ -598,17 +571,14 @@ async fn props_supervision_strategy_builder_is_chainable() {
         Arc::new(AtomicU32::new(0)),
         Arc::new(AtomicU32::new(0)),
     );
-    let mut props = Props::new(move || SupervisedProcess {
+    let props = Props::new(move || SupervisedProcess {
         start_count: s.clone(),
         stop_count: st.clone(),
     });
-    // Chain: with_supervision_strategy returns &mut Self
-    let result = props.with_supervision_strategy(SupervisionStrategy::Restart {
-        max_retries: 3,
-        within: Duration::from_secs(60),
-    });
+    // Chain: with_supervision_strategy consumes self and returns Self
+    let result = props.with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(60)).expect("valid restart config"));
 
-    // Then: builder returns &mut Props (compiles and does not panic)
+    // Then: builder returns Props (self-consuming; compiles and does not panic)
     let _ = result;
     let _ = c; // avoid unused warning
 }

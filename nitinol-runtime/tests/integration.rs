@@ -36,7 +36,7 @@ async fn named_process_lookup_and_communicate() {
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped.clone(), counter);
     let name = ProcessName::new("worker");
-    let proxy = system.spawn_named(name.clone(), props).await;
+    let proxy = system.spawn(props.with_name(name.clone())).await;
     wait_for_flag(&started).await;
 
     // When: the process is found by name and communicated with

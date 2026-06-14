@@ -131,7 +131,7 @@ async fn publish_returns_side_variant() {
     // Given: a running process system with a BoxedMessage stream
     let system = ProcessSystem::new().await;
     let stream = system
-        .spawn_stream::<BoxedMessage>(ProcessName::new("effect-test-publish"))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(ProcessName::new("effect-test-publish")))
         .await
         .expect("spawn_stream should succeed");
 

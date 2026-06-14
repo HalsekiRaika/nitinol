@@ -108,11 +108,8 @@ async fn demo_stop_strategy() {
 async fn demo_restart_strategy() {
     info!("Restart strategy (max_retries=2, within=10s)");
     let system = ProcessSystem::new().await;
-    let mut props = Props::new(DataTransformer::new);
-    props.with_supervision_strategy(SupervisionStrategy::Restart {
-        max_retries: 2,
-        within: Duration::from_secs(10),
-    });
+    let props = Props::new(DataTransformer::new)
+        .with_supervision_strategy(SupervisionStrategy::restart(2, Duration::from_secs(10)).expect("valid restart config"));
     let proxy = system.spawn(props).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -140,11 +137,8 @@ async fn demo_restart_strategy() {
 async fn demo_rate_limit_exceeded() {
     info!("Rate limit exceeded (max_retries=2, within=10s)");
     let system = ProcessSystem::new().await;
-    let mut props = Props::new(DataTransformer::new);
-    props.with_supervision_strategy(SupervisionStrategy::Restart {
-        max_retries: 2,
-        within: Duration::from_secs(10),
-    });
+    let props = Props::new(DataTransformer::new)
+        .with_supervision_strategy(SupervisionStrategy::restart(2, Duration::from_secs(10)).expect("valid restart config"));
     let proxy = system.spawn(props).await;
     let pid = proxy.pid();
     tokio::time::sleep(Duration::from_millis(50)).await;

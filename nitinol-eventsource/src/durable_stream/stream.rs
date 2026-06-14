@@ -7,7 +7,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadedEvent;
 use nitinol_runtime::error::SpawnError;
 use nitinol_runtime::ident::ProcessName;
-use nitinol_runtime::process::{Props, SupervisionStrategy};
+use nitinol_runtime::process::{Props, StreamProps, SupervisionStrategy};
 use nitinol_runtime::ProcessSystem;
 
 use crate::durable_stream::cursor::SequenceCursor;
@@ -114,7 +114,7 @@ where
     T: 'static + Send + Sync + Clone,
 {
     pub async fn spawn(self, system: &ProcessSystem) -> Result<DurableStreamProxy<T>, SpawnError> {
-        let stream_proxy = system.spawn_stream::<T>(self.topic).await?;
+        let stream_proxy = system.spawn(StreamProps::<T>::new(self.topic.clone())).await?;
         let publisher = stream_proxy.clone();
         let DurableStream {
             store,
@@ -134,23 +134,25 @@ where
         let producer_start_open = Arc::clone(&start_open);
         let producer_cursor = initial_cursor;
 
-        let mut props = Props::new(move || DurablePollerProcess {
+        let restart_strategy = SupervisionStrategy::restart(
+            POLLER_RESTART_MAX_RETRIES,
+            POLLER_RESTART_WITHIN,
+        )
+        .expect("POLLER_RESTART_WITHIN is a positive duration constant");
+
+        let driver = IntervalDriver::<DurablePollerProcess<T>>::new(poll_interval);
+        let poller_name = shared_poller_name(stream_proxy.pid());
+        let props = Props::new(move || DurablePollerProcess {
             store: Arc::clone(&producer_store),
             publisher: producer_publisher.clone(),
             transform: Arc::clone(&producer_transform),
             cursor: producer_cursor.clone(),
             start_open: Arc::clone(&producer_start_open),
-        });
-        props.with_supervision_strategy(SupervisionStrategy::Restart {
-            max_retries: POLLER_RESTART_MAX_RETRIES,
-            within: POLLER_RESTART_WITHIN,
-        });
-
-        let driver = IntervalDriver::<DurablePollerProcess<T>>::new(poll_interval);
-        let poller_name = shared_poller_name(stream_proxy.pid());
-        let shared_poller = system
-            .spawn_named_with_driver(poller_name, props, driver)
-            .await;
+        })
+        .with_supervision_strategy(restart_strategy)
+        .with_name(poller_name)
+        .add_driver(driver);
+        let shared_poller = system.spawn(props).await;
 
         Ok(DurableStreamProxy::new(
             stream_proxy,

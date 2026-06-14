@@ -1,10 +1,17 @@
 mod combine;
+mod dyn_driver;
+mod dyn_set;
 mod message;
 mod pipe;
+mod stash;
 
 pub use self::combine::Combine;
 pub use self::pipe::{PipeDriver, PipeHandle, PipePanic, PipedTask};
+
+pub(crate) use self::dyn_driver::{boxed_dyn_driver, DynDriver};
+pub(crate) use self::dyn_set::DynDriverSet;
 pub(crate) use self::message::MessageDriver;
+pub(crate) use self::stash::StashDriver;
 
 use std::future::Future;
 
@@ -24,6 +31,15 @@ use crate::process::{Process, ProcessContext};
 /// Multiple Drivers can be composed into one via [`Combine`] (and the
 /// [`combine_drivers!`](crate::combine_drivers) macro). The lifecycle loop
 /// still drives a single Driver — multiplexing is the Driver tree's job.
+///
+/// # Implicit Drivers
+///
+/// `ProcessSystem::spawn(props)` automatically composes the following drivers:
+/// - `MessageDriver` — mailbox receive (`tell` / `ask`)
+/// - `PipeDriver`    — backs `ctx.pipe_to_self`
+/// - `StashDriver`   — backs `ctx.stash` / `ctx.unstash_all`
+///
+/// Additional drivers added via `Props::add_driver` are composed on top.
 pub trait Driver<P: Process>: Send + 'static {
     /// One unit of work delivered by `next` and consumed by `apply`.
     type Event: Send;

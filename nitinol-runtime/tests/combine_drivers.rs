@@ -241,12 +241,7 @@ async fn combine_drivers_two_args_dispatch_events_to_each_side() {
         }
     );
 
-    let _proxy = system
-        .spawn_with_driver(
-            counter_props(),
-            driver,
-        )
-        .await;
+    let _proxy = system.spawn(counter_props().add_driver(driver)).await;
 
     int_tx.send(1).await.expect("int send");
     int_tx.send(2).await.expect("int send");
@@ -291,12 +286,7 @@ async fn combine_drivers_three_args_dispatch_events_to_all_three_sides() {
         }
     );
 
-    let _proxy = system
-        .spawn_with_driver(
-            counter_props(),
-            driver,
-        )
-        .await;
+    let _proxy = system.spawn(counter_props().add_driver(driver)).await;
 
     int_tx.send(7).await.expect("int send");
     str_tx.send("x".into()).await.expect("str send");

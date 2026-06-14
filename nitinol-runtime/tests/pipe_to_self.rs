@@ -490,10 +490,10 @@ async fn pipe_panic_payload_is_accessible_via_payload_accessor() {
 }
 
 // ---------------------------------------------------------------------------
-// Misuse: calling `pipe_to_self` without a composed `PipeDriver` panics
-// synchronously inside the call. The lifecycle loop must NOT silently drop
-// the future, because that would mask programmer errors (saga state-machine
-// bug class). See plan §"PipeDriver 非配線時の `ctx.pipe_to_self` の挙動".
+// Issue #56 inversion: under the unified spawn entry, the Core `PipeDriver`
+// is ALWAYS composed, so `ctx.pipe_to_self` never panics on a "missing
+// driver" basis. The probe here is now a positive check that the always-
+// composed driver actually delivers the piped follow-up.
 // ---------------------------------------------------------------------------
 
 /// Process used only to host the "no PipeDriver" probe driver. Its handlers
@@ -571,63 +571,48 @@ impl Driver<ProbeProcess> for ProbeDriver {
     }
 }
 
-/// Given a process spawned with `spawn_with_driver(props, ProbeDriver)`
-/// — explicitly NOT composing `PipeDriver` —,
+/// Given a process spawned with `Props::add_driver(ProbeDriver)`,
 /// when the driver's `apply` calls `ctx.pipe_to_self(...)`,
-/// then `pipe_to_self` panics synchronously rather than silently dropping
-/// the future. The panic message must clearly identify the misuse so it
-/// surfaces in saga / handler logs.
+/// then the always-composed Core `PipeDriver` accepts the future and the
+/// call returns normally — no panic, no silent drop on the happy path.
 #[tokio::test]
-async fn pipe_to_self_panics_when_pipe_driver_is_not_composed() {
+async fn pipe_to_self_does_not_panic_under_unified_spawn_entry() {
     // Given
     let system = ProcessSystem::new().await;
     let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let ok_taken: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     let (tx, rx) = mpsc::channel::<()>(4);
 
-    let props = Props::new(|| ProbeProcess);
+    let props = Props::new(|| ProbeProcess).add_driver(ProbeDriver {
+        rx,
+        captured: captured.clone(),
+        ok_path_taken: ok_taken.clone(),
+    });
 
-    let _proxy = system
-        .spawn_with_driver(
-            props,
-            ProbeDriver {
-                rx,
-                captured: captured.clone(),
-                ok_path_taken: ok_taken.clone(),
-            },
-        )
-        .await;
+    let _proxy = system.spawn(props).await;
 
     // When: drive the apply path once.
     tx.send(()).await.expect("driver source send");
 
-    // Then: poll the captured slot.
+    // Then: the ok-path flag flips and no panic message is recorded.
     let deadline = Instant::now() + Duration::from_secs(5);
-    let panic_msg = loop {
-        if let Some(s) = captured.lock().await.clone() {
-            break s;
-        }
+    loop {
         if *ok_taken.lock().await {
+            break;
+        }
+        if let Some(msg) = captured.lock().await.clone() {
             panic!(
-                "pipe_to_self returned normally with no PipeDriver composed — \
-                 misuse must panic, not silently drop the future"
+                "pipe_to_self panicked under the unified spawn entry, \
+                 but the Core PipeDriver is supposed to be always composed: \
+                 captured panic message = {msg:?}"
             );
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for pipe_to_self panic to be captured"
+            "timed out waiting for pipe_to_self ok-path flag to flip"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
-    };
-
-    // The plan stipulates the panic message must identify PipeDriver
-    // composition as the missing piece.
-    let lowered = panic_msg.to_lowercase();
-    assert!(
-        lowered.contains("pipedriver") || lowered.contains("pipe_to_self"),
-        "panic message must clearly identify the misuse \
-         (mention PipeDriver or pipe_to_self); got {panic_msg:?}"
-    );
+    }
 }
 
 // ---------------------------------------------------------------------------

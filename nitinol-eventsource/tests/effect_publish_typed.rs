@@ -61,7 +61,7 @@ async fn effect_publish_typed_returns_side_variant() {
     // Given: a running system with a typed Stream<TypedMsg>
     let system = ProcessSystem::new().await;
     let stream: ProcessProxy<Stream<TypedMsg>> = system
-        .spawn_stream::<TypedMsg>(ProcessName::new("effect-publish-typed-side"))
+        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(ProcessName::new("effect-publish-typed-side")))
         .await
         .expect("spawn_stream must succeed");
 
@@ -93,7 +93,7 @@ async fn effect_publish_typed_delivers_message_to_subscriber() {
     // Given: a typed stream with one subscriber
     let system = ProcessSystem::new().await;
     let stream: ProcessProxy<Stream<TypedMsg>> = system
-        .spawn_stream::<TypedMsg>(ProcessName::new("effect-publish-typed-roundtrip"))
+        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(ProcessName::new("effect-publish-typed-roundtrip")))
         .await
         .expect("spawn_stream must succeed");
 
@@ -167,7 +167,7 @@ async fn effect_publish_type_parameter_is_consistent_between_stream_and_message(
     // Given
     let system = ProcessSystem::new().await;
     let stream: ProcessProxy<Stream<TypedMsg>> = system
-        .spawn_stream::<TypedMsg>(ProcessName::new("effect-publish-typed-consistency"))
+        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(ProcessName::new("effect-publish-typed-consistency")))
         .await
         .expect("spawn_stream must succeed");
 
@@ -196,7 +196,7 @@ async fn effect_publish_typed_broadcasts_to_all_subscribers() {
     // Given: a typed stream with two subscribers
     let system = ProcessSystem::new().await;
     let stream: ProcessProxy<Stream<TypedMsg>> = system
-        .spawn_stream::<TypedMsg>(ProcessName::new("effect-publish-typed-broadcast"))
+        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(ProcessName::new("effect-publish-typed-broadcast")))
         .await
         .expect("spawn_stream must succeed");
 

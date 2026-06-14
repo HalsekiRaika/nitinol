@@ -10,14 +10,16 @@ use tokio::sync::mpsc;
 use crate::error::SendError;
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
-use crate::process::driver::{Driver, PipeHandle, PipePanic, PipedTask};
+use crate::process::driver::{PipeHandle, PipePanic, PipedTask};
 use crate::process::pid_set::PidSet;
+use crate::process::props::{MailboxCapacity, PipeCapacity, StashCapacity};
 use crate::process::proxy::ProcessProxy;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
 use crate::process::spawn::SpawnEnv;
+use crate::process::spawnable::SpawnDispatch;
 use crate::process::task::{TellTask, UserTask};
-use crate::process::{Process, Props, Receive};
+use crate::process::{Process, Receive};
 
 use super::wiring;
 
@@ -32,6 +34,9 @@ pub struct ProcessContext<P: Process> {
     pub(crate) parent: Option<Pid>,
     pub(crate) children: PidSet,
     pub(crate) default_idle_timeout: Option<Duration>,
+    pub(crate) default_mailbox_capacity: MailboxCapacity,
+    pub(crate) default_stash_capacity: StashCapacity,
+    pub(crate) default_pipe_capacity: PipeCapacity,
     /// PIDs this process explicitly registered for DeathWatch via `ctx.watch`.
     ///
     /// Used by the lifecycle loop to distinguish hierarchy-only children (where
@@ -50,15 +55,15 @@ impl<P: Process> ProcessContext<P> {
         self.name.as_ref()
     }
 
-    /// Pid of the process that spawned this one via `ctx.spawn_child*`.
+    /// Pid of the process that spawned this one via `ctx.spawn_child`.
     ///
     /// Returns `None` for top-level processes (those spawned via
-    /// `ProcessSystem::spawn*`).
+    /// `ProcessSystem::spawn`).
     pub fn parent(&self) -> Option<&Pid> {
         self.parent.as_ref()
     }
 
-    /// The set of Pids spawned by this process via `ctx.spawn_child*`.
+    /// The set of Pids spawned by this process via `ctx.spawn_child`.
     ///
     /// Read-only — the runtime maintains the membership during the process's
     /// lifecycle (entries are auto-removed when a child terminates).
@@ -74,7 +79,7 @@ impl<P: Process> ProcessContext<P> {
         &self.self_proxy
     }
 
-    /// Spawn `props` as a child of this process.
+    /// Spawn `spawnable` as a child of this process.
     ///
     /// The new process inherits the parent's [`ProcessRegistry`] (flat
     /// registry — no path information attached to the Pid) and the system
@@ -82,42 +87,28 @@ impl<P: Process> ProcessContext<P> {
     /// `ctx.parent()` returns this process's Pid. When this process stops,
     /// the runtime cascade-stops every child (reverse insertion order) and
     /// waits for their `Terminated` before exiting.
-    pub async fn spawn_child<C: Process>(&mut self, props: Props<C>) -> ProcessProxy<C> {
-        let env = SpawnEnv::child(
-            self.registry.clone(),
-            self.dead_letter.clone(),
-            self.default_idle_timeout,
-            self.pid,
-        );
-        let proxy = env.spawn(None, props).await;
-        self.register_child(&proxy).await;
-        proxy
-    }
-
-    /// Spawn `props` as a child of this process, driven by `driver`.
     ///
-    /// Same parent/child semantics as [`Self::spawn_child`], but the caller
-    /// supplies the driver tree — used for tick / poll sources where the
-    /// default `MessageDriver + PipeDriver` composition is not appropriate
-    /// (e.g. `IntervalDriver` backing a `DurableStream` poller).
-    pub async fn spawn_child_with_driver<C, D>(
-        &mut self,
-        props: Props<C>,
-        driver: D,
-    ) -> ProcessProxy<C>
-    where
-        C: Process,
-        D: Driver<C>,
-    {
+    /// Accepts `Props<C>` (returns `ProcessProxy<C>`) or `StreamProps<T>`
+    /// (returns `Result<ProcessProxy<Stream<T>>, SpawnError>`).
+    #[allow(private_bounds)]
+    pub async fn spawn_child<S: SpawnDispatch>(&mut self, spawnable: S) -> S::Output {
         let env = SpawnEnv::child(
             self.registry.clone(),
             self.dead_letter.clone(),
             self.default_idle_timeout,
+            self.default_mailbox_capacity,
+            self.default_stash_capacity,
+            self.default_pipe_capacity,
             self.pid,
         );
-        let proxy = env.spawn_with_driver(None, props, driver).await;
-        self.register_child(&proxy).await;
-        proxy
+        let registry = env.registry().clone();
+        let output = spawnable.spawn_with(&env).await;
+        let child_pid = match S::child_pid(&output) {
+            Some(pid) => pid,
+            None => return output,
+        };
+        self.register_child_by_pid(child_pid, &registry).await;
+        output
     }
 
     /// Record `proxy` as a child of this process.
@@ -133,13 +124,12 @@ impl<P: Process> ProcessContext<P> {
     /// `Terminated { why: NotFound }` is delivered to this process's `sys_tx`.
     /// That guarantees `stop_children_and_wait` can drain the child even when
     /// it exits before the Watch registration completes.
-    async fn register_child<C: Process>(&mut self, proxy: &ProcessProxy<C>) {
-        let child_pid = proxy.pid();
+    async fn register_child_by_pid(&mut self, child_pid: Pid, registry: &ProcessRegistry) {
         self.children.add(child_pid);
         wiring::watch(
             self.pid,
             child_pid,
-            &self.registry,
+            registry,
             &self.sys_tx,
             self.dead_letter.as_ref(),
         )
@@ -179,6 +169,25 @@ impl<P: Process> ProcessContext<P> {
         wiring::unwatch(self.pid, target_pid, &self.registry).await;
     }
 
+    /// Save the in-flight message into the stash for later re-delivery.
+    ///
+    /// API surface only — the queue / replay machinery is owned by the
+    /// follow-up "stash B issue". This stub is removed once that issue
+    /// lands a real `StashDriver` queue implementation; the public
+    /// signature is fixed today so call sites can compile against it.
+    pub async fn stash<M>(&mut self, _msg: M)
+    where
+        P: Receive<M>,
+        M: 'static + Send + Sync,
+    {
+    }
+
+    /// Re-deliver every stashed message back to the mailbox.
+    ///
+    /// API surface only — paired with [`Self::stash`]; removed by the
+    /// follow-up "stash B issue".
+    pub async fn unstash_all(&mut self) {}
+
     /// Pipe the future `fut`'s result back into this actor as a typed message.
     ///
     /// The future is polled by the owning process's `PipeDriver` inside the
@@ -203,12 +212,11 @@ impl<P: Process> ProcessContext<P> {
     /// Pipe futures cannot be cancelled individually; they are dropped en
     /// masse when the lifecycle loop terminates.
     ///
-    /// # Panics
+    /// # Bounded backpressure
     ///
-    /// Panics if the actor was started without a `PipeDriver` composed into
-    /// its driver tree (i.e. `spawn_with_driver` was used and the caller did
-    /// not include `PipeDriver::new()` via `combine_drivers!`). Silent drop
-    /// would mask programmer errors, so the misuse is reported immediately.
+    /// Enqueue is `try_send` over the `PipeDriver`'s bounded channel: when
+    /// the buffer is full or the channel is closed, the future is dropped
+    /// silently and the actor stays alive.
     pub fn pipe_to_self<F, M, U>(&self, fut: F, map: U)
     where
         F: Future + Send + 'static,
@@ -219,10 +227,13 @@ impl<P: Process> ProcessContext<P> {
     {
         let handle = match &self.pipe_handle {
             Some(h) => h,
-            None => panic!(
-                "ProcessContext::pipe_to_self called but no PipeDriver is composed; \
-                 include PipeDriver::new() in your driver tree via combine_drivers! \
-                 (or use ProcessSystem::spawn / spawn_named, which compose it automatically)"
+            // Unreachable in normal operation: `lifecycle::run` always
+            // composes a `PipeDriver` into the Core driver trio, so every
+            // spawned process has a pipe handle.
+            None => unreachable!(
+                "ProcessContext::pipe_to_self called on a process whose driver tree \
+                 lacks PipeDriver — lifecycle::run is supposed to always compose \
+                 the Core trio (Message + Pipe + Stash)"
             ),
         };
 
@@ -236,10 +247,11 @@ impl<P: Process> ProcessContext<P> {
             PipedTask::new(task)
         };
 
-        // Send failures here mean the receiving PipeDriver was already
-        // dropped (lifecycle terminated). The future is dropped along with
-        // the send error — there is nothing meaningful to do, and panicking
-        // would crash the still-running shutdown path.
-        let _ = handle.tx.send(Box::pin(task_fut));
+        // try_send: on full (bounded buffer exhausted) or on closed
+        // (lifecycle terminated), drop silently. Panicking here would crash
+        // the still-running shutdown path or surprise the user on a
+        // bounded-buffer overload; silent drop matches the plan's
+        // pipe-to-self bounded migration.
+        let _ = handle.tx.try_send(Box::pin(task_fut));
     }
 }

@@ -48,7 +48,7 @@ async fn lookup_by_name_finds_named_process() {
     let (started, stopped, counter) = tracked_state();
     let props = test_props(started.clone(), stopped, counter);
     let name = ProcessName::new("named-worker");
-    let _proxy = system.spawn_named(name.clone(), props).await;
+    let _proxy = system.spawn(props.with_name(name.clone())).await;
     wait_for_flag(&started).await;
 
     // When: lookup by name

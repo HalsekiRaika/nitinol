@@ -345,7 +345,7 @@ async fn e2e_publish_side_effect_from_decide_reaches_stream_subscriber() {
     // Spawn the BoxedMessage stream
     let stream = system
         .process_system()
-        .spawn_stream::<BoxedMessage>(ProcessName::new("e2e-comm-pub-stream"))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(ProcessName::new("e2e-comm-pub-stream")))
         .await
         .expect("spawn_stream must succeed");
 

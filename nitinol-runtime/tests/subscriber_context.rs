@@ -120,7 +120,7 @@ async fn subscriber_with_subscriber_context_receives_published_messages() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("subscriber-context-receives");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream must succeed");
 
@@ -163,7 +163,7 @@ async fn subscriber_context_pid_matches_spawned_subscriber_pid() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("subscriber-context-pid");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream must succeed");
 
@@ -242,7 +242,7 @@ async fn subscriber_remains_addressable_after_spawn_proxy_drop() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("subscriber-context-drop");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream must succeed");
 
@@ -342,7 +342,7 @@ async fn subscriber_context_stop_self_stops_subscriber() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("subscriber-ctx-stop-self");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream must succeed");
 
@@ -444,7 +444,7 @@ async fn subscriber_context_watch_live_process_continues_working_after_target_st
     // And: a subscriber stream
     let topic = ProcessName::new("subscriber-ctx-watch");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream must succeed");
 
@@ -533,7 +533,7 @@ async fn subscriber_context_unwatch_does_not_disrupt_subscriber() {
 
     let topic = ProcessName::new("subscriber-ctx-unwatch");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream must succeed");
 

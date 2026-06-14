@@ -88,7 +88,7 @@ async fn sensor_publish_delivers_to_all_subscribers() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("test-fanout");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -153,7 +153,7 @@ async fn alert_fires_only_for_readings_above_threshold() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("test-alert-thresh");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -230,7 +230,7 @@ async fn alert_does_not_fire_when_celsius_equals_threshold() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("test-alert-boundary");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -291,7 +291,7 @@ async fn alert_count_tracks_only_above_threshold_readings() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("test-mixed-temps");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -377,7 +377,7 @@ async fn display_subscriber_counts_every_received_message() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("test-display");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -435,7 +435,7 @@ async fn alert_subscriber_via_props_subscriber_receives_above_threshold_reading(
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("test-props-sub");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -475,7 +475,7 @@ async fn unsubscribed_subscriber_does_not_receive_subsequent_messages() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("test-unsub");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -563,7 +563,7 @@ async fn stopped_subscriber_is_auto_removed_subsequent_publish_succeeds() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("test-auto-cleanup");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 
@@ -628,7 +628,7 @@ async fn only_stopped_subscriber_is_removed_remaining_stays_active() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("test-partial-cleanup");
     let stream = system
-        .spawn_stream::<BoxedMessage>(topic)
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
         .await
         .expect("spawn_stream should succeed");
 

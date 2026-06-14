@@ -195,10 +195,10 @@ pub fn watcher_props(
     received: Arc<Mutex<Option<Terminated>>>,
     idle_timeout: IdleTimeout,
 ) -> Props<WatcherProcess> {
-    let mut props = Props::new(move || WatcherProcess {
+    let props = Props::new(move || WatcherProcess {
         received: received.clone(),
     });
-    props.with_idle_timeout(idle_timeout);
+    let props = props.with_idle_timeout(idle_timeout);
     props
 }
 

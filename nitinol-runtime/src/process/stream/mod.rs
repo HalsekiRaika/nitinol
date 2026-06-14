@@ -1,3 +1,7 @@
+mod stream_props;
+
+pub use self::stream_props::StreamProps;
+
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::future::Future;

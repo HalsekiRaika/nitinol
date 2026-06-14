@@ -405,17 +405,14 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
     let otc = on_terminated_called.clone();
     let osc = on_start_count.clone();
     let cpas = child_pids_after_start.clone();
-    let mut props = Props::new(move || RestartableSubscriber {
+    let props = Props::new(move || RestartableSubscriber {
         config: config.clone(),
         on_terminated_called: otc.clone(),
         on_start_count: osc.clone(),
         child_pids: cpas.clone(),
-    });
-    props.with_idle_timeout(IdleTimeout::Persistent);
-    props.with_supervision_strategy(SupervisionStrategy::Restart {
-        max_retries: 3,
-        within: std::time::Duration::from_secs(10),
-    });
+    })
+    .with_idle_timeout(IdleTimeout::Persistent)
+    .with_supervision_strategy(SupervisionStrategy::restart(3, std::time::Duration::from_secs(10)).expect("valid restart config"));
 
     let proxy = system.spawn(props).await;
 
