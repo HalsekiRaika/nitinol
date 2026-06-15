@@ -173,6 +173,7 @@ impl<P: Process, D: Driver<P>> Props<P, D> {
 /// // Empty driver list — must be a compile error.
 /// type Bad = Props![MyProc;];
 /// ```
+#[allow(non_snake_case)]
 #[macro_export]
 macro_rules! Props {
     // Internal: type-level right-fold of `Combine` for 1+ drivers.
