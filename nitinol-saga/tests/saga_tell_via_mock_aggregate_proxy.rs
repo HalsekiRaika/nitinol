@@ -210,7 +210,7 @@ async fn saga_tell_to_mock_dispatches_command_observable_via_drain_captured() {
         .await
         .expect("saga handle() must run within 3 seconds");
 
-    // The Tell side effect dispatches via the retry executor's `tokio::spawn` —
+    // The Tell side effect dispatches via the outbox executor child process —
     // give it a brief window to land in the mock buffer before draining.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let captured = loop {

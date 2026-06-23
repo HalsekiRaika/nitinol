@@ -156,15 +156,14 @@ impl OutboxAppender {
     /// Append a `TellAcked` or `TellFailed` marker at the given pre-claimed
     /// sequence number.
     ///
-    /// The caller (outbox retry executor) sends `AppendTerminalAndClaim` to the
-    /// saga via `self_proxy.ask`, which atomically appends the terminal marker
+    /// Invoked from the saga's `AppendTerminalAndClaim` handler (the executor
+    /// child sends that message), which atomically appends the terminal marker
     /// and advances the sequence cursor inside the saga's single-threaded loop.
     ///
     /// Returns `true` when the marker was durably appended, `false` on failure.
-    /// Callers **must** check the return value before notifying the saga
-    /// process to remove the matching `pending_intents` entry — removing it on
-    /// failure would make a subsequent supervised restart unable to re-dispatch
-    /// the tell.
+    /// The handler **must** check the return value before removing the matching
+    /// `pending_intents` entry — removing it on failure would make a subsequent
+    /// supervised restart unable to re-dispatch the tell.
     pub(crate) async fn append_terminal(
         store: &Arc<dyn EventStore>,
         saga_id: &SagaId,

@@ -1,16 +1,17 @@
 //! Regression test for AI-52-010: when the outbox executor's terminal-marker
-//! append fails (i.e. `AppendTerminalAndClaim` returns `false`), a saga that
-//! returned `then_end()` must still stop.
+//! append fails, a saga that returned `then_end()` must still stop.
 //!
-//! Without the fix the deferred-stop condition was checked only in
-//! `OutboxTerminalSettled`, which is never sent when the terminal append fails.
-//! This left `pending_end == true` and `pending_intents` non-empty forever —
-//! the saga would never receive subsequent upstream events (its mailbox is
-//! alive but `pending_end` blocks the stop) and silently stall.
+//! Without the fix the deferred-stop condition was only triggered when the
+//! terminal append succeeded.  A store failure left `pending_end == true` and
+//! `pending_executor_count > 0` forever — the saga would never receive
+//! subsequent upstream events (its mailbox is alive but `pending_end` blocks
+//! the stop) and silently stall.
 //!
-//! With the fix, `OutboxTerminalAppendFailed` is sent instead, the saga
-//! decrements `pending_executor_count`, and `stop_self()` fires when the count
-//! reaches zero.
+//! With the fix, the outbox executor child sends `AppendTerminalAndClaim` to
+//! the parent saga via fire-and-forget `tell` regardless of the append outcome.
+//! The `AppendTerminalAndClaim` handler decrements `pending_executor_count`
+//! whether the durable append succeeds or fails, so `stop_self()` fires when
+//! the count reaches zero.
 //!
 //! The test verifies: after `tell(...).then_end()` where every terminal append
 //! fails, the saga process stops and no further upstream events are processed.
@@ -248,8 +249,8 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
         .await
         .expect("saga must handle the first upstream event within 5 seconds");
 
-    // Give the executor and OutboxTerminalAppendFailed message time to arrive,
-    // and the deferred stop to fire.
+    // Give the outbox executor child time to send AppendTerminalAndClaim and
+    // the deferred stop to fire.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Push a second upstream event.  If the saga stopped correctly, handle()

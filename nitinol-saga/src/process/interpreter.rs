@@ -16,7 +16,7 @@ use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
-use nitinol_runtime::process::{ProcessContext, ProcessProxy};
+use nitinol_runtime::process::ProcessContext;
 
 use crate::effect::{Schedule, TellIntent};
 use crate::id::SagaId;
@@ -40,10 +40,9 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     /// `pending_executor_count` reaches zero.
     pub(crate) pending_end: &'a mut bool,
     /// Mirror of `SagaProcess::pending_executor_count`.  Incremented for every
-    /// executor spawned in `persist_batch`; decremented by both
-    /// `OutboxTerminalSettled` and `OutboxTerminalAppendFailed`.
+    /// executor spawned in `persist_batch`; decremented by the
+    /// `AppendTerminalAndClaim` handler.
     pub(crate) pending_executor_count: &'a mut usize,
-    pub(crate) self_proxy: ProcessProxy<SagaProcess<S>>,
 }
 
 pub(crate) enum InterpretOutcome {
@@ -71,9 +70,8 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
                     }
                 } else {
                     // Executors are still in-flight.  Defer stop until every
-                    // executor reports via OutboxTerminalSettled or
-                    // OutboxTerminalAppendFailed, reducing pending_executor_count
-                    // to zero.
+                    // executor settles via AppendTerminalAndClaim, reducing
+                    // pending_executor_count to zero.
                     *ictx.pending_end = true;
                 }
                 InterpretOutcome::Stop
@@ -130,12 +128,8 @@ async fn persist_batch<S: Saga>(
     for (intent, tell_id) in tells.into_iter().zip(tell_ids) {
         ictx.pending_intents.insert(tell_id, intent.clone());
         *ictx.pending_executor_count += 1;
-        spawn_outbox_executor(
-            intent,
-            tell_id,
-            ictx.retry_policy.clone(),
-            ictx.self_proxy.clone(),
-        );
+        let policy = ictx.retry_policy.clone();
+        spawn_outbox_executor(ictx.process_ctx, intent, tell_id, policy).await;
     }
 
     InterpretOutcome::Continue

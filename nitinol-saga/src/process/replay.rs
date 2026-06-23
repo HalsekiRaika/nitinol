@@ -42,7 +42,7 @@ use futures_util::StreamExt;
 use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
-use nitinol_runtime::process::ProcessProxy;
+use nitinol_runtime::process::ProcessContext;
 
 use crate::effect::TellIntent;
 use crate::id::SagaId;
@@ -63,7 +63,7 @@ use crate::saga::Saga;
 /// after restart can inspect them via
 /// [`crate::SagaContext::failed_tell_ids`].
 ///
-/// Re-spawned outbox executors notify the saga via `OutboxTerminalSettled`
+/// Re-spawned outbox executor children settle via `AppendTerminalAndClaim`
 /// when they append a `TellFailed` terminal marker, so that asynchronous
 /// TellFailed outcomes are also surfaced to subsequent `Saga::handle` calls in
 /// the current run.
@@ -77,7 +77,7 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     pending_intents: &mut HashMap<u64, TellIntent>,
     crash_restart_factory: Option<&(dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync)>,
     retry_policy: RetryPolicy,
-    self_proxy: ProcessProxy<SagaProcess<S>>,
+    ctx: &mut ProcessContext<SagaProcess<S>>,
 ) -> Vec<u64> {
     let scan = match scan_stream(saga_id, state, codec, store, sequence).await {
         Some(s) => s,
@@ -92,7 +92,7 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
         pending_intents,
         crash_restart_factory,
         retry_policy,
-        self_proxy,
+        ctx,
     )
     .await;
     // Surface synthetic-TellFailed tell_ids the same way as TellFailed markers
@@ -219,7 +219,7 @@ async fn redispatch_pending<S: Saga>(
     pending_intents: &mut HashMap<u64, TellIntent>,
     crash_restart_factory: Option<&(dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync)>,
     retry_policy: RetryPolicy,
-    self_proxy: ProcessProxy<SagaProcess<S>>,
+    ctx: &mut ProcessContext<SagaProcess<S>>,
 ) -> Vec<u64> {
     let mut synthetic_failed: Vec<u64> = Vec::new();
     for (tell_id, crash_restart_payload) in pending {
@@ -227,10 +227,10 @@ async fn redispatch_pending<S: Saga>(
         //
         // IMPORTANT: do NOT remove the entry from `pending_intents` here.  The
         // intent must stay in the registry until the re-spawned executor
-        // successfully appends the terminal marker.  The executor notifies the
-        // saga via `OutboxTerminalSettled` only after a durable append; keeping
-        // the entry intact means a subsequent supervised restart can still
-        // re-dispatch if the terminal append fails.
+        // successfully appends the terminal marker.  The `AppendTerminalAndClaim`
+        // handler removes the entry only after a durable append; keeping it
+        // intact means a subsequent supervised restart can still re-dispatch if
+        // the terminal append fails.
         let resolved = if let Some(intent) = pending_intents.get(&tell_id).cloned() {
             // Supervised restart: in-memory intent is still available.
             tracing::debug!(
@@ -248,8 +248,9 @@ async fn redispatch_pending<S: Saga>(
                         tell_id,
                         "saga replay: crash restart — reconstructed TellIntent from payload"
                     );
-                    // Register the reconstructed intent so the executor's
-                    // terminal-settled notification can clean it up.
+                    // Register the reconstructed intent so the
+                    // `AppendTerminalAndClaim` handler can clean it up after a
+                    // durable terminal append.
                     pending_intents.insert(tell_id, reconstructed.clone());
                     Some(reconstructed)
                 }
@@ -276,7 +277,7 @@ async fn redispatch_pending<S: Saga>(
         };
 
         if let Some(intent) = resolved {
-            spawn_outbox_executor(intent, tell_id, retry_policy.clone(), self_proxy.clone());
+            spawn_outbox_executor(ctx, intent, tell_id, retry_policy.clone()).await;
         } else {
             // No path resolved the intent.  Claim a fresh sequence here from
             // the local cursor (we are still inside `on_start`, so no other
@@ -338,8 +339,6 @@ mod tests {
     use nitinol_persistence::{AppendingEvent, EventType, LoadedEvent};
     use nitinol_runtime::ProcessSystem;
 
-    use crate::outbox::RetryPolicy;
-    use crate::process::saga_process::SagaProcess;
     use crate::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
     // -----------------------------------------------------------------------
@@ -441,8 +440,8 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // EventStore that fails all `append` calls, used to exercise the path
-    // where `AppendTerminalAndClaim` returns `false` and the executor exits
-    // without sending `OutboxTerminalSettled`.
+    // where the `AppendTerminalAndClaim` handler's append fails and the
+    // `pending_intents` entry is therefore preserved.
     // -----------------------------------------------------------------------
 
     struct FailAppendStore {
@@ -628,30 +627,28 @@ mod tests {
     // -----------------------------------------------------------------------
     // Test 2 — intent survives when terminal append fails
     //
-    // Contract: when the outbox executor calls `AppendTerminalAndClaim` but
-    // the store append fails (returns `false`), the executor must NOT send
-    // `OutboxTerminalSettled`.  Consequently `pending_intents` is NOT cleared,
-    // leaving the entry intact for the next supervised restart.
+    // Contract: when the executor sends `AppendTerminalAndClaim` but the store
+    // append inside the handler fails, the `pending_intents` entry is NOT
+    // cleared, leaving it intact for the next supervised restart.
     //
     // Observable consequence: no `TellAcked` and no `TellFailed` is written to
     // the store after the executor runs — the outbox stream remains in the
     // pending state.
     // -----------------------------------------------------------------------
 
-    /// When `AppendTerminalAndClaim` fails (store error), the executor exits
-    /// without sending `OutboxTerminalSettled`, so the `pending_intents` entry
-    /// is kept for the next supervised restart.  The observable effect is that
-    /// the store contains neither `TellAcked` nor `TellFailed` after the
-    /// executor completes.
+    /// When the `AppendTerminalAndClaim` handler's store append fails, the
+    /// `pending_intents` entry is kept for the next supervised restart.  The
+    /// observable effect is that the store contains neither `TellAcked` nor
+    /// `TellFailed` after the executor completes.
     #[tokio::test]
     async fn replay_keeps_pending_intent_when_terminal_append_fails() {
         let mock = MockAggregateProxy::<MarkerAggregate>::new();
         let ps = ProcessSystem::new().await;
 
         // Use an inner InMemoryEventStore for load, wrapped so that ALL
-        // appends fail.  This ensures that `AppendTerminalAndClaim` cannot
-        // write a terminal marker, exercising the "executor sees false, exits
-        // without OutboxTerminalSettled" path.
+        // appends fail.  This ensures the `AppendTerminalAndClaim` handler
+        // cannot write a terminal marker, exercising the "append fails →
+        // pending_intents entry preserved" path.
         let inner_store = Arc::new(InMemoryEventStore::default());
         let saga_id = SagaId::new("supervised-replay-keeps-intent-unit-1");
 
@@ -668,9 +665,9 @@ mod tests {
         let routed = saga_id.clone();
         let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
 
-        // Spawn saga against the fail-all-appends store.  The executor will
-        // call `ask(AppendTerminalAndClaim)`, which uses `fail_store.append`,
-        // gets `false` back, and exits WITHOUT sending `OutboxTerminalSettled`.
+        // Spawn saga against the fail-all-appends store.  The executor sends
+        // `AppendTerminalAndClaim`; the handler's `fail_store.append` fails, so
+        // the `pending_intents` entry is preserved and no marker is written.
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&fail_store),

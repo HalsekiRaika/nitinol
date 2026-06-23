@@ -36,15 +36,15 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
     pub(crate) route_fn: RouteFn<S::SubscribedEvent>,
     /// Monotonic sequence cursor for the saga's own stream.  Owned by the
-    /// saga process; outbox retry executors claim a fresh sequence by sending
-    /// `AppendTerminalAndClaim` to the saga's own mailbox via `self_proxy`.
+    /// saga process; outbox executor children claim a fresh sequence by sending
+    /// `AppendTerminalAndClaim` to the saga's own mailbox.
     pub(crate) sequence: u64,
     pub(crate) retry_policy: RetryPolicy,
     /// Registry of in-flight [`TellIntent`]s.  Populated by the interpreter
-    /// before spawning each outbox executor; the entry is removed when the
-    /// executor reports a successful terminal append via
-    /// `OutboxTerminalSettled`.  On supervised restart the replay path checks
-    /// this registry to re-dispatch any pending tells.
+    /// before spawning each outbox executor child; the entry is removed by the
+    /// `AppendTerminalAndClaim` handler once a terminal marker is durably
+    /// appended.  On supervised restart the replay path checks this registry to
+    /// re-dispatch any pending tells.
     pub(crate) pending_intents: HashMap<u64, TellIntent>,
     /// Optional factory for crash-restart re-dispatch.
     ///
@@ -63,15 +63,14 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) failed_tell_ids: Vec<u64>,
     /// Set to `true` when `SagaEffect::End` is interpreted while outbox
     /// executors are still in-flight.  The actual `stop_self()` is deferred
-    /// until every spawned executor reports completion — either via
-    /// `OutboxTerminalSettled` (durable terminal append) or via
-    /// `OutboxTerminalAppendFailed` (store failure) — at which point
+    /// until every spawned executor settles via `AppendTerminalAndClaim`
+    /// (whether the terminal append succeeds or fails), at which point
     /// `pending_executor_count` reaches zero and `stop_self()` fires.
     pub(crate) pending_end: bool,
     /// Count of outbox executors that have been spawned and have not yet
     /// reported completion.  Incremented in the interpreter's `persist_batch`
-    /// for every spawned executor.  Decremented by both `OutboxTerminalSettled`
-    /// and `OutboxTerminalAppendFailed`.  The deferred-stop condition is
+    /// for every spawned executor.  Decremented by the `AppendTerminalAndClaim`
+    /// handler.  The deferred-stop condition is
     /// `pending_end && pending_executor_count == 0`.
     pub(crate) pending_executor_count: usize,
     pub(crate) upstream_config: DurableSubscription<EventEnvelope<S::SubscribedEvent>>,
@@ -81,7 +80,6 @@ pub struct SagaProcess<S: Saga> {
 impl<S: Saga> Process for SagaProcess<S> {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         let factory_ref = self.crash_restart_factory.as_ref().map(|f| f.as_ref());
-        let self_proxy = ctx.self_proxy().clone();
         let scan_failed = replay_and_redispatch(
             &self.saga_id,
             &mut self.state,
@@ -91,7 +89,7 @@ impl<S: Saga> Process for SagaProcess<S> {
             &mut self.pending_intents,
             factory_ref,
             self.retry_policy.clone(),
-            self_proxy,
+            ctx,
         )
         .await;
         if !scan_failed.is_empty() {
@@ -144,7 +142,6 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
             }
         };
 
-        let self_proxy = ctx.self_proxy().clone();
         let mut ictx = InterpreterCtx {
             state: &mut self.state,
             saga_id: self.saga_id.clone(),
@@ -156,7 +153,6 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
             pending_intents: &mut self.pending_intents,
             pending_end: &mut self.pending_end,
             pending_executor_count: &mut self.pending_executor_count,
-            self_proxy,
         };
         let _ = run_saga_effect(effect, &mut ictx).await;
         Ok(())
@@ -167,16 +163,25 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
 // Internal self-messages
 // ---------------------------------------------------------------------------
 
-/// Atomically append a terminal outbox marker and advance the sequence cursor.
+/// Append a terminal outbox marker, advance the sequence cursor, and perform
+/// the in-memory cleanup for a settled tell — all atomically inside the saga's
+/// single-threaded loop.
 ///
-/// Sent by `spawn_outbox_executor` via `self_proxy.ask` after the retry loop
-/// completes.  The append and the cursor advance happen together inside the
-/// saga's single-threaded loop: `sequence` is only committed when
-/// `EventStore::append` succeeds, so a store failure never skips a sequence
-/// number.  Returns `true` when the marker was durably written, `false` on
-/// failure.  The executor uses the boolean to decide whether to send
-/// [`OutboxTerminalSettled`] — the saga removes the `pending_intents` entry
-/// only after a durable append.
+/// Sent (fire-and-forget) by an [`OutboxExecutorProcess`] once its retry loop
+/// reaches a terminal outcome, immediately before the executor stops itself.
+/// The append and the cursor advance happen together: `sequence` is only
+/// committed when `EventStore::append` succeeds, so a store failure never skips
+/// a sequence number.
+///
+/// On a durable append the handler removes the `pending_intents` entry (and, for
+/// `TerminalKind::Failed`, records the `tell_id` in `failed_tell_ids` so the
+/// next [`crate::Saga::handle`] call can observe it). On a store failure the
+/// entry is **kept** so a subsequent supervised restart can re-dispatch the
+/// tell. Either way `pending_executor_count` is decremented and, if `End` was
+/// deferred while executors were in-flight, `stop_self` fires once the last
+/// executor settles.
+///
+/// [`OutboxExecutorProcess`]: crate::process::outbox_executor::OutboxExecutorProcess
 pub(crate) struct AppendTerminalAndClaim {
     pub(crate) tell_id: u64,
     pub(crate) kind: TerminalKind,
@@ -203,14 +208,14 @@ async fn append_terminal_and_claim(
 }
 
 impl<S: Saga> Receive<AppendTerminalAndClaim> for SagaProcess<S> {
-    type Response = bool;
+    type Response = ();
     type Error = std::convert::Infallible;
 
     async fn recv(
         &mut self,
         msg: AppendTerminalAndClaim,
-        _ctx: &mut ProcessContext<Self>,
-    ) -> Result<bool, std::convert::Infallible> {
+        ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), std::convert::Infallible> {
         let appended = append_terminal_and_claim(
             &self.store,
             &self.saga_id,
@@ -219,81 +224,35 @@ impl<S: Saga> Receive<AppendTerminalAndClaim> for SagaProcess<S> {
             msg.tell_id,
         )
         .await;
-        Ok(appended)
-    }
-}
 
-/// Reported by an outbox executor after a terminal marker has been durably
-/// appended.  When `failed == true` the tell is recorded into
-/// `failed_tell_ids` so the next `Saga::handle` invocation can observe it.
-pub(crate) struct OutboxTerminalSettled {
-    pub(crate) tell_id: u64,
-    pub(crate) failed: bool,
-}
-
-impl<S: Saga> Receive<OutboxTerminalSettled> for SagaProcess<S> {
-    type Response = ();
-    type Error = std::convert::Infallible;
-
-    async fn recv(
-        &mut self,
-        msg: OutboxTerminalSettled,
-        ctx: &mut ProcessContext<Self>,
-    ) -> Result<(), std::convert::Infallible> {
-        self.pending_intents.remove(&msg.tell_id);
-        if msg.failed {
-            self.failed_tell_ids.push(msg.tell_id);
+        if appended {
+            // Durable terminal append: drop the in-flight intent so a future
+            // supervised restart does not re-dispatch an already-settled tell.
+            self.pending_intents.remove(&msg.tell_id);
+            if matches!(msg.kind, TerminalKind::Failed) {
+                // Surface the failure to the next `Saga::handle` via
+                // `SagaContext::failed_tell_ids`.
+                self.failed_tell_ids.push(msg.tell_id);
+            }
+        } else {
+            // Store failure: keep the `pending_intents` entry intact so a
+            // subsequent supervised restart can re-dispatch the tell via the
+            // in-memory path rather than falling back to synthetic TellFailed.
+            tracing::debug!(
+                tell_id = msg.tell_id,
+                "saga outbox terminal append failed; \
+                 pending_intents entry preserved for supervised-restart re-dispatch"
+            );
         }
+
         self.pending_executor_count = self.pending_executor_count.saturating_sub(1);
         // If End was deferred because outbox executors were still in-flight,
-        // stop now that the last executor has reported completion.
+        // stop now that the last executor has settled.
         if self.pending_end && self.pending_executor_count == 0 {
             if let Err(e) = ctx.stop_self().await {
                 tracing::warn!(
                     error = %e,
                     "saga deferred End: stop_self failed after all outbox executors settled"
-                );
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Sent by an outbox executor when `AppendTerminalAndClaim` returned `false`
-/// (the `EventStore::append` for the terminal marker failed).
-///
-/// The saga process decrements `pending_executor_count` without removing the
-/// `pending_intents` entry, so the intent survives for supervised-restart
-/// re-dispatch.  If `pending_end` is true and this was the last in-flight
-/// executor, the saga stops.
-pub(crate) struct OutboxTerminalAppendFailed {
-    pub(crate) tell_id: u64,
-}
-
-impl<S: Saga> Receive<OutboxTerminalAppendFailed> for SagaProcess<S> {
-    type Response = ();
-    type Error = std::convert::Infallible;
-
-    async fn recv(
-        &mut self,
-        msg: OutboxTerminalAppendFailed,
-        ctx: &mut ProcessContext<Self>,
-    ) -> Result<(), std::convert::Infallible> {
-        tracing::debug!(
-            tell_id = msg.tell_id,
-            "saga outbox terminal append failed; \
-             pending_intents entry preserved for supervised-restart re-dispatch"
-        );
-        // Keep pending_intents entry intact: the intent must survive so a
-        // subsequent supervised restart can re-dispatch the tell via the
-        // in-memory path rather than falling back to synthetic TellFailed.
-        self.pending_executor_count = self.pending_executor_count.saturating_sub(1);
-        // If End was deferred, check whether all executors have now reported.
-        if self.pending_end && self.pending_executor_count == 0 {
-            if let Err(e) = ctx.stop_self().await {
-                tracing::warn!(
-                    error = %e,
-                    "saga deferred End: stop_self failed after terminal append failure"
                 );
             }
         }
