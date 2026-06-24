@@ -1,39 +1,3 @@
-//! Saga replay path with Outbox-aware classification.
-//!
-//! On `on_start` the saga loads its own event stream and walks it once:
-//! - User events are decoded via the registered codec and `state.apply`-d.
-//! - `TellRequested` markers add their `tell_id` plus any crash-restart bytes
-//!   to the pending map.
-//! - `TellAcked` / `TellFailed` markers remove the matching `tell_id` from
-//!   the pending map.
-//! - `Scheduled` markers are ignored in this MVP (scheduler execution is
-//!   reserved for a follow-up issue).
-//!
-//! After the walk, any `tell_id` still in the pending map means a crash
-//! between the atomic Persist batch and the executor's terminal Ack/Failed
-//! append.
-//!
-//! ## Re-dispatch path — supervised restart (spec C-9)
-//!
-//! If the saga is restarted within the **same OS process** (e.g. under a
-//! `Restart` supervision strategy), the in-memory `pending_intents` map still
-//! holds the original `TellIntent`.  `replay_and_redispatch` reads the intent
-//! out of the map and spawns a fresh retry executor — true re-dispatch per
-//! spec C-9.
-//!
-//! ## Re-dispatch path — crash restart
-//!
-//! If the in-memory `pending_intents` map does not contain a matching entry
-//! (e.g. after a full OS-process crash) but the `TellRequested` payload
-//! contains crash-restart bytes **and** a crash-restart factory was registered
-//! via [`crate::SagaProps::with_crash_restart_factory`], the factory is
-//! invoked to reconstruct the `TellIntent` and spawn the retry executor.
-//!
-//! If no factory is registered or the payload carries no crash-restart bytes,
-//! a **synthetic `TellFailed`** is appended to the saga stream so that the
-//! outbox reaches a consistent terminal state.  The Saga can detect this
-//! marker in a future `handle` call and trigger compensation (post-MVP).
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -48,25 +12,13 @@ use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
 use crate::outbox::{
-    decode_tell_id, decode_tell_requested, OutboxAppender, OutboxClassification, OutboxClassifier,
-    TerminalKind,
+    decode_tell_id, decode_tell_requested, OutboxAppender, TellOutcome, OUTBOX_SCHEDULED,
+    OUTBOX_TELL_REQUESTED,
 };
 use crate::process::outbox_executor::spawn_outbox_executor;
-use crate::process::saga_process::SagaProcess;
+use crate::process::saga_process::{SagaProcess, TellState};
 use crate::saga::Saga;
 
-/// Replay the saga's event stream, re-dispatch any pending tells, and return
-/// the `tell_id`s of tells that were definitively failed in the event history.
-///
-/// The returned `Vec<u64>` lets the caller pre-populate the saga process's
-/// `failed_tell_ids` accumulator so that the first `Saga::handle` invocation
-/// after restart can inspect them via
-/// [`crate::SagaContext::failed_tell_ids`].
-///
-/// Re-spawned outbox executor children settle via `AppendTerminalAndClaim`
-/// when they append a `TellFailed` terminal marker, so that asynchronous
-/// TellFailed outcomes are also surfaced to subsequent `Saga::handle` calls in
-/// the current run.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn replay_and_redispatch<S: Saga>(
     saga_id: &SagaId,
@@ -74,7 +26,7 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     codec: &dyn ErasedCodec<S::Event>,
     store: &Arc<dyn EventStore>,
     sequence: &mut u64,
-    pending_intents: &mut HashMap<u64, TellIntent>,
+    tell_states: &mut HashMap<u64, TellState>,
     crash_restart_factory: Option<&(dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync)>,
     retry_policy: RetryPolicy,
     ctx: &mut ProcessContext<SagaProcess<S>>,
@@ -89,27 +41,18 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
         store,
         sequence,
         scan.pending,
-        pending_intents,
+        tell_states,
         crash_restart_factory,
         retry_policy,
         ctx,
     )
     .await;
-    // Surface synthetic-TellFailed tell_ids the same way as TellFailed markers
-    // already in the stream: the next `Saga::handle` must observe both via
-    // `SagaContext::failed_tell_ids` (ARCH-45-002 regression).
     failed.extend(synthetic_failed);
     failed
 }
 
-/// Result of scanning the saga's event stream.
 struct ReplayScan {
-    /// Pending tell_ids (TellRequested without a terminal marker) mapped to
-    /// their optional crash-restart payload bytes.
     pending: HashMap<u64, Option<Bytes>>,
-    /// Tell_ids whose `TellFailed` terminal marker was found in the event
-    /// stream.  Surfaced to the next `Saga::handle` call so the saga can
-    /// detect unrecoverable tell failures and trigger compensation.
     failed: Vec<u64>,
 }
 
@@ -136,9 +79,7 @@ async fn scan_stream<S: Saga>(
 
     futures_util::pin_mut!(stream);
     let mut highest_seq = initial_seq;
-    // Maps pending tell_id → optional crash-restart payload bytes.
     let mut pending: HashMap<u64, Option<Bytes>> = HashMap::new();
-    // Collect tell_ids that have a TellFailed terminal in the event stream.
     let mut failed: Vec<u64> = Vec::new();
     while let Some(item) = stream.next().await {
         let loaded = match item {
@@ -162,77 +103,52 @@ fn dispatch_loaded<S: Saga>(
     pending: &mut HashMap<u64, Option<Bytes>>,
     failed: &mut Vec<u64>,
 ) {
-    match OutboxClassifier::classify(loaded.event_type) {
-        OutboxClassification::User => match codec.decode(&loaded.payload) {
+    if loaded.event_type == OUTBOX_TELL_REQUESTED {
+        if let Some((id, crp)) = decode_tell_requested(&loaded.payload) {
+            pending.insert(id, crp);
+        }
+    } else if let Some(outcome) = TellOutcome::from_event_type(loaded.event_type) {
+        if let Some(id) = decode_tell_id(&loaded.payload) {
+            pending.remove(&id);
+            if matches!(outcome, TellOutcome::Failed) {
+                failed.push(id);
+            }
+        }
+    } else if loaded.event_type == OUTBOX_SCHEDULED {
+        // no-op MVP
+    } else {
+        match codec.decode(&loaded.payload) {
             Ok(event) => state.apply(event),
             Err(e) => {
                 tracing::error!(error = %e, "saga event decode failed; skipping event");
             }
-        },
-        OutboxClassification::TellRequested => {
-            // Decode tell_id and optional crash-restart payload.
-            if let Some((id, crp)) = decode_tell_requested(&loaded.payload) {
-                pending.insert(id, crp);
-            }
         }
-        OutboxClassification::TellAcked => {
-            if let Some(id) = decode_tell_id(&loaded.payload) {
-                pending.remove(&id);
-            }
-        }
-        OutboxClassification::TellFailed => {
-            if let Some(id) = decode_tell_id(&loaded.payload) {
-                pending.remove(&id);
-                // Record the failure so it can be surfaced to the next
-                // Saga::handle call (spec C-9: saga detects TellFailed
-                // after restart and can trigger compensation).
-                failed.push(id);
-            }
-        }
-        OutboxClassification::Scheduled => { /* no-op MVP */ }
     }
 }
 
-/// For each pending `(tell_id, crash_restart_payload)`, resolve the `TellIntent`
-/// via one of two paths:
-///
-/// 1. **Supervised restart** — `pending_intents` still holds the original
-///    intent (same OS-process lifetime).  Read it and spawn a fresh retry
-///    executor.
-/// 2. **Crash restart** — `pending_intents` is empty (new OS process).  If the
-///    `TellRequested` payload carried crash-restart bytes **and** a factory was
-///    registered via [`crate::SagaProps::with_crash_restart_factory`], invoke
-///    the factory to reconstruct the intent and spawn the retry executor.
-///
-/// If neither path succeeds, a **synthetic `TellFailed`** is appended so that
-/// the outbox reaches a consistent terminal state.  This covers cases where
-/// `TellIntent::new` was used directly (no crash-restart bytes), or where
-/// `SagaEffect::tell` was used but no crash-restart factory was registered.
-/// The Saga can detect the resulting `TellFailed` event in a subsequent
-/// `handle` call and compensate.
+fn intent_of(state: Option<&TellState>) -> Option<TellIntent> {
+    match state {
+        Some(TellState::Pending(intent)) | Some(TellState::AppendFailed(intent)) => {
+            Some(intent.clone())
+        }
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn redispatch_pending<S: Saga>(
     saga_id: &SagaId,
     store: &Arc<dyn EventStore>,
     sequence: &mut u64,
     pending: HashMap<u64, Option<Bytes>>,
-    pending_intents: &mut HashMap<u64, TellIntent>,
+    tell_states: &mut HashMap<u64, TellState>,
     crash_restart_factory: Option<&(dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync)>,
     retry_policy: RetryPolicy,
     ctx: &mut ProcessContext<SagaProcess<S>>,
 ) -> Vec<u64> {
     let mut synthetic_failed: Vec<u64> = Vec::new();
     for (tell_id, crash_restart_payload) in pending {
-        // Attempt to resolve the TellIntent via one of two paths.
-        //
-        // IMPORTANT: do NOT remove the entry from `pending_intents` here.  The
-        // intent must stay in the registry until the re-spawned executor
-        // successfully appends the terminal marker.  The `AppendTerminalAndClaim`
-        // handler removes the entry only after a durable append; keeping it
-        // intact means a subsequent supervised restart can still re-dispatch if
-        // the terminal append fails.
-        let resolved = if let Some(intent) = pending_intents.get(&tell_id).cloned() {
-            // Supervised restart: in-memory intent is still available.
+        let resolved = if let Some(intent) = intent_of(tell_states.get(&tell_id)) {
             tracing::debug!(
                 tell_id,
                 "saga replay: supervised restart — re-dispatching pending tell"
@@ -241,17 +157,13 @@ async fn redispatch_pending<S: Saga>(
         } else if let (Some(factory), Some(payload)) =
             (crash_restart_factory, crash_restart_payload.as_deref())
         {
-            // Crash restart: reconstruct via factory using the persisted bytes.
             match factory(payload) {
                 Some(reconstructed) => {
                     tracing::debug!(
                         tell_id,
                         "saga replay: crash restart — reconstructed TellIntent from payload"
                     );
-                    // Register the reconstructed intent so the
-                    // `AppendTerminalAndClaim` handler can clean it up after a
-                    // durable terminal append.
-                    pending_intents.insert(tell_id, reconstructed.clone());
+                    tell_states.insert(tell_id, TellState::Pending(reconstructed.clone()));
                     Some(reconstructed)
                 }
                 None => {
@@ -264,7 +176,6 @@ async fn redispatch_pending<S: Saga>(
                 }
             }
         } else {
-            // Neither supervised-restart intent nor crash-restart path is available.
             tracing::warn!(
                 tell_id,
                 has_factory = crash_restart_factory.is_some(),
@@ -277,31 +188,24 @@ async fn redispatch_pending<S: Saga>(
         };
 
         if let Some(intent) = resolved {
+            if matches!(tell_states.get(&tell_id), Some(TellState::AppendFailed(_))) {
+                tell_states.insert(tell_id, TellState::Pending(intent.clone()));
+            }
             spawn_outbox_executor(ctx, intent, tell_id, retry_policy.clone()).await;
         } else {
-            // No path resolved the intent.  Claim a fresh sequence here from
-            // the local cursor (we are still inside `on_start`, so no other
-            // task is touching it) and append a synthetic TellFailed so the
-            // outbox stream is in a consistent terminal state.
             *sequence += 1;
             let claimed = *sequence;
             let appended = OutboxAppender::append_terminal(
                 store,
                 saga_id,
                 claimed,
-                TerminalKind::Failed,
+                TellOutcome::Failed,
                 tell_id,
             )
             .await;
             if appended {
-                // Surface the synthetic-TellFailed tell_id so the first
-                // `Saga::handle` invocation after `on_start` observes it via
-                // `SagaContext::failed_tell_ids` — matching the runtime
-                // executor path's behaviour when it appends TellFailed after
-                // exhausting retries.
                 synthetic_failed.push(tell_id);
             } else {
-                // Roll back the cursor so the next attempt does not skip seq.
                 *sequence -= 1;
             }
         }
@@ -309,13 +213,6 @@ async fn redispatch_pending<S: Saga>(
 
     synthetic_failed
 }
-
-// ---------------------------------------------------------------------------
-// Tests — supervised-restart re-dispatch regression
-//
-// Referenced from `nitinol-saga/tests/saga_outbox_replay_synthesizes_failed.rs`
-// where the companion synthetic-`TellFailed` integration tests live.
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -341,12 +238,6 @@ mod tests {
 
     use crate::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
-    // -----------------------------------------------------------------------
-    // Minimal JSON codec for use inside the test module (mirrors common/ in
-    // integration tests but is defined inline so library unit tests don't
-    // depend on the integration-test helper path).
-    // -----------------------------------------------------------------------
-
     struct JsonCodec;
 
     impl<E: Serialize + for<'de> Deserialize<'de> + 'static> Codec<E> for JsonCodec {
@@ -360,11 +251,6 @@ mod tests {
             serde_json::from_slice(payload)
         }
     }
-
-    // -----------------------------------------------------------------------
-    // A minimal aggregate whose sole purpose is to accept a command via
-    // `TellIntent::new` so the executor has a real proxy to call.
-    // -----------------------------------------------------------------------
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
     struct MarkerEvent;
@@ -397,11 +283,6 @@ mod tests {
             Ok(Effect::empty())
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Inert saga — never handles upstream events; only the `on_start` replay
-    // path is exercised in these tests.
-    // -----------------------------------------------------------------------
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct UpstreamEvt;
@@ -438,19 +319,11 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // EventStore that fails all `append` calls, used to exercise the path
-    // where the `AppendTerminalAndClaim` handler's append fails and the
-    // `pending_intents` entry is therefore preserved.
-    // -----------------------------------------------------------------------
-
     struct FailAppendStore {
         inner: Arc<InMemoryEventStore>,
     }
 
     impl FailAppendStore {
-        /// Build a store backed by `inner` whose `append` always fails.
-        /// Pre-seed the inner store BEFORE wrapping to inject initial events.
         fn wrap(inner: Arc<InMemoryEventStore>) -> Arc<dyn EventStore> {
             Arc::new(Self { inner })
         }
@@ -469,8 +342,6 @@ mod tests {
         }
 
         async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-            // Collect owned events so the returned stream has 'static lifetime,
-            // satisfying EventStream<'_> (a 'static stream is coercible to 'a).
             let events: Vec<LoadedEvent> = self.inner.load(query).await?.try_collect().await?;
             let stream: Pin<
                 Box<dyn Stream<Item = Result<LoadedEvent, LoadError>> + Send + 'static>,
@@ -479,15 +350,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
-
     fn encode_tell_requested_no_crash_bytes(tell_id: u64) -> Bytes {
-        // Plain 8-byte big-endian tell_id with no appended crash-restart bytes.
-        // `decode_tell_requested` treats the suffix (absent here) as None, so the
-        // crash-restart path is unavailable for this intent — only the in-memory
-        // supervised-restart path can re-dispatch it.
         Bytes::from(tell_id.to_be_bytes().to_vec())
     }
 
@@ -521,18 +384,6 @@ mod tests {
             .expect("collect must succeed")
     }
 
-    // -----------------------------------------------------------------------
-    // Test 1 — supervised-restart re-dispatch produces TellAcked
-    //
-    // Contract: when `pending_intents` carries the matching `TellIntent` for
-    // an unacked `TellRequested` (simulating a supervised same-OS-process
-    // restart), `replay_and_redispatch` must re-dispatch the intent and
-    // eventually produce a durable `TellAcked` — NOT a synthetic `TellFailed`.
-    // -----------------------------------------------------------------------
-
-    /// Supervised restart path: when the in-memory `TellIntent` is available
-    /// for an unacked `TellRequested` on replay, the saga re-dispatches the
-    /// intent via a fresh outbox executor and the store receives `TellAcked`.
     #[tokio::test]
     async fn unacked_tell_requested_with_pending_intent_yields_tell_acked_on_replay() {
         let mock = MockAggregateProxy::<MarkerAggregate>::new();
@@ -541,31 +392,23 @@ mod tests {
         let inner_store = Arc::new(InMemoryEventStore::default());
         let saga_id = SagaId::new("supervised-replay-acked-unit-1");
 
-        // Seed a TellRequested with tell_id=1 and NO crash-restart bytes.
-        // Without crash bytes there is no crash-restart path; only the
-        // in-memory supervised-restart path can re-dispatch it.
         seed_tell_requested(&inner_store, &saga_id, 1, 1).await;
 
-        // Build an in-memory intent for tell_id=1 — simulates what the
-        // previous `SagaProcess` run would have stored before crashing.
+        use crate::process::saga_process::TellState;
         let intent = TellIntent::new::<MarkerAggregate, MarkerCmd, _>(mock.clone(), MarkerCmd);
-        let mut initial_intents = HashMap::new();
-        initial_intents.insert(1u64, intent);
+        let mut initial_tell_states = HashMap::new();
+        initial_tell_states.insert(1u64, TellState::Pending(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
         let routed = saga_id.clone();
         let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
 
-        // Spawn with the pre-seeded intent injected via `with_initial_pending_intents`.
-        // `on_start` receives it as `initial_pending_intents`, populates the flat
-        // `pending_intents` field, and calls `replay_and_redispatch` — exercising
-        // the supervised-restart re-dispatch path.
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&inner_store) as Arc<dyn EventStore>,
             InertSaga::default,
         )
-        .with_initial_pending_intents(initial_intents)
+        .with_initial_tell_states(initial_tell_states)
         .with_codec(Arc::new(JsonCodec) as Arc<dyn ErasedCodec<SagaEvt>>)
         .with_subscription(
             Arc::clone(&upstream_store),
@@ -579,7 +422,6 @@ mod tests {
         .spawn(&ps)
         .await;
 
-        // Wait for the supervised-restart re-dispatch to produce TellAcked.
         let saga_store: Arc<dyn EventStore> = Arc::clone(&inner_store) as Arc<dyn EventStore>;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -624,56 +466,33 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Test 2 — intent survives when terminal append fails
-    //
-    // Contract: when the executor sends `AppendTerminalAndClaim` but the store
-    // append inside the handler fails, the `pending_intents` entry is NOT
-    // cleared, leaving it intact for the next supervised restart.
-    //
-    // Observable consequence: no `TellAcked` and no `TellFailed` is written to
-    // the store after the executor runs — the outbox stream remains in the
-    // pending state.
-    // -----------------------------------------------------------------------
-
-    /// When the `AppendTerminalAndClaim` handler's store append fails, the
-    /// `pending_intents` entry is kept for the next supervised restart.  The
-    /// observable effect is that the store contains neither `TellAcked` nor
-    /// `TellFailed` after the executor completes.
     #[tokio::test]
     async fn replay_keeps_pending_intent_when_terminal_append_fails() {
         let mock = MockAggregateProxy::<MarkerAggregate>::new();
         let ps = ProcessSystem::new().await;
 
-        // Use an inner InMemoryEventStore for load, wrapped so that ALL
-        // appends fail.  This ensures the `AppendTerminalAndClaim` handler
-        // cannot write a terminal marker, exercising the "append fails →
-        // pending_intents entry preserved" path.
         let inner_store = Arc::new(InMemoryEventStore::default());
         let saga_id = SagaId::new("supervised-replay-keeps-intent-unit-1");
 
-        // Seed TellRequested BEFORE wrapping with FailAppendStore.
         seed_tell_requested(&inner_store, &saga_id, 1, 1).await;
 
         let fail_store = FailAppendStore::wrap(Arc::clone(&inner_store));
 
+        use crate::process::saga_process::TellState;
         let intent = TellIntent::new::<MarkerAggregate, MarkerCmd, _>(mock.clone(), MarkerCmd);
-        let mut initial_intents = HashMap::new();
-        initial_intents.insert(1u64, intent);
+        let mut initial_tell_states = HashMap::new();
+        initial_tell_states.insert(1u64, TellState::Pending(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
         let routed = saga_id.clone();
         let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
 
-        // Spawn saga against the fail-all-appends store.  The executor sends
-        // `AppendTerminalAndClaim`; the handler's `fail_store.append` fails, so
-        // the `pending_intents` entry is preserved and no marker is written.
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&fail_store),
             InertSaga::default,
         )
-        .with_initial_pending_intents(initial_intents)
+        .with_initial_tell_states(initial_tell_states)
         .with_codec(Arc::new(JsonCodec) as Arc<dyn ErasedCodec<SagaEvt>>)
         .with_subscription(
             Arc::clone(&upstream_store),
@@ -687,11 +506,8 @@ mod tests {
         .spawn(&ps)
         .await;
 
-        // Give the executor ample time to run and (fail to) append terminal.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        // The inner store should still have exactly the seeded TellRequested
-        // and NOTHING else — no TellAcked, no TellFailed.
         let events =
             load_outbox_events(&(Arc::clone(&inner_store) as Arc<dyn EventStore>), &saga_id).await;
         let acked = events
@@ -706,12 +522,96 @@ mod tests {
         assert_eq!(
             acked, 0,
             "terminal append failure must NOT produce TellAcked; \
-             pending_intents entry is kept for next restart"
+             tell state entry is preserved as AppendFailed for next restart"
         );
         assert_eq!(
             failed, 0,
             "terminal append failure must NOT produce TellFailed; \
-             pending_intents entry is kept for next restart"
+             tell state entry is preserved as AppendFailed for next restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_failed_tell_is_redispatched_on_supervised_restart() {
+        use crate::process::saga_process::TellState;
+
+        let mock = MockAggregateProxy::<MarkerAggregate>::new();
+        let ps = ProcessSystem::new().await;
+
+        let store = Arc::new(InMemoryEventStore::default());
+        let saga_id = SagaId::new("append-failed-redispatch-regression-1");
+
+        seed_tell_requested(&store, &saga_id, 1, 1).await;
+
+        let intent =
+            TellIntent::new::<MarkerAggregate, MarkerCmd, _>(mock.clone(), MarkerCmd);
+        let mut initial_tell_states = HashMap::new();
+        initial_tell_states.insert(1u64, TellState::AppendFailed(intent));
+
+        let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let routed = saga_id.clone();
+        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
+
+        let _saga_proxy = SagaProps::<InertSaga>::new(
+            saga_id.clone(),
+            Arc::clone(&store) as Arc<dyn EventStore>,
+            InertSaga::default,
+        )
+        .with_initial_tell_states(initial_tell_states)
+        .with_codec(Arc::new(JsonCodec) as Arc<dyn ErasedCodec<SagaEvt>>)
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            Arc::new(JsonCodec) as Arc<dyn ErasedCodec<UpstreamEvt>>,
+            SequenceCursor::Stream {
+                key: "no-such-upstream".to_owned(),
+                after: 0,
+            },
+            route_fn,
+        )
+        .spawn(&ps)
+        .await;
+
+        let saga_store: Arc<dyn EventStore> = Arc::clone(&store) as Arc<dyn EventStore>;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = load_outbox_events(&saga_store, &saga_id).await;
+            let acked = events
+                .iter()
+                .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_acked")
+                .count();
+            if acked >= 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for TellAcked on AppendFailed supervised-restart \
+                 re-dispatch; events={:?}",
+                events
+                    .iter()
+                    .map(|e| e.event_type.as_str())
+                    .collect::<Vec<_>>()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let events = load_outbox_events(&saga_store, &saga_id).await;
+        let acked = events
+            .iter()
+            .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_acked")
+            .count();
+        let failed = events
+            .iter()
+            .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_failed")
+            .count();
+
+        assert_eq!(
+            acked, 1,
+            "AppendFailed supervised-restart re-dispatch must produce exactly one TellAcked"
+        );
+        assert_eq!(
+            failed, 0,
+            "AppendFailed supervised-restart re-dispatch must NOT produce TellFailed \
+             when the in-memory intent is available"
         );
     }
 }

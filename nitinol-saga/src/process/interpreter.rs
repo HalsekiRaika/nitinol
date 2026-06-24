@@ -1,10 +1,4 @@
 //! Outbox-backed interpreter for [`SagaEffect`].
-//!
-//! Walks the effect ADT depth-first.  `Persist` branches go through
-//! [`persist_batch`], which builds the entire atomic batch
-//! (user events + `TellRequested` markers + `Scheduled` markers) and submits
-//! it as one `EventStore::append` call.  `End` triggers `stop_self()` on the
-//! process and short-circuits any enclosing `Sequence`.
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -22,7 +16,7 @@ use crate::effect::{Schedule, TellIntent};
 use crate::id::SagaId;
 use crate::outbox::{OutboxAppender, RetryPolicy};
 use crate::process::outbox_executor::spawn_outbox_executor;
-use crate::process::saga_process::SagaProcess;
+use crate::process::saga_process::{in_flight_count, Lifecycle, SagaProcess, TellState};
 use crate::saga::Saga;
 use crate::SagaEffect;
 
@@ -34,15 +28,8 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
     pub(crate) retry_policy: RetryPolicy,
     pub(crate) process_ctx: &'a mut ProcessContext<SagaProcess<S>>,
-    pub(crate) pending_intents: &'a mut HashMap<u64, TellIntent>,
-    /// Mirror of `SagaProcess::pending_end`.  Set to `true` when `End` is
-    /// encountered with in-flight outbox executors; `stop_self()` fires once
-    /// `pending_executor_count` reaches zero.
-    pub(crate) pending_end: &'a mut bool,
-    /// Mirror of `SagaProcess::pending_executor_count`.  Incremented for every
-    /// executor spawned in `persist_batch`; decremented by the
-    /// `AppendTerminalAndClaim` handler.
-    pub(crate) pending_executor_count: &'a mut usize,
+    pub(crate) tell_states: &'a mut HashMap<u64, TellState>,
+    pub(crate) lifecycle: &'a mut Lifecycle,
 }
 
 pub(crate) enum InterpretOutcome {
@@ -63,16 +50,12 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
                 schedules,
             } => persist_batch(events, tells, schedules, ictx).await,
             SagaEffect::End => {
-                if *ictx.pending_executor_count == 0 {
-                    // No executors in-flight: stop immediately.
+                if in_flight_count(ictx.tell_states) == 0 {
                     if let Err(e) = ictx.process_ctx.stop_self().await {
                         tracing::warn!(error = %e, "saga End: stop_self signal failed");
                     }
                 } else {
-                    // Executors are still in-flight.  Defer stop until every
-                    // executor settles via AppendTerminalAndClaim, reducing
-                    // pending_executor_count to zero.
-                    *ictx.pending_end = true;
+                    *ictx.lifecycle = Lifecycle::Draining;
                 }
                 InterpretOutcome::Stop
             }
@@ -126,8 +109,8 @@ async fn persist_batch<S: Saga>(
     }
 
     for (intent, tell_id) in tells.into_iter().zip(tell_ids) {
-        ictx.pending_intents.insert(tell_id, intent.clone());
-        *ictx.pending_executor_count += 1;
+        ictx.tell_states
+            .insert(tell_id, TellState::Pending(intent.clone()));
         let policy = ictx.retry_policy.clone();
         spawn_outbox_executor(ictx.process_ctx, intent, tell_id, policy).await;
     }

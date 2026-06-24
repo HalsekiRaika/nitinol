@@ -60,7 +60,7 @@ pub enum SagaEffect<E> {
 /// command on every attempt.
 ///
 /// `TellIntent` is `Clone` (cheap — the inner `Arc` is reference-counted).
-/// This enables the in-memory `pending_intents` registry to store a
+/// This enables the in-memory `tell_states` registry to store a
 /// clone before transferring ownership to the outbox executor.
 ///
 /// # Crash-restart re-dispatch
@@ -80,7 +80,7 @@ pub struct TellIntent {
     /// reconstruct the `TellIntent` after a full OS-process crash.
     ///
     /// `None` means crash-restart re-dispatch is not supported for this intent
-    /// (supervised restart via the in-memory `pending_intents` registry
+    /// (supervised restart via the in-memory `tell_states` registry
     /// still works).
     pub(crate) crash_restart_payload: Option<Bytes>,
 }

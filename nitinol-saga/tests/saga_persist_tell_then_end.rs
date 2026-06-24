@@ -5,7 +5,7 @@
 //!
 //! Without the deferred-stop fix, `End` would call `stop_self()` immediately
 //! via the priority system channel, so the outbox executor child's
-//! `saga_proxy.tell(AppendTerminalAndClaim)` would fail with a closed-channel
+//! `saga_proxy.tell(OutboxReport)` would fail with a closed-channel
 //! error and no terminal marker would ever reach the store.
 
 mod common;

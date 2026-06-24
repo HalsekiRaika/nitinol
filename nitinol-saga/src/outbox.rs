@@ -26,7 +26,7 @@
 //! # Re-dispatch on restart
 //!
 //! - **Supervised restart** (same OS process): the replay path re-dispatches
-//!   via the in-memory `pending_intents` registry inside `SagaProcess`.
+//!   via the in-memory `tell_states` registry inside `SagaProcess`.
 //! - **Crash restart** (fresh OS process): if the `TellRequested` payload
 //!   contains crash-restart bytes **and** the saga was configured with
 //!   [`crate::SagaProps::with_crash_restart_factory`], the factory is invoked
@@ -43,8 +43,8 @@ mod event_types;
 mod payload;
 mod retry_policy;
 
+pub(crate) use self::event_types::{OUTBOX_SCHEDULED, OUTBOX_TELL_REQUESTED};
 pub(crate) use self::payload::{
-    decode_tell_id, decode_tell_requested, OutboxAppender, OutboxClassification, OutboxClassifier,
-    TerminalKind,
+    decode_tell_id, decode_tell_requested, OutboxAppender, TellOutcome,
 };
 pub(crate) use self::retry_policy::RetryPolicy;

@@ -2,16 +2,17 @@
 //! append fails, a saga that returned `then_end()` must still stop.
 //!
 //! Without the fix the deferred-stop condition was only triggered when the
-//! terminal append succeeded.  A store failure left `pending_end == true` and
-//! `pending_executor_count > 0` forever — the saga would never receive
-//! subsequent upstream events (its mailbox is alive but `pending_end` blocks
-//! the stop) and silently stall.
+//! terminal append succeeded.  A store failure left the saga stuck in
+//! `Lifecycle::Draining` with in-flight entries remaining in `tell_states`
+//! forever — the saga would never receive subsequent upstream events and
+//! silently stall.
 //!
-//! With the fix, the outbox executor child sends `AppendTerminalAndClaim` to
+//! With the fix, the outbox executor child sends `OutboxReport` to
 //! the parent saga via fire-and-forget `tell` regardless of the append outcome.
-//! The `AppendTerminalAndClaim` handler decrements `pending_executor_count`
-//! whether the durable append succeeds or fails, so `stop_self()` fires when
-//! the count reaches zero.
+//! On append failure, the `OutboxReport` handler transitions the entry from
+//! `Pending` to `AppendFailed` in `tell_states`; `AppendFailed` is not counted
+//! as in-flight, so `ready_to_stop()` fires when `Lifecycle::Draining` and no
+//! `Pending` entries remain.
 //!
 //! The test verifies: after `tell(...).then_end()` where every terminal append
 //! fails, the saga process stops and no further upstream events are processed.
@@ -249,7 +250,7 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
         .await
         .expect("saga must handle the first upstream event within 5 seconds");
 
-    // Give the outbox executor child time to send AppendTerminalAndClaim and
+    // Give the outbox executor child time to send OutboxReport and
     // the deferred stop to fire.
     tokio::time::sleep(Duration::from_millis(500)).await;
 

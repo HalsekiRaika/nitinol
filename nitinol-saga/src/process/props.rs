@@ -11,7 +11,7 @@ use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
 use crate::process::proxy::SagaProxy;
-use crate::process::saga_process::{CrashRestartFactory, RouteFn, SagaProcess};
+use crate::process::saga_process::{CrashRestartFactory, Lifecycle, RouteFn, SagaProcess, TellState};
 use crate::saga::Saga;
 
 /// Marker: the event codec has not yet been provided.
@@ -45,10 +45,8 @@ pub struct SagaProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
     codec: C,
     subscription: Sub,
     crash_restart_factory: Option<CrashRestartFactory>,
-    /// Pre-seeded `pending_intents` entries injected at construction time.
-    /// Always empty in production; populated in tests via
-    /// `with_initial_pending_intents`.
-    initial_pending_intents: HashMap<u64, TellIntent>,
+    #[cfg(test)]
+    initial_tell_states: HashMap<u64, TellState>,
 }
 
 impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
@@ -70,7 +68,8 @@ impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
             codec: CodecUnset,
             subscription: SubscriptionUnset,
             crash_restart_factory: None,
-            initial_pending_intents: HashMap::new(),
+            #[cfg(test)]
+            initial_tell_states: HashMap::new(),
         }
     }
 }
@@ -88,7 +87,8 @@ impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
             codec: CodecSet { codec },
             subscription: self.subscription,
             crash_restart_factory: self.crash_restart_factory,
-            initial_pending_intents: self.initial_pending_intents,
+            #[cfg(test)]
+            initial_tell_states: self.initial_tell_states,
         }
     }
 }
@@ -122,7 +122,8 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
                 route_fn,
             },
             crash_restart_factory: self.crash_restart_factory,
-            initial_pending_intents: self.initial_pending_intents,
+            #[cfg(test)]
+            initial_tell_states: self.initial_tell_states,
         }
     }
 }
@@ -137,18 +138,12 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
         self
     }
 
-    /// Pre-seed the `pending_intents` registry of the first spawned
-    /// `SagaProcess` instance.
-    ///
-    /// Used in tests to simulate the scenario where a `SagaProcess` already
-    /// has in-flight `TellIntent`s at start (e.g. pre-registered for
-    /// supervised-restart re-dispatch via the persistent outbox).
     #[cfg(test)]
-    pub(crate) fn with_initial_pending_intents(
+    pub(crate) fn with_initial_tell_states(
         mut self,
-        intents: HashMap<u64, TellIntent>,
+        tell_states: HashMap<u64, TellState>,
     ) -> Self {
-        self.initial_pending_intents = intents;
+        self.initial_tell_states = tell_states;
         self
     }
 }
@@ -204,25 +199,30 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let route_fn_for_props = Arc::clone(&route_fn);
         let producer_for_props = Arc::clone(&producer);
         let crash_restart_factory_for_props = self.crash_restart_factory;
-        let initial_pending_intents_for_props = self.initial_pending_intents;
+        #[cfg(test)]
+        let initial_tell_states_for_props = self.initial_tell_states;
         let upstream_config_for_props = upstream_config;
         let cursor_for_props = cursor;
 
-        let props = Props::new(move || SagaProcess::<S> {
-            state: producer_for_props(),
-            saga_id: saga_id_for_props.clone(),
-            store: Arc::clone(&store_for_props),
-            codec: Arc::clone(&codec_for_props),
-            route_fn: Arc::clone(&route_fn_for_props),
-            sequence: 0,
-            retry_policy: RetryPolicy::default(),
-            pending_intents: initial_pending_intents_for_props.clone(),
-            crash_restart_factory: crash_restart_factory_for_props.clone(),
-            failed_tell_ids: Vec::new(),
-            pending_end: false,
-            pending_executor_count: 0,
-            upstream_config: upstream_config_for_props.clone(),
-            upstream_cursor: cursor_for_props.clone(),
+        let props = Props::new(move || {
+            #[cfg(not(test))]
+            let tell_states: HashMap<u64, TellState> = HashMap::new();
+            #[cfg(test)]
+            let tell_states: HashMap<u64, TellState> = initial_tell_states_for_props.clone();
+            SagaProcess::<S> {
+                state: producer_for_props(),
+                saga_id: saga_id_for_props.clone(),
+                store: Arc::clone(&store_for_props),
+                codec: Arc::clone(&codec_for_props),
+                route_fn: Arc::clone(&route_fn_for_props),
+                sequence: 0,
+                retry_policy: RetryPolicy::default(),
+                tell_states,
+                crash_restart_factory: crash_restart_factory_for_props.clone(),
+                lifecycle: Lifecycle::Running,
+                upstream_config: upstream_config_for_props.clone(),
+                upstream_cursor: cursor_for_props.clone(),
+            }
         });
 
         let saga_proxy = system.spawn(props).await;
