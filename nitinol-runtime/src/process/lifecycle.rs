@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
-use crate::process::driver::{Combine, Driver, FusedDriver, MessageDriver, PipeDriver, StashDriver};
+use crate::process::driver::{Combine, Driver, FusedDriver, MessageDriver, PipeDriver, StashDriver, StashHandle};
 use crate::process::pid_set::PidSet;
 use crate::process::props::{MailboxCapacity, PipeCapacity, StashCapacity, SupervisionStrategy};
 use crate::process::registry::ProcessRegistry;
@@ -77,21 +77,13 @@ pub(crate) async fn run<P: Process, D: Driver<P>>(cfg: LifecycleConfig<P, D>) ->
         .register(pid, any_proxy, process_name.as_ref())
         .await;
 
-    // Compose the Core trio (Message + Pipe + Stash) into a single
-    // Combine tree, then layer the user-supplied driver on top via another
-    // `Combine`. This is the "always operational" guarantee for
-    // `ctx.pipe_to_self` / `ctx.stash` / `ctx.unstash_all`.
-    //
-    // The user driver is wrapped in `FusedDriver` so that if it exhausts
-    // (`next()` returns `None`), the exhaustion is absorbed rather than
-    // propagated to the lifecycle loop. This preserves the pre-#57 contract:
-    // a user driver running dry is non-fatal; the Core trio keeps the process
-    // alive until an explicit Stop/Poison signal arrives.
+    let stash_driver = StashDriver::<P>::new(stash_capacity);
+    let stash_handle = stash_driver.handle();
     let core = Combine::new(
-        MessageDriver::new(user_rx),
+        stash_driver,
         Combine::new(
+            MessageDriver::new(user_rx),
             PipeDriver::<P>::with_capacity(pipe_capacity),
-            StashDriver::<P>::new(stash_capacity),
         ),
     );
     let driver_tree = Combine::new(core, FusedDriver::new(user_driver));
@@ -102,6 +94,7 @@ pub(crate) async fn run<P: Process, D: Driver<P>>(cfg: LifecycleConfig<P, D>) ->
         registry: registry.clone(),
         pid,
         driver: driver_tree,
+        stash_handle,
         sys_tx,
         sys_rx,
         timeout,
@@ -144,6 +137,7 @@ struct LifecycleLoopArgs<P: Process, D: Driver<P>> {
     registry: ProcessRegistry,
     pid: Pid,
     driver: D,
+    stash_handle: StashHandle<P>,
     sys_tx: mpsc::Sender<SystemSignal>,
     sys_rx: mpsc::Receiver<SystemSignal>,
     timeout: Option<Duration>,
@@ -164,6 +158,7 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
         registry,
         pid,
         driver,
+        stash_handle,
         sys_tx,
         mut sys_rx,
         timeout,
@@ -182,10 +177,6 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
     let mut watchers: HashSet<Pid> = HashSet::new();
     let mut restart_tracker = RestartTracker::new();
 
-    // Extract the pipe handle (if any) from the driver tree once, at start.
-    // `Combine` surfaces the first non-`None` handle in its subtree; the
-    // Core trio always contributes one, so this is `Some(_)` for every
-    // process spawned via the unified path.
     let pipe_handle = driver.pipe_handle();
 
     let mut ctx = ProcessContext {
@@ -196,6 +187,8 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
         dead_letter: dead_letter.clone(),
         self_proxy,
         pipe_handle,
+        stash_handle: Some(stash_handle),
+        pending_reply: None,
         parent,
         children: PidSet::new(),
         default_idle_timeout,
@@ -551,12 +544,16 @@ mod tests {
             registry: registry.clone(),
         };
 
+        let stash_driver = StashDriver::<NoOpProcess>::new(NonZeroUsize::new(8).unwrap());
+        let stash_handle = stash_driver.handle();
+
         let args = LifecycleLoopArgs {
             process: NoOpProcess,
             process_name: None,
             registry,
             pid,
             driver: PendingNeverIdleDriver,
+            stash_handle,
             sys_tx: sys_tx.clone(),
             sys_rx,
             timeout: Some(Duration::from_millis(50)),

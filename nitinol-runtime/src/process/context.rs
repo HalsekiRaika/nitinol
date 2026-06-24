@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::collections::HashSet;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -7,10 +8,10 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
 
-use crate::error::SendError;
+use crate::error::{SendError, StashError};
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
-use crate::process::driver::{PipeHandle, PipePanic, PipedTask};
+use crate::process::driver::{PipeHandle, PipePanic, PipedTask, StashHandle};
 use crate::process::pid_set::PidSet;
 use crate::process::props::{MailboxCapacity, PipeCapacity, StashCapacity};
 use crate::process::proxy::ProcessProxy;
@@ -18,7 +19,7 @@ use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
 use crate::process::spawn::SpawnEnv;
 use crate::process::spawnable::SpawnDispatch;
-use crate::process::task::{TellTask, UserTask};
+use crate::process::task::{AskTask, ReplySender, TellTask, UserTask};
 use crate::process::{Process, Receive};
 
 use super::wiring;
@@ -31,6 +32,8 @@ pub struct ProcessContext<P: Process> {
     pub(crate) dead_letter: Option<DeadLetterProxy>,
     pub(crate) self_proxy: ProcessProxy<P>,
     pub(crate) pipe_handle: Option<PipeHandle<P>>,
+    pub(crate) stash_handle: Option<StashHandle<P>>,
+    pub(crate) pending_reply: Option<Box<dyn Any + Send + Sync>>,
     pub(crate) parent: Option<Pid>,
     pub(crate) children: PidSet,
     pub(crate) default_idle_timeout: Option<Duration>,
@@ -171,22 +174,70 @@ impl<P: Process> ProcessContext<P> {
 
     /// Save the in-flight message into the stash for later re-delivery.
     ///
-    /// API surface only — the queue / replay machinery is owned by the
-    /// follow-up "stash B issue". This stub is removed once that issue
-    /// lands a real `StashDriver` queue implementation; the public
-    /// signature is fixed today so call sites can compile against it.
-    pub async fn stash<M>(&mut self, _msg: M)
+    /// Stashed messages are replayed — ahead of newly arrived messages, in
+    /// stash order — when [`Self::unstash_all`] or [`Self::unstash`] is called.
+    /// An `ask`-originated message keeps its reply channel while stashed, so
+    /// the caller stays pending until the message is replayed and handled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StashError::Full`] when the stash is already at its configured
+    /// [`StashCapacity`](crate::StashCapacity). The message is not stashed: a
+    /// `tell` is discarded, and an `ask` has its reply channel dropped so the
+    /// caller observes [`AskError::ReplyDropped`](crate::error::AskError::ReplyDropped).
+    pub async fn stash<M>(&mut self, msg: M) -> Result<(), StashError>
     where
         P: Receive<M>,
         M: 'static + Send + Sync,
     {
+        let task: UserTask<P> = match self.take_pending_reply::<M>() {
+            Some(reply_tx) => Box::new(AskTask::new(msg, reply_tx)),
+            None => Box::new(TellTask::new(msg)),
+        };
+        match self.stash_handle().try_stash(task) {
+            Ok(()) => Ok(()),
+            Err(_overflowed) => Err(StashError::Full),
+        }
     }
 
-    /// Re-deliver every stashed message back to the mailbox.
-    ///
-    /// API surface only — paired with [`Self::stash`]; removed by the
-    /// follow-up "stash B issue".
-    pub async fn unstash_all(&mut self) {}
+    /// Re-deliver every stashed message ahead of new arrivals, in stash order.
+    pub async fn unstash_all(&mut self) {
+        self.stash_handle().unstash_all();
+    }
+
+    /// Re-deliver the first `n` stashed messages ahead of new arrivals, in
+    /// stash order; the remainder stay stashed. Fewer than `n` are replayed
+    /// when the stash holds fewer messages.
+    pub async fn unstash(&mut self, n: usize) {
+        self.stash_handle().unstash(n);
+    }
+
+    fn stash_handle(&self) -> &StashHandle<P> {
+        self.stash_handle.as_ref().expect(
+            "ProcessContext stash API called on a process whose driver tree \
+             lacks StashDriver — lifecycle::run is supposed to always compose \
+             the Core trio (Message + Pipe + Stash)",
+        )
+    }
+
+    pub(crate) fn set_pending_reply(&mut self, reply: Box<dyn Any + Send + Sync>) {
+        self.pending_reply = Some(reply);
+    }
+
+    pub(crate) fn take_pending_reply<M>(&mut self) -> Option<ReplySender<P, M>>
+    where
+        P: Receive<M>,
+        M: 'static,
+    {
+        let parked = self.pending_reply.take()?;
+        match parked.downcast::<ReplySender<P, M>>() {
+            Ok(reply_tx) => Some(*reply_tx),
+            Err(parked) => {
+                self.pending_reply = Some(parked);
+                None
+            }
+        }
+    }
 
     /// Pipe the future `fut`'s result back into this actor as a typed message.
     ///

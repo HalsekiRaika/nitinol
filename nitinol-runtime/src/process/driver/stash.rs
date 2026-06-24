@@ -1,54 +1,101 @@
+use std::collections::VecDeque;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 
 use crate::error::HandlerError;
 use crate::process::driver::Driver;
+use crate::process::task::UserTask;
 use crate::process::{Process, ProcessContext};
 
-/// Driver mount point for the stash machinery.
-///
-/// Issue #56 reserves the API surface and the spawn-time slot in the Core
-/// driver tree. The full stash queue / replay implementation lives in a
-/// follow-up issue ("the B issue"); for now this driver:
-/// - accepts the configured `StashCapacity` so the spawn boundary can finish
-///   resolving `Inherit` once and pass a concrete `NonZeroUsize` down;
-/// - reports `supports_idle_timeout = true` so it does not interfere with
-///   `IdleTimeout::After` handling;
-/// - pends forever inside `next` so the lifecycle loop never sees an event
-///   from this driver (matches the stub `ctx.stash` / `ctx.unstash_all`).
-pub(crate) struct StashDriver<P: Process> {
-    #[allow(dead_code)]
+struct StashInner<P: Process> {
     capacity: NonZeroUsize,
-    _phantom: PhantomData<fn(P)>,
+    stashed: VecDeque<UserTask<P>>,
+    ready: VecDeque<UserTask<P>>,
+}
+
+pub(crate) struct StashDriver<P: Process> {
+    inner: Arc<Mutex<StashInner<P>>>,
 }
 
 impl<P: Process> StashDriver<P> {
     pub(crate) fn new(capacity: NonZeroUsize) -> Self {
         Self {
-            capacity,
-            _phantom: PhantomData,
+            inner: Arc::new(Mutex::new(StashInner {
+                capacity,
+                stashed: VecDeque::new(),
+                ready: VecDeque::new(),
+            })),
+        }
+    }
+
+    pub(crate) fn handle(&self) -> StashHandle<P> {
+        StashHandle {
+            inner: self.inner.clone(),
         }
     }
 }
 
 impl<P: Process> Driver<P> for StashDriver<P> {
-    type Event = std::convert::Infallible;
+    type Event = UserTask<P>;
 
     fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        // Stub: yield no events. The lifecycle loop's `select!` will simply
-        // never pick this branch.
-        std::future::pending()
+        let popped = self.inner.lock().unwrap().ready.pop_front();
+        async move {
+            match popped {
+                Some(task) => Some(task),
+                None => std::future::pending().await,
+            }
+        }
     }
 
     async fn apply(
         &mut self,
-        _state: &mut P,
-        _ctx: &mut ProcessContext<P>,
+        state: &mut P,
+        ctx: &mut ProcessContext<P>,
         ev: Self::Event,
     ) -> Result<(), HandlerError> {
-        // `Infallible` cannot be constructed — `apply` is unreachable until
-        // the B issue lands the queue/replay implementation.
-        match ev {}
+        ev.run(state, ctx).await
+    }
+}
+
+pub(crate) struct StashHandle<P: Process> {
+    inner: Arc<Mutex<StashInner<P>>>,
+}
+
+impl<P: Process> Clone for StashHandle<P> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<P: Process> StashHandle<P> {
+    pub(crate) fn try_stash(&self, task: UserTask<P>) -> Result<(), UserTask<P>> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.stashed.len() >= inner.capacity.get() {
+            return Err(task);
+        }
+        inner.stashed.push_back(task);
+        Ok(())
+    }
+
+    pub(crate) fn unstash(&self, n: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        let count = n.min(inner.stashed.len());
+        for _ in 0..count {
+            let task = inner
+                .stashed
+                .pop_front()
+                .expect("count is bounded by stashed.len()");
+            inner.ready.push_back(task);
+        }
+    }
+
+    pub(crate) fn unstash_all(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        let drained = std::mem::take(&mut inner.stashed);
+        inner.ready.extend(drained);
     }
 }

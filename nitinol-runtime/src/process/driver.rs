@@ -11,7 +11,7 @@ pub use self::pipe::{PipeDriver, PipeHandle, PipePanic, PipedTask};
 
 pub(crate) use self::fused::FusedDriver;
 pub(crate) use self::message::MessageDriver;
-pub(crate) use self::stash::StashDriver;
+pub(crate) use self::stash::{StashDriver, StashHandle};
 
 use std::future::Future;
 

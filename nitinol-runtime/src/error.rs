@@ -26,6 +26,16 @@ pub struct SpawnError {
 #[error("handler returned an error")]
 pub struct HandlerError;
 
+/// Errors surfaced by [`ProcessContext::stash`](crate::process::ProcessContext::stash).
+#[derive(Debug, thiserror::Error)]
+pub enum StashError {
+    /// The stash buffer is at its configured capacity; the message was not
+    /// stashed. For an `ask`-originated message the reply channel is dropped,
+    /// so the caller observes [`AskError::ReplyDropped`].
+    #[error("stash buffer is full")]
+    Full,
+}
+
 /// Errors surfaced by smart constructors on configuration values like
 /// `MailboxCapacity::bounded(0)` or `SupervisionStrategy::restart(_, ZERO)`.
 ///

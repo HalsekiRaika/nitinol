@@ -11,6 +11,9 @@ use crate::process::{Process, ProcessContext, Receive};
 
 pub(crate) type UserTask<P> = Box<dyn Task<P>>;
 
+pub(crate) type ReplySender<P, M> =
+    oneshot::Sender<Result<<P as Receive<M>>::Response, <P as Receive<M>>::Error>>;
+
 #[async_trait]
 pub(crate) trait Task<P: Process>: 'static + Sync + Send {
     async fn run(
@@ -106,10 +109,12 @@ where
         state: &mut P,
         ctx: &mut ProcessContext<P>,
     ) -> Result<(), HandlerError> {
+        ctx.set_pending_reply(Box::new(self.reply_tx));
         let result = state.recv(self.msg, ctx).await;
         let failed = result.is_err();
-        let _ = self.reply_tx.send(result);
-        // Propagate failure to the lifecycle loop for supervision.
+        if let Some(reply_tx) = ctx.take_pending_reply::<M>() {
+            let _ = reply_tx.send(result);
+        }
         if failed {
             Err(HandlerError)
         } else {
