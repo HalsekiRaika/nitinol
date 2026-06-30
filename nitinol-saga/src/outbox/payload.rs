@@ -1,69 +1,21 @@
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use bytes::Bytes;
+use nitinol_eventsource::appending_system_event;
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{AppendingEvent, EventType};
+use nitinol_persistence::AppendingEvent;
 
 use crate::id::SagaId;
-use crate::outbox::event_types::{
-    OUTBOX_SCHEDULED, OUTBOX_TELL_ACKED, OUTBOX_TELL_FAILED, OUTBOX_TELL_REQUESTED,
-};
+use crate::outbox::message::{Scheduled, TellAcked, TellFailed, TellRequested};
 
-pub(crate) fn encode_tell_id(tell_id: u64) -> Bytes {
-    Bytes::from(tell_id.to_be_bytes().to_vec())
-}
-
-pub(crate) fn decode_tell_id(payload: &[u8]) -> Option<u64> {
-    if payload.len() < 8 {
-        return None;
-    }
-    let bytes: [u8; 8] = payload[..8].try_into().ok()?;
-    Some(u64::from_be_bytes(bytes))
-}
-
-pub(crate) fn encode_tell_requested(tell_id: u64, crash_restart_payload: Option<&[u8]>) -> Bytes {
-    let mut buf = tell_id.to_be_bytes().to_vec();
-    if let Some(extra) = crash_restart_payload {
-        buf.extend_from_slice(extra);
-    }
-    Bytes::from(buf)
-}
-
-pub(crate) fn decode_tell_requested(payload: &[u8]) -> Option<(u64, Option<Bytes>)> {
-    if payload.len() < 8 {
-        return None;
-    }
-    let bytes: [u8; 8] = payload[..8].try_into().ok()?;
-    let tell_id = u64::from_be_bytes(bytes);
-    let crash = if payload.len() > 8 {
-        Some(Bytes::copy_from_slice(&payload[8..]))
-    } else {
-        None
-    };
-    Some((tell_id, crash))
-}
-
-pub(crate) fn encode_scheduled_at(at: jiff::Timestamp) -> Bytes {
-    Bytes::from(at.as_second().to_be_bytes().to_vec())
-}
-
+/// Whether a tell reached a successful or failed terminal state.
+///
+/// Drives which terminal marker [`OutboxAppender::append_terminal`] writes; the
+/// read side classifies markers through [`crate::outbox::message::OutboxMessage`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TellOutcome {
     Acked,
     Failed,
-}
-
-impl TellOutcome {
-    pub(crate) fn from_event_type(event_type: EventType) -> Option<Self> {
-        if event_type == OUTBOX_TELL_ACKED {
-            Some(TellOutcome::Acked)
-        } else if event_type == OUTBOX_TELL_FAILED {
-            Some(TellOutcome::Failed)
-        } else {
-            None
-        }
-    }
 }
 
 pub(crate) struct OutboxAppender;
@@ -75,12 +27,15 @@ impl OutboxAppender {
         crash_restart_payload: Option<&[u8]>,
         occurred_at: jiff::Timestamp,
     ) -> AppendingEvent {
-        AppendingEvent {
-            sequence,
-            event_type: OUTBOX_TELL_REQUESTED,
-            payload: encode_tell_requested(tell_id, crash_restart_payload),
-            occurred_at,
-        }
+        let message = TellRequested {
+            tell_id,
+            // Normalize empty bytes to None to preserve the old decode_tell_requested
+            // behaviour where only payloads longer than 8 bytes were treated as Some.
+            crash_restart: crash_restart_payload
+                .filter(|b| !b.is_empty())
+                .map(<[u8]>::to_vec),
+        };
+        appending_system_event(sequence, &message, occurred_at)
     }
 
     pub(crate) fn build_scheduled(
@@ -88,12 +43,10 @@ impl OutboxAppender {
         at: jiff::Timestamp,
         occurred_at: jiff::Timestamp,
     ) -> AppendingEvent {
-        AppendingEvent {
-            sequence,
-            event_type: OUTBOX_SCHEDULED,
-            payload: encode_scheduled_at(at),
-            occurred_at,
-        }
+        let message = Scheduled {
+            at_unix_seconds: at.as_second(),
+        };
+        appending_system_event(sequence, &message, occurred_at)
     }
 
     pub(crate) async fn append_terminal(
@@ -103,15 +56,10 @@ impl OutboxAppender {
         outcome: TellOutcome,
         tell_id: u64,
     ) -> bool {
-        let event_type = match outcome {
-            TellOutcome::Acked => OUTBOX_TELL_ACKED,
-            TellOutcome::Failed => OUTBOX_TELL_FAILED,
-        };
-        let event = AppendingEvent {
-            sequence,
-            event_type,
-            payload: encode_tell_id(tell_id),
-            occurred_at: jiff::Timestamp::now(),
+        let now = jiff::Timestamp::now();
+        let event = match outcome {
+            TellOutcome::Acked => appending_system_event(sequence, &TellAcked { tell_id }, now),
+            TellOutcome::Failed => appending_system_event(sequence, &TellFailed { tell_id }, now),
         };
         if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
             tracing::warn!(error = %e, ?outcome, "saga outbox terminal marker append failed");
@@ -132,6 +80,32 @@ mod tests {
     use nitinol_persistence::error::{AppendError, LoadError};
     use nitinol_persistence::store::EventStream;
     use nitinol_persistence::AppendOutcome;
+
+    #[test]
+    fn build_tell_requested_normalizes_empty_crash_restart_bytes_to_none() {
+        // Regression: Some(&[]) must be treated identically to None so the
+        // replay path never sees empty crash-restart bytes and tries to use
+        // them as a factory payload.
+        let event = OutboxAppender::build_tell_requested(
+            1,
+            42,
+            Some(&[]),
+            jiff::Timestamp::UNIX_EPOCH,
+        );
+        match crate::outbox::message::OutboxMessage::classify(event.event_type, &event.payload) {
+            Some(Ok(crate::outbox::message::OutboxMessage::TellRequested(m))) => {
+                assert!(
+                    m.crash_restart.is_none(),
+                    "empty crash_restart bytes must be normalized to None, got {:?}",
+                    m.crash_restart
+                );
+            }
+            other => panic!(
+                "expected decoded TellRequested, classify returned unexpected: is_some={}",
+                other.is_some()
+            ),
+        }
+    }
 
     struct FailOnceStore {
         has_failed: AtomicBool,
@@ -175,33 +149,6 @@ mod tests {
             > = Box::pin(futures_util::stream::empty());
             Ok(stream)
         }
-    }
-
-    #[test]
-    fn tell_outcome_from_event_type_returns_correct_variant_for_terminal_types() {
-        use nitinol_persistence::EventType;
-        assert_eq!(
-            TellOutcome::from_event_type(EventType::from_str("nitinol.saga.outbox.tell_acked")),
-            Some(TellOutcome::Acked),
-            "tell_acked event_type must yield Some(Acked)"
-        );
-        assert_eq!(
-            TellOutcome::from_event_type(EventType::from_str("nitinol.saga.outbox.tell_failed")),
-            Some(TellOutcome::Failed),
-            "tell_failed event_type must yield Some(Failed)"
-        );
-        assert_eq!(
-            TellOutcome::from_event_type(EventType::from_str(
-                "nitinol.saga.outbox.tell_requested"
-            )),
-            None,
-            "tell_requested is not a terminal event_type"
-        );
-        assert_eq!(
-            TellOutcome::from_event_type(EventType::from_str("user.SomeEvent")),
-            None,
-            "user event_type must yield None"
-        );
     }
 
     #[tokio::test]

@@ -11,10 +11,7 @@ use nitinol_runtime::process::ProcessContext;
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
-use crate::outbox::{
-    decode_tell_id, decode_tell_requested, OutboxAppender, TellOutcome, OUTBOX_SCHEDULED,
-    OUTBOX_TELL_REQUESTED,
-};
+use crate::outbox::{OutboxAppender, OutboxMessage, TellOutcome};
 use crate::process::outbox_executor::spawn_outbox_executor;
 use crate::process::saga_process::{SagaProcess, TellState};
 use crate::saga::Saga;
@@ -103,25 +100,43 @@ fn dispatch_loaded<S: Saga>(
     pending: &mut HashMap<u64, Option<Bytes>>,
     failed: &mut Vec<u64>,
 ) {
-    if loaded.event_type == OUTBOX_TELL_REQUESTED {
-        if let Some((id, crp)) = decode_tell_requested(&loaded.payload) {
-            pending.insert(id, crp);
+    match OutboxMessage::classify(loaded.event_type, &loaded.payload) {
+        Some(Ok(message)) => apply_outbox_message(message, pending, failed),
+        Some(Err(e)) => {
+            tracing::error!(error = %e, "saga outbox marker decode failed; skipping event");
         }
-    } else if let Some(outcome) = TellOutcome::from_event_type(loaded.event_type) {
-        if let Some(id) = decode_tell_id(&loaded.payload) {
-            pending.remove(&id);
-            if matches!(outcome, TellOutcome::Failed) {
-                failed.push(id);
-            }
-        }
-    } else if loaded.event_type == OUTBOX_SCHEDULED {
-        // no-op MVP
-    } else {
-        match codec.decode(&loaded.payload) {
+        None => match codec.decode(&loaded.payload) {
             Ok(event) => state.apply(event),
             Err(e) => {
                 tracing::error!(error = %e, "saga event decode failed; skipping event");
             }
+        },
+    }
+}
+
+fn apply_outbox_message(
+    message: OutboxMessage,
+    pending: &mut HashMap<u64, Option<Bytes>>,
+    failed: &mut Vec<u64>,
+) {
+    match message {
+        OutboxMessage::TellRequested(m) => {
+            pending.insert(m.tell_id, m.crash_restart.map(Bytes::from));
+        }
+        OutboxMessage::TellAcked(m) => {
+            pending.remove(&m.tell_id);
+        }
+        OutboxMessage::TellFailed(m) => {
+            pending.remove(&m.tell_id);
+            failed.push(m.tell_id);
+        }
+        OutboxMessage::Scheduled(m) => {
+            // Scheduled markers are durable but a replay no-op; there is nothing
+            // to re-drive, so we only record that one was seen.
+            tracing::trace!(
+                at_unix_seconds = m.at_unix_seconds,
+                "saga replay: scheduled marker (no-op)"
+            );
         }
     }
 }
@@ -236,6 +251,7 @@ mod tests {
     use nitinol_persistence::{AppendingEvent, EventType, LoadedEvent};
     use nitinol_runtime::ProcessSystem;
 
+    use crate::outbox::OutboxAppender;
     use crate::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
     struct JsonCodec;
@@ -350,26 +366,22 @@ mod tests {
         }
     }
 
-    fn encode_tell_requested_no_crash_bytes(tell_id: u64) -> Bytes {
-        Bytes::from(tell_id.to_be_bytes().to_vec())
-    }
-
     async fn seed_tell_requested(
         store: &Arc<InMemoryEventStore>,
         saga_id: &SagaId,
         sequence: u64,
         tell_id: u64,
     ) {
+        // Seed through the real write path so the payload uses the framework's
+        // prost `SystemEvent` codec (no crash-restart bytes).
+        let event = OutboxAppender::build_tell_requested(
+            sequence,
+            tell_id,
+            None,
+            jiff::Timestamp::now(),
+        );
         store
-            .append(
-                saga_id.as_str(),
-                vec![AppendingEvent {
-                    sequence,
-                    event_type: EventType::from_str("nitinol.saga.outbox.tell_requested"),
-                    payload: encode_tell_requested_no_crash_bytes(tell_id),
-                    occurred_at: jiff::Timestamp::now(),
-                }],
-            )
+            .append(saga_id.as_str(), vec![event])
             .await
             .expect("seed TellRequested must succeed");
     }

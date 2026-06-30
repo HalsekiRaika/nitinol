@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+// Wire schema for the framework outbox markers (`nitinol.saga.outbox.*`).
+// The package name is part of the reserved namespace contract; field numbers
+// are the stable evolution anchors and must not be reused.
+package nitinol.saga.outbox;
+
+// One per `SagaEffect::tell`, written atomically with the user events.
+message TellRequested {
+  uint64 tell_id = 1;
+  // Present only when crash-restart bytes were supplied; absence means the
+  // tell cannot be reconstructed after a crash.
+  optional bytes crash_restart = 2;
+}
+
+// Terminal marker: the tell was acknowledged.
+message TellAcked {
+  uint64 tell_id = 1;
+}
+
+// Terminal marker: the tell exhausted its retries (or could not be re-dispatched).
+message TellFailed {
+  uint64 tell_id = 1;
+}
+
+// One per `Schedule`, recording the schedule time as whole unix seconds.
+message Scheduled {
+  int64 at_unix_seconds = 1;
+}

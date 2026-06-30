@@ -12,7 +12,7 @@
 //! (not `TellFailed`).
 
 mod common;
-use common::JsonCodec;
+use common::{decode_tell_requested, encode_tell_requested, JsonCodec};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -176,13 +176,12 @@ async fn append_order_placed(
     .await;
 }
 
-/// Encode a `TellRequested` payload as `SagaEffect::tell` would: 8-byte
-/// big-endian `tell_id` followed by JSON-serialized command bytes.
+/// Encode a `TellRequested` payload as `SagaEffect::tell` would: prost
+/// `tell_id` (field 1) plus the JSON-serialized command as crash-restart
+/// bytes (field 2).
 fn encode_tell_requested_with_json_cmd<C: Serialize>(tell_id: u64, cmd: &C) -> Bytes {
-    let mut buf = tell_id.to_be_bytes().to_vec();
     let json = serde_json::to_vec(cmd).expect("command serialization must succeed");
-    buf.extend_from_slice(&json);
-    Bytes::from(buf)
+    encode_tell_requested(tell_id, Some(&json))
 }
 
 async fn append_raw(
@@ -415,35 +414,27 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     };
 
     // -----------------------------------------------------------------------
-    // Verify payload format: 8-byte big-endian tell_id + JSON(Reserve)
+    // Verify payload format: prost TellRequested { tell_id, crash_restart }
+    // where crash_restart holds the JSON-serialized command.
     // -----------------------------------------------------------------------
     let tell_requested_event = p1_events
         .iter()
         .find(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_requested")
         .expect("SagaEffect::tell must produce a TellRequested outbox marker");
 
-    assert!(
-        tell_requested_event.payload.len() > 8,
-        "TellRequested payload from SagaEffect::tell must be >8 bytes \
-         (8-byte tell_id header + JSON-encoded command); \
-         got {} bytes — helper.rs may have regressed to TellIntent::new without crash-restart payload",
-        tell_requested_event.payload.len()
-    );
+    let decoded = decode_tell_requested(&tell_requested_event.payload);
 
-    let raw_payload = &tell_requested_event.payload;
-    // First 8 bytes: big-endian tell_id (a valid u64 is all we need here)
-    let _tell_id = u64::from_be_bytes(
-        raw_payload[..8]
-            .try_into()
-            .expect("first 8 bytes must decode as big-endian tell_id"),
-    );
-    // Remaining bytes: JSON-serialized Reserve command
-    let json_bytes = &raw_payload[8..];
-    let decoded_cmd: Reserve = serde_json::from_slice(json_bytes).unwrap_or_else(|e| {
+    let json_bytes = decoded.crash_restart.unwrap_or_else(|| {
         panic!(
-            "bytes after tell_id in TellRequested payload must be valid JSON for \
-             Reserve command; serde_json error: {e} — \
-             raw bytes (hex): {:?}",
+            "TellRequested from SagaEffect::tell must carry crash_restart bytes \
+             (field 2 present) — the JSON-encoded command; helper may have regressed \
+             to TellIntent::new without a crash-restart payload"
+        )
+    });
+    let decoded_cmd: Reserve = serde_json::from_slice(&json_bytes).unwrap_or_else(|e| {
+        panic!(
+            "crash_restart bytes in TellRequested payload must be valid JSON for \
+             Reserve command; serde_json error: {e} — raw bytes (hex): {:?}",
             json_bytes
                 .iter()
                 .map(|b| format!("{b:02x}"))
@@ -452,9 +443,11 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     });
     assert_eq!(
         decoded_cmd.sku, "SKU-PAYLOAD-CHECK",
-        "JSON bytes in TellRequested payload must encode the original Reserve command \
-         as produced by SagaEffect::tell"
+        "crash_restart bytes in TellRequested payload must encode the original Reserve \
+         command as produced by SagaEffect::tell"
     );
+
+    let raw_payload = &tell_requested_event.payload;
 
     // -----------------------------------------------------------------------
     // Phase 2 — crash-restart redispatch using the real SagaEffect::tell bytes

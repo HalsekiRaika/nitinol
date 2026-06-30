@@ -13,7 +13,7 @@
 //!    call must expose the `tell_id` in `ctx.failed_tell_ids()`.
 
 mod common;
-use common::JsonCodec;
+use common::{encode_tell_id, encode_tell_requested, JsonCodec};
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -283,13 +283,12 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
 
     // Pre-seed: TellRequested(tell_id=1) + TellFailed(tell_id=1).
     // This simulates a saga that had a tell fail in a previous run.
-    let tell_id_payload = Bytes::from(1u64.to_be_bytes().to_vec());
     append_raw(
         &saga_store,
         saga_id.as_str(),
         1,
         EventType::from_str(OUTBOX_TELL_REQUESTED),
-        tell_id_payload.clone(),
+        encode_tell_requested(1, None),
     )
     .await;
     append_raw(
@@ -297,7 +296,7 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
         saga_id.as_str(),
         2,
         EventType::from_str(OUTBOX_TELL_FAILED),
-        tell_id_payload,
+        encode_tell_id(1),
     )
     .await;
 
@@ -386,10 +385,10 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let saga_id = SagaId::new("failed-tell-synthetic-replay-saga-1");
 
     // Seed only a TellRequested — no TellAcked/TellFailed yet, no crash-restart
-    // bytes (exactly 8 bytes: big-endian tell_id).  Simulates a crash between
+    // bytes (prost TellRequested with field 2 absent).  Simulates a crash between
     // the atomic Persist batch and the executor's terminal append where the new
     // process has no in-memory intent and no factory registered.
-    let tell_id_payload = Bytes::from(5u64.to_be_bytes().to_vec());
+    let tell_id_payload = encode_tell_requested(5, None);
     append_raw(
         &saga_store,
         saga_id.as_str(),

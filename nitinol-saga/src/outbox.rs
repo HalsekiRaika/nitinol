@@ -16,12 +16,14 @@
 //!
 //! # Payload format
 //!
-//! `TellAcked` and `TellFailed` markers carry an 8-byte big-endian
-//! `tell_id: u64` payload.  `TellRequested` markers carry the same 8-byte
-//! `tell_id` header followed by optional **crash-restart bytes** supplied
-//! via [`crate::TellIntent::new_with_crash_restart`].  No external codec is
-//! involved — the format is defined inside the framework so the replay path
-//! can decode the markers without going through `Saga::Event`'s user codec.
+//! Marker payloads are encoded with **prost** from the schema in
+//! `proto/outbox.proto`.  `TellAcked` and `TellFailed` carry a `tell_id: u64`
+//! (field 1).  `TellRequested` carries the same `tell_id` plus an optional
+//! `crash_restart` bytes field (field 2) supplied via
+//! [`crate::TellIntent::new_with_crash_restart`].  `Scheduled` carries the
+//! schedule time as whole unix seconds.  Each marker implements the framework's
+//! `SystemEvent` codec, so the replay path decodes markers without going
+//! through `Saga::Event`'s user codec.
 //!
 //! # Re-dispatch on restart
 //!
@@ -40,11 +42,10 @@
 //!   terminal state and the Saga can compensate in a future handle.
 
 mod event_types;
+mod message;
 mod payload;
 mod retry_policy;
 
-pub(crate) use self::event_types::{OUTBOX_SCHEDULED, OUTBOX_TELL_REQUESTED};
-pub(crate) use self::payload::{
-    decode_tell_id, decode_tell_requested, OutboxAppender, TellOutcome,
-};
+pub(crate) use self::message::OutboxMessage;
+pub(crate) use self::payload::{OutboxAppender, TellOutcome};
 pub(crate) use self::retry_policy::RetryPolicy;

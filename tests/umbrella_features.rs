@@ -67,6 +67,81 @@ fn eventsource_feature_exposes_aggregate_and_projection() {
 }
 
 // ---------------------------------------------------------------------------
+// Feature: eventsource — SystemEvent system must NOT be exposed at umbrella root
+// ---------------------------------------------------------------------------
+
+/// Regression guard: the umbrella facade (`pub mod eventsource`) must expose all
+/// user-facing root items and sub-modules, while deliberately NOT including
+/// `SystemEvent`, `appending_system_event`, or `SystemEventDecodeError`
+/// (order.md §3 — "exclude from umbrella re-export").
+///
+/// The test body is a compile-time check only: it passes if every import
+/// resolves successfully.  No runtime assertions are needed because the
+/// absence of the three framework-internal items is enforced structurally by
+/// the facade's explicit re-export list.
+#[cfg(feature = "eventsource")]
+#[test]
+fn eventsource_facade_exposes_user_api_without_system_event() {
+    // Root-level re-exports
+    #[allow(unused_imports)]
+    use nitinol::eventsource::{
+        // core traits
+        Aggregate, Decider, Event, Receive, Snapshotable,
+        // process builder
+        AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset,
+        // snapshot
+        SnapshotPersistor, SnapshotPersistorProxy,
+        // effect
+        Effect, SideEffect, SideEffectError,
+        // context
+        Context,
+        // errors
+        AskError, ExecError, TellError,
+        // projection
+        EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset,
+        ProjectionContext, Projector, ProjectorProps, TxProvider,
+        // durable stream
+        CursorSet, CursorUnset, DurableStream, DurableStreamProxy,
+        DurableSubscription, SequenceCursor,
+    };
+    // Sub-modules must be accessible.
+    #[allow(unused_imports)]
+    use nitinol::eventsource::{codec, error, projection, system};
+    // The test passes if the above imports all compile.
+}
+
+// ---------------------------------------------------------------------------
+// Feature: eventsource — error facade exposes only user-facing types
+// ---------------------------------------------------------------------------
+
+/// Regression guard: `nitinol::eventsource::error` must expose exactly the
+/// five user-facing error types and nothing else.
+///
+/// `SystemEventDecodeError` (framework-internal) must NOT be importable via
+/// `nitinol::eventsource::error`. The negative check is enforced structurally
+/// by the explicit re-export list in `src/lib.rs` and by the `compile_fail`
+/// doctest on the `eventsource` module.
+///
+/// This test covers the positive side: all five user-facing types must be
+/// accessible through the `error` facade.
+#[cfg(feature = "eventsource")]
+#[test]
+fn eventsource_error_facade_exposes_user_facing_types() {
+    #[allow(unused_imports)]
+    use nitinol::eventsource::error::{AskError, CodecError, EffectExecutionError, ExecError, TellError};
+
+    // CodecError and EffectExecutionError are concrete enums; verify they are in scope.
+    let _ = std::marker::PhantomData::<CodecError>;
+    let _ = std::marker::PhantomData::<EffectExecutionError>;
+    // AskError<R>, ExecError<E> have type parameters — use Infallible as a stand-in.
+    let _ = std::marker::PhantomData::<AskError<std::convert::Infallible>>;
+    let _ = std::marker::PhantomData::<ExecError<std::convert::Infallible>>;
+    let _ = std::marker::PhantomData::<TellError>;
+    // If `SystemEventDecodeError` were in the facade the `compile_fail` doctest
+    // in src/lib.rs would catch it at `cargo test --doc`.
+}
+
+// ---------------------------------------------------------------------------
 // Default: no features enabled → nothing is re-exported
 // ---------------------------------------------------------------------------
 

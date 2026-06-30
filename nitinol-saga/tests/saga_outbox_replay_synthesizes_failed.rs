@@ -26,7 +26,7 @@
 //! `saga_tell_crash_restart_redispatch.rs`.
 
 mod common;
-use common::JsonCodec;
+use common::{encode_tell_id, encode_tell_requested, JsonCodec};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -129,8 +129,8 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new("replay-acked-saga-1");
 
-    let pending_tell_id_payload = Bytes::from(2u64.to_be_bytes().to_vec());
-    let ack_payload = Bytes::from(2u64.to_be_bytes().to_vec());
+    let pending_tell_id_payload = encode_tell_requested(2, None);
+    let ack_payload = encode_tell_id(2);
 
     append_raw(
         &saga_store,
@@ -208,9 +208,9 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
     let saga_id = SagaId::new("replay-unresolvable-saga-1");
 
     // Seed a TellRequested with tell_id = 1 and NO crash-restart bytes.
-    // This simulates a `TellIntent::new` direct usage — payload is exactly
-    // 8 bytes (big-endian tell_id, no suffix).
-    let tell_id_payload = Bytes::from(1u64.to_be_bytes().to_vec());
+    // This simulates a `TellIntent::new` direct usage — prost TellRequested
+    // with field 2 (crash_restart) absent.
+    let tell_id_payload = encode_tell_requested(1, None);
     append_raw(
         &saga_store,
         saga_id.as_str(),

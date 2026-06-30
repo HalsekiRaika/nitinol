@@ -6,7 +6,7 @@
 //! marker carries crash-restart bytes.
 
 mod common;
-use common::JsonCodec;
+use common::{encode_tell_requested, JsonCodec};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,15 +119,6 @@ impl Saga for InertSaga {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Encode a `TellRequested` payload: 8-byte big-endian tell_id followed by
-/// optional crash-restart bytes.  This mirrors `outbox::payload::encode_tell_requested`
-/// (which is `pub(crate)`).
-fn encode_tell_requested(tell_id: u64, crash_restart: &[u8]) -> Bytes {
-    let mut buf = tell_id.to_be_bytes().to_vec();
-    buf.extend_from_slice(crash_restart);
-    Bytes::from(buf)
-}
-
 async fn append_raw(
     store: &Arc<dyn EventStore>,
     stream_key: &str,
@@ -181,7 +172,7 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
 
     // Seed a TellRequested with tell_id = 1 and crash-restart bytes = b"Reserve".
     // The factory below identifies "Reserve" intents by these bytes.
-    let payload = encode_tell_requested(1, b"Reserve");
+    let payload = encode_tell_requested(1, Some(b"Reserve"));
     append_raw(
         &saga_store,
         saga_id.as_str(),

@@ -75,13 +75,14 @@ pub enum SagaEffect<E> {
 /// restart.
 pub struct TellIntent {
     pub(crate) side: Arc<dyn SagaSideEffect>,
-    /// Opaque bytes appended after the 8-byte `tell_id` in the `TellRequested`
-    /// outbox marker.  The saga's crash-restart factory uses these bytes to
-    /// reconstruct the `TellIntent` after a full OS-process crash.
+    /// Opaque bytes stored in prost field 2 (`crash_restart`) of the
+    /// `TellRequested` outbox marker.  The saga's crash-restart factory uses
+    /// these bytes to reconstruct the `TellIntent` after a full OS-process
+    /// crash.
     ///
     /// `None` means crash-restart re-dispatch is not supported for this intent
     /// (supervised restart via the in-memory `tell_states` registry
-    /// still works).
+    /// still works).  An empty slice is normalised to `None` at the write path.
     pub(crate) crash_restart_payload: Option<Bytes>,
 }
 
@@ -122,8 +123,8 @@ impl TellIntent {
 
     /// Build a `TellIntent` with an optional crash-restart payload.
     ///
-    /// The `crash_restart_payload` bytes are stored in the `TellRequested`
-    /// outbox marker (after the 8-byte `tell_id`) so that a
+    /// The `crash_restart_payload` bytes are stored in prost field 2
+    /// (`crash_restart`) of the `TellRequested` outbox marker so that a
     /// [`crate::SagaProps::with_crash_restart_factory`]-equipped saga can
     /// reconstruct the intent after a full OS-process crash.
     ///

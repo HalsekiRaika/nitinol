@@ -1,5 +1,21 @@
 use crate::SideEffectError;
 
+/// Error produced when decoding a [`crate::SystemEvent`] payload fails.
+///
+/// The underlying serializer (prost) is wrapped behind `Box<dyn Error>` so the
+/// framework's choice of wire format does not leak into the public surface.
+#[doc(hidden)]
+#[derive(Debug, thiserror::Error)]
+#[error("system event decode failed: {0}")]
+pub struct SystemEventDecodeError(Box<dyn std::error::Error + Send + Sync>);
+
+impl SystemEventDecodeError {
+    #[doc(hidden)]
+    pub fn new(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self(Box::new(source))
+    }
+}
+
 /// Error produced when a [`crate::codec::ErasedCodec`] operation fails.
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {

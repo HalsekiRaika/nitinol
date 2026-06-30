@@ -158,3 +158,94 @@ pub fn schedule_at(schedule: &Schedule) -> jiff::Timestamp {
 pub fn schedule_at_ts(ts: jiff::Timestamp) -> Schedule {
     Schedule { at: ts }
 }
+
+// ---------------------------------------------------------------------------
+// Prost mirrors of the framework outbox marker payloads (`nitinol.saga.outbox.*`).
+//
+// These mirror `nitinol-saga/proto/outbox.proto` exactly — same field numbers
+// and wire types as the framework's `SystemEvent` codec:
+//
+//   message TellRequested { uint64 tell_id = 1; optional bytes crash_restart = 2; }
+//   message TellAcked     { uint64 tell_id = 1; }
+//   message TellFailed    { uint64 tell_id = 1; }
+//   message Scheduled     { int64 at_unix_seconds = 1; }
+//
+// Integration tests live outside the saga crate and cannot reach the
+// crate-internal prost types, so seeds and payload assertions go through these
+// independent mirrors.  prost's wire format depends only on the field number +
+// wire type, so bytes produced here decode in the framework and vice versa.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, PartialEq, prost::Message)]
+#[allow(dead_code)]
+pub struct TellRequestedPayload {
+    #[prost(uint64, tag = "1")]
+    pub tell_id: u64,
+    #[prost(bytes = "vec", optional, tag = "2")]
+    pub crash_restart: Option<Vec<u8>>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+#[allow(dead_code)]
+pub struct TellIdPayload {
+    #[prost(uint64, tag = "1")]
+    pub tell_id: u64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+#[allow(dead_code)]
+pub struct ScheduledPayload {
+    #[prost(int64, tag = "1")]
+    pub at_unix_seconds: i64,
+}
+
+/// Encode a `TellRequested` outbox payload exactly as the framework's prost
+/// codec does: `tell_id` in field 1, optional `crash_restart` bytes in field 2.
+/// `None` omits field 2 entirely (presence semantics for "no crash-restart").
+#[allow(dead_code)]
+pub fn encode_tell_requested(tell_id: u64, crash_restart: Option<&[u8]>) -> Bytes {
+    let msg = TellRequestedPayload {
+        tell_id,
+        crash_restart: crash_restart.map(<[u8]>::to_vec),
+    };
+    Bytes::from(prost::Message::encode_to_vec(&msg))
+}
+
+/// Encode a terminal (`TellAcked` / `TellFailed`) outbox payload: just the
+/// `tell_id` in field 1.
+#[allow(dead_code)]
+pub fn encode_tell_id(tell_id: u64) -> Bytes {
+    let msg = TellIdPayload { tell_id };
+    Bytes::from(prost::Message::encode_to_vec(&msg))
+}
+
+/// Encode a `Scheduled` outbox payload: the schedule time as whole unix seconds
+/// in field 1 (mirrors `jiff::Timestamp::as_second`).
+#[allow(dead_code)]
+pub fn encode_scheduled_at(at: jiff::Timestamp) -> Bytes {
+    let msg = ScheduledPayload {
+        at_unix_seconds: at.as_second(),
+    };
+    Bytes::from(prost::Message::encode_to_vec(&msg))
+}
+
+/// Decode a `TellRequested` payload produced by the framework's prost codec.
+#[allow(dead_code)]
+pub fn decode_tell_requested(payload: &[u8]) -> TellRequestedPayload {
+    <TellRequestedPayload as prost::Message>::decode(payload)
+        .expect("payload must be a valid prost TellRequested message")
+}
+
+/// Decode a terminal (`TellAcked` / `TellFailed`) payload.
+#[allow(dead_code)]
+pub fn decode_tell_id(payload: &[u8]) -> TellIdPayload {
+    <TellIdPayload as prost::Message>::decode(payload)
+        .expect("payload must be a valid prost tell_id message")
+}
+
+/// Decode a `Scheduled` payload.
+#[allow(dead_code)]
+pub fn decode_scheduled(payload: &[u8]) -> ScheduledPayload {
+    <ScheduledPayload as prost::Message>::decode(payload)
+        .expect("payload must be a valid prost Scheduled message")
+}

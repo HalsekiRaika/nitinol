@@ -8,7 +8,7 @@
 //!      follow-up issue (γ).
 
 mod common;
-use common::JsonCodec;
+use common::{decode_scheduled, JsonCodec};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -213,6 +213,25 @@ async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_take
     assert_eq!(
         tell_failed_count, 0,
         "no TellFailed must be appended in this MVP — scheduler execution is reserved for Issue γ"
+    );
+
+    // Each `scheduled` marker payload must be prost-encoded with the schedule
+    // time as whole unix seconds (field 1), preserving both Schedule `at`s.
+    let mut scheduled_seconds: Vec<i64> = events
+        .iter()
+        .filter(|e| {
+            let s = e.event_type.as_str();
+            s.starts_with(OUTBOX_PREFIX) && s.ends_with("scheduled")
+        })
+        .map(|e| decode_scheduled(&e.payload).at_unix_seconds)
+        .collect();
+    scheduled_seconds.sort_unstable();
+    let mut expected_seconds = vec![at_a.as_second(), at_b.as_second()];
+    expected_seconds.sort_unstable();
+    assert_eq!(
+        scheduled_seconds, expected_seconds,
+        "each `scheduled` marker payload must prost-decode to its Schedule's \
+         unix-second timestamp"
     );
 
     // The atomic batch is the *initial* burst: user event + 2 scheduled markers

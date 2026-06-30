@@ -33,6 +33,7 @@ mod durable_stream;
 mod effect;
 mod event;
 mod receive;
+mod system_event;
 
 pub mod error;
 mod process;
@@ -45,6 +46,14 @@ pub use self::decider::Decider;
 pub use self::effect::{Effect, SideEffect, SideEffectError};
 pub use self::event::Event;
 pub use self::receive::Receive;
+
+// Framework-managed persistent message abstraction. Hidden from docs and not
+// re-exported through the umbrella crate so it stays an internal API; direct
+// `nitinol-eventsource` importers can still reach it (consumer's responsibility).
+#[doc(hidden)]
+pub use self::error::SystemEventDecodeError;
+#[doc(hidden)]
+pub use self::system_event::{appending_system_event, SystemEvent};
 
 pub use self::error::{AskError, ExecError, TellError};
 pub use self::process::{

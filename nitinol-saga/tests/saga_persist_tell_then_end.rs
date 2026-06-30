@@ -9,7 +9,7 @@
 //! error and no terminal marker would ever reach the store.
 
 mod common;
-use common::JsonCodec;
+use common::{decode_tell_id, decode_tell_requested, JsonCodec};
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -274,5 +274,25 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
         1,
         "saga stream must contain exactly one terminal marker (TellAcked or TellFailed); \
          got acked={tell_acked} failed={tell_failed}"
+    );
+
+    // The TellRequested and the terminal marker must both be prost-encoded and
+    // reference the same tell_id (field 1 in both messages).
+    let requested_id = events
+        .iter()
+        .find(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_requested")
+        .map(|e| decode_tell_requested(&e.payload).tell_id)
+        .expect("a TellRequested marker must be present");
+    let terminal_id = events
+        .iter()
+        .find(|e| {
+            let t = e.event_type.as_str();
+            t == "nitinol.saga.outbox.tell_acked" || t == "nitinol.saga.outbox.tell_failed"
+        })
+        .map(|e| decode_tell_id(&e.payload).tell_id)
+        .expect("a terminal marker must be present");
+    assert_eq!(
+        requested_id, terminal_id,
+        "the terminal marker's prost tell_id must match the TellRequested tell_id"
     );
 }
