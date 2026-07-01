@@ -30,7 +30,7 @@ mod query;
 mod snapshot;
 
 pub use event::{AppendingEvent, LoadedEvent};
-pub use event_type::EventType;
+pub use event_type::{EventType, Family, TypeKey, TypeName, Variant};
 pub use id::{AggregateId, ProjectionId};
 pub use query::{AppendOutcome, LoadQuery};
 pub use snapshot::PersistedSnapshot;

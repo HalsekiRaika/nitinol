@@ -35,7 +35,9 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, EventType, LoadQuery};
+use nitinol_persistence::{
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
+};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -49,7 +51,10 @@ struct UpstreamTrigger {
 }
 
 impl Event for UpstreamTrigger {
-    const EVENT_TYPE: EventType = EventType::from_str("term_append_fail.UpstreamTrigger");
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("term_append_fail"),
+        TypeName::new("UpstreamTrigger"),
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,7 +63,8 @@ struct SagaMarker {
 }
 
 impl Event for SagaMarker {
-    const EVENT_TYPE: EventType = EventType::from_str("term_append_fail.SagaMarker");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("term_append_fail"), TypeName::new("SagaMarker"));
 }
 
 // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ use nitinol_runtime::process::Receive as RuntimeReceive;
 
 use async_trait::async_trait;
 use nitinol_eventsource::{Aggregate, Context, Event};
-use nitinol_persistence::{AggregateId, EventType};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::process::{Process, ProcessContext};
 
 // ---------------------------------------------------------------------------
@@ -16,7 +16,7 @@ use nitinol_runtime::process::{Process, ProcessContext};
 struct Counted;
 
 impl Event for Counted {
-    const EVENT_TYPE: EventType = EventType::from_str("Counted");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Counted"));
 }
 
 #[derive(Default)]

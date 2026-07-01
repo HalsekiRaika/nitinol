@@ -21,7 +21,7 @@ use nitinol_eventsource::{
     Receive as EvtReceive,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, LoadQuery};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,7 @@ use nitinol_runtime::ProcessSystem;
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("E2EAgg.Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.agg"), TypeName::new("Incremented"));
 }
 
 // ---------------------------------------------------------------------------

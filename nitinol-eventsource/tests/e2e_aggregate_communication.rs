@@ -25,7 +25,7 @@ use nitinol_eventsource::{
     Event, Receive as EvtReceive, SideEffect, SideEffectError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Stream};
 use nitinol_runtime::{BoxedMessage, ProcessSystem, Props};
@@ -38,7 +38,7 @@ use nitinol_runtime::{BoxedMessage, ProcessSystem, Props};
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("E2EComm.Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.comm"), TypeName::new("Incremented"));
 }
 
 // ---------------------------------------------------------------------------

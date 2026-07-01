@@ -38,14 +38,19 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
 const OUTBOX_PREFIX: &str = "nitinol.saga.outbox.";
-const OUTBOX_TELL_REQUESTED: &str = "nitinol.saga.outbox.tell_requested";
-const OUTBOX_TELL_ACKED: &str = "nitinol.saga.outbox.tell_acked";
-const OUTBOX_TELL_FAILED: &str = "nitinol.saga.outbox.tell_failed";
+const OUTBOX_TELL_REQUESTED: EventType = EventType::new(
+    Family::new("nitinol.saga.outbox"),
+    TypeName::new("tell_requested"),
+);
+const OUTBOX_TELL_ACKED: EventType =
+    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_acked"));
+const OUTBOX_TELL_FAILED: EventType =
+    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_failed"));
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -53,7 +58,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("replay.OrderPlaced");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("replay"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,7 +68,10 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("replay.ReservationRequested");
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("replay"),
+        TypeName::new("ReservationRequested"),
+    );
 }
 
 /// Inert saga used only to drive the on_start replay path — never invoked.
@@ -136,7 +145,7 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
         &saga_store,
         saga_id.as_str(),
         1,
-        EventType::from_str(OUTBOX_TELL_REQUESTED),
+        OUTBOX_TELL_REQUESTED,
         pending_tell_id_payload,
     )
     .await;
@@ -144,7 +153,7 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
         &saga_store,
         saga_id.as_str(),
         2,
-        EventType::from_str(OUTBOX_TELL_ACKED),
+        OUTBOX_TELL_ACKED,
         ack_payload,
     )
     .await;
@@ -175,11 +184,11 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
     let events = load_saga_events(&saga_store, &saga_id).await;
     let failed_count = events
         .iter()
-        .filter(|e| e.event_type.as_str() == OUTBOX_TELL_FAILED)
+        .filter(|e| e.event_type == OUTBOX_TELL_FAILED)
         .count();
     let total_outbox = events
         .iter()
-        .filter(|e| e.event_type.as_str().starts_with(OUTBOX_PREFIX))
+        .filter(|e| e.event_type.to_string().starts_with(OUTBOX_PREFIX))
         .count();
 
     assert_eq!(
@@ -215,7 +224,7 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
         &saga_store,
         saga_id.as_str(),
         1,
-        EventType::from_str(OUTBOX_TELL_REQUESTED),
+        OUTBOX_TELL_REQUESTED,
         tell_id_payload,
     )
     .await;
@@ -248,13 +257,13 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
         let events = load_saga_events(&saga_store, &saga_id).await;
         let failed_count = events
             .iter()
-            .filter(|e| e.event_type.as_str() == OUTBOX_TELL_FAILED)
+            .filter(|e| e.event_type == OUTBOX_TELL_FAILED)
             .count();
         if failed_count >= 1 {
             break events;
         }
         if std::time::Instant::now() >= deadline {
-            let event_types: Vec<_> = events.iter().map(|e| e.event_type.as_str()).collect();
+            let event_types: Vec<_> = events.iter().map(|e| e.event_type.to_string()).collect();
             panic!(
                 "timed out waiting for synthetic TellFailed after crash-restart replay \
                  (event_types: {:?})",
@@ -266,11 +275,11 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
 
     let failed_count = events
         .iter()
-        .filter(|e| e.event_type.as_str() == OUTBOX_TELL_FAILED)
+        .filter(|e| e.event_type == OUTBOX_TELL_FAILED)
         .count();
     let acked_count = events
         .iter()
-        .filter(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED)
+        .filter(|e| e.event_type == OUTBOX_TELL_ACKED)
         .count();
 
     assert_eq!(

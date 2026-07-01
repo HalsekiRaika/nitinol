@@ -5,7 +5,7 @@ use futures_util::TryStreamExt;
 use jiff::Timestamp;
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 
 fn make_event(sequence: u64, event_type: EventType, payload: &'static [u8]) -> AppendingEvent {
     AppendingEvent {
@@ -22,7 +22,7 @@ async fn append_and_load_by_stream_matches_payload_and_sequence() {
     // Given: an empty store and one event to append
     let store = InMemoryEventStore::default();
     let agg = AggregateId::new("agg-1");
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
     let event = make_event(1, et, b"hello world");
 
     // When: the event is appended and then loaded by stream key
@@ -51,7 +51,7 @@ async fn load_from_global_returns_events_in_global_sequence_order() {
     let store = InMemoryEventStore::default();
     let agg1 = AggregateId::new("agg-1");
     let agg2 = AggregateId::new("agg-2");
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     // When: events are appended to different aggregates, then loaded from global sequence 1
     store
@@ -90,8 +90,8 @@ async fn load_by_event_type_returns_only_matching_events() {
     // Given: one aggregate with three events of two different types
     let store = InMemoryEventStore::default();
     let agg = AggregateId::new("agg-1");
-    let type_a = EventType::from_str("TypeA");
-    let type_b = EventType::from_str("TypeB");
+    let type_a = EventType::new(Family::new(""), TypeName::new("TypeA"));
+    let type_b = EventType::new(Family::new(""), TypeName::new("TypeB"));
 
     store
         .append(
@@ -126,7 +126,7 @@ async fn load_with_limit_returns_at_most_limit_events() {
     // Given: one aggregate with five events
     let store = InMemoryEventStore::default();
     let agg = AggregateId::new("agg-1");
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     store
         .append(
@@ -157,7 +157,7 @@ async fn duplicate_sequence_on_same_aggregate_returns_sequence_conflict() {
     // Given: an aggregate with one event already appended
     let store = InMemoryEventStore::default();
     let agg = AggregateId::new("agg-1");
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     store
         .append(agg.borrow(), vec![make_event(1, et, b"first")])
@@ -183,7 +183,7 @@ async fn batch_append_with_conflict_is_all_or_nothing() {
     // Given: an aggregate with sequence 1 already stored
     let store = InMemoryEventStore::default();
     let agg = AggregateId::new("agg-1");
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     let outcome = store
         .append(agg.borrow(), vec![make_event(1, et, b"existing")])
@@ -242,7 +242,7 @@ async fn intra_batch_duplicate_sequence_returns_sequence_conflict() {
     // Given: an empty store
     let store = InMemoryEventStore::default();
     let agg = AggregateId::new("agg-1");
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     // When: a batch containing two events with the same sequence is appended
     let result = store
@@ -276,7 +276,7 @@ async fn empty_batch_append_is_noop_and_returns_current_stream_version() {
     // Given: an aggregate with one event already stored (sequence=3)
     let store = InMemoryEventStore::default();
     let agg = AggregateId::new("agg-1");
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     store
         .append(agg.borrow(), vec![make_event(3, et, b"existing")])

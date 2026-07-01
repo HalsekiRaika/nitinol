@@ -21,7 +21,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, Schedule};
 
@@ -33,7 +33,7 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("schedule.OrderPlaced");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("schedule"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("schedule.ReservationRequested");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("schedule"), TypeName::new("ReservationRequested"));
 }
 
 struct ScheduleSaga {
@@ -168,28 +168,28 @@ async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_take
     let scheduled_count = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("scheduled")
         })
         .count();
     let tell_requested_count = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
         })
         .count();
     let tell_acked_count = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_acked")
         })
         .count();
     let tell_failed_count = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_failed")
         })
         .count();
@@ -220,7 +220,7 @@ async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_take
     let mut scheduled_seconds: Vec<i64> = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("scheduled")
         })
         .map(|e| decode_scheduled(&e.payload).at_unix_seconds)
@@ -240,7 +240,7 @@ async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_take
         .iter()
         .filter(|e| {
             e.event_type == ReservationRequested::EVENT_TYPE || {
-                let s = e.event_type.as_str();
+                let s = e.event_type.to_string();
                 s.starts_with(OUTBOX_PREFIX) && s.ends_with("scheduled")
             }
         })

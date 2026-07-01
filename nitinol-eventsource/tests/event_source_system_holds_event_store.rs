@@ -14,7 +14,7 @@ use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Default)]
@@ -39,7 +39,7 @@ struct Counter;
 struct Bumped;
 
 impl Event for Bumped {
-    const EVENT_TYPE: EventType = EventType::from_str("e2e.system.Bumped");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.system"), TypeName::new("Bumped"));
 }
 
 impl Aggregate for Counter {

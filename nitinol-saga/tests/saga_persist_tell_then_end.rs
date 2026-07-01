@@ -25,7 +25,9 @@ use nitinol_eventsource::{
     SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -39,7 +41,8 @@ struct UpstreamEvent {
 }
 
 impl Event for UpstreamEvent {
-    const EVENT_TYPE: EventType = EventType::from_str("persist_tell_end.UpstreamEvent");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("persist_tell_end"), TypeName::new("UpstreamEvent"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,7 +51,8 @@ struct SagaDomainEvent {
 }
 
 impl Event for SagaDomainEvent {
-    const EVENT_TYPE: EventType = EventType::from_str("persist_tell_end.SagaDomainEvent");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("persist_tell_end"), TypeName::new("SagaDomainEvent"));
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +235,7 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
         let terminal_count = events
             .iter()
             .filter(|e| {
-                let t = e.event_type.as_str();
+                let t = e.event_type.to_string();
                 t == "nitinol.saga.outbox.tell_acked" || t == "nitinol.saga.outbox.tell_failed"
             })
             .count();
@@ -245,7 +249,7 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
              events: {:?}",
             events
                 .iter()
-                .map(|e| e.event_type.as_str())
+                .map(|e| e.event_type.to_string())
                 .collect::<Vec<_>>()
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -254,15 +258,15 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
     let events = load_saga_events(&saga_store, &saga_id).await;
     let tell_requested = events
         .iter()
-        .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_requested")
+        .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_requested")
         .count();
     let tell_acked = events
         .iter()
-        .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_acked")
+        .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
         .count();
     let tell_failed = events
         .iter()
-        .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_failed")
+        .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_failed")
         .count();
 
     assert_eq!(
@@ -280,13 +284,13 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
     // reference the same tell_id (field 1 in both messages).
     let requested_id = events
         .iter()
-        .find(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_requested")
+        .find(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_requested")
         .map(|e| decode_tell_requested(&e.payload).tell_id)
         .expect("a TellRequested marker must be present");
     let terminal_id = events
         .iter()
         .find(|e| {
-            let t = e.event_type.as_str();
+            let t = e.event_type.to_string();
             t == "nitinol.saga.outbox.tell_acked" || t == "nitinol.saga.outbox.tell_failed"
         })
         .map(|e| decode_tell_id(&e.payload).tell_id)

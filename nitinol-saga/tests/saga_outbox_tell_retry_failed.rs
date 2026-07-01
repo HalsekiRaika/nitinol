@@ -26,7 +26,7 @@ use nitinol_eventsource::{
     SequenceCursor, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
@@ -93,7 +93,7 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("retry.OrderPlaced");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("retry"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,7 +102,7 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("retry.ReservationRequested");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("retry"), TypeName::new("ReservationRequested"));
 }
 
 #[derive(Default)]
@@ -112,7 +112,7 @@ struct Inventory;
 struct InventoryReserved;
 
 impl Event for InventoryReserved {
-    const EVENT_TYPE: EventType = EventType::from_str("retry.InventoryReserved");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("retry"), TypeName::new("InventoryReserved"));
 }
 
 impl Aggregate for Inventory {
@@ -205,7 +205,7 @@ async fn wait_for_tell_failed(
     loop {
         let events = load_saga_events(store, saga_id).await;
         let failed = events.iter().any(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_failed")
         });
         if failed {
@@ -216,7 +216,7 @@ async fn wait_for_tell_failed(
                 "timed out waiting for TellFailed outbox event in saga stream (event_types: {:?})",
                 events
                     .iter()
-                    .map(|e| e.event_type.as_str())
+                    .map(|e| e.event_type.to_string())
                     .collect::<Vec<_>>()
             );
         }
@@ -280,21 +280,21 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
     let failed_count = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_failed")
         })
         .count();
     let acked_count = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_acked")
         })
         .count();
     let requested_count = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
         })
         .count();

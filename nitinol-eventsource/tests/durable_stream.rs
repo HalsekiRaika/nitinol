@@ -9,7 +9,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{DurableStream, Event, EventEnvelope, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadedEvent};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, LoadedEvent};
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Process, ProcessContext, Props, Receive};
 use nitinol_runtime::ProcessSystem;
@@ -18,10 +18,10 @@ use nitinol_runtime::ProcessSystem;
 struct Evt;
 
 impl Event for Evt {
-    const EVENT_TYPE: EventType = EventType::from_str("Evt");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Evt"));
 }
 
-const OTHER_EVENT_TYPE: EventType = EventType::from_str("OtherEvt");
+const OTHER_EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("OtherEvt"));
 
 fn to_envelope(loaded: LoadedEvent) -> Option<EventEnvelope<Evt>> {
     if loaded.event_type != Evt::EVENT_TYPE {

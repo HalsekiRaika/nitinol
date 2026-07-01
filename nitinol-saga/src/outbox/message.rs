@@ -63,13 +63,13 @@ impl OutboxMessage {
         event_type: EventType,
         payload: &[u8],
     ) -> Option<Result<OutboxMessage, SystemEventDecodeError>> {
-        if event_type == OUTBOX_TELL_REQUESTED {
+        if event_type.type_key() == OUTBOX_TELL_REQUESTED.type_key() {
             Some(TellRequested::decode(payload).map(OutboxMessage::TellRequested))
-        } else if event_type == OUTBOX_TELL_ACKED {
+        } else if event_type.type_key() == OUTBOX_TELL_ACKED.type_key() {
             Some(TellAcked::decode(payload).map(OutboxMessage::TellAcked))
-        } else if event_type == OUTBOX_TELL_FAILED {
+        } else if event_type.type_key() == OUTBOX_TELL_FAILED.type_key() {
             Some(TellFailed::decode(payload).map(OutboxMessage::TellFailed))
-        } else if event_type == OUTBOX_SCHEDULED {
+        } else if event_type.type_key() == OUTBOX_SCHEDULED.type_key() {
             Some(Scheduled::decode(payload).map(OutboxMessage::Scheduled))
         } else {
             None
@@ -80,6 +80,7 @@ impl OutboxMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nitinol_persistence::{Family, TypeName, Variant};
 
     #[test]
     fn classify_round_trips_each_marker_through_its_system_event_codec() {
@@ -118,7 +119,11 @@ mod tests {
 
     #[test]
     fn classify_returns_none_for_user_event_types() {
-        assert!(OutboxMessage::classify(EventType::from_str("user.SomeEvent"), &[]).is_none());
+        assert!(OutboxMessage::classify(
+            EventType::new(Family::new("user"), TypeName::new("SomeEvent")),
+            &[]
+        )
+        .is_none());
     }
 
     #[test]
@@ -133,6 +138,34 @@ mod tests {
                 assert!(m.crash_restart.is_none());
             }
             _ => panic!("expected decoded TellRequested with absent crash_restart"),
+        }
+    }
+
+    /// Regression: classify uses type_key() so a variant-Some EventType with the
+    /// same family/type_name as an outbox marker must still dispatch and decode.
+    ///
+    /// If classify reverted to full `==` instead of `.type_key() ==`, this test
+    /// would return `None` instead of `Some(Ok(TellRequested(...)))` and fail.
+    #[test]
+    fn classify_with_variant_some_dispatches_by_type_key() {
+        let requested = TellRequested {
+            tell_id: 42,
+            crash_restart: None,
+        };
+        // Same family/type_name as OUTBOX_TELL_REQUESTED, but carrying a variant.
+        let incoming_with_variant = EventType::with_variant(
+            Family::new("nitinol.saga.outbox"),
+            TypeName::new("tell_requested"),
+            Variant::new("v1"),
+        );
+        match OutboxMessage::classify(incoming_with_variant, &requested.encode()) {
+            Some(Ok(OutboxMessage::TellRequested(m))) => {
+                assert_eq!(m.tell_id, 42);
+            }
+            other => panic!(
+                "expected TellRequested decoded via type_key, classify returned Some={}",
+                other.is_some()
+            ),
         }
     }
 }

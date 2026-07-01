@@ -18,7 +18,7 @@ use nitinol_eventsource::{
     Event, Receive as EvtReceive, SideEffect, SideEffectError, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName, Variant};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ use nitinol_runtime::ProcessSystem;
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
 }
 
 // ---------------------------------------------------------------------------
@@ -447,4 +447,117 @@ async fn interleaved_ask_and_exec_maintain_consistent_state() {
     // Then
     assert_eq!(after_first, 1, "count must be 1 after first ask");
     assert_eq!(after_second, 3, "count must be 3 after IncrementBy(2)");
+}
+
+// ---------------------------------------------------------------------------
+// Regression: aggregate persist path stores enum event's variant() in LoadedEvent
+// ---------------------------------------------------------------------------
+
+/// An enum event with arm-specific `variant()` override.
+#[derive(Clone, PartialEq, Debug)]
+enum CounterOp {
+    Incremented,
+}
+
+impl Event for CounterOp {
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("CounterOp"));
+
+    fn variant(&self) -> EventType {
+        let v = match self {
+            CounterOp::Incremented => Variant::new("Incremented"),
+        };
+        EventType::with_variant(Family::new(""), TypeName::new("CounterOp"), v)
+    }
+}
+
+#[derive(Default)]
+struct CounterEnum {
+    value: i64,
+}
+
+impl Aggregate for CounterEnum {
+    type Event = CounterOp;
+
+    fn apply(&mut self, event: CounterOp) {
+        match event {
+            CounterOp::Incremented => self.value += 1,
+        }
+    }
+}
+
+struct IncOp;
+
+#[async_trait]
+impl Decider<IncOp> for CounterEnum {
+    type Rejection = std::convert::Infallible;
+
+    async fn decide(
+        &self,
+        _cmd: IncOp,
+        _ctx: &mut Context,
+    ) -> Result<Effect<CounterOp>, Self::Rejection> {
+        Ok(Effect::persist(CounterOp::Incremented))
+    }
+}
+
+struct CounterOpCodec;
+
+impl Codec<CounterOp> for CounterOpCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &CounterOp) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<CounterOp, Self::Error> {
+        Ok(CounterOp::Incremented)
+    }
+}
+
+/// Regression test: the aggregate persist path must store the arm-specific
+/// `variant()` of an enum event in `LoadedEvent.event_type`, not the
+/// type-level `EVENT_TYPE` (which always has `variant: None`).
+///
+/// Failure mode without the fix: `event_type: A::Event::EVENT_TYPE` ignores
+/// the `variant()` override, so the stored event_type has `variant=None` even
+/// for enum events.
+#[tokio::test]
+async fn aggregate_persist_stores_enum_event_variant_in_loaded_event() {
+    use futures_util::TryStreamExt;
+    use nitinol_persistence::LoadQuery;
+
+    // Given
+    let system = ProcessSystem::new().await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let id = AggregateId::new("agg-enum-variant-persist");
+
+    let proxy = AggregateProps::<CounterEnum>::new(id.clone(), Arc::clone(&store))
+        .with_codec(Arc::new(CounterOpCodec))
+        .spawn(&system)
+        .await;
+
+    // When: persist an enum event via AggregateProcess
+    proxy.ask(IncOp).await.expect("ask(IncOp) must succeed");
+
+    // Then: the stored LoadedEvent carries the arm-specific variant=Some("Incremented")
+    let events: Vec<_> = store
+        .load(LoadQuery::by_stream(id.as_str()))
+        .await
+        .expect("store.load must succeed")
+        .try_collect()
+        .await
+        .expect("stream collect must succeed");
+
+    assert_eq!(events.len(), 1, "exactly one event must be stored");
+    assert_eq!(
+        events[0].event_type.variant(),
+        Some(Variant::new("Incremented")),
+        "aggregate persist must store enum event's arm variant (Some), not None; \
+         regression for aggregate_process.rs using event.variant() instead of EVENT_TYPE"
+    );
+    assert_eq!(
+        events[0].event_type.type_key(),
+        CounterOp::EVENT_TYPE.type_key(),
+        "type_key must match EVENT_TYPE so routing dispatch still works"
+    );
 }

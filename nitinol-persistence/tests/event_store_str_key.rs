@@ -28,7 +28,7 @@ use futures_util::TryStreamExt;
 use jiff::Timestamp;
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,7 +72,7 @@ fn aggregate_id_borrows_as_str() {
 async fn append_accepts_str_key_directly() {
     // Given
     let store = InMemoryEventStore::default();
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     // When: append using a string slice directly
     let outcome = store
@@ -91,7 +91,7 @@ async fn append_accepts_aggregate_id_via_borrow() {
     // Given
     let store = InMemoryEventStore::default();
     let id = AggregateId::new("agg-borrow-append");
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     // When: pass through Borrow<str>
     let outcome = store
@@ -113,7 +113,7 @@ async fn append_accepts_aggregate_id_via_borrow() {
 async fn load_by_stream_with_str_returns_matching_events() {
     // Given
     let store = InMemoryEventStore::default();
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
     store
         .append("stream-a", vec![make_event(1, et, b"a1")])
         .await
@@ -137,7 +137,7 @@ async fn load_by_stream_with_aggregate_id_returns_matching_events() {
     // Given
     let store = InMemoryEventStore::default();
     let id = AggregateId::new("agg-by-stream");
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
     store
         .append(id.borrow(), vec![make_event(1, et, b"payload")])
         .await
@@ -166,7 +166,7 @@ async fn load_by_stream_with_aggregate_id_returns_matching_events() {
 async fn load_query_uses_renamed_stream_fields() {
     // Given
     let store = InMemoryEventStore::default();
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
     store
         .append(
             "stream-renamed",
@@ -207,7 +207,7 @@ async fn load_query_uses_renamed_stream_fields() {
 async fn loaded_event_exposes_stream_key_string() {
     // Given
     let store = InMemoryEventStore::default();
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
     store
         .append("loaded-stream-key", vec![make_event(1, et, b"x")])
         .await
@@ -236,7 +236,7 @@ async fn loaded_event_exposes_stream_key_string() {
 async fn sequence_conflict_error_carries_string_key() {
     // Given
     let store = InMemoryEventStore::default();
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
     store
         .append("conflict-stream", vec![make_event(1, et, b"first")])
         .await
@@ -293,7 +293,7 @@ async fn empty_batch_with_str_key_is_noop() {
 async fn event_store_is_dyn_compatible() {
     // Given
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     // When
     store
@@ -325,7 +325,7 @@ async fn distinct_stream_keys_coexist_in_one_store() {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg = AggregateId::new("coexist-agg");
     let saga_key: &str = "coexist-saga";
-    let et = EventType::from_str("TestEvent");
+    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     // When
     store

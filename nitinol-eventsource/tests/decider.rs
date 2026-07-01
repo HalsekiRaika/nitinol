@@ -3,7 +3,7 @@ use common::{shape_of, Shape};
 
 use async_trait::async_trait;
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
-use nitinol_persistence::{AggregateId, EventType};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -13,7 +13,7 @@ use nitinol_persistence::{AggregateId, EventType};
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
 }
 
 #[derive(Default)]

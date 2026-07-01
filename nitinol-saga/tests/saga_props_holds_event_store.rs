@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::EventType;
+use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -16,14 +16,16 @@ use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 struct Triggered;
 
 impl Event for Triggered {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.direct.Triggered");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("saga.direct"), TypeName::new("Triggered"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Recorded;
 
 impl Event for Recorded {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.direct.Recorded");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("saga.direct"), TypeName::new("Recorded"));
 }
 
 #[derive(Default)]

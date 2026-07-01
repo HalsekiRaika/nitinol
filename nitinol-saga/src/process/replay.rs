@@ -248,7 +248,7 @@ mod tests {
     use nitinol_persistence::error::{AppendError, LoadError};
     use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
     use nitinol_persistence::{AppendOutcome, LoadQuery};
-    use nitinol_persistence::{AppendingEvent, EventType, LoadedEvent};
+    use nitinol_persistence::{AppendingEvent, EventType, Family, LoadedEvent, TypeName};
     use nitinol_runtime::ProcessSystem;
 
     use crate::outbox::OutboxAppender;
@@ -272,7 +272,8 @@ mod tests {
     struct MarkerEvent;
 
     impl Event for MarkerEvent {
-        const EVENT_TYPE: EventType = EventType::from_str("replay_unit_test.Marker");
+        const EVENT_TYPE: EventType =
+            EventType::new(Family::new("replay_unit_test"), TypeName::new("Marker"));
     }
 
     #[derive(Default)]
@@ -304,14 +305,16 @@ mod tests {
     struct UpstreamEvt;
 
     impl Event for UpstreamEvt {
-        const EVENT_TYPE: EventType = EventType::from_str("replay_unit_test.Upstream");
+        const EVENT_TYPE: EventType =
+            EventType::new(Family::new("replay_unit_test"), TypeName::new("Upstream"));
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct SagaEvt;
 
     impl Event for SagaEvt {
-        const EVENT_TYPE: EventType = EventType::from_str("replay_unit_test.SagaEvent");
+        const EVENT_TYPE: EventType =
+            EventType::new(Family::new("replay_unit_test"), TypeName::new("SagaEvent"));
     }
 
     #[derive(Default)]
@@ -440,7 +443,7 @@ mod tests {
             let events = load_outbox_events(&saga_store, &saga_id).await;
             let acked = events
                 .iter()
-                .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_acked")
+                .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
                 .count();
             if acked >= 1 {
                 break;
@@ -451,7 +454,7 @@ mod tests {
                  events={:?}",
                 events
                     .iter()
-                    .map(|e| e.event_type.as_str())
+                    .map(|e| e.event_type.to_string())
                     .collect::<Vec<_>>()
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -460,11 +463,11 @@ mod tests {
         let events = load_outbox_events(&saga_store, &saga_id).await;
         let acked = events
             .iter()
-            .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_acked")
+            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
             .count();
         let failed = events
             .iter()
-            .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_failed")
+            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_failed")
             .count();
 
         assert_eq!(
@@ -524,11 +527,11 @@ mod tests {
             load_outbox_events(&(Arc::clone(&inner_store) as Arc<dyn EventStore>), &saga_id).await;
         let acked = events
             .iter()
-            .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_acked")
+            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
             .count();
         let failed = events
             .iter()
-            .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_failed")
+            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_failed")
             .count();
 
         assert_eq!(
@@ -589,7 +592,7 @@ mod tests {
             let events = load_outbox_events(&saga_store, &saga_id).await;
             let acked = events
                 .iter()
-                .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_acked")
+                .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
                 .count();
             if acked >= 1 {
                 break;
@@ -600,7 +603,7 @@ mod tests {
                  re-dispatch; events={:?}",
                 events
                     .iter()
-                    .map(|e| e.event_type.as_str())
+                    .map(|e| e.event_type.to_string())
                     .collect::<Vec<_>>()
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -609,11 +612,11 @@ mod tests {
         let events = load_outbox_events(&saga_store, &saga_id).await;
         let acked = events
             .iter()
-            .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_acked")
+            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
             .count();
         let failed = events
             .iter()
-            .filter(|e| e.event_type.as_str() == "nitinol.saga.outbox.tell_failed")
+            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_failed")
             .count();
 
         assert_eq!(

@@ -31,7 +31,7 @@ use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, Pro
 use nitinol_persistence::store::{
     CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, ProjectionId};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ use nitinol_runtime::ProcessSystem;
 struct Evt;
 
 impl Event for Evt {
-    const EVENT_TYPE: EventType = EventType::from_str("Evt");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Evt"));
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ async fn append_evt(store: &InMemoryEventStore, agg_id: &AggregateId, sequence: 
             agg_id.as_str(),
             vec![AppendingEvent {
                 sequence,
-                event_type: EventType::from_str("Evt"),
+                event_type: EventType::new(Family::new(""), TypeName::new("Evt")),
                 payload: Bytes::new(),
                 occurred_at: jiff::Timestamp::now(),
             }],

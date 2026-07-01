@@ -39,7 +39,7 @@ use nitinol_eventsource::{
     SequenceCursor, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
@@ -123,7 +123,7 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("cascade_stop.OrderPlaced");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("cascade_stop"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,7 +132,7 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("cascade_stop.ReservationRequested");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("cascade_stop"), TypeName::new("ReservationRequested"));
 }
 
 #[derive(Default)]
@@ -142,7 +142,7 @@ struct Inventory;
 struct InventoryReserved;
 
 impl Event for InventoryReserved {
-    const EVENT_TYPE: EventType = EventType::from_str("cascade_stop.InventoryReserved");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("cascade_stop"), TypeName::new("InventoryReserved"));
 }
 
 impl Aggregate for Inventory {
@@ -237,7 +237,7 @@ fn count_with_suffix(events: &[LoadedEvent], suffix: &str) -> usize {
     events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with(suffix)
         })
         .count()

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, Receive as EvtReceive};
-use nitinol_persistence::EventType;
+use nitinol_persistence::{EventType, Family, TypeName};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reserved {
@@ -10,7 +10,7 @@ pub struct Reserved {
 }
 
 impl Event for Reserved {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.example.Reserved");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("saga.example"), TypeName::new("Reserved"));
 }
 
 #[derive(Default)]

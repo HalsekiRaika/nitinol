@@ -45,13 +45,13 @@ fn eventsource_feature_exposes_aggregate_and_projection() {
     use nitinol::eventsource::{Aggregate, AggregateProps, Event, ProjectorProps};
     // EventType lives in nitinol-persistence; the eventsource feature transitively
     // enables the persistence feature, so nitinol::persistence is re-exported.
-    use nitinol::persistence::EventType;
+    use nitinol::persistence::{EventType, Family, TypeName};
 
     // Minimal dummy types satisfying the trait bounds required by AggregateProps<A: Aggregate>.
     #[derive(Clone)]
     struct DummyEvent;
     impl Event for DummyEvent {
-        const EVENT_TYPE: EventType = EventType::from_str("dummy.event");
+        const EVENT_TYPE: EventType = EventType::new(Family::new("dummy"), TypeName::new("event"));
     }
 
     #[derive(Default)]

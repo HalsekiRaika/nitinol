@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
-use nitinol_persistence::EventType;
+use nitinol_persistence::{EventType, Family, TypeName};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Reserved {
@@ -12,7 +12,7 @@ struct Reserved {
 }
 
 impl Event for Reserved {
-    const EVENT_TYPE: EventType = EventType::from_str("mock.proxy.Reserved");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("mock.proxy"), TypeName::new("Reserved"));
 }
 
 #[derive(Default)]

@@ -22,7 +22,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, ProjectionId};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ use nitinol_runtime::ProcessSystem;
 struct PingEvent;
 
 impl Event for PingEvent {
-    const EVENT_TYPE: EventType = EventType::from_str("PingEvent");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("PingEvent"));
 }
 
 struct PingCodec;
@@ -114,7 +114,7 @@ async fn projector_catches_up_via_direct_arc_dyn_event_store() {
                 agg_id.as_str(),
                 vec![AppendingEvent {
                     sequence: seq,
-                    event_type: EventType::from_str("PingEvent"),
+                    event_type: EventType::new(Family::new(""), TypeName::new("PingEvent")),
                     payload: Bytes::new(),
                     occurred_at: jiff::Timestamp::now(),
                 }],

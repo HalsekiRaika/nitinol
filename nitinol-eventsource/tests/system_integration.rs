@@ -27,7 +27,7 @@ use nitinol_persistence::store::{
     EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore,
 };
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, PersistedSnapshot, ProjectionId,
+    AggregateId, AppendingEvent, EventType, Family, TypeName, PersistedSnapshot, ProjectionId,
 };
 use nitinol_runtime::ProcessSystem;
 
@@ -39,7 +39,7 @@ use nitinol_runtime::ProcessSystem;
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("SysIntIncremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("SysIntIncremented"));
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +355,7 @@ async fn system_codec_integrates_with_projector_props() {
             agg_id.as_str(),
             vec![AppendingEvent {
                 sequence: 1,
-                event_type: EventType::from_str("SysIntIncremented"),
+                event_type: EventType::new(Family::new(""), TypeName::new("SysIntIncremented")),
                 payload: serde_json::to_vec(&Incremented).map(Bytes::from).unwrap(),
                 occurred_at: jiff::Timestamp::now(),
             }],

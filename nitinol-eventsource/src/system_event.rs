@@ -27,6 +27,13 @@ use crate::error::SystemEventDecodeError;
 pub trait SystemEvent: Sized {
     const EVENT_TYPE: EventType;
 
+    /// Value-level identity of this event, consistent with [`crate::Event`].
+    ///
+    /// Defaults to the type-level [`Self::EVENT_TYPE`] (variant `None`).
+    fn variant(&self) -> EventType {
+        Self::EVENT_TYPE
+    }
+
     fn encode(&self) -> Bytes;
 
     fn decode(payload: &[u8]) -> Result<Self, SystemEventDecodeError>;
@@ -45,7 +52,7 @@ pub fn appending_system_event<E: SystemEvent>(
 ) -> AppendingEvent {
     AppendingEvent {
         sequence,
-        event_type: E::EVENT_TYPE,
+        event_type: event.variant(),
         payload: event.encode(),
         occurred_at,
     }

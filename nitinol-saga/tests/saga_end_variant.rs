@@ -21,7 +21,9 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -31,7 +33,7 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("end.OrderPlaced");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("end"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,7 +42,8 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("end.ReservationRequested");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("end"), TypeName::new("ReservationRequested"));
 }
 
 /// A saga that emits `Persist.combine(End)` so we can verify both:

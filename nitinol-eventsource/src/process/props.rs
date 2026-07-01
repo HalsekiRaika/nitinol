@@ -58,12 +58,12 @@ impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
     /// ```compile_fail
     /// # use std::sync::Arc;
     /// # use nitinol_eventsource::{Aggregate, AggregateProps, Event};
-    /// # use nitinol_persistence::{AggregateId, EventType};
+    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
     /// # use nitinol_runtime::ProcessSystem;
     /// # #[derive(Default)] struct MyAgg;
     /// # #[derive(Clone, PartialEq, Debug)] struct MyEv;
-    /// # impl Event for MyEv { const EVENT_TYPE: EventType = EventType::from_str("Ev"); }
+    /// # impl Event for MyEv { const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Ev")); }
     /// # impl Aggregate for MyAgg { type Event = MyEv; fn apply(&mut self, _: MyEv) {} }
     /// # async fn bad() {
     /// let system = ProcessSystem::new().await;

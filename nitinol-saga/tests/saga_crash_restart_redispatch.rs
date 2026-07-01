@@ -21,12 +21,14 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
-const OUTBOX_TELL_ACKED: &str = "nitinol.saga.outbox.tell_acked";
-const OUTBOX_TELL_FAILED: &str = "nitinol.saga.outbox.tell_failed";
+const OUTBOX_TELL_ACKED: EventType =
+    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_acked"));
+const OUTBOX_TELL_FAILED: EventType =
+    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_failed"));
 
 // ---------------------------------------------------------------------------
 // Domain types — minimal; Reserve is a unit struct so the crash-restart
@@ -39,7 +41,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("crash_restart.OrderPlaced");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("crash_restart"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,7 +51,8 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("crash_restart.ReservationRequested");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("crash_restart"), TypeName::new("ReservationRequested"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -57,7 +61,8 @@ struct Reserved {
 }
 
 impl Event for Reserved {
-    const EVENT_TYPE: EventType = EventType::from_str("crash_restart.Reserved");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("crash_restart"), TypeName::new("Reserved"));
 }
 
 #[derive(Default)]
@@ -177,7 +182,7 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
         &saga_store,
         saga_id.as_str(),
         1,
-        EventType::from_str("nitinol.saga.outbox.tell_requested"),
+        EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_requested")),
         payload,
     )
     .await;
@@ -221,13 +226,13 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
         let events = load_saga_events(&saga_store, &saga_id).await;
         let acked_count = events
             .iter()
-            .filter(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED)
+            .filter(|e| e.event_type == OUTBOX_TELL_ACKED)
             .count();
         if acked_count >= 1 {
             break events;
         }
         if std::time::Instant::now() >= deadline {
-            let event_types: Vec<_> = events.iter().map(|e| e.event_type.as_str()).collect();
+            let event_types: Vec<_> = events.iter().map(|e| e.event_type.to_string()).collect();
             panic!(
                 "timed out waiting for TellAcked on crash-restart re-dispatch \
                  (event_types: {:?})",
@@ -239,11 +244,11 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
 
     let acked_count = events
         .iter()
-        .filter(|e| e.event_type.as_str() == OUTBOX_TELL_ACKED)
+        .filter(|e| e.event_type == OUTBOX_TELL_ACKED)
         .count();
     let failed_count = events
         .iter()
-        .filter(|e| e.event_type.as_str() == OUTBOX_TELL_FAILED)
+        .filter(|e| e.event_type == OUTBOX_TELL_FAILED)
         .count();
 
     assert_eq!(

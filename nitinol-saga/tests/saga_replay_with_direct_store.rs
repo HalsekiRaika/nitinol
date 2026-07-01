@@ -14,7 +14,7 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -24,7 +24,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("e2e.direct.OrderPlaced");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("e2e.direct"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Default)]
@@ -58,7 +59,10 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("e2e.direct.ReservationRequested");
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("e2e.direct"),
+        TypeName::new("ReservationRequested"),
+    );
 }
 
 struct RecordingSaga {

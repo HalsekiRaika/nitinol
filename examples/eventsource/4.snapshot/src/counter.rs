@@ -8,13 +8,13 @@ use async_trait::async_trait;
 use nitinol_eventsource::{
     Aggregate, Context, Decider, Effect, Event, Receive as EvtReceive, Snapshotable,
 };
-use nitinol_persistence::EventType;
+use nitinol_persistence::{EventType, Family, TypeName};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("Snapshot.Counter.Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("snapshot.counter"), TypeName::new("Incremented"));
 }
 
 #[derive(Default)]

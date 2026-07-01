@@ -2,13 +2,13 @@
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
 use nitinol_eventsource::{Aggregate, AggregateProxy, AggregateTellTarget, Event};
-use nitinol_persistence::EventType;
+use nitinol_persistence::{EventType, Family, TypeName};
 
 #[derive(Clone, Debug)]
 struct Noop;
 
 impl Event for Noop {
-    const EVENT_TYPE: EventType = EventType::from_str("tell_target.Noop");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("tell_target"), TypeName::new("Noop"));
 }
 
 #[derive(Default)]

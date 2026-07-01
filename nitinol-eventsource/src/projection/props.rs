@@ -217,12 +217,12 @@ where
     /// # use async_trait::async_trait;
     /// # use nitinol_eventsource::{Event, Projector, ProjectorProps, ProjectionContext};
     /// # use nitinol_eventsource::codec::Codec;
-    /// # use nitinol_persistence::{EventType, ProjectionId};
+    /// # use nitinol_persistence::{EventType, Family, ProjectionId, TypeName};
     /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryCheckpointStore};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use bytes::Bytes;
     /// # #[derive(Clone, PartialEq, Debug)] struct MyEv;
-    /// # impl Event for MyEv { const EVENT_TYPE: EventType = EventType::from_str("Ev"); }
+    /// # impl Event for MyEv { const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Ev")); }
     /// # struct MyProj;
     /// # impl MyProj { fn new() -> Self { MyProj } }
     /// # #[async_trait]

@@ -30,13 +30,17 @@ use nitinol_eventsource::{
     SequenceCursor, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AppendingEvent, EventType, LoadQuery};
+use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
-const OUTBOX_TELL_FAILED: &str = "nitinol.saga.outbox.tell_failed";
-const OUTBOX_TELL_REQUESTED: &str = "nitinol.saga.outbox.tell_requested";
+const OUTBOX_TELL_FAILED: EventType =
+    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_failed"));
+const OUTBOX_TELL_REQUESTED: EventType = EventType::new(
+    Family::new("nitinol.saga.outbox"),
+    TypeName::new("tell_requested"),
+);
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -48,7 +52,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("failed_tell_ids.OrderPlaced");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("failed_tell_ids"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,7 +62,10 @@ struct OrderProcessed {
 }
 
 impl Event for OrderProcessed {
-    const EVENT_TYPE: EventType = EventType::from_str("failed_tell_ids.OrderProcessed");
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("failed_tell_ids"),
+        TypeName::new("OrderProcessed"),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -74,7 +82,8 @@ struct DummyCmd;
 struct DummyEvent;
 
 impl Event for DummyEvent {
-    const EVENT_TYPE: EventType = EventType::from_str("failed_tell_ids.DummyEvent");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("failed_tell_ids"), TypeName::new("DummyEvent"));
 }
 
 impl Aggregate for DummyTarget {
@@ -256,7 +265,7 @@ async fn publish_order_placed(upstream_store: &Arc<dyn EventStore>, order_id: &s
         upstream_store,
         "upstream",
         sequence,
-        EventType::from_str("failed_tell_ids.OrderPlaced"),
+        EventType::new(Family::new("failed_tell_ids"), TypeName::new("OrderPlaced")),
         Bytes::from(payload),
     )
     .await;
@@ -287,7 +296,7 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
         &saga_store,
         saga_id.as_str(),
         1,
-        EventType::from_str(OUTBOX_TELL_REQUESTED),
+        OUTBOX_TELL_REQUESTED,
         encode_tell_requested(1, None),
     )
     .await;
@@ -295,7 +304,7 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
         &saga_store,
         saga_id.as_str(),
         2,
-        EventType::from_str(OUTBOX_TELL_FAILED),
+        OUTBOX_TELL_FAILED,
         encode_tell_id(1),
     )
     .await;
@@ -393,7 +402,7 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
         &saga_store,
         saga_id.as_str(),
         1,
-        EventType::from_str(OUTBOX_TELL_REQUESTED),
+        OUTBOX_TELL_REQUESTED,
         tell_id_payload,
     )
     .await;
@@ -531,12 +540,12 @@ async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
         let events: Vec<_> = events.try_collect().await.expect("collect must succeed");
         let has_failed = events
             .iter()
-            .any(|e| e.event_type.as_str() == OUTBOX_TELL_FAILED);
+            .any(|e| e.event_type == OUTBOX_TELL_FAILED);
         if has_failed {
             break;
         }
         if std::time::Instant::now() >= deadline {
-            let types: Vec<_> = events.iter().map(|e| e.event_type.as_str()).collect();
+            let types: Vec<_> = events.iter().map(|e| e.event_type.to_string()).collect();
             panic!(
                 "timed out waiting for TellFailed to be appended (event types: {:?})",
                 types

@@ -25,7 +25,7 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -35,7 +35,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.tell_mock.OrderPlaced");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("saga.tell_mock"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -44,7 +45,10 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.tell_mock.ReservationRequested");
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("saga.tell_mock"),
+        TypeName::new("ReservationRequested"),
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -53,7 +57,8 @@ struct Reserved {
 }
 
 impl Event for Reserved {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.tell_mock.Reserved");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("saga.tell_mock"), TypeName::new("Reserved"));
 }
 
 #[derive(Default)]

@@ -20,7 +20,7 @@ use nitinol_persistence::store::{
 };
 use nitinol_persistence::LoadQuery;
 use nitinol_persistence::{
-    AggregateId, AppendOutcome, AppendingEvent, EventType, PersistedSnapshot,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, TypeName, PersistedSnapshot,
 };
 use nitinol_runtime::ProcessSystem;
 
@@ -32,7 +32,7 @@ use nitinol_runtime::ProcessSystem;
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
 }
 
 // ---------------------------------------------------------------------------

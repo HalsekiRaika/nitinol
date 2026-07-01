@@ -31,11 +31,11 @@ use crate::Effect;
 /// ```rust,no_run
 /// use async_trait::async_trait;
 /// use nitinol_eventsource::{Aggregate, Decider, Effect, Event, Context};
-/// use nitinol_persistence::EventType;
+/// use nitinol_persistence::{EventType, Family, TypeName};
 ///
 /// #[derive(Clone)]
 /// enum CounterEvent { Incremented }
-/// impl Event for CounterEvent { const EVENT_TYPE: EventType = EventType::from_str("counter.incremented"); }
+/// impl Event for CounterEvent { const EVENT_TYPE: EventType = EventType::new(Family::new("counter"), TypeName::new("incremented")); }
 ///
 /// struct Increment;
 ///

@@ -15,7 +15,9 @@ use nitinol_eventsource::{
     SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
@@ -30,7 +32,8 @@ struct UpstreamTrigger {
 }
 
 impl Event for UpstreamTrigger {
-    const EVENT_TYPE: EventType = EventType::from_str("multi_tell_end.UpstreamTrigger");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("multi_tell_end"), TypeName::new("UpstreamTrigger"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,7 +42,8 @@ struct SagaMarker {
 }
 
 impl Event for SagaMarker {
-    const EVENT_TYPE: EventType = EventType::from_str("multi_tell_end.SagaMarker");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("multi_tell_end"), TypeName::new("SagaMarker"));
 }
 
 #[derive(Default)]
@@ -142,7 +146,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 fn count_event_type(events: &[LoadedEvent], event_type: &str) -> usize {
     events
         .iter()
-        .filter(|e| e.event_type.as_str() == event_type)
+        .filter(|e| e.event_type.to_string() == event_type)
         .count()
 }
 
@@ -244,7 +248,7 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
         "the Persist branch must append exactly one user event; events: {:?}",
         events
             .iter()
-            .map(|e| e.event_type.as_str())
+            .map(|e| e.event_type.to_string())
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -258,7 +262,7 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
          events: {:?}",
         events
             .iter()
-            .map(|e| e.event_type.as_str())
+            .map(|e| e.event_type.to_string())
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -294,7 +298,7 @@ async fn multi_tell_then_end_stops_saga_after_last_executor_settles() {
         "both terminal markers must settle before asserting the stop; events: {:?}",
         events
             .iter()
-            .map(|e| e.event_type.as_str())
+            .map(|e| e.event_type.to_string())
             .collect::<Vec<_>>()
     );
 
@@ -313,7 +317,7 @@ async fn multi_tell_then_end_stops_saga_after_last_executor_settles() {
     let final_events = load_saga_events(&saga_store, &saga_id).await;
     let outbox = final_events
         .iter()
-        .filter(|e| e.event_type.as_str().starts_with(OUTBOX_PREFIX))
+        .filter(|e| e.event_type.to_string().starts_with(OUTBOX_PREFIX))
         .count();
     assert_eq!(
         outbox, 4,

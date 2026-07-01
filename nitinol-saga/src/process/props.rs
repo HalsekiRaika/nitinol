@@ -167,7 +167,7 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
 
         let codec_for_transform = Arc::clone(&upstream_codec);
         let transform = move |loaded: nitinol_persistence::LoadedEvent| {
-            if loaded.event_type != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE {
+            if loaded.event_type.type_key() != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE.type_key() {
                 return None;
             }
             match codec_for_transform.decode(&loaded.payload) {

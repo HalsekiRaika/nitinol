@@ -8,7 +8,7 @@ use nitinol_eventsource::{
     Projector, ProjectorProps,
 };
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, ProjectionId};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -22,7 +22,7 @@ struct Counter;
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
 }
 
 impl Aggregate for Counter {

@@ -14,14 +14,14 @@ use nitinol_eventsource::{
 use nitinol_persistence::store::{
     CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
-use nitinol_persistence::{AggregateId, EventType, ProjectionId};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("E2EProj.Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.proj"), TypeName::new("Incremented"));
 }
 
 #[derive(Default)]

@@ -22,7 +22,7 @@ use nitinol_eventsource::{
     Receive as EvtReceive, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -34,7 +34,7 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("e2e.saga.OrderPlaced");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.saga"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -43,7 +43,7 @@ struct Reserved {
 }
 
 impl Event for Reserved {
-    const EVENT_TYPE: EventType = EventType::from_str("e2e.saga.Reserved");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.saga"), TypeName::new("Reserved"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("e2e.saga.ReservationRequested");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.saga"), TypeName::new("ReservationRequested"));
 }
 
 #[derive(Default)]
@@ -175,7 +175,7 @@ fn count_outbox_events(events: &[LoadedEvent], suffix: &str) -> usize {
     events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with(suffix)
         })
         .count()
@@ -196,7 +196,7 @@ async fn wait_until_outbox_acked(
                 "timed out waiting for TellAcked outbox event in saga stream (event_types: {:?})",
                 events
                     .iter()
-                    .map(|e| e.event_type.as_str())
+                    .map(|e| e.event_type.to_string())
                     .collect::<Vec<_>>()
             );
         }
@@ -329,7 +329,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let requested = saga_events
         .iter()
         .find(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
         })
         .expect("TellRequested outbox event must exist in saga stream");

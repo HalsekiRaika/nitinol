@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{AggregateProxy, Event};
-use nitinol_persistence::EventType;
+use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect};
 
 use crate::inventory::{Inventory, Reserve};
@@ -14,7 +14,7 @@ pub struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.example.ReservationRequested");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("saga.example"), TypeName::new("ReservationRequested"));
 }
 
 pub struct ReservationSaga {

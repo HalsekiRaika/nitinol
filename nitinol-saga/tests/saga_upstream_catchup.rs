@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -22,7 +22,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.upstream.OrderPlaced");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("saga.upstream"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -31,14 +32,18 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.upstream.ReservationRequested");
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("saga.upstream"),
+        TypeName::new("ReservationRequested"),
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct UnrelatedEvent;
 
 impl Event for UnrelatedEvent {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.upstream.Unrelated");
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("saga.upstream"), TypeName::new("Unrelated"));
 }
 
 struct RecordingSaga {

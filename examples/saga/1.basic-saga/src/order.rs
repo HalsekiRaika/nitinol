@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
-use nitinol_persistence::EventType;
+use nitinol_persistence::{EventType, Family, TypeName};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OrderPlaced {
@@ -10,7 +10,7 @@ pub struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("saga.example.OrderPlaced");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("saga.example"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Default)]

@@ -212,7 +212,7 @@ where
                     let payload = codec.encode(event).map_err(EffectExecutionError::Codec)?;
                     appending.push(AppendingEvent {
                         sequence: next_sequence,
-                        event_type: A::Event::EVENT_TYPE,
+                        event_type: event.variant(),
                         payload,
                         occurred_at: jiff::Timestamp::now(),
                     });

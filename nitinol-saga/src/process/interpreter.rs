@@ -9,7 +9,7 @@ use futures_core::future::BoxFuture;
 use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::AppendingEvent;
+use nitinol_persistence::{AppendingEvent, EventType};
 use nitinol_runtime::process::ProcessContext;
 
 use crate::effect::{Schedule, TellIntent};
@@ -91,7 +91,7 @@ async fn persist_batch<S: Saga>(
 
     let mut appending: Vec<AppendingEvent> =
         Vec::with_capacity(encoded_events.len() + tells.len() + schedules.len());
-    append_user_events::<S>(&mut appending, encoded_events, &mut next_seq, now);
+    append_user_events(&mut appending, encoded_events, &mut next_seq, now);
     let tell_ids = append_tell_requested(&mut appending, &tells, &mut next_seq, now);
     append_scheduled(&mut appending, &schedules, &mut next_seq, now);
 
@@ -121,11 +121,11 @@ async fn persist_batch<S: Saga>(
 fn encode_events<S: Saga>(
     events: &[S::Event],
     codec: &dyn ErasedCodec<S::Event>,
-) -> Option<Vec<Bytes>> {
+) -> Option<Vec<(EventType, Bytes)>> {
     let mut encoded = Vec::with_capacity(events.len());
     for event in events {
         match codec.encode(event) {
-            Ok(payload) => encoded.push(payload),
+            Ok(payload) => encoded.push((event.variant(), payload)),
             Err(e) => {
                 tracing::warn!(error = %e, "saga event encode failed; skipping persist batch");
                 return None;
@@ -135,17 +135,17 @@ fn encode_events<S: Saga>(
     Some(encoded)
 }
 
-fn append_user_events<S: Saga>(
+fn append_user_events(
     appending: &mut Vec<AppendingEvent>,
-    encoded: Vec<Bytes>,
+    encoded: Vec<(EventType, Bytes)>,
     next_seq: &mut u64,
     now: jiff::Timestamp,
 ) {
-    for payload in encoded {
+    for (event_type, payload) in encoded {
         *next_seq += 1;
         appending.push(AppendingEvent {
             sequence: *next_seq,
-            event_type: <S::Event as Event>::EVENT_TYPE,
+            event_type,
             payload,
             occurred_at: now,
         });

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, Receive as EvtReceive};
-use nitinol_persistence::EventType;
+use nitinol_persistence::{EventType, Family, TypeName};
 
 // ---------------------------------------------------------------------------
 // Events
@@ -21,7 +21,7 @@ use nitinol_persistence::EventType;
 pub struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("BasicAggregate.Counter.Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("basic_aggregate.counter"), TypeName::new("Incremented"));
 }
 
 // ---------------------------------------------------------------------------

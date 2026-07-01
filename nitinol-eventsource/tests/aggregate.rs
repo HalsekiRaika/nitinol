@@ -1,5 +1,5 @@
 use nitinol_eventsource::{Aggregate, Context, Event, Snapshotable};
-use nitinol_persistence::{AggregateId, EventType};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -9,7 +9,7 @@ use nitinol_persistence::{AggregateId, EventType};
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
 }
 
 #[derive(Default)]
@@ -50,7 +50,7 @@ impl Snapshotable for Counter {
 fn event_type_constant_has_correct_string() {
     // Given / When / Then
     assert_eq!(
-        Incremented::EVENT_TYPE.as_str(),
+        Incremented::EVENT_TYPE.to_string(),
         "Incremented",
         "EVENT_TYPE must be the static string 'Incremented'"
     );

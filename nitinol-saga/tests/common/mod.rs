@@ -8,7 +8,7 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaEffect, Schedule, TellIntent};
 
@@ -45,7 +45,7 @@ pub struct TestTarget;
 pub struct TestTargetEvent;
 
 impl Event for TestTargetEvent {
-    const EVENT_TYPE: EventType = EventType::from_str("test.noop_target");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("test"), TypeName::new("noop_target"));
 }
 
 impl Aggregate for TestTarget {

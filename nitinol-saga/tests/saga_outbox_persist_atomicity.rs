@@ -26,7 +26,7 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, LoadQuery, LoadedEvent};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -38,7 +38,7 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::from_str("atomic.OrderPlaced");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("atomic"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,7 +47,7 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::from_str("atomic.ReservationRequested");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("atomic"), TypeName::new("ReservationRequested"));
 }
 
 #[derive(Default)]
@@ -64,7 +64,7 @@ struct InventoryReserved {
 }
 
 impl Event for InventoryReserved {
-    const EVENT_TYPE: EventType = EventType::from_str("atomic.InventoryReserved");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("atomic"), TypeName::new("InventoryReserved"));
 }
 
 #[derive(Clone)]
@@ -248,21 +248,21 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
     let requested: Vec<&LoadedEvent> = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
         })
         .collect();
     let acked: Vec<&LoadedEvent> = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_acked")
         })
         .collect();
     let failed: Vec<&LoadedEvent> = events
         .iter()
         .filter(|e| {
-            let s = e.event_type.as_str();
+            let s = e.event_type.to_string();
             s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_failed")
         })
         .collect();
@@ -291,7 +291,7 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
         .iter()
         .filter(|e| {
             e.event_type == ReservationRequested::EVENT_TYPE || {
-                let s = e.event_type.as_str();
+                let s = e.event_type.to_string();
                 s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
             }
         })
@@ -400,7 +400,7 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
     let events = load_saga_events(&saga_store, &saga_id).await;
     let outbox_events: Vec<&LoadedEvent> = events
         .iter()
-        .filter(|e| e.event_type.as_str().starts_with(OUTBOX_PREFIX))
+        .filter(|e| e.event_type.to_string().starts_with(OUTBOX_PREFIX))
         .collect();
 
     assert_eq!(
@@ -414,7 +414,7 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
          got: {:?}",
         outbox_events
             .iter()
-            .map(|e| e.event_type.as_str())
+            .map(|e| e.event_type.to_string())
             .collect::<Vec<_>>()
     );
     assert_eq!(events[0].event_type, ReservationRequested::EVENT_TYPE);

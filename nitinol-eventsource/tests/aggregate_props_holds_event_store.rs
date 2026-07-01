@@ -21,7 +21,7 @@ use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, Context, Decider, Effect, Event, Receive as EvtReceive,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ struct Counter {
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
 }
 
 impl Aggregate for Counter {

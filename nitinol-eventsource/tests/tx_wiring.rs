@@ -22,7 +22,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::error::CheckpointError;
 use nitinol_persistence::store::{CheckpointStore, EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, ProjectionId};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ use nitinol_runtime::ProcessSystem;
 struct TickEvent;
 
 impl Event for TickEvent {
-    const EVENT_TYPE: EventType = EventType::from_str("TickEvent");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("TickEvent"));
 }
 
 struct TickCodec;
@@ -240,7 +240,7 @@ async fn append_tick(store: &InMemoryEventStore, agg_id: &AggregateId, seq: u64)
             agg_id.as_str(),
             vec![AppendingEvent {
                 sequence: seq,
-                event_type: EventType::from_str("TickEvent"),
+                event_type: EventType::new(Family::new(""), TypeName::new("TickEvent")),
                 payload: Bytes::new(),
                 occurred_at: jiff::Timestamp::now(),
             }],

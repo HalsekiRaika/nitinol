@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, Receive as EvtReceive};
-use nitinol_persistence::EventType;
+use nitinol_persistence::{EventType, Family, TypeName};
 
 // ---------------------------------------------------------------------------
 // Events
@@ -39,7 +39,7 @@ pub enum WalletEvent {
 
 impl Event for WalletEvent {
     // The outer enum carries its own type string; inner variants are embedded.
-    const EVENT_TYPE: EventType = EventType::from_str("MultipleDeciders.Wallet.Event");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("multiple_deciders.wallet"), TypeName::new("Event"));
 }
 
 // ---------------------------------------------------------------------------

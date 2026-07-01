@@ -8,21 +8,21 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, ProjectionId};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, Variant, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Clone)]
 struct Counted;
 
 impl Event for Counted {
-    const EVENT_TYPE: EventType = EventType::from_str("Counted");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Counted"));
 }
 
 #[derive(Clone)]
 struct Labeled;
 
 impl Event for Labeled {
-    const EVENT_TYPE: EventType = EventType::from_str("Labeled");
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Labeled"));
 }
 
 struct UnitCodec;
@@ -122,7 +122,7 @@ async fn append_counted(store: &InMemoryEventStore, agg_id: &AggregateId, sequen
             agg_id.as_str(),
             vec![AppendingEvent {
                 sequence,
-                event_type: EventType::from_str("Counted"),
+                event_type: EventType::new(Family::new(""), TypeName::new("Counted")),
                 payload: Bytes::new(),
                 occurred_at: jiff::Timestamp::now(),
             }],
@@ -137,7 +137,7 @@ async fn append_labeled(store: &InMemoryEventStore, agg_id: &AggregateId, sequen
             agg_id.as_str(),
             vec![AppendingEvent {
                 sequence,
-                event_type: EventType::from_str("Labeled"),
+                event_type: EventType::new(Family::new(""), TypeName::new("Labeled")),
                 payload: Bytes::new(),
                 occurred_at: jiff::Timestamp::now(),
             }],
@@ -371,5 +371,67 @@ async fn projector_live_event_is_projected_after_catchup() {
         count.load(Ordering::SeqCst),
         1,
         "Projector<Counted>::project() must be called once for the live event"
+    );
+}
+
+/// Regression: ProjectorProcess dispatches via type_key(), so a LoadedEvent
+/// whose EventType carries variant=Some must reach the handler registered for
+/// the type-level EVENT_TYPE (variant=None).
+///
+/// If process.rs reverted to full `==` instead of `.type_key() ==`, this test
+/// would time out because project() would never be called.
+#[tokio::test]
+async fn projector_variant_some_event_type_dispatches_to_type_level_handler() {
+    let system = ProcessSystem::new().await;
+    let event_store = Arc::new(InMemoryEventStore::default());
+    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let agg_id = AggregateId::new("proj-variant-dispatch-agg");
+
+    // Append an event whose EventType has variant=Some but the same family/type_name
+    // as Counted::EVENT_TYPE (which has variant=None).
+    event_store
+        .append(
+            agg_id.as_str(),
+            vec![AppendingEvent {
+                sequence: 1,
+                event_type: EventType::with_variant(
+                    Family::new(""),
+                    TypeName::new("Counted"),
+                    Variant::new("Created"),
+                ),
+                payload: Bytes::new(),
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("append must succeed");
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let notify = Arc::new(Notify::new());
+    let count_c = Arc::clone(&count);
+    let notify_c = Arc::clone(&notify);
+
+    let _proxy = ProjectorProps::new(
+        ProjectionId::new("proj-variant-dispatch"),
+        Arc::clone(&event_store) as Arc<dyn EventStore>,
+        Arc::clone(&checkpoint_store),
+        move || TrackingProjector {
+            count: Arc::clone(&count_c),
+            label_count: Arc::new(AtomicUsize::new(0)),
+            notify: Arc::clone(&notify_c),
+            last_projection_id: Arc::new(Mutex::new(None)),
+            last_sequence: Arc::new(AtomicUsize::new(0)),
+        },
+    )
+    .with_event::<Counted>(Arc::new(UnitCodec))
+    .catchup_from_aggregate(agg_id)
+    .spawn(&system)
+    .await;
+
+    wait_for_count(&count, &notify, 1).await;
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        1,
+        "project(Counted) must be called even when the stored EventType carries variant=Some"
     );
 }

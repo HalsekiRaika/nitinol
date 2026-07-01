@@ -18,7 +18,7 @@ use nitinol_eventsource::{
     Receive as EvtReceive, SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
-use nitinol_persistence::{AggregateId, EventType, PersistedSnapshot};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName, PersistedSnapshot};
 use nitinol_runtime::ProcessSystem;
 
 // ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ use nitinol_runtime::ProcessSystem;
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("E2ESnap.Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.snap"), TypeName::new("Incremented"));
 }
 
 // ---------------------------------------------------------------------------

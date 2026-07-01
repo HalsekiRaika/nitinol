@@ -23,7 +23,7 @@ use nitinol_persistence::store::{
     EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore,
 };
 use nitinol_persistence::{
-    AggregateId, AppendOutcome, AppendingEvent, EventType, LoadQuery, PersistedSnapshot,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, TypeName, LoadQuery, PersistedSnapshot,
 };
 use nitinol_runtime::ProcessSystem;
 
@@ -35,7 +35,7 @@ use nitinol_runtime::ProcessSystem;
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::from_str("E2EReplay.Incremented");
+    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.replay"), TypeName::new("Incremented"));
 }
 
 // ---------------------------------------------------------------------------

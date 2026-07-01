@@ -22,11 +22,11 @@ use crate::event::Event;
 ///
 /// ```rust,no_run
 /// use nitinol_eventsource::{Aggregate, Event};
-/// use nitinol_persistence::EventType;
+/// use nitinol_persistence::{EventType, Family, TypeName};
 ///
 /// #[derive(Clone)]
 /// enum CounterEvent { Incremented }
-/// impl Event for CounterEvent { const EVENT_TYPE: EventType = EventType::from_str("counter.incremented"); }
+/// impl Event for CounterEvent { const EVENT_TYPE: EventType = EventType::new(Family::new("counter"), TypeName::new("incremented")); }
 ///
 /// #[derive(Default)]
 /// struct Counter { value: u64 }
