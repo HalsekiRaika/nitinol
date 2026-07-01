@@ -6,12 +6,8 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
 
 use crate::id::SagaId;
-use crate::outbox::message::{Scheduled, TellAcked, TellFailed, TellRequested};
+use crate::outbox::message::{OutboxMessage, Scheduled, TellAcked, TellFailed, TellRequested};
 
-/// Whether a tell reached a successful or failed terminal state.
-///
-/// Drives which terminal marker [`OutboxAppender::append_terminal`] writes; the
-/// read side classifies markers through [`crate::outbox::message::OutboxMessage`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TellOutcome {
     Acked,
@@ -27,14 +23,12 @@ impl OutboxAppender {
         crash_restart_payload: Option<&[u8]>,
         occurred_at: jiff::Timestamp,
     ) -> AppendingEvent {
-        let message = TellRequested {
+        let message = OutboxMessage::TellRequested(TellRequested {
             tell_id,
-            // Normalize empty bytes to None to preserve the old decode_tell_requested
-            // behaviour where only payloads longer than 8 bytes were treated as Some.
             crash_restart: crash_restart_payload
                 .filter(|b| !b.is_empty())
                 .map(<[u8]>::to_vec),
-        };
+        });
         appending_system_event(sequence, &message, occurred_at)
     }
 
@@ -43,9 +37,9 @@ impl OutboxAppender {
         at: jiff::Timestamp,
         occurred_at: jiff::Timestamp,
     ) -> AppendingEvent {
-        let message = Scheduled {
+        let message = OutboxMessage::Scheduled(Scheduled {
             at_unix_seconds: at.as_second(),
-        };
+        });
         appending_system_event(sequence, &message, occurred_at)
     }
 
@@ -58,8 +52,16 @@ impl OutboxAppender {
     ) -> bool {
         let now = jiff::Timestamp::now();
         let event = match outcome {
-            TellOutcome::Acked => appending_system_event(sequence, &TellAcked { tell_id }, now),
-            TellOutcome::Failed => appending_system_event(sequence, &TellFailed { tell_id }, now),
+            TellOutcome::Acked => appending_system_event(
+                sequence,
+                &OutboxMessage::TellAcked(TellAcked { tell_id }),
+                now,
+            ),
+            TellOutcome::Failed => appending_system_event(
+                sequence,
+                &OutboxMessage::TellFailed(TellFailed { tell_id }),
+                now,
+            ),
         };
         if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
             tracing::warn!(error = %e, ?outcome, "saga outbox terminal marker append failed");
@@ -83,9 +85,6 @@ mod tests {
 
     #[test]
     fn build_tell_requested_normalizes_empty_crash_restart_bytes_to_none() {
-        // Regression: Some(&[]) must be treated identically to None so the
-        // replay path never sees empty crash-restart bytes and tries to use
-        // them as a factory payload.
         let event = OutboxAppender::build_tell_requested(
             1,
             42,

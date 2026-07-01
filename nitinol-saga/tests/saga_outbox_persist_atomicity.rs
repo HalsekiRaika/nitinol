@@ -9,7 +9,7 @@
 //! replay.
 
 mod common;
-use common::JsonCodec;
+use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -29,8 +29,6 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
-
-const OUTBOX_PREFIX: &str = "nitinol.saga.outbox.";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct OrderPlaced {
@@ -247,24 +245,15 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
         .collect();
     let requested: Vec<&LoadedEvent> = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
-        })
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellRequested(_))))
         .collect();
     let acked: Vec<&LoadedEvent> = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_acked")
-        })
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
         .collect();
     let failed: Vec<&LoadedEvent> = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_failed")
-        })
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .collect();
 
     assert_eq!(user_events.len(), 1, "must persist exactly one user event");
@@ -290,10 +279,8 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
     let mut atomic_batch: Vec<&LoadedEvent> = events
         .iter()
         .filter(|e| {
-            e.event_type == ReservationRequested::EVENT_TYPE || {
-                let s = e.event_type.to_string();
-                s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
-            }
+            e.event_type == ReservationRequested::EVENT_TYPE
+                || matches!(outbox_kind_of(e), Some(OutboxKind::TellRequested(_)))
         })
         .collect();
     atomic_batch.sort_by_key(|e| e.sequence);
@@ -400,7 +387,7 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
     let events = load_saga_events(&saga_store, &saga_id).await;
     let outbox_events: Vec<&LoadedEvent> = events
         .iter()
-        .filter(|e| e.event_type.to_string().starts_with(OUTBOX_PREFIX))
+        .filter(|e| outbox_kind_of(e).is_some())
         .collect();
 
     assert_eq!(

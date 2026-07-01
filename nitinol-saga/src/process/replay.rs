@@ -131,8 +131,6 @@ fn apply_outbox_message(
             failed.push(m.tell_id);
         }
         OutboxMessage::Scheduled(m) => {
-            // Scheduled markers are durable but a replay no-op; there is nothing
-            // to re-drive, so we only record that one was seen.
             tracing::trace!(
                 at_unix_seconds = m.at_unix_seconds,
                 "saga replay: scheduled marker (no-op)"
@@ -251,7 +249,7 @@ mod tests {
     use nitinol_persistence::{AppendingEvent, EventType, Family, LoadedEvent, TypeName};
     use nitinol_runtime::ProcessSystem;
 
-    use crate::outbox::OutboxAppender;
+    use crate::outbox::{OutboxAppender, OutboxMessage};
     use crate::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
     struct JsonCodec;
@@ -375,8 +373,6 @@ mod tests {
         sequence: u64,
         tell_id: u64,
     ) {
-        // Seed through the real write path so the payload uses the framework's
-        // prost `SystemEvent` codec (no crash-restart bytes).
         let event = OutboxAppender::build_tell_requested(
             sequence,
             tell_id,
@@ -397,6 +393,16 @@ mod tests {
             .try_collect()
             .await
             .expect("collect must succeed")
+    }
+
+    fn count_outbox(events: &[LoadedEvent], pred: impl Fn(&OutboxMessage) -> bool) -> usize {
+        events
+            .iter()
+            .filter(|e| match OutboxMessage::classify(e.event_type, &e.payload) {
+                Some(Ok(m)) => pred(&m),
+                _ => false,
+            })
+            .count()
     }
 
     #[tokio::test]
@@ -441,10 +447,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let events = load_outbox_events(&saga_store, &saga_id).await;
-            let acked = events
-                .iter()
-                .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
-                .count();
+            let acked = count_outbox(&events, |m| matches!(m, OutboxMessage::TellAcked(_)));
             if acked >= 1 {
                 break;
             }
@@ -461,14 +464,8 @@ mod tests {
         }
 
         let events = load_outbox_events(&saga_store, &saga_id).await;
-        let acked = events
-            .iter()
-            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
-            .count();
-        let failed = events
-            .iter()
-            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_failed")
-            .count();
+        let acked = count_outbox(&events, |m| matches!(m, OutboxMessage::TellAcked(_)));
+        let failed = count_outbox(&events, |m| matches!(m, OutboxMessage::TellFailed(_)));
 
         assert_eq!(
             acked, 1,
@@ -525,14 +522,8 @@ mod tests {
 
         let events =
             load_outbox_events(&(Arc::clone(&inner_store) as Arc<dyn EventStore>), &saga_id).await;
-        let acked = events
-            .iter()
-            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
-            .count();
-        let failed = events
-            .iter()
-            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_failed")
-            .count();
+        let acked = count_outbox(&events, |m| matches!(m, OutboxMessage::TellAcked(_)));
+        let failed = count_outbox(&events, |m| matches!(m, OutboxMessage::TellFailed(_)));
 
         assert_eq!(
             acked, 0,
@@ -590,10 +581,7 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let events = load_outbox_events(&saga_store, &saga_id).await;
-            let acked = events
-                .iter()
-                .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
-                .count();
+            let acked = count_outbox(&events, |m| matches!(m, OutboxMessage::TellAcked(_)));
             if acked >= 1 {
                 break;
             }
@@ -610,14 +598,8 @@ mod tests {
         }
 
         let events = load_outbox_events(&saga_store, &saga_id).await;
-        let acked = events
-            .iter()
-            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
-            .count();
-        let failed = events
-            .iter()
-            .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_failed")
-            .count();
+        let acked = count_outbox(&events, |m| matches!(m, OutboxMessage::TellAcked(_)));
+        let failed = count_outbox(&events, |m| matches!(m, OutboxMessage::TellFailed(_)));
 
         assert_eq!(
             acked, 1,

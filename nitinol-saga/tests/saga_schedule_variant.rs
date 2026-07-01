@@ -1,14 +1,5 @@
-//! Spec C-11c: `Schedule` is reserved as a future-extension hook.  In Issue
-//! #45 the interpreter's behaviour is fixed at:
-//!   1. Each `Schedule` in a `Persist` branch must be appended as a
-//!      `nitinol.saga.outbox.scheduled` marker as part of the *same atomic
-//!      batch* as the user events / TellRequested markers.
-//!   2. No further action: no spawned timer, no command dispatch, no eventual
-//!      TellRequested.  Scheduler execution is the responsibility of a
-//!      follow-up issue (γ).
-
 mod common;
-use common::{decode_scheduled, JsonCodec};
+use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,8 +15,6 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, Schedule};
-
-const OUTBOX_PREFIX: &str = "nitinol.saga.outbox.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -167,31 +156,19 @@ async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_take
         .count();
     let scheduled_count = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("scheduled")
-        })
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::Scheduled(_))))
         .count();
     let tell_requested_count = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
-        })
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellRequested(_))))
         .count();
     let tell_acked_count = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_acked")
-        })
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
         .count();
     let tell_failed_count = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_failed")
-        })
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .count();
 
     assert_eq!(
@@ -215,15 +192,13 @@ async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_take
         "no TellFailed must be appended in this MVP — scheduler execution is reserved for Issue γ"
     );
 
-    // Each `scheduled` marker payload must be prost-encoded with the schedule
-    // time as whole unix seconds (field 1), preserving both Schedule `at`s.
     let mut scheduled_seconds: Vec<i64> = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("scheduled")
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::Scheduled(_))))
+        .map(|e| match outbox_kind_of(e) {
+            Some(OutboxKind::Scheduled(p)) => p.at_unix_seconds,
+            _ => unreachable!("filtered to Scheduled"),
         })
-        .map(|e| decode_scheduled(&e.payload).at_unix_seconds)
         .collect();
     scheduled_seconds.sort_unstable();
     let mut expected_seconds = vec![at_a.as_second(), at_b.as_second()];
@@ -234,15 +209,11 @@ async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_take
          unix-second timestamp"
     );
 
-    // The atomic batch is the *initial* burst: user event + 2 scheduled markers
-    // appended at consecutive sequences.
     let mut atomic_batch: Vec<&LoadedEvent> = events
         .iter()
         .filter(|e| {
-            e.event_type == ReservationRequested::EVENT_TYPE || {
-                let s = e.event_type.to_string();
-                s.starts_with(OUTBOX_PREFIX) && s.ends_with("scheduled")
-            }
+            e.event_type == ReservationRequested::EVENT_TYPE
+                || matches!(outbox_kind_of(e), Some(OutboxKind::Scheduled(_)))
         })
         .collect();
     atomic_batch.sort_by_key(|e| e.sequence);
@@ -260,7 +231,6 @@ async fn persist_with_schedules_appends_scheduled_markers_in_same_batch_and_take
          schedule markers MUST share the same store::append call as the user event"
     );
 
-    // Total event count must equal the atomic batch — nothing else must appear.
     assert_eq!(
         events.len(),
         3,

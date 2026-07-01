@@ -12,7 +12,9 @@
 //! (not `TellFailed`).
 
 mod common;
-use common::{decode_tell_requested, encode_tell_requested, JsonCodec};
+use common::{
+    encode_outbox_tell_requested, outbox_kind_of, JsonCodec, OutboxKind, OUTBOX_MARKER,
+};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,11 +32,6 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
-
-const OUTBOX_TELL_ACKED: EventType =
-    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_acked"));
-const OUTBOX_TELL_FAILED: EventType =
-    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_failed"));
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -186,7 +183,7 @@ async fn append_order_placed(
 /// bytes (field 2).
 fn encode_tell_requested_with_json_cmd<C: Serialize>(tell_id: u64, cmd: &C) -> Bytes {
     let json = serde_json::to_vec(cmd).expect("command serialization must succeed");
-    encode_tell_requested(tell_id, Some(&json))
+    encode_outbox_tell_requested(tell_id, Some(&json))
 }
 
 async fn append_raw(
@@ -252,7 +249,7 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
         &saga_store,
         saga_id.as_str(),
         1,
-        EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_requested")),
+        OUTBOX_MARKER,
         payload,
     )
     .await;
@@ -297,7 +294,7 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
         let events = load_saga_events(&saga_store, &saga_id).await;
         let acked_count = events
             .iter()
-            .filter(|e| e.event_type == OUTBOX_TELL_ACKED)
+            .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
             .count();
         if acked_count >= 1 {
             break events;
@@ -315,11 +312,11 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
 
     let acked_count = events
         .iter()
-        .filter(|e| e.event_type == OUTBOX_TELL_ACKED)
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
         .count();
     let failed_count = events
         .iter()
-        .filter(|e| e.event_type == OUTBOX_TELL_FAILED)
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .count();
 
     assert_eq!(
@@ -404,7 +401,7 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
         let events = load_saga_events(&saga_store_p1, &saga_id_p1).await;
         if events
             .iter()
-            .any(|e| e.event_type == OUTBOX_TELL_ACKED)
+            .any(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
         {
             break events;
         }
@@ -424,10 +421,13 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     // -----------------------------------------------------------------------
     let tell_requested_event = p1_events
         .iter()
-        .find(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_requested")
+        .find(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellRequested(_))))
         .expect("SagaEffect::tell must produce a TellRequested outbox marker");
 
-    let decoded = decode_tell_requested(&tell_requested_event.payload);
+    let decoded = match common::decode_outbox_kind(&tell_requested_event.payload) {
+        OutboxKind::TellRequested(p) => p,
+        _ => panic!("expected TellRequested outbox marker, got a different kind"),
+    };
 
     let json_bytes = decoded.crash_restart.unwrap_or_else(|| {
         panic!(
@@ -468,7 +468,7 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
         &saga_store_p2,
         saga_id_p2.as_str(),
         1,
-        EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_requested")),
+        OUTBOX_MARKER,
         raw_payload.clone(),
     )
     .await;
@@ -512,7 +512,7 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
         let events = load_saga_events(&saga_store_p2, &saga_id_p2).await;
         if events
             .iter()
-            .any(|e| e.event_type == OUTBOX_TELL_ACKED)
+            .any(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
         {
             break events;
         }
@@ -529,11 +529,11 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
 
     let acked_count = p2_events
         .iter()
-        .filter(|e| e.event_type == OUTBOX_TELL_ACKED)
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
         .count();
     let failed_count = p2_events
         .iter()
-        .filter(|e| e.event_type == OUTBOX_TELL_FAILED)
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .count();
 
     assert_eq!(

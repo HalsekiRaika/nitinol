@@ -8,7 +8,7 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+use nitinol_persistence::{AggregateId, EventType, Family, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaEffect, Schedule, TellIntent};
 
@@ -159,22 +159,9 @@ pub fn schedule_at_ts(ts: jiff::Timestamp) -> Schedule {
     Schedule { at: ts }
 }
 
-// ---------------------------------------------------------------------------
-// Prost mirrors of the framework outbox marker payloads (`nitinol.saga.outbox.*`).
-//
-// These mirror `nitinol-saga/proto/outbox.proto` exactly — same field numbers
-// and wire types as the framework's `SystemEvent` codec:
-//
-//   message TellRequested { uint64 tell_id = 1; optional bytes crash_restart = 2; }
-//   message TellAcked     { uint64 tell_id = 1; }
-//   message TellFailed    { uint64 tell_id = 1; }
-//   message Scheduled     { int64 at_unix_seconds = 1; }
-//
-// Integration tests live outside the saga crate and cannot reach the
-// crate-internal prost types, so seeds and payload assertions go through these
-// independent mirrors.  prost's wire format depends only on the field number +
-// wire type, so bytes produced here decode in the framework and vice versa.
-// ---------------------------------------------------------------------------
+#[allow(dead_code)]
+pub const OUTBOX_MARKER: EventType =
+    EventType::new(Family::new("nitinol.saga"), TypeName::new("outbox"));
 
 #[derive(Clone, PartialEq, prost::Message)]
 #[allow(dead_code)]
@@ -199,53 +186,60 @@ pub struct ScheduledPayload {
     pub at_unix_seconds: i64,
 }
 
-/// Encode a `TellRequested` outbox payload exactly as the framework's prost
-/// codec does: `tell_id` in field 1, optional `crash_restart` bytes in field 2.
-/// `None` omits field 2 entirely (presence semantics for "no crash-restart").
+#[derive(Clone, PartialEq, prost::Oneof)]
 #[allow(dead_code)]
-pub fn encode_tell_requested(tell_id: u64, crash_restart: Option<&[u8]>) -> Bytes {
-    let msg = TellRequestedPayload {
+pub enum OutboxKind {
+    #[prost(message, tag = "1")]
+    TellRequested(TellRequestedPayload),
+    #[prost(message, tag = "2")]
+    TellAcked(TellIdPayload),
+    #[prost(message, tag = "3")]
+    TellFailed(TellIdPayload),
+    #[prost(message, tag = "4")]
+    Scheduled(ScheduledPayload),
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+#[allow(dead_code)]
+pub struct OutboxMarkerPayload {
+    #[prost(oneof = "OutboxKind", tags = "1, 2, 3, 4")]
+    pub kind: Option<OutboxKind>,
+}
+
+#[allow(dead_code)]
+pub fn encode_outbox_marker(kind: OutboxKind) -> Bytes {
+    let msg = OutboxMarkerPayload { kind: Some(kind) };
+    Bytes::from(prost::Message::encode_to_vec(&msg))
+}
+
+#[allow(dead_code)]
+pub fn encode_outbox_tell_requested(tell_id: u64, crash_restart: Option<&[u8]>) -> Bytes {
+    encode_outbox_marker(OutboxKind::TellRequested(TellRequestedPayload {
         tell_id,
         crash_restart: crash_restart.map(<[u8]>::to_vec),
-    };
-    Bytes::from(prost::Message::encode_to_vec(&msg))
+    }))
 }
 
-/// Encode a terminal (`TellAcked` / `TellFailed`) outbox payload: just the
-/// `tell_id` in field 1.
 #[allow(dead_code)]
-pub fn encode_tell_id(tell_id: u64) -> Bytes {
-    let msg = TellIdPayload { tell_id };
-    Bytes::from(prost::Message::encode_to_vec(&msg))
+pub fn encode_outbox_tell_acked(tell_id: u64) -> Bytes {
+    encode_outbox_marker(OutboxKind::TellAcked(TellIdPayload { tell_id }))
 }
 
-/// Encode a `Scheduled` outbox payload: the schedule time as whole unix seconds
-/// in field 1 (mirrors `jiff::Timestamp::as_second`).
 #[allow(dead_code)]
-pub fn encode_scheduled_at(at: jiff::Timestamp) -> Bytes {
-    let msg = ScheduledPayload {
-        at_unix_seconds: at.as_second(),
-    };
-    Bytes::from(prost::Message::encode_to_vec(&msg))
+pub fn encode_outbox_tell_failed(tell_id: u64) -> Bytes {
+    encode_outbox_marker(OutboxKind::TellFailed(TellIdPayload { tell_id }))
 }
 
-/// Decode a `TellRequested` payload produced by the framework's prost codec.
 #[allow(dead_code)]
-pub fn decode_tell_requested(payload: &[u8]) -> TellRequestedPayload {
-    <TellRequestedPayload as prost::Message>::decode(payload)
-        .expect("payload must be a valid prost TellRequested message")
+pub fn decode_outbox_kind(payload: &[u8]) -> OutboxKind {
+    <OutboxMarkerPayload as prost::Message>::decode(payload)
+        .expect("payload must be a valid prost OutboxMarker message")
+        .kind
+        .expect("outbox marker payload must carry a oneof kind")
 }
 
-/// Decode a terminal (`TellAcked` / `TellFailed`) payload.
 #[allow(dead_code)]
-pub fn decode_tell_id(payload: &[u8]) -> TellIdPayload {
-    <TellIdPayload as prost::Message>::decode(payload)
-        .expect("payload must be a valid prost tell_id message")
-}
-
-/// Decode a `Scheduled` payload.
-#[allow(dead_code)]
-pub fn decode_scheduled(payload: &[u8]) -> ScheduledPayload {
-    <ScheduledPayload as prost::Message>::decode(payload)
-        .expect("payload must be a valid prost Scheduled message")
+pub fn outbox_kind_of(event: &LoadedEvent) -> Option<OutboxKind> {
+    (event.event_type.type_key() == OUTBOX_MARKER.type_key())
+        .then(|| decode_outbox_kind(&event.payload))
 }

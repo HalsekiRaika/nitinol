@@ -9,7 +9,7 @@
 //! error and no terminal marker would ever reach the store.
 
 mod common;
-use common::{decode_tell_id, decode_tell_requested, JsonCodec};
+use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -235,8 +235,10 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
         let terminal_count = events
             .iter()
             .filter(|e| {
-                let t = e.event_type.to_string();
-                t == "nitinol.saga.outbox.tell_acked" || t == "nitinol.saga.outbox.tell_failed"
+                matches!(
+                    outbox_kind_of(e),
+                    Some(OutboxKind::TellAcked(_) | OutboxKind::TellFailed(_))
+                )
             })
             .count();
         if terminal_count >= 1 {
@@ -258,15 +260,15 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
     let events = load_saga_events(&saga_store, &saga_id).await;
     let tell_requested = events
         .iter()
-        .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_requested")
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellRequested(_))))
         .count();
     let tell_acked = events
         .iter()
-        .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_acked")
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
         .count();
     let tell_failed = events
         .iter()
-        .filter(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_failed")
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .count();
 
     assert_eq!(
@@ -284,16 +286,24 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
     // reference the same tell_id (field 1 in both messages).
     let requested_id = events
         .iter()
-        .find(|e| e.event_type.to_string() == "nitinol.saga.outbox.tell_requested")
-        .map(|e| decode_tell_requested(&e.payload).tell_id)
+        .find(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellRequested(_))))
+        .map(|e| match outbox_kind_of(e) {
+            Some(OutboxKind::TellRequested(p)) => p.tell_id,
+            _ => unreachable!("filtered to TellRequested"),
+        })
         .expect("a TellRequested marker must be present");
     let terminal_id = events
         .iter()
         .find(|e| {
-            let t = e.event_type.to_string();
-            t == "nitinol.saga.outbox.tell_acked" || t == "nitinol.saga.outbox.tell_failed"
+            matches!(
+                outbox_kind_of(e),
+                Some(OutboxKind::TellAcked(_) | OutboxKind::TellFailed(_))
+            )
         })
-        .map(|e| decode_tell_id(&e.payload).tell_id)
+        .map(|e| match outbox_kind_of(e) {
+            Some(OutboxKind::TellAcked(p) | OutboxKind::TellFailed(p)) => p.tell_id,
+            _ => unreachable!("filtered to TellAcked or TellFailed"),
+        })
         .expect("a terminal marker must be present");
     assert_eq!(
         requested_id, terminal_id,

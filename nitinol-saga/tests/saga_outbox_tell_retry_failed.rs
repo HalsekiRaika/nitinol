@@ -7,7 +7,7 @@
 //! e2e_saga.rs / saga_outbox_persist_atomicity.rs.
 
 mod common;
-use common::JsonCodec;
+use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,8 +30,6 @@ use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQu
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
-
-const OUTBOX_PREFIX: &str = "nitinol.saga.outbox.";
 
 // ---------------------------------------------------------------------------
 // A custom TellTarget that always returns Err(TellError::Send(SendError)).
@@ -204,10 +202,9 @@ async fn wait_for_tell_failed(
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let events = load_saga_events(store, saga_id).await;
-        let failed = events.iter().any(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_failed")
-        });
+        let failed = events
+            .iter()
+            .any(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))));
         if failed {
             return events;
         }
@@ -279,24 +276,15 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
 
     let failed_count = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_failed")
-        })
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .count();
     let acked_count = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_acked")
-        })
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
         .count();
     let requested_count = events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
-        })
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellRequested(_))))
         .count();
 
     assert_eq!(

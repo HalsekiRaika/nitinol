@@ -1,5 +1,5 @@
 mod common;
-use common::JsonCodec;
+use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -20,11 +20,6 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
-
-const OUTBOX_PREFIX: &str = "nitinol.saga.outbox.";
-const TELL_REQUESTED: &str = "nitinol.saga.outbox.tell_requested";
-const TELL_ACKED: &str = "nitinol.saga.outbox.tell_acked";
-const TELL_FAILED: &str = "nitinol.saga.outbox.tell_failed";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UpstreamTrigger {
@@ -143,10 +138,13 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events")
 }
 
-fn count_event_type(events: &[LoadedEvent], event_type: &str) -> usize {
+fn count_outbox(events: &[LoadedEvent], pred: impl Fn(&OutboxKind) -> bool) -> usize {
     events
         .iter()
-        .filter(|e| e.event_type.to_string() == event_type)
+        .filter(|e| match outbox_kind_of(e) {
+            Some(k) => pred(&k),
+            None => false,
+        })
         .count()
 }
 
@@ -235,9 +233,9 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
 
     let events = wait_for_event_count(&saga_store, &saga_id, 5).await;
 
-    let requested = count_event_type(&events, TELL_REQUESTED);
-    let acked = count_event_type(&events, TELL_ACKED);
-    let failed = count_event_type(&events, TELL_FAILED);
+    let requested = count_outbox(&events, |k| matches!(k, OutboxKind::TellRequested(_)));
+    let acked = count_outbox(&events, |k| matches!(k, OutboxKind::TellAcked(_)));
+    let failed = count_outbox(&events, |k| matches!(k, OutboxKind::TellFailed(_)));
     let user_events = events
         .iter()
         .filter(|e| e.event_type == SagaMarker::EVENT_TYPE)
@@ -293,7 +291,7 @@ async fn multi_tell_then_end_stops_saga_after_last_executor_settles() {
 
     let events = wait_for_event_count(&saga_store, &saga_id, 5).await;
     assert_eq!(
-        count_event_type(&events, TELL_ACKED),
+        count_outbox(&events, |k| matches!(k, OutboxKind::TellAcked(_))),
         2,
         "both terminal markers must settle before asserting the stop; events: {:?}",
         events
@@ -317,7 +315,7 @@ async fn multi_tell_then_end_stops_saga_after_last_executor_settles() {
     let final_events = load_saga_events(&saga_store, &saga_id).await;
     let outbox = final_events
         .iter()
-        .filter(|e| e.event_type.to_string().starts_with(OUTBOX_PREFIX))
+        .filter(|e| outbox_kind_of(e).is_some())
         .count();
     assert_eq!(
         outbox, 4,

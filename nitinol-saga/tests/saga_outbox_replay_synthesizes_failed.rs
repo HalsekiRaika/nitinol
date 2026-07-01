@@ -26,7 +26,10 @@
 //! `saga_tell_crash_restart_redispatch.rs`.
 
 mod common;
-use common::{encode_tell_id, encode_tell_requested, JsonCodec};
+use common::{
+    encode_outbox_tell_acked, encode_outbox_tell_requested, outbox_kind_of, JsonCodec, OutboxKind,
+    OUTBOX_MARKER,
+};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,16 +44,6 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
-
-const OUTBOX_PREFIX: &str = "nitinol.saga.outbox.";
-const OUTBOX_TELL_REQUESTED: EventType = EventType::new(
-    Family::new("nitinol.saga.outbox"),
-    TypeName::new("tell_requested"),
-);
-const OUTBOX_TELL_ACKED: EventType =
-    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_acked"));
-const OUTBOX_TELL_FAILED: EventType =
-    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_failed"));
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -138,14 +131,14 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new("replay-acked-saga-1");
 
-    let pending_tell_id_payload = encode_tell_requested(2, None);
-    let ack_payload = encode_tell_id(2);
+    let pending_tell_id_payload = encode_outbox_tell_requested(2, None);
+    let ack_payload = encode_outbox_tell_acked(2);
 
     append_raw(
         &saga_store,
         saga_id.as_str(),
         1,
-        OUTBOX_TELL_REQUESTED,
+        OUTBOX_MARKER,
         pending_tell_id_payload,
     )
     .await;
@@ -153,7 +146,7 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
         &saga_store,
         saga_id.as_str(),
         2,
-        OUTBOX_TELL_ACKED,
+        OUTBOX_MARKER,
         ack_payload,
     )
     .await;
@@ -184,12 +177,9 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
     let events = load_saga_events(&saga_store, &saga_id).await;
     let failed_count = events
         .iter()
-        .filter(|e| e.event_type == OUTBOX_TELL_FAILED)
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .count();
-    let total_outbox = events
-        .iter()
-        .filter(|e| e.event_type.to_string().starts_with(OUTBOX_PREFIX))
-        .count();
+    let total_outbox = events.iter().filter(|e| outbox_kind_of(e).is_some()).count();
 
     assert_eq!(
         failed_count, 0,
@@ -219,12 +209,12 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
     // Seed a TellRequested with tell_id = 1 and NO crash-restart bytes.
     // This simulates a `TellIntent::new` direct usage — prost TellRequested
     // with field 2 (crash_restart) absent.
-    let tell_id_payload = encode_tell_requested(1, None);
+    let tell_id_payload = encode_outbox_tell_requested(1, None);
     append_raw(
         &saga_store,
         saga_id.as_str(),
         1,
-        OUTBOX_TELL_REQUESTED,
+        OUTBOX_MARKER,
         tell_id_payload,
     )
     .await;
@@ -257,7 +247,7 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
         let events = load_saga_events(&saga_store, &saga_id).await;
         let failed_count = events
             .iter()
-            .filter(|e| e.event_type == OUTBOX_TELL_FAILED)
+            .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
             .count();
         if failed_count >= 1 {
             break events;
@@ -275,11 +265,11 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
 
     let failed_count = events
         .iter()
-        .filter(|e| e.event_type == OUTBOX_TELL_FAILED)
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .count();
     let acked_count = events
         .iter()
-        .filter(|e| e.event_type == OUTBOX_TELL_ACKED)
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
         .count();
 
     assert_eq!(
@@ -290,5 +280,15 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
     assert_eq!(
         acked_count, 0,
         "replay must NOT append TellAcked — the tell cannot be re-dispatched"
+    );
+
+    let failed_marker = events
+        .iter()
+        .find(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
+        .expect("the synthetic TellFailed marker must be present");
+    assert_eq!(
+        failed_marker.event_type, OUTBOX_MARKER,
+        "framework-written outbox markers must all carry the single reserved \
+         event_type; the kind is recovered by decoding the payload"
     );
 }

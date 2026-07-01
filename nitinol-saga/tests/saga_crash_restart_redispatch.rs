@@ -6,7 +6,7 @@
 //! marker carries crash-restart bytes.
 
 mod common;
-use common::{encode_tell_requested, JsonCodec};
+use common::{encode_outbox_tell_requested, outbox_kind_of, JsonCodec, OutboxKind, OUTBOX_MARKER};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,11 +24,6 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
-
-const OUTBOX_TELL_ACKED: EventType =
-    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_acked"));
-const OUTBOX_TELL_FAILED: EventType =
-    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_failed"));
 
 // ---------------------------------------------------------------------------
 // Domain types — minimal; Reserve is a unit struct so the crash-restart
@@ -177,15 +172,8 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
 
     // Seed a TellRequested with tell_id = 1 and crash-restart bytes = b"Reserve".
     // The factory below identifies "Reserve" intents by these bytes.
-    let payload = encode_tell_requested(1, Some(b"Reserve"));
-    append_raw(
-        &saga_store,
-        saga_id.as_str(),
-        1,
-        EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_requested")),
-        payload,
-    )
-    .await;
+    let payload = encode_outbox_tell_requested(1, Some(b"Reserve"));
+    append_raw(&saga_store, saga_id.as_str(), 1, OUTBOX_MARKER, payload).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
@@ -226,7 +214,7 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
         let events = load_saga_events(&saga_store, &saga_id).await;
         let acked_count = events
             .iter()
-            .filter(|e| e.event_type == OUTBOX_TELL_ACKED)
+            .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
             .count();
         if acked_count >= 1 {
             break events;
@@ -244,11 +232,11 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
 
     let acked_count = events
         .iter()
-        .filter(|e| e.event_type == OUTBOX_TELL_ACKED)
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellAcked(_))))
         .count();
     let failed_count = events
         .iter()
-        .filter(|e| e.event_type == OUTBOX_TELL_FAILED)
+        .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .count();
 
     assert_eq!(

@@ -6,7 +6,7 @@
 //!   3. Appends a TellAcked outbox marker once the dispatch succeeds
 
 mod common;
-use common::JsonCodec;
+use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -25,8 +25,6 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
-
-const OUTBOX_PREFIX: &str = "nitinol.saga.outbox.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -171,13 +169,10 @@ fn count_user_events(events: &[LoadedEvent], expected: EventType) -> usize {
     events.iter().filter(|e| e.event_type == expected).count()
 }
 
-fn count_outbox_events(events: &[LoadedEvent], suffix: &str) -> usize {
+fn count_outbox_events(events: &[LoadedEvent], pred: impl Fn(&OutboxKind) -> bool) -> usize {
     events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with(suffix)
-        })
+        .filter(|e| outbox_kind_of(e).as_ref().is_some_and(&pred))
         .count()
 }
 
@@ -188,7 +183,7 @@ async fn wait_until_outbox_acked(
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         let events = load_saga_events(store, saga_id).await;
-        if count_outbox_events(&events, "tell_acked") >= 1 {
+        if count_outbox_events(&events, |k| matches!(k, OutboxKind::TellAcked(_))) >= 1 {
             return events;
         }
         if std::time::Instant::now() >= deadline {
@@ -305,17 +300,17 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
         "saga must persist exactly one ReservationRequested user event"
     );
     assert_eq!(
-        count_outbox_events(&saga_events, "tell_requested"),
+        count_outbox_events(&saga_events, |k| matches!(k, OutboxKind::TellRequested(_))),
         1,
         "Persist with one tell must append exactly one TellRequested outbox event"
     );
     assert_eq!(
-        count_outbox_events(&saga_events, "tell_acked"),
+        count_outbox_events(&saga_events, |k| matches!(k, OutboxKind::TellAcked(_))),
         1,
         "a successful tell dispatch must result in exactly one TellAcked outbox event"
     );
     assert_eq!(
-        count_outbox_events(&saga_events, "tell_failed"),
+        count_outbox_events(&saga_events, |k| matches!(k, OutboxKind::TellFailed(_))),
         0,
         "a successful tell must not produce a TellFailed event"
     );
@@ -328,10 +323,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
         .expect("ReservationRequested user event must exist in saga stream");
     let requested = saga_events
         .iter()
-        .find(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with("tell_requested")
-        })
+        .find(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellRequested(_))))
         .expect("TellRequested outbox event must exist in saga stream");
     assert_eq!(
         user_event.sequence, 1,

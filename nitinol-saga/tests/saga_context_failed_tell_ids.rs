@@ -13,7 +13,10 @@
 //!    call must expose the `tell_id` in `ctx.failed_tell_ids()`.
 
 mod common;
-use common::{encode_tell_id, encode_tell_requested, JsonCodec};
+use common::{
+    encode_outbox_tell_failed, encode_outbox_tell_requested, outbox_kind_of, JsonCodec,
+    OutboxKind, OUTBOX_MARKER,
+};
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -34,13 +37,6 @@ use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, TypeName
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
-
-const OUTBOX_TELL_FAILED: EventType =
-    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_failed"));
-const OUTBOX_TELL_REQUESTED: EventType = EventType::new(
-    Family::new("nitinol.saga.outbox"),
-    TypeName::new("tell_requested"),
-);
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -296,16 +292,16 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
         &saga_store,
         saga_id.as_str(),
         1,
-        OUTBOX_TELL_REQUESTED,
-        encode_tell_requested(1, None),
+        OUTBOX_MARKER,
+        encode_outbox_tell_requested(1, None),
     )
     .await;
     append_raw(
         &saga_store,
         saga_id.as_str(),
         2,
-        OUTBOX_TELL_FAILED,
-        encode_tell_id(1),
+        OUTBOX_MARKER,
+        encode_outbox_tell_failed(1),
     )
     .await;
 
@@ -397,12 +393,12 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     // bytes (prost TellRequested with field 2 absent).  Simulates a crash between
     // the atomic Persist batch and the executor's terminal append where the new
     // process has no in-memory intent and no factory registered.
-    let tell_id_payload = encode_tell_requested(5, None);
+    let tell_id_payload = encode_outbox_tell_requested(5, None);
     append_raw(
         &saga_store,
         saga_id.as_str(),
         1,
-        OUTBOX_TELL_REQUESTED,
+        OUTBOX_MARKER,
         tell_id_payload,
     )
     .await;
@@ -540,7 +536,7 @@ async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
         let events: Vec<_> = events.try_collect().await.expect("collect must succeed");
         let has_failed = events
             .iter()
-            .any(|e| e.event_type == OUTBOX_TELL_FAILED);
+            .any(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))));
         if has_failed {
             break;
         }

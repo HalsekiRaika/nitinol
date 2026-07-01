@@ -20,7 +20,7 @@
 //! not stop it — it runs the full retry budget and appends `TellFailed`.
 
 mod common;
-use common::JsonCodec;
+use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -43,8 +43,6 @@ use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQu
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
-
-const OUTBOX_PREFIX: &str = "nitinol.saga.outbox.";
 
 // ---------------------------------------------------------------------------
 // A TellTarget that fails every dispatch attempt.  The first attempt blocks on
@@ -233,13 +231,10 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-fn count_with_suffix(events: &[LoadedEvent], suffix: &str) -> usize {
+fn count_matching(events: &[LoadedEvent], pred: impl Fn(&OutboxKind) -> bool) -> usize {
     events
         .iter()
-        .filter(|e| {
-            let s = e.event_type.to_string();
-            s.starts_with(OUTBOX_PREFIX) && s.ends_with(suffix)
-        })
+        .filter(|e| outbox_kind_of(e).is_some_and(|k| pred(&k)))
         .count()
 }
 
@@ -306,12 +301,13 @@ async fn parent_stop_cascades_to_in_flight_outbox_executor_child() {
 
     let events = load_saga_events(&saga_store, &saga_id).await;
     assert_eq!(
-        count_with_suffix(&events, "tell_requested"),
+        count_matching(&events, |k| matches!(k, OutboxKind::TellRequested(_))),
         1,
         "exactly one TellRequested must have been written before the stop"
     );
     assert_eq!(
-        count_with_suffix(&events, "tell_acked") + count_with_suffix(&events, "tell_failed"),
+        count_matching(&events, |k| matches!(k, OutboxKind::TellAcked(_)))
+            + count_matching(&events, |k| matches!(k, OutboxKind::TellFailed(_))),
         0,
         "no terminal marker may exist while the executor is still in-flight"
     );
@@ -336,12 +332,12 @@ async fn parent_stop_cascades_to_in_flight_outbox_executor_child() {
 
     let events = load_saga_events(&saga_store, &saga_id).await;
     assert_eq!(
-        count_with_suffix(&events, "tell_acked"),
+        count_matching(&events, |k| matches!(k, OutboxKind::TellAcked(_))),
         0,
         "a cascade-stopped executor must not append TellAcked"
     );
     assert_eq!(
-        count_with_suffix(&events, "tell_failed"),
+        count_matching(&events, |k| matches!(k, OutboxKind::TellFailed(_))),
         0,
         "a cascade-stopped executor must not run to retry exhaustion and append TellFailed; \
          its TellRequested marker stays open for the Replay path to recover"
