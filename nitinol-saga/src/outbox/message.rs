@@ -1,18 +1,20 @@
 use bytes::Bytes;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::EventType;
-
-use crate::outbox::event_types::OUTBOX_MARKER;
+use nitinol_persistence::{EventType, Family, TypeName};
 
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/nitinol.saga.outbox.rs"));
 }
 
 pub(crate) use self::proto::{OutboxMarker, Scheduled, TellAcked, TellFailed, TellRequested};
+
 use self::proto::outbox_marker::Kind;
 
+pub(crate) const OUTBOX_MARKER: EventType =
+    EventType::new(Family::new("nitinol.saga"), TypeName::new("outbox"));
+
 #[derive(Debug, thiserror::Error)]
-#[error("outbox marker payload carried no oneof kind")]
+#[error("outbox marker payload carried no `oneof` kind")]
 struct MissingOutboxKind;
 
 pub(crate) enum OutboxMessage {
@@ -65,7 +67,6 @@ impl OutboxMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::outbox::event_types::OUTBOX_MARKER;
     use nitinol_persistence::{Family, TypeName, Variant};
 
     fn tell_requested(tell_id: u64, crash_restart: Option<Vec<u8>>) -> OutboxMessage {

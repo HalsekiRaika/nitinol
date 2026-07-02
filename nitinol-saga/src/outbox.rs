@@ -1,4 +1,3 @@
-mod event_types;
 mod message;
 mod payload;
 mod retry_policy;
