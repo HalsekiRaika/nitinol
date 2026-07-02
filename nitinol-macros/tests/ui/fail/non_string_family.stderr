@@ -1,0 +1,5 @@
+error: expected a string literal for `#[event(family = "...")]`
+ --> tests/ui/fail/non_string_family.rs:7:18
+  |
+7 | #[event(family = 42)]
+  |                  ^^

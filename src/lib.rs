@@ -68,6 +68,12 @@ pub mod eventsource {
     pub use nitinol_eventsource::Decider;
     pub use nitinol_eventsource::{Effect, SideEffect, SideEffectError};
     pub use nitinol_eventsource::Event;
+
+    /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
+    /// `use nitinol::eventsource::Event;` brings both into scope (trait in the
+    /// type namespace, derive in the macro namespace — as `serde` does).
+    pub use nitinol_macros::Event;
+
     pub use nitinol_eventsource::Receive;
     pub use nitinol_eventsource::{AskError, ExecError, TellError};
     pub use nitinol_eventsource::{

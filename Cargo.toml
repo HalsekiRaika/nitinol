@@ -45,7 +45,7 @@ description = "A utilities for event sourcing"
 default = []
 runtime = ["dep:nitinol-runtime"]
 persistence = ["dep:nitinol-persistence"]
-eventsource = ["dep:nitinol-eventsource", "runtime", "persistence"]
+eventsource = ["dep:nitinol-eventsource", "dep:nitinol-macros", "runtime", "persistence"]
 saga = ["dep:nitinol-saga", "runtime", "persistence", "eventsource"]
 full = ["runtime", "persistence", "eventsource", "saga"]
 
@@ -54,6 +54,7 @@ nitinol-runtime = { path = "nitinol-runtime", optional = true }
 nitinol-persistence = { path = "nitinol-persistence", optional = true }
 nitinol-eventsource = { path = "nitinol-eventsource", optional = true }
 nitinol-saga = { path = "nitinol-saga", optional = true }
+nitinol-macros = { path = "nitinol-macros", optional = true }
 
 [dev-dependencies]
 # Required by the `#[tokio::test]` attribute in umbrella integration tests.
