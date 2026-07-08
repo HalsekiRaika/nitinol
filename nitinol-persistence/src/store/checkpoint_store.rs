@@ -40,7 +40,6 @@ pub enum DeliveryMode {
 
 #[async_trait]
 pub trait CheckpointStore: Send + Sync {
-    /// ユーザー実装次第で `()` または実 TX ハンドル
     type Tx: Send;
 
     async fn load(&self, projection_id: &ProjectionId) -> Result<Option<u64>, CheckpointError>;
