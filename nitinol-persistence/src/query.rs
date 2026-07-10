@@ -1,11 +1,12 @@
 use std::borrow::Borrow;
 
 use crate::event_type::EventType;
+use crate::materialized_path::MaterializedPath;
 
 #[derive(Debug, Clone, Default)]
 pub struct LoadQuery {
     pub stream_key: Option<String>,
-    pub event_type: Option<EventType>,
+    pub event_type_prefix: Option<MaterializedPath>,
     pub from_global_sequence: Option<u64>,
     pub from_stream_sequence: Option<u64>,
     pub limit: Option<usize>,
@@ -25,9 +26,23 @@ impl LoadQuery {
         }
     }
 
+    /// Build a query targeting a specific [`EventType`].
+    ///
+    /// Uses the event type's Materialized Path as a prefix: a struct event
+    /// (`variant = None`) matches exactly itself; an enum-arm event matches
+    /// only that arm; a type-level query (`variant = None`) for a family that
+    /// stores per-arm variants will match all arms under that type name, since
+    /// the type path is an ancestor prefix of every arm path.
     pub fn by_event_type(et: EventType) -> Self {
         Self {
-            event_type: Some(et),
+            event_type_prefix: Some(et.to_path()),
+            ..Default::default()
+        }
+    }
+
+    pub fn by_event_type_prefix(prefix: MaterializedPath) -> Self {
+        Self {
+            event_type_prefix: Some(prefix),
             ..Default::default()
         }
     }

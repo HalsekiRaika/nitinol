@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol_persistence::{EventType, Family, TypeName, Variant};
 
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/nitinol.saga.outbox.rs"));
@@ -27,6 +27,16 @@ pub(crate) enum OutboxMessage {
 impl SystemEvent for OutboxMessage {
     const EVENT_TYPE: EventType = OUTBOX_MARKER;
 
+    fn variant(&self) -> EventType {
+        let variant = match self {
+            OutboxMessage::TellRequested(_) => Variant::new("tell_requested"),
+            OutboxMessage::TellAcked(_) => Variant::new("tell_acked"),
+            OutboxMessage::TellFailed(_) => Variant::new("tell_failed"),
+            OutboxMessage::Scheduled(_) => Variant::new("scheduled"),
+        };
+        EventType::with_variant(OUTBOX_MARKER.family(), OUTBOX_MARKER.type_name(), variant)
+    }
+
     fn encode(&self) -> Bytes {
         let kind = match self {
             OutboxMessage::TellRequested(m) => Kind::TellRequested(m.clone()),
@@ -39,8 +49,8 @@ impl SystemEvent for OutboxMessage {
     }
 
     fn decode(payload: &[u8]) -> Result<Self, SystemEventDecodeError> {
-        let marker =
-            <OutboxMarker as prost::Message>::decode(payload).map_err(SystemEventDecodeError::new)?;
+        let marker = <OutboxMarker as prost::Message>::decode(payload)
+            .map_err(SystemEventDecodeError::new)?;
         match marker.kind {
             Some(Kind::TellRequested(m)) => Ok(OutboxMessage::TellRequested(m)),
             Some(Kind::TellAcked(m)) => Ok(OutboxMessage::TellAcked(m)),
@@ -87,19 +97,25 @@ mod tests {
     }
 
     #[test]
-    fn every_marker_writes_the_same_wire_event_type() {
-        let markers = [
-            tell_requested(1, None),
-            OutboxMessage::TellAcked(TellAcked { tell_id: 1 }),
-            OutboxMessage::TellFailed(TellFailed { tell_id: 1 }),
-            OutboxMessage::Scheduled(Scheduled { at_unix_seconds: 0 }),
+    fn each_marker_writes_its_per_arm_variant_on_the_wire() {
+        let cases = [
+            (tell_requested(1, None), "tell_requested"),
+            (
+                OutboxMessage::TellAcked(TellAcked { tell_id: 1 }),
+                "tell_acked",
+            ),
+            (
+                OutboxMessage::TellFailed(TellFailed { tell_id: 1 }),
+                "tell_failed",
+            ),
+            (
+                OutboxMessage::Scheduled(Scheduled { at_unix_seconds: 0 }),
+                "scheduled",
+            ),
         ];
-        for m in &markers {
-            assert_eq!(
-                m.variant(),
-                OUTBOX_MARKER,
-                "no marker may override variant(); all share one wire event_type"
-            );
+        for (marker, expected) in &cases {
+            assert_eq!(marker.variant().variant(), Some(Variant::new(expected)));
+            assert_eq!(marker.variant().type_key(), OUTBOX_MARKER.type_key());
         }
     }
 

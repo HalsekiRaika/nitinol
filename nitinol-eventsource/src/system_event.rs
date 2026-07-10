@@ -29,10 +29,10 @@ pub trait SystemEvent: Sized {
 
     /// Value-level identity of this event, consistent with [`crate::Event`].
     ///
-    /// Defaults to the type-level [`Self::EVENT_TYPE`] (variant `None`).
-    fn variant(&self) -> EventType {
-        Self::EVENT_TYPE
-    }
+    /// Required (no default) so an enum `SystemEvent` cannot silently fall back
+    /// to `variant = None` and drop its per-arm identity from the wire. A
+    /// struct implementor writes the one-liner `Self::EVENT_TYPE`.
+    fn variant(&self) -> EventType;
 
     fn encode(&self) -> Bytes;
 

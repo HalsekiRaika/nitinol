@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, Receive as EvtReceive};
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol::eventsource::Event;
+use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Receive as EvtReceive};
 
 // ---------------------------------------------------------------------------
 // Events
@@ -30,16 +30,12 @@ pub struct Withdrawn {
 // The aggregate must fold both event kinds — use an enum as the event union.
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
 #[serde(tag = "kind")]
+#[event(family = "multiple_deciders.wallet")]
 pub enum WalletEvent {
     Deposited(Deposited),
     Withdrawn(Withdrawn),
-}
-
-impl Event for WalletEvent {
-    // The outer enum carries its own type string; inner variants are embedded.
-    const EVENT_TYPE: EventType = EventType::new(Family::new("multiple_deciders.wallet"), TypeName::new("Event"));
 }
 
 // ---------------------------------------------------------------------------

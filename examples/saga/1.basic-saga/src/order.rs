@@ -1,16 +1,13 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol::eventsource::Event;
+use nitinol_eventsource::{Aggregate, Context, Decider, Effect};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Event)]
+#[event(family = "saga.example")]
 pub struct OrderPlaced {
     pub sku: String,
-}
-
-impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("saga.example"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Default)]

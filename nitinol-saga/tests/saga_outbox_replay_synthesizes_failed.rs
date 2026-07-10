@@ -41,7 +41,9 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
+use nitinol_persistence::{
+    AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -61,10 +63,8 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::new(
-        Family::new("replay"),
-        TypeName::new("ReservationRequested"),
-    );
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("replay"), TypeName::new("ReservationRequested"));
 }
 
 /// Inert saga used only to drive the on_start replay path — never invoked.
@@ -142,14 +142,7 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
         pending_tell_id_payload,
     )
     .await;
-    append_raw(
-        &saga_store,
-        saga_id.as_str(),
-        2,
-        OUTBOX_MARKER,
-        ack_payload,
-    )
-    .await;
+    append_raw(&saga_store, saga_id.as_str(), 2, OUTBOX_MARKER, ack_payload).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
@@ -179,7 +172,10 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
         .iter()
         .filter(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .count();
-    let total_outbox = events.iter().filter(|e| outbox_kind_of(e).is_some()).count();
+    let total_outbox = events
+        .iter()
+        .filter(|e| outbox_kind_of(e).is_some())
+        .count();
 
     assert_eq!(
         failed_count, 0,
@@ -286,9 +282,19 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
         .iter()
         .find(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .expect("the synthetic TellFailed marker must be present");
+    // Issue #66: outbox markers now carry a per-arm variant on the wire. The
+    // synthetic TellFailed must write the `tell_failed` variant so the marker is
+    // queryable by Materialized Path, while its variant-free `type_key` still
+    // equals `OUTBOX_MARKER`'s so `classify`/routing keeps decoding it.
     assert_eq!(
-        failed_marker.event_type, OUTBOX_MARKER,
-        "framework-written outbox markers must all carry the single reserved \
-         event_type; the kind is recovered by decoding the payload"
+        failed_marker.event_type.variant(),
+        Some(Variant::new("tell_failed")),
+        "the synthetic TellFailed must carry the per-arm `tell_failed` variant on the wire"
+    );
+    assert_eq!(
+        failed_marker.event_type.type_key(),
+        OUTBOX_MARKER.type_key(),
+        "the marker's variant-free type_key must still match the reserved outbox key \
+         so decode-registry routing keeps recovering the kind from the payload"
     );
 }

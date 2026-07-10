@@ -3,15 +3,12 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol::eventsource::Event;
+use nitinol_eventsource::{Aggregate, Context, Decider, Effect};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
+#[event(family = "projection.counter")]
 pub struct Incremented;
-
-impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("projection.counter"), TypeName::new("Incremented"));
-}
 
 #[derive(Default)]
 pub struct Counter {

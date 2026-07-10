@@ -118,8 +118,8 @@ impl EventStore for InMemoryEventStore {
                         return false;
                     }
                 }
-                if let Some(et) = query.event_type {
-                    if event.event_type != et {
+                if let Some(ref prefix) = query.event_type_prefix {
+                    if !event.event_type.to_path().is_within(prefix) {
                         return false;
                     }
                 }

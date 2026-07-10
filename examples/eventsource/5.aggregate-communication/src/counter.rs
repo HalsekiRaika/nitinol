@@ -5,19 +5,16 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+use nitinol::eventsource::Event;
 use nitinol_eventsource::{
-    Aggregate, AggregateProxy, Context, Decider, Effect, Event, Receive as EvtReceive,
+    Aggregate, AggregateProxy, Context, Decider, Effect, Receive as EvtReceive,
 };
-use nitinol_persistence::{EventType, Family, TypeName};
 
 use crate::effects::TellTargetEffect;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
+#[event(family = "agg_comm.counter")]
 pub struct Incremented;
-
-impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("agg_comm.counter"), TypeName::new("Incremented"));
-}
 
 #[derive(Default)]
 pub struct Counter {

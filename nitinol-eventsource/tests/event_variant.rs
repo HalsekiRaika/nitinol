@@ -1,10 +1,12 @@
 //! Contract tests for the value-level `variant()` accessor added to `Event`
 //! and `SystemEvent` (Issue #64).
 //!
-//! Both traits gain a defaulted `fn variant(&self) -> EventType` that returns
-//! `Self::EVENT_TYPE`. struct events keep the default (type-level identity);
-//! enum events would override it per arm. These tests pin the default so an
-//! un-overridden implementor reports its declared `EVENT_TYPE`.
+//! `Event` keeps a defaulted `fn variant(&self) -> EventType` returning
+//! `Self::EVENT_TYPE`; `SystemEvent::variant()` is required (Issue #66) so an
+//! enum implementor cannot silently drop its per-arm identity. A struct event
+//! keeps the type-level identity (variant `None`) — via the `Event` default or
+//! the explicit `Self::EVENT_TYPE` one-liner a `SystemEvent` struct writes.
+//! These tests pin that type-level identity and the per-arm override.
 
 use bytes::Bytes;
 use nitinol_eventsource::{appending_system_event, Event, SystemEvent, SystemEventDecodeError};
@@ -49,18 +51,34 @@ impl Event for OrderEvent {
             OrderEvent::Placed => Variant::new("Placed"),
             OrderEvent::Cancelled => Variant::new("Cancelled"),
         };
-        EventType::with_variant(Family::new("saga.upstream"), TypeName::new("OrderEvent"), variant)
+        EventType::with_variant(
+            Family::new("saga.upstream"),
+            TypeName::new("OrderEvent"),
+            variant,
+        )
     }
 }
 
 #[test]
 fn event_overridden_variant_returns_arm_specific_event_type() {
-    assert_eq!(OrderEvent::Placed.variant().variant(), Some(Variant::new("Placed")));
-    assert_eq!(OrderEvent::Cancelled.variant().variant(), Some(Variant::new("Cancelled")));
+    assert_eq!(
+        OrderEvent::Placed.variant().variant(),
+        Some(Variant::new("Placed"))
+    );
+    assert_eq!(
+        OrderEvent::Cancelled.variant().variant(),
+        Some(Variant::new("Cancelled"))
+    );
 
     // Both arms share the same variant-free type-key as the const EVENT_TYPE.
-    assert_eq!(OrderEvent::Placed.variant().type_key(), OrderEvent::EVENT_TYPE.type_key());
-    assert_eq!(OrderEvent::Cancelled.variant().type_key(), OrderEvent::EVENT_TYPE.type_key());
+    assert_eq!(
+        OrderEvent::Placed.variant().type_key(),
+        OrderEvent::EVENT_TYPE.type_key()
+    );
+    assert_eq!(
+        OrderEvent::Cancelled.variant().type_key(),
+        OrderEvent::EVENT_TYPE.type_key()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -70,8 +88,14 @@ fn event_overridden_variant_returns_arm_specific_event_type() {
 struct Marker;
 
 impl SystemEvent for Marker {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("scheduled"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("nitinol.saga.outbox"),
+        TypeName::new("scheduled"),
+    );
+
+    fn variant(&self) -> EventType {
+        Self::EVENT_TYPE
+    }
 
     fn encode(&self) -> Bytes {
         Bytes::new()

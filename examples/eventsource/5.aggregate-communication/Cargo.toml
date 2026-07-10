@@ -16,6 +16,7 @@ name = "eventsource-aggregate-communication"
 path = "src/main.rs"
 
 [dependencies]
+nitinol = { path = "../../..", features = ["eventsource"] }
 nitinol-eventsource = { path = "../../../nitinol-eventsource" }
 nitinol-persistence = { path = "../../../nitinol-persistence" }
 nitinol-runtime = { path = "../../../nitinol-runtime" }

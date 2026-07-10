@@ -1,20 +1,17 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{AggregateProxy, Event};
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol::eventsource::Event;
+use nitinol_eventsource::AggregateProxy;
 use nitinol_saga::{Saga, SagaContext, SagaEffect};
 
 use crate::inventory::{Inventory, Reserve};
 use crate::order::OrderPlaced;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Event)]
+#[event(family = "saga.example")]
 pub struct ReservationRequested {
     pub sku: String,
-}
-
-impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("saga.example"), TypeName::new("ReservationRequested"));
 }
 
 pub struct ReservationSaga {

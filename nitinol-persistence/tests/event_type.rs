@@ -1,15 +1,28 @@
-//! Contract tests for the restructured [`EventType`] (Issue #64).
+//! Contract tests for the restructured [`EventType`] (Issues #64, #66).
 //!
 //! `EventType` is redefined from a single `&'static str` into three components
 //! — `Family` / `TypeName` / `Variant` — with structured equality, a
-//! variant-free type-key, hierarchical family matching, and a one-way `Display`.
+//! variant-free type-key, hierarchical family matching, and a `Display` impl
+//! that renders the one-way canonical `family.TypeName[.variant]` path.
 //! These tests pin the public contract the framework and future tooling rely on.
+//!
+//! # Round-trip via `MaterializedPath`
+//!
+//! `EventType` uses `&'static str` for all components and is therefore `Copy`
+//! and `const`-constructable, but cannot implement `FromStr` (runtime strings
+//! cannot be borrowed as `&'static str`).  The parse boundary is
+//! [`MaterializedPath`]: `event_type.to_path().to_string()` produces the
+//! canonical wire string, which `str::parse::<MaterializedPath>()` recovers
+//! without loss.  See [`event_type_round_trips_as_materialized_path`] for the
+//! pinned contract test.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use nitinol_persistence::{EventType, Family, TypeName, Variant};
+use nitinol_persistence::{
+    EventType, Family, MaterializedPath, ParsedEventType, TypeName, Variant,
+};
 
 fn hash_of<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -102,7 +115,10 @@ fn family_is_within_false_for_unrelated_families() {
 /// family/type_name match and variant is None (struct events).
 #[test]
 fn new_sets_components_and_leaves_variant_none() {
-    let et = EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_requested"));
+    let et = EventType::new(
+        Family::new("nitinol.saga.outbox"),
+        TypeName::new("tell_requested"),
+    );
 
     assert_eq!(et.family(), Family::new("nitinol.saga.outbox"));
     assert_eq!(et.type_name(), TypeName::new("tell_requested"));
@@ -196,7 +212,10 @@ fn type_key_usable_as_registry_lookup_key() {
         Variant::new("OrderPlaced"),
     );
 
-    assert_eq!(registry.get(&loaded_variant.type_key()), Some(&"OrderDecoder"));
+    assert_eq!(
+        registry.get(&loaded_variant.type_key()),
+        Some(&"OrderDecoder")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +278,10 @@ fn inequality_holds_when_some_variants_differ() {
 #[test]
 fn hash_set_distinguishes_variants() {
     let mut set = HashSet::new();
-    set.insert(EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent")));
+    set.insert(EventType::new(
+        Family::new("saga.upstream"),
+        TypeName::new("OrderEvent"),
+    ));
     set.insert(EventType::with_variant(
         Family::new("saga.upstream"),
         TypeName::new("OrderEvent"),
@@ -282,7 +304,10 @@ fn hash_set_distinguishes_variants() {
 /// formatted, Then it renders `family.type_name`.
 #[test]
 fn display_renders_family_and_type_name_without_variant() {
-    let et = EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("tell_requested"));
+    let et = EventType::new(
+        Family::new("nitinol.saga.outbox"),
+        TypeName::new("tell_requested"),
+    );
     assert_eq!(et.to_string(), "nitinol.saga.outbox.tell_requested");
 }
 
@@ -310,7 +335,11 @@ fn display_omits_prefix_for_empty_family() {
 /// only the family prefix is dropped; the variant suffix remains.
 #[test]
 fn display_omits_prefix_for_empty_family_but_keeps_variant() {
-    let et = EventType::with_variant(Family::new(""), TypeName::new("Order"), Variant::new("Placed"));
+    let et = EventType::with_variant(
+        Family::new(""),
+        TypeName::new("Order"),
+        Variant::new("Placed"),
+    );
     assert_eq!(et.to_string(), "Order.Placed");
 }
 
@@ -318,8 +347,10 @@ fn display_omits_prefix_for_empty_family_but_keeps_variant() {
 // const usability & Copy — required for `const EVENT_TYPE` definitions
 // ---------------------------------------------------------------------------
 
-const CONST_STRUCT_EVENT: EventType =
-    EventType::new(Family::new("nitinol.saga.outbox"), TypeName::new("scheduled"));
+const CONST_STRUCT_EVENT: EventType = EventType::new(
+    Family::new("nitinol.saga.outbox"),
+    TypeName::new("scheduled"),
+);
 const CONST_VARIANT_EVENT: EventType = EventType::with_variant(
     Family::new("saga.upstream"),
     TypeName::new("OrderEvent"),
@@ -332,7 +363,10 @@ const CONST_VARIANT_EVENT: EventType = EventType::with_variant(
 fn const_constructors_are_usable_in_const_context() {
     assert_eq!(CONST_STRUCT_EVENT.type_name(), TypeName::new("scheduled"));
     assert_eq!(CONST_STRUCT_EVENT.variant(), None);
-    assert_eq!(CONST_VARIANT_EVENT.variant(), Some(Variant::new("OrderPlaced")));
+    assert_eq!(
+        CONST_VARIANT_EVENT.variant(),
+        Some(Variant::new("OrderPlaced"))
+    );
 }
 
 /// Given an EventType is Copy, When passed by value twice, Then the original
@@ -344,4 +378,241 @@ fn event_type_is_copy() {
     // Both bindings remain independently usable because EventType is Copy.
     assert_eq!(original, copied);
     assert_eq!(original.type_name(), TypeName::new("OrderEvent"));
+}
+
+// ---------------------------------------------------------------------------
+// Round-trip via MaterializedPath
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Component constructor invariants — invalid inputs must be rejected
+// ---------------------------------------------------------------------------
+
+/// Given a TypeName containing a dot, When constructed, Then it panics because
+/// TypeName must be a single path segment (no sub-segments).
+#[test]
+#[should_panic]
+fn type_name_with_dot_panics() {
+    let _ = TypeName::new("Order.Event");
+}
+
+/// Given an empty TypeName, When constructed, Then it panics because an empty
+/// segment would break the round-trip contract.
+#[test]
+#[should_panic]
+fn type_name_empty_panics() {
+    let _ = TypeName::new("");
+}
+
+/// Given a Variant containing a dot, When constructed, Then it panics because
+/// Variant must be a single path segment (no sub-segments).
+#[test]
+#[should_panic]
+fn variant_with_dot_panics() {
+    let _ = Variant::new("A.B");
+}
+
+/// Given an empty Variant, When constructed, Then it panics because an empty
+/// segment would break the round-trip contract.
+#[test]
+#[should_panic]
+fn variant_empty_panics() {
+    let _ = Variant::new("");
+}
+
+/// Given a Family with consecutive dots (empty segment), When constructed, Then
+/// it panics because every segment must be non-empty.
+#[test]
+#[should_panic]
+fn family_with_consecutive_dots_panics() {
+    let _ = Family::new("a..b");
+}
+
+/// Given a Family with a leading dot, When constructed, Then it panics because
+/// the first segment would be empty.
+#[test]
+#[should_panic]
+fn family_with_leading_dot_panics() {
+    let _ = Family::new(".a");
+}
+
+/// Given a Family with a trailing dot, When constructed, Then it panics because
+/// the last segment would be empty.
+#[test]
+#[should_panic]
+fn family_with_trailing_dot_panics() {
+    let _ = Family::new("a.");
+}
+
+// ---------------------------------------------------------------------------
+// Round-trip via MaterializedPath
+// ---------------------------------------------------------------------------
+
+/// Pinned contract: EventType round-trips as a Materialized Path (#66 acceptance
+/// criterion).
+///
+/// `EventType` uses `&'static str` components for `Copy`/`const` semantics and
+/// cannot implement `FromStr` directly.  The parse boundary is
+/// [`MaterializedPath`]:
+///
+/// - **Serialise**: `event_type.to_path().to_string()` → canonical wire string.
+/// - **Parse**: `wire.parse::<MaterializedPath>()` → owned path.
+/// - **Round-trip**: reparsed path equals the projected path (Eq).
+///
+/// Covers both struct events (variant None) and enum-arm events (variant Some).
+#[test]
+fn event_type_round_trips_as_materialized_path() {
+    let cases: &[EventType] = &[
+        EventType::new(
+            Family::new("nitinol.saga.outbox"),
+            TypeName::new("tell_requested"),
+        ),
+        EventType::with_variant(
+            Family::new("saga.upstream"),
+            TypeName::new("OrderEvent"),
+            Variant::new("OrderPlaced"),
+        ),
+        EventType::new(Family::new(""), TypeName::new("Bare")),
+    ];
+    for &et in cases {
+        let path = et.to_path();
+        let wire = path.to_string();
+        // wire string must equal Display rendering
+        assert_eq!(wire, et.to_string(), "wire != Display for {:?}", et);
+        // re-parsing the wire string recovers the same MaterializedPath
+        let reparsed = wire
+            .parse::<MaterializedPath>()
+            .unwrap_or_else(|_| panic!("must re-parse `{wire}`"));
+        assert_eq!(reparsed, path, "round-trip failed for {:?}", et);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ParsedEventType — component-level round-trip (#66 acceptance criterion)
+// ---------------------------------------------------------------------------
+
+/// Given a struct EventType with a non-empty family, When its canonical wire
+/// string is parsed back via `ParsedEventType::from_struct_path`, Then the
+/// recovered Family, TypeName, and Variant components match the original.
+#[test]
+fn parsed_event_type_round_trips_struct_event_with_family() {
+    let et = EventType::new(
+        Family::new("nitinol.saga.outbox"),
+        TypeName::new("tell_requested"),
+    );
+    let expected = ParsedEventType::from(et);
+
+    let wire = et.to_path().to_string();
+    let path: MaterializedPath = wire.parse().unwrap();
+    let parsed = ParsedEventType::from_struct_path(path);
+
+    assert_eq!(parsed, expected);
+    assert_eq!(parsed.family, "nitinol.saga.outbox");
+    assert_eq!(parsed.type_name, "tell_requested");
+    assert_eq!(parsed.variant, None);
+}
+
+/// Given an enum-arm EventType with a non-empty family, When its canonical wire
+/// string is parsed back via `ParsedEventType::try_from_enum_arm_path`, Then
+/// the recovered Family, TypeName, and Variant components match the original.
+#[test]
+fn parsed_event_type_round_trips_enum_arm_event_with_family() {
+    let et = EventType::with_variant(
+        Family::new("saga.upstream"),
+        TypeName::new("OrderEvent"),
+        Variant::new("OrderPlaced"),
+    );
+    let expected = ParsedEventType::from(et);
+
+    let wire = et.to_path().to_string();
+    let path: MaterializedPath = wire.parse().unwrap();
+    let parsed = ParsedEventType::try_from_enum_arm_path(path).unwrap();
+
+    assert_eq!(parsed, expected);
+    assert_eq!(parsed.family, "saga.upstream");
+    assert_eq!(parsed.type_name, "OrderEvent");
+    assert_eq!(parsed.variant, Some("OrderPlaced".to_owned()));
+}
+
+/// Given a struct EventType with an empty family (top-level event), When its
+/// canonical wire string is parsed back, Then the recovered family is empty
+/// and type_name matches the original.
+#[test]
+fn parsed_event_type_round_trips_struct_event_with_empty_family() {
+    let et = EventType::new(Family::new(""), TypeName::new("Incremented"));
+    let expected = ParsedEventType::from(et);
+
+    let wire = et.to_path().to_string();
+    let path: MaterializedPath = wire.parse().unwrap();
+    let parsed = ParsedEventType::from_struct_path(path);
+
+    assert_eq!(parsed, expected);
+    assert_eq!(parsed.family, "");
+    assert_eq!(parsed.type_name, "Incremented");
+    assert_eq!(parsed.variant, None);
+}
+
+/// Given an enum-arm EventType with an empty family (top-level event with
+/// variant), When its canonical wire string is parsed back, Then the recovered
+/// family is empty and type_name / variant match the original.
+#[test]
+fn parsed_event_type_round_trips_enum_arm_event_with_empty_family() {
+    let et = EventType::with_variant(
+        Family::new(""),
+        TypeName::new("Order"),
+        Variant::new("Placed"),
+    );
+    let expected = ParsedEventType::from(et);
+
+    let wire = et.to_path().to_string();
+    let path: MaterializedPath = wire.parse().unwrap();
+    let parsed = ParsedEventType::try_from_enum_arm_path(path).unwrap();
+
+    assert_eq!(parsed, expected);
+    assert_eq!(parsed.family, "");
+    assert_eq!(parsed.type_name, "Order");
+    assert_eq!(parsed.variant, Some("Placed".to_owned()));
+}
+
+/// Given a struct event's canonical wire path, When `try_from_enum_arm_path`
+/// is called with only a single segment, Then it returns `None` (cannot
+/// hold both type_name and variant).
+#[test]
+fn try_from_enum_arm_path_returns_none_for_single_segment() {
+    let et = EventType::new(Family::new(""), TypeName::new("BareEvent"));
+    let path = et.to_path();
+    // Single-segment path cannot carry both type_name and variant.
+    assert!(ParsedEventType::try_from_enum_arm_path(path).is_none());
+}
+
+/// Given a ParsedEventType, When formatted, Then its Display matches the
+/// original EventType's Display (canonical string form is identical).
+#[test]
+fn parsed_event_type_display_matches_event_type_display() {
+    let cases: &[EventType] = &[
+        EventType::new(
+            Family::new("nitinol.saga.outbox"),
+            TypeName::new("scheduled"),
+        ),
+        EventType::with_variant(
+            Family::new("saga.upstream"),
+            TypeName::new("OrderEvent"),
+            Variant::new("OrderPlaced"),
+        ),
+        EventType::new(Family::new(""), TypeName::new("Bare")),
+        EventType::with_variant(
+            Family::new(""),
+            TypeName::new("Order"),
+            Variant::new("Placed"),
+        ),
+    ];
+    for &et in cases {
+        let parsed = ParsedEventType::from(et);
+        assert_eq!(
+            parsed.to_string(),
+            et.to_string(),
+            "Display mismatch for {:?}",
+            et
+        );
+    }
 }
