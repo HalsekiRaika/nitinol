@@ -4,6 +4,7 @@ use std::sync::Arc;
 use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::{DurableSubscription, EventEnvelope, SequenceCursor};
 use nitinol_persistence::store::EventStore;
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::context::SagaContext;
@@ -12,7 +13,7 @@ use crate::id::SagaId;
 use crate::outbox::{OutboxAppender, RetryPolicy, TellOutcome};
 use crate::process::interpreter::{run_saga_effect, InterpreterCtx};
 use crate::process::replay::replay_and_redispatch;
-use crate::saga::Saga;
+use crate::saga::{Saga, ScheduledMessage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Lifecycle {
@@ -75,7 +76,7 @@ impl<S: Saga> SagaProcess<S> {
 impl<S: Saga> Process for SagaProcess<S> {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         let factory_ref = self.crash_restart_factory.as_ref().map(|f| f.as_ref());
-        let scan_failed = replay_and_redispatch(
+        let outcome = match replay_and_redispatch(
             &self.saga_id,
             &mut self.state,
             self.codec.as_ref(),
@@ -86,9 +87,40 @@ impl<S: Saga> Process for SagaProcess<S> {
             self.retry_policy.clone(),
             ctx,
         )
-        .await;
-        for tell_id in scan_failed {
+        .await
+        {
+            Ok(o) => o,
+            // store.load() failed — the terminated state cannot be determined.
+            // Fail safe: stop the process without subscribing so a possibly-
+            // terminated saga is not revived (D-14).
+            Err(()) => {
+                tracing::error!(
+                    saga_id = self.saga_id.as_str(),
+                    "saga replay failed; stopping to prevent spawn with unknown terminated state"
+                );
+                if let Err(e) = ctx.stop_self().await {
+                    tracing::warn!(error = %e, "saga replay-failed stop_self failed");
+                }
+                return;
+            }
+        };
+        for tell_id in outcome.failed {
             self.tell_states.insert(tell_id, TellState::Failed);
+        }
+
+        // D-14: a saga whose stream carries a durable `Ended` marker terminated
+        // in a previous incarnation.  Refuse to wire up the upstream
+        // subscription — so `Saga::handle` can never run again — and stop the
+        // inert process to release its resources.
+        if outcome.ended {
+            tracing::info!(
+                saga_id = self.saga_id.as_str(),
+                "saga already terminated (Ended marker present); skipping subscription"
+            );
+            if let Err(e) = ctx.stop_self().await {
+                tracing::warn!(error = %e, "terminated saga stop_self failed");
+            }
+            return;
         }
 
         self.upstream_config
@@ -106,6 +138,15 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
         msg: EventEnvelope<S::SubscribedEvent>,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
+        // D-14 / ARCH-001: once `End` has been interpreted and the durable
+        // `Ended` marker persisted, the lifecycle transitions to `Draining`
+        // while in-flight tells settle.  Upstream events arriving during
+        // draining must not reach `Saga::handle` — doing so could produce
+        // additional effects that violate the terminal lifecycle contract.
+        if matches!(self.lifecycle, Lifecycle::Draining) {
+            return Ok(());
+        }
+
         let Some(target_id) = (self.route_fn)(&msg.event) else {
             return Ok(());
         };
@@ -127,6 +168,57 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
             Ok(effect) => effect,
             Err(e) => {
                 tracing::warn!(error = %e, "saga handle failed");
+                return Ok(());
+            }
+        };
+
+        let mut ictx = InterpreterCtx {
+            state: &mut self.state,
+            saga_id: self.saga_id.clone(),
+            sequence: &mut self.sequence,
+            store: Arc::clone(&self.store),
+            codec: Arc::clone(&self.codec),
+            retry_policy: self.retry_policy.clone(),
+            process_ctx: ctx,
+            tell_states: &mut self.tell_states,
+            lifecycle: &mut self.lifecycle,
+        };
+        let _ = run_saga_effect(effect, &mut ictx).await;
+        Ok(())
+    }
+}
+
+impl<S: Saga> Receive<ScheduledMessage> for SagaProcess<S> {
+    type Response = ();
+    type Error = std::convert::Infallible;
+
+    async fn recv(
+        &mut self,
+        msg: ScheduledMessage,
+        ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), std::convert::Infallible> {
+        // ARCH-001: mirror the `EventEnvelope` guard — scheduled messages
+        // must also be dropped while draining so `on_scheduled` cannot
+        // produce additional effects after the terminal `Ended` marker has
+        // been written.
+        if matches!(self.lifecycle, Lifecycle::Draining) {
+            return Ok(());
+        }
+
+        let current_sequence = self.sequence;
+        let drained_failed = self.drain_failed_tell_ids();
+        let mut saga_ctx = SagaContext::new(
+            self.saga_id.clone(),
+            current_sequence,
+            AggregateId::new(""),
+            0,
+            jiff::Timestamp::now(),
+            drained_failed,
+        );
+        let effect = match self.state.on_scheduled(msg, &mut saga_ctx).await {
+            Ok(effect) => effect,
+            Err(e) => {
+                tracing::warn!(error = %e, "saga on_scheduled failed");
                 return Ok(());
             }
         };

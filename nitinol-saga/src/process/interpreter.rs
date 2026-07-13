@@ -50,6 +50,20 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
                 schedules,
             } => persist_batch(events, tells, schedules, ictx).await,
             SagaEffect::End => {
+                // Persist the durable `Ended` marker before transitioning to the
+                // End state.  D-14 relies on this marker being present in the
+                // stream so that a subsequent spawn can detect prior termination
+                // and refuse to revive the saga.  If the append fails we do NOT
+                // stop: stopping without the marker would leave the stream without
+                // the guard, allowing the saga to be revived on the next spawn.
+                // Remaining alive lets the next incoming event retry the End
+                // decision.
+                let candidate = *ictx.sequence + 1;
+                if !OutboxAppender::append_ended(&ictx.store, &ictx.saga_id, candidate).await {
+                    return InterpretOutcome::Continue;
+                }
+                *ictx.sequence = candidate;
+
                 if in_flight_count(ictx.tell_states) == 0 {
                     if let Err(e) = ictx.process_ctx.stop_self().await {
                         tracing::warn!(error = %e, "saga End: stop_self signal failed");

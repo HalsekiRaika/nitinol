@@ -6,7 +6,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
 
 use crate::id::SagaId;
-use crate::outbox::message::{OutboxMessage, Scheduled, TellAcked, TellFailed, TellRequested};
+use crate::outbox::message::{Ended, OutboxMessage, Scheduled, TellAcked, TellFailed, TellRequested};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TellOutcome {
@@ -41,6 +41,26 @@ impl OutboxAppender {
             at_unix_seconds: at.as_second(),
         });
         appending_system_event(sequence, &message, occurred_at)
+    }
+
+    /// Append the durable `Ended` terminal marker at `sequence` on the saga's
+    /// own stream.  Written when `SagaEffect::End` is interpreted so a later
+    /// spawn can detect termination and refuse to revive the saga (D-14).
+    ///
+    /// Returns `false` (and does not advance any caller-held sequence) when the
+    /// store rejects the append, mirroring [`OutboxAppender::append_terminal`].
+    pub(crate) async fn append_ended(
+        store: &Arc<dyn EventStore>,
+        saga_id: &SagaId,
+        sequence: u64,
+    ) -> bool {
+        let now = jiff::Timestamp::now();
+        let event = appending_system_event(sequence, &OutboxMessage::Ended(Ended {}), now);
+        if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
+            tracing::warn!(error = %e, "saga outbox ended marker append failed");
+            return false;
+        }
+        true
     }
 
     pub(crate) async fn append_terminal(

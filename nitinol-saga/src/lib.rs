@@ -45,4 +45,4 @@ pub use self::id::SagaId;
 pub use self::process::{
     CodecSet, CodecUnset, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset,
 };
-pub use self::saga::Saga;
+pub use self::saga::{Saga, SagaSnapshot, ScheduledMessage};

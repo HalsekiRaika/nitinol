@@ -131,16 +131,20 @@ impl Saga for TellThenEndSaga {
 }
 
 // ---------------------------------------------------------------------------
-// Saga store that allows the first append (TellRequested batch) to succeed
-// but rejects all subsequent appends (terminal marker attempts).
+// Saga store that allows the first two appends to succeed:
+//   attempt 0 — the atomic Persist batch (TellRequested marker)
+//   attempt 1 — the durable Ended marker written by the End interpreter
+// All subsequent appends (TellAcked / TellFailed terminal markers) fail.
+// This lets the saga reach Draining normally; the test then verifies it
+// stops even though the terminal-marker appends fail.
 // ---------------------------------------------------------------------------
 
-struct FirstAppendOnlyStore {
+struct TwoSuccessStore {
     append_count: AtomicUsize,
     inner: InMemoryEventStore,
 }
 
-impl FirstAppendOnlyStore {
+impl TwoSuccessStore {
     fn new() -> Self {
         Self {
             append_count: AtomicUsize::new(0),
@@ -150,19 +154,19 @@ impl FirstAppendOnlyStore {
 }
 
 #[async_trait]
-impl EventStore for FirstAppendOnlyStore {
+impl EventStore for TwoSuccessStore {
     async fn append(
         &self,
         key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
         let attempt = self.append_count.fetch_add(1, Ordering::SeqCst);
-        if attempt == 0 {
-            // First append: the persist batch with TellRequested — succeed and
-            // store so that replay can see the TellRequested marker.
+        if attempt < 2 {
+            // Attempts 0 and 1 succeed so that the TellRequested batch and the
+            // durable Ended marker are both durably written.
             self.inner.append(key, events).await
         } else {
-            // Subsequent appends: terminal marker attempts — always fail.
+            // Subsequent appends: TellAcked / TellFailed terminal markers — fail.
             Err(AppendError::Backend(
                 "injected terminal append failure".into(),
             ))
@@ -217,7 +221,7 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
         .spawn_aggregate::<TargetAgg>(agg_id.clone(), Arc::clone(&target_store))
         .await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(FirstAppendOnlyStore::new());
+    let saga_store: Arc<dyn EventStore> = Arc::new(TwoSuccessStore::new());
     let saga_id = SagaId::new("term-fail-saga");
 
     let handle_count: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));

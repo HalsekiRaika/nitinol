@@ -231,11 +231,13 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
 
     append_upstream(&upstream_store, &agg_id, 1, "order-1").await;
 
-    let events = wait_for_event_count(&saga_store, &saga_id, 5).await;
+    // 1 user event + 2 TellRequested + 1 Ended (from End) + 2 TellAcked = 6.
+    let events = wait_for_event_count(&saga_store, &saga_id, 6).await;
 
     let requested = count_outbox(&events, |k| matches!(k, OutboxKind::TellRequested(_)));
     let acked = count_outbox(&events, |k| matches!(k, OutboxKind::TellAcked(_)));
     let failed = count_outbox(&events, |k| matches!(k, OutboxKind::TellFailed(_)));
+    let ended = count_outbox(&events, |k| matches!(k, OutboxKind::Ended(_)));
     let user_events = events
         .iter()
         .filter(|e| e.event_type == SagaMarker::EVENT_TYPE)
@@ -267,15 +269,19 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
         failed, 0,
         "every dispatch succeeds first try, so no TellFailed must be emitted"
     );
+    assert_eq!(
+        ended, 1,
+        "reaching End must persist exactly one durable Ended marker (D-14)"
+    );
 
     let mut seqs: Vec<u64> = events.iter().map(|e| e.sequence).collect();
     seqs.sort_unstable();
     assert_eq!(
         seqs,
-        vec![1, 2, 3, 4, 5],
-        "saga sequences must be gap-free and consecutive across the atomic batch \
-         and both terminal claims; a gap means a terminal claim advanced the \
-         cursor without a durable append (or vice versa)"
+        vec![1, 2, 3, 4, 5, 6],
+        "saga sequences must be gap-free and consecutive across the atomic batch, \
+         the Ended marker, and both terminal claims; a gap means a terminal claim \
+         advanced the cursor without a durable append (or vice versa)"
     );
 }
 
@@ -289,7 +295,8 @@ async fn multi_tell_then_end_stops_saga_after_last_executor_settles() {
 
     append_upstream(&upstream_store, &agg_id, 1, "order-1").await;
 
-    let events = wait_for_event_count(&saga_store, &saga_id, 5).await;
+    // 1 user event + 2 TellRequested + 1 Ended (from End) + 2 TellAcked = 6.
+    let events = wait_for_event_count(&saga_store, &saga_id, 6).await;
     assert_eq!(
         count_outbox(&events, |k| matches!(k, OutboxKind::TellAcked(_))),
         2,
@@ -318,8 +325,8 @@ async fn multi_tell_then_end_stops_saga_after_last_executor_settles() {
         .filter(|e| outbox_kind_of(e).is_some())
         .count();
     assert_eq!(
-        outbox, 4,
-        "exactly four outbox markers (2 TellRequested + 2 TellAcked) must exist; \
+        outbox, 5,
+        "exactly five outbox markers (2 TellRequested + 1 Ended + 2 TellAcked) must exist; \
          a stopped saga must not emit more for the second upstream event"
     );
 }

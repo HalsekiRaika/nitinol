@@ -186,6 +186,13 @@ pub struct ScheduledPayload {
     pub at_unix_seconds: i64,
 }
 
+/// Mirror of the production `Ended {}` outbox marker (proto tag 5).  The
+/// message carries no fields — its presence in the saga stream is the durable
+/// signal that the saga terminated (D-14).
+#[derive(Clone, PartialEq, prost::Message)]
+#[allow(dead_code)]
+pub struct EndedPayload {}
+
 #[derive(Clone, PartialEq, prost::Oneof)]
 #[allow(dead_code)]
 pub enum OutboxKind {
@@ -197,12 +204,14 @@ pub enum OutboxKind {
     TellFailed(TellIdPayload),
     #[prost(message, tag = "4")]
     Scheduled(ScheduledPayload),
+    #[prost(message, tag = "5")]
+    Ended(EndedPayload),
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
 #[allow(dead_code)]
 pub struct OutboxMarkerPayload {
-    #[prost(oneof = "OutboxKind", tags = "1, 2, 3, 4")]
+    #[prost(oneof = "OutboxKind", tags = "1, 2, 3, 4, 5")]
     pub kind: Option<OutboxKind>,
 }
 
@@ -228,6 +237,13 @@ pub fn encode_outbox_tell_acked(tell_id: u64) -> Bytes {
 #[allow(dead_code)]
 pub fn encode_outbox_tell_failed(tell_id: u64) -> Bytes {
     encode_outbox_marker(OutboxKind::TellFailed(TellIdPayload { tell_id }))
+}
+
+/// Encode the durable `Ended` terminal marker (proto tag 5) so D-14 tests can
+/// seed a "this saga already terminated" stream before spawning the process.
+#[allow(dead_code)]
+pub fn encode_outbox_ended() -> Bytes {
+    encode_outbox_marker(OutboxKind::Ended(EndedPayload {}))
 }
 
 #[allow(dead_code)]

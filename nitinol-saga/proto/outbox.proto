@@ -8,6 +8,7 @@ message OutboxMarker {
     TellAcked tell_acked = 2;
     TellFailed tell_failed = 3;
     Scheduled scheduled = 4;
+    Ended ended = 5;
   }
 }
 
@@ -27,3 +28,9 @@ message TellFailed {
 message Scheduled {
   int64 at_unix_seconds = 1;
 }
+
+// Durable terminal marker written when `SagaEffect::End` is interpreted.  Its
+// presence in the saga's own event stream is the signal that the saga has
+// terminated; on a subsequent spawn `on_start` refuses to wire up the upstream
+// subscription (D-14).  Carries no fields — presence is the whole signal.
+message Ended {}

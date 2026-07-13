@@ -2,8 +2,7 @@
 //!
 //! The runtime `ProcessProxy<SagaProcess<S>>` is wrapped so the user never
 //! sees the `Process` trait or the internal `SagaProcess` type.  MVP exposes
-//! only the saga's `pid()` because the MVP design forbids ad-hoc commands
-//! into a saga from outside the subscription channel.
+//! only the saga's `pid()` and `stop()` for ad-hoc control.
 
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::ProcessProxy;

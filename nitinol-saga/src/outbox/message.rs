@@ -6,7 +6,7 @@ mod proto {
     include!(concat!(env!("OUT_DIR"), "/nitinol.saga.outbox.rs"));
 }
 
-pub(crate) use self::proto::{OutboxMarker, Scheduled, TellAcked, TellFailed, TellRequested};
+pub(crate) use self::proto::{Ended, OutboxMarker, Scheduled, TellAcked, TellFailed, TellRequested};
 
 use self::proto::outbox_marker::Kind;
 
@@ -22,6 +22,7 @@ pub(crate) enum OutboxMessage {
     TellAcked(TellAcked),
     TellFailed(TellFailed),
     Scheduled(Scheduled),
+    Ended(Ended),
 }
 
 impl SystemEvent for OutboxMessage {
@@ -33,6 +34,7 @@ impl SystemEvent for OutboxMessage {
             OutboxMessage::TellAcked(_) => Variant::new("tell_acked"),
             OutboxMessage::TellFailed(_) => Variant::new("tell_failed"),
             OutboxMessage::Scheduled(_) => Variant::new("scheduled"),
+            OutboxMessage::Ended(_) => Variant::new("ended"),
         };
         EventType::with_variant(OUTBOX_MARKER.family(), OUTBOX_MARKER.type_name(), variant)
     }
@@ -43,6 +45,7 @@ impl SystemEvent for OutboxMessage {
             OutboxMessage::TellAcked(m) => Kind::TellAcked(*m),
             OutboxMessage::TellFailed(m) => Kind::TellFailed(*m),
             OutboxMessage::Scheduled(m) => Kind::Scheduled(*m),
+            OutboxMessage::Ended(m) => Kind::Ended(*m),
         };
         let marker = OutboxMarker { kind: Some(kind) };
         Bytes::from(prost::Message::encode_to_vec(&marker))
@@ -56,6 +59,7 @@ impl SystemEvent for OutboxMessage {
             Some(Kind::TellAcked(m)) => Ok(OutboxMessage::TellAcked(m)),
             Some(Kind::TellFailed(m)) => Ok(OutboxMessage::TellFailed(m)),
             Some(Kind::Scheduled(m)) => Ok(OutboxMessage::Scheduled(m)),
+            Some(Kind::Ended(m)) => Ok(OutboxMessage::Ended(m)),
             None => Err(SystemEventDecodeError::new(MissingOutboxKind)),
         }
     }

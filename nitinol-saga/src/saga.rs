@@ -64,4 +64,76 @@ pub trait Saga: Send + Sync + 'static {
         event: Self::SubscribedEvent,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error>;
+
+    /// Capture a snapshot of the saga's state (B-5b).
+    ///
+    /// The MVP takes no snapshots, so the default returns `None`.  A future
+    /// snapshotting implementation overrides this to return a
+    /// [`SagaSnapshot`]; until then a saga replays purely from its event
+    /// stream.
+    fn snapshot(&self) -> Option<SagaSnapshot> {
+        None
+    }
+
+    /// Reconstruct the saga from a previously captured [`SagaSnapshot`] (B-5b).
+    ///
+    /// This is a stub: with no snapshotting in the MVP there is no way to
+    /// obtain a `SagaSnapshot`, so the default panics.  Implementors that
+    /// override [`Saga::snapshot`] must override this as its inverse.
+    fn from_snapshot(snapshot: SagaSnapshot) -> Self
+    where
+        Self: Sized,
+    {
+        let _ = snapshot;
+        unimplemented!(
+            "Saga::from_snapshot is a stub; override it together with Saga::snapshot \
+             to restore a saga from a captured snapshot"
+        )
+    }
+
+    /// Timer-driven entry point invoked when a scheduled message fires (E-17).
+    ///
+    /// The scheduler is not implemented in this MVP, so no [`ScheduledMessage`]
+    /// is ever delivered and the default is a no-op returning
+    /// [`SagaEffect::None`].  A saga that opts into scheduling overrides this
+    /// hook once the scheduler lands.
+    async fn on_scheduled(
+        &mut self,
+        message: ScheduledMessage,
+        ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let _ = (message, ctx);
+        Ok(SagaEffect::None)
+    }
+}
+
+/// Opaque handle to a captured saga snapshot (B-5b).
+///
+/// Snapshotting is not implemented in this MVP; this type is the trait-level
+/// placeholder referenced by [`Saga::snapshot`] and [`Saga::from_snapshot`].
+/// It is `#[non_exhaustive]` so it cannot be constructed outside this crate —
+/// a future issue gives it real fields.
+#[non_exhaustive]
+pub struct SagaSnapshot {}
+
+/// A message delivered to [`Saga::on_scheduled`] when a scheduled timer fires
+/// (E-17).
+///
+/// The scheduler is a follow-up (#50); this is the minimal placeholder the
+/// trait method references.  A future issue turns it into an associated type
+/// carrying the scheduled payload.
+#[non_exhaustive]
+pub struct ScheduledMessage {}
+
+impl ScheduledMessage {
+    /// Construct the minimal `ScheduledMessage` stub.
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Default for ScheduledMessage {
+    fn default() -> Self {
+        Self::new()
+    }
 }
