@@ -10,7 +10,7 @@ use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaEffect, Schedule, TellIntent};
+use nitinol_saga::{SagaEffect, ScheduleSpec, TellIntent};
 
 // ---------------------------------------------------------------------------
 // JsonCodec — shared across all integration tests
@@ -111,8 +111,8 @@ pub async fn make_tell_intent() -> TellIntent {
 // PartialEq or Debug.
 //
 // `TellIntent` is opaque (its inner side effect cannot be matched against), so
-// `Persist` records only the *count* of tells.  `Schedule` carries a public
-// `at` timestamp, so we capture that.
+// `Persist` records only the *count* of tells.  `ScheduleSpec` is `PartialEq`,
+// so we capture the specs verbatim.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq)]
@@ -122,10 +122,11 @@ pub enum Shape<E> {
     Persist {
         events: Vec<E>,
         tells: usize,
-        schedules: Vec<jiff::Timestamp>,
+        schedules: Vec<ScheduleSpec>,
     },
     End,
     Sequence(Vec<Shape<E>>),
+    CancelSchedule,
 }
 
 #[allow(dead_code)]
@@ -139,24 +140,12 @@ pub fn shape_of<E: Clone>(effect: &SagaEffect<E>) -> Shape<E> {
         } => Shape::Persist {
             events: events.clone(),
             tells: tells.len(),
-            schedules: schedules.iter().map(schedule_at).collect(),
+            schedules: schedules.clone(),
         },
         SagaEffect::End => Shape::End,
         SagaEffect::Sequence(children) => Shape::Sequence(children.iter().map(shape_of).collect()),
+        SagaEffect::CancelSchedule(_) => Shape::CancelSchedule,
     }
-}
-
-#[allow(dead_code)]
-pub fn schedule_at(schedule: &Schedule) -> jiff::Timestamp {
-    schedule.at
-}
-
-/// Build a `Schedule` whose `at` field is `ts`.  Centralised so every test
-/// uses the same construction path (and breaks together if `Schedule`'s
-/// public shape ever changes).
-#[allow(dead_code)]
-pub fn schedule_at_ts(ts: jiff::Timestamp) -> Schedule {
-    Schedule { at: ts }
 }
 
 #[allow(dead_code)]

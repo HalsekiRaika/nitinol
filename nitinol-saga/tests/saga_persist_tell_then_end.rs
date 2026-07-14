@@ -104,6 +104,7 @@ impl Saga for TellThenEndSaga {
     type SubscribedEvent = UpstreamEvent;
     type Event = SagaDomainEvent;
     type State = ();
+    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
     fn apply(&mut self, _event: SagaDomainEvent) {}

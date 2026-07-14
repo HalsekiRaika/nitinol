@@ -13,7 +13,7 @@
 //! lifecycle contract.
 //!
 //! The fix (ARCH-001): `Receive<EventEnvelope<_>>::recv` and
-//! `Receive<ScheduledMessage>::recv` both check `Lifecycle::Draining` at entry
+//! `Receive<FireScheduled>::recv` both check `Lifecycle::Draining` at entry
 //! and return `Ok(())` immediately if set.
 //!
 //! Test strategy: pre-load the upstream store with TWO events before spawning
@@ -118,6 +118,7 @@ impl Saga for DrainGuardSaga {
     type SubscribedEvent = UpstreamDrainEvent;
     type Event = DrainSagaEvent;
     type State = ();
+    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
     fn apply(&mut self, _event: DrainSagaEvent) {}

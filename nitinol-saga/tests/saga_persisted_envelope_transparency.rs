@@ -72,6 +72,7 @@ impl Saga for EnvelopeSaga {
     type SubscribedEvent = Triggered;
     type Event = DomainEvt;
     type State = ();
+    type ScheduledMessage = ();
     type Error = Infallible;
 
     fn apply(&mut self, event: DomainEvt) {

@@ -11,13 +11,17 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendingEvent, EventType};
 use nitinol_runtime::process::ProcessContext;
 
-use crate::effect::{Schedule, TellIntent};
+use crate::effect::{ScheduleSpec, TellIntent};
 use crate::id::SagaId;
 use crate::outbox::{OutboxAppender, RetryPolicy};
 use crate::persisted::SagaPersisted;
 use crate::process::outbox_executor::spawn_outbox_executor;
-use crate::process::saga_process::{in_flight_count, Lifecycle, SagaProcess, TellState};
+use crate::process::saga_process::{
+    build_fire_dispatch, in_flight_count, Lifecycle, SagaProcess, TellState,
+};
 use crate::saga::Saga;
+use crate::scheduler::{append_schedule_marker, ScheduleEvent, SchedulerProxy, Timers};
+use crate::scheduler::{ScheduleToken, TimerName};
 use crate::SagaEffect;
 
 pub(crate) struct InterpreterCtx<'a, S: Saga> {
@@ -30,6 +34,15 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     pub(crate) process_ctx: &'a mut ProcessContext<SagaProcess<S>>,
     pub(crate) tell_states: &'a mut HashMap<u64, TellState>,
     pub(crate) lifecycle: &'a mut Lifecycle,
+    pub(crate) scheduler: Option<SchedulerProxy>,
+}
+
+impl<S: Saga> InterpreterCtx<'_, S> {
+    fn timers(&self) -> Option<Timers> {
+        self.scheduler
+            .as_ref()
+            .map(|s| Timers::new(self.saga_id.clone(), s.clone()))
+    }
 }
 
 pub(crate) enum InterpretOutcome {
@@ -81,14 +94,49 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
                 }
                 InterpretOutcome::Continue
             }
+            SagaEffect::CancelSchedule(name) => {
+                cancel_schedule(name, ictx).await;
+                InterpretOutcome::Continue
+            }
         }
     })
+}
+
+/// Interpret `CancelSchedule(name)`: append a `ScheduleEvent::Cancelled` marker
+/// (single append, sequence advances only on success) and cancel the pending
+/// timer with the resident scheduler.
+async fn cancel_schedule<S: Saga>(name: TimerName, ictx: &mut InterpreterCtx<'_, S>) {
+    let token = ScheduleToken {
+        saga_id: ictx.saga_id.clone(),
+        name: name.clone(),
+    };
+    let event = ScheduleEvent::Cancelled {
+        token,
+        cancelled_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
+    };
+    let appended = append_schedule_marker(
+        &ictx.store,
+        &ictx.saga_id,
+        ictx.sequence,
+        event,
+        jiff::Timestamp::now(),
+    )
+    .await;
+    if !appended {
+        // Leave the timer registered: without the durable Cancelled marker a
+        // later replay would re-register it, so cancelling the live timer now
+        // would diverge from the persisted state.  The next effect can retry.
+        return;
+    }
+    if let Some(timers) = ictx.timers() {
+        timers.cancel(name).await;
+    }
 }
 
 async fn persist_batch<S: Saga>(
     events: Vec<S::Event>,
     tells: Vec<TellIntent>,
-    schedules: Vec<Schedule>,
+    schedules: Vec<ScheduleSpec>,
     ictx: &mut InterpreterCtx<'_, S>,
 ) -> InterpretOutcome {
     if events.is_empty() && tells.is_empty() && schedules.is_empty() {
@@ -110,7 +158,8 @@ async fn persist_batch<S: Saga>(
         Vec::with_capacity(encoded_events.len() + tells.len() + schedules.len());
     append_user_events(&mut appending, encoded_events, &mut next_seq, now);
     let tell_ids = append_tell_requested(&mut appending, &tells, &mut next_seq, now);
-    append_scheduled(&mut appending, &schedules, &mut next_seq, now);
+    let registrations =
+        append_schedule_specs(&mut appending, &ictx.saga_id, &schedules, &mut next_seq, now);
 
     if let Err(e) = ictx.store.append(ictx.saga_id.borrow(), appending).await {
         // Sequence stays at its pre-batch value so the next attempt does not
@@ -124,7 +173,7 @@ async fn persist_batch<S: Saga>(
     for persisted_event in persisted {
         match persisted_event {
             SagaPersisted::Domain(event) => ictx.state.apply(event),
-            SagaPersisted::Outbox(_) => unreachable!(
+            SagaPersisted::Outbox(_) | SagaPersisted::Schedule(_) => unreachable!(
                 "persist_batch enqueues only Domain events into the envelope"
             ),
         }
@@ -135,6 +184,26 @@ async fn persist_batch<S: Saga>(
             .insert(tell_id, TellState::Pending(intent.clone()));
         let policy = ictx.retry_policy.clone();
         spawn_outbox_executor(ictx.process_ctx, intent, tell_id, policy).await;
+    }
+
+    // Register timers only after the `Scheduled` markers are durably persisted,
+    // so a firing can never precede its own durable record.
+    if let Some(timers) = ictx.timers() {
+        for reg in registrations {
+            let dispatch = build_fire_dispatch::<S>(
+                ictx.process_ctx.self_proxy().clone(),
+                reg.name.clone(),
+                reg.payload,
+            );
+            timers.start_single(reg.name, reg.after, dispatch).await;
+        }
+    } else if !schedules.is_empty() {
+        tracing::warn!(
+            saga_id = ictx.saga_id.as_str(),
+            "saga persisted schedule markers but no scheduler was injected \
+             (SagaProps::with_scheduler); timers will not fire until replayed \
+             by a scheduler-equipped incarnation"
+        );
     }
 
     InterpretOutcome::Continue
@@ -195,14 +264,46 @@ fn append_tell_requested(
     tell_ids
 }
 
-fn append_scheduled(
+/// A timer to register with the resident scheduler after the atomic batch has
+/// been persisted.
+struct PendingRegistration {
+    name: TimerName,
+    after: std::time::Duration,
+    payload: bytes::Bytes,
+}
+
+/// Append one `ScheduleEvent::Scheduled` marker per spec into the atomic batch,
+/// returning the data needed to register each timer once the append succeeds.
+///
+/// `scheduled_at` is captured as a wall-clock anchor so replay can recompute
+/// the remaining delay (`remaining = scheduled_at + after - now`).
+fn append_schedule_specs(
     appending: &mut Vec<AppendingEvent>,
-    schedules: &[Schedule],
+    saga_id: &SagaId,
+    schedules: &[ScheduleSpec],
     next_seq: &mut u64,
     now: jiff::Timestamp,
-) {
-    for schedule in schedules {
+) -> Vec<PendingRegistration> {
+    let scheduled_at_unix_millis = now.as_millisecond();
+    let mut registrations = Vec::with_capacity(schedules.len());
+    for spec in schedules {
         *next_seq += 1;
-        appending.push(OutboxAppender::build_scheduled(*next_seq, schedule.at, now));
+        let token = ScheduleToken {
+            saga_id: saga_id.clone(),
+            name: spec.name.clone(),
+        };
+        let event = ScheduleEvent::Scheduled {
+            token,
+            after: spec.after,
+            payload: spec.payload.clone(),
+            scheduled_at_unix_millis,
+        };
+        appending.push(nitinol_eventsource::appending_system_event(*next_seq, &event, now));
+        registrations.push(PendingRegistration {
+            name: spec.name.clone(),
+            after: spec.after,
+            payload: spec.payload.clone(),
+        });
     }
+    registrations
 }

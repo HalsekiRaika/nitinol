@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::Event;
 use nitinol_persistence::{EventType, Family, TypeName};
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, ScheduledMessage};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
 
 // ---------------------------------------------------------------------------
 // A saga that overrides ONLY the required methods, leaving snapshot /
@@ -48,6 +48,7 @@ impl Saga for StubSaga {
     type SubscribedEvent = StubUpstream;
     type Event = StubEvent;
     type State = ();
+    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
     fn apply(&mut self, _event: Self::Event) {}
@@ -81,15 +82,15 @@ async fn default_snapshot_returns_none() {
 // ---------------------------------------------------------------------------
 
 /// The default `on_scheduled` implementation must be a no-op that yields
-/// `SagaEffect::None` — the scheduler is not implemented in this MVP, so a
-/// saga that does not override the hook must produce no effect if ever driven.
+/// `SagaEffect::None` — a saga that does not override the hook opts out of
+/// scheduled handling and produces no effect when a timer fires.
 #[tokio::test]
 async fn default_on_scheduled_returns_none_effect() {
     let mut saga = StubSaga;
     let mut ctx = SagaContext::test_context(SagaId::new("on-scheduled-default"), 0);
 
     let effect = saga
-        .on_scheduled(ScheduledMessage::new(), &mut ctx)
+        .on_scheduled((), &mut ctx)
         .await
         .expect("the default on_scheduled must return Ok");
 

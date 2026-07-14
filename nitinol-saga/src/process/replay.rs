@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -16,6 +17,17 @@ use crate::persisted::{SagaPersisted, SagaPersistedDecodeError};
 use crate::process::outbox_executor::spawn_outbox_executor;
 use crate::process::saga_process::{SagaProcess, TellState};
 use crate::saga::Saga;
+use crate::scheduler::{ScheduleEvent, TimerName};
+
+/// A schedule that replay found still active — a persisted `Scheduled` with no
+/// later `Cancelled` / `Fired` for the same name.  Re-registered with the
+/// resident scheduler on `on_start`.
+pub(crate) struct ActiveSchedule {
+    pub(crate) name: TimerName,
+    pub(crate) after: Duration,
+    pub(crate) payload: Bytes,
+    pub(crate) scheduled_at_unix_millis: i64,
+}
 
 /// Outcome of replaying the saga's own event stream on `on_start`.
 pub(crate) struct ReplayOutcome {
@@ -25,6 +37,9 @@ pub(crate) struct ReplayOutcome {
     /// `true` when the stream carries a durable `Ended` marker — the saga
     /// terminated in a previous incarnation and must not be revived (D-14).
     pub(crate) ended: bool,
+    /// Schedules still pending after replay, to be re-registered with the
+    /// scheduler.  Empty when the saga has ended.
+    pub(crate) active_schedules: Vec<ActiveSchedule>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -49,12 +64,15 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     // D-14: when the stream carries a durable `Ended` marker the saga terminated
     // in a previous incarnation.  Skip `redispatch_pending` entirely so that any
     // in-flight `TellRequested` entries are NOT re-executed after termination.
+    // Ended sagas also skip schedule re-registration (E-30).
     if scan.ended {
         return Ok(ReplayOutcome {
             failed: scan.failed,
             ended: true,
+            active_schedules: Vec::new(),
         });
     }
+    let active_schedules: Vec<ActiveSchedule> = scan.schedules.into_values().collect();
     let mut failed = scan.failed;
     let synthetic_failed = redispatch_pending(
         saga_id,
@@ -71,6 +89,7 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     Ok(ReplayOutcome {
         failed,
         ended: false,
+        active_schedules,
     })
 }
 
@@ -78,6 +97,7 @@ struct ReplayScan {
     pending: HashMap<u64, Option<Bytes>>,
     failed: Vec<u64>,
     ended: bool,
+    schedules: HashMap<TimerName, ActiveSchedule>,
 }
 
 async fn scan_stream<S: Saga>(
@@ -106,6 +126,7 @@ async fn scan_stream<S: Saga>(
     let mut pending: HashMap<u64, Option<Bytes>> = HashMap::new();
     let mut failed: Vec<u64> = Vec::new();
     let mut ended = false;
+    let mut schedules: HashMap<TimerName, ActiveSchedule> = HashMap::new();
     while let Some(item) = stream.next().await {
         let loaded = match item {
             Ok(ev) => ev,
@@ -115,16 +136,26 @@ async fn scan_stream<S: Saga>(
             }
         };
         highest_seq = highest_seq.max(loaded.sequence);
-        dispatch_loaded::<S>(loaded, state, codec, &mut pending, &mut failed, &mut ended);
+        dispatch_loaded::<S>(
+            loaded,
+            state,
+            codec,
+            &mut pending,
+            &mut failed,
+            &mut ended,
+            &mut schedules,
+        );
     }
     *sequence = highest_seq;
     Some(ReplayScan {
         pending,
         failed,
         ended,
+        schedules,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_loaded<S: Saga>(
     loaded: LoadedEvent,
     state: &mut S,
@@ -132,15 +163,49 @@ fn dispatch_loaded<S: Saga>(
     pending: &mut HashMap<u64, Option<Bytes>>,
     failed: &mut Vec<u64>,
     ended: &mut bool,
+    schedules: &mut HashMap<TimerName, ActiveSchedule>,
 ) {
     match SagaPersisted::classify(loaded.event_type, &loaded.payload, codec) {
         Ok(SagaPersisted::Outbox(marker)) => apply_outbox_message(marker, pending, failed, ended),
+        Ok(SagaPersisted::Schedule(marker)) => apply_schedule_marker(marker, schedules),
         Ok(SagaPersisted::Domain(event)) => state.apply(event),
         Err(SagaPersistedDecodeError::Outbox(e)) => {
             tracing::error!(error = %e, "saga outbox marker decode failed; skipping event");
         }
+        Err(SagaPersistedDecodeError::Schedule(e)) => {
+            tracing::error!(error = %e, "saga schedule marker decode failed; skipping event");
+        }
         Err(SagaPersistedDecodeError::Domain(e)) => {
             tracing::error!(error = %e, "saga event decode failed; skipping event");
+        }
+    }
+}
+
+/// Fold a schedule marker into the active-schedule set: a `Scheduled` inserts
+/// (or supersedes) by name; a `Cancelled` / `Fired` removes it.
+fn apply_schedule_marker(
+    marker: ScheduleEvent,
+    schedules: &mut HashMap<TimerName, ActiveSchedule>,
+) {
+    match marker {
+        ScheduleEvent::Scheduled {
+            token,
+            after,
+            payload,
+            scheduled_at_unix_millis,
+        } => {
+            schedules.insert(
+                token.name.clone(),
+                ActiveSchedule {
+                    name: token.name,
+                    after,
+                    payload,
+                    scheduled_at_unix_millis,
+                },
+            );
+        }
+        ScheduleEvent::Cancelled { token, .. } | ScheduleEvent::Fired { token, .. } => {
+            schedules.remove(&token.name);
         }
     }
 }
@@ -361,6 +426,7 @@ mod tests {
         type SubscribedEvent = UpstreamEvt;
         type Event = SagaEvt;
         type State = ();
+        type ScheduledMessage = ();
         type Error = std::convert::Infallible;
 
         fn apply(&mut self, _event: SagaEvt) {}
@@ -439,6 +505,7 @@ mod tests {
         type SubscribedEvent = UpstreamEvt;
         type Event = SagaEvt;
         type State = ();
+        type ScheduledMessage = ();
         type Error = std::convert::Infallible;
 
         fn apply(&mut self, _event: SagaEvt) {}

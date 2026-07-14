@@ -152,6 +152,7 @@ impl Saga for RecordingSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = OrderProcessed;
     type State = ();
+    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
     fn apply(&mut self, _event: OrderProcessed) {}
@@ -196,6 +197,7 @@ impl Saga for RuntimeSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = OrderProcessed;
     type State = ();
+    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
     fn apply(&mut self, _event: OrderProcessed) {}

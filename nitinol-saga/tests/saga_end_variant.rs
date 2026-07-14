@@ -59,6 +59,7 @@ impl Saga for PersistThenEndSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
     type State = ();
+    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
     fn apply(&mut self, _event: Self::Event) {}

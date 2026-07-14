@@ -51,6 +51,15 @@ pub trait Saga: Send + Sync + 'static {
     /// give the implementation a place to surface diagnostics.
     type Error: std::error::Error + Send + Sync + 'static;
 
+    /// The typed payload delivered to [`Saga::on_scheduled`] when a scheduled
+    /// timer fires (E-27).
+    ///
+    /// [`SagaEffect::schedule`](crate::SagaEffect::schedule) serializes a value
+    /// of this type into the schedule's payload; on firing it is deserialized
+    /// and handed back to `on_scheduled`.  A saga that does not schedule uses
+    /// `type ScheduledMessage = ();`.
+    type ScheduledMessage: serde::Serialize + serde::de::DeserializeOwned + Send + 'static;
+
     /// Apply one of the saga's own events to the in-memory state.
     ///
     /// Called during replay (`on_start`) for every event in the saga's event
@@ -91,15 +100,15 @@ pub trait Saga: Send + Sync + 'static {
         )
     }
 
-    /// Timer-driven entry point invoked when a scheduled message fires (E-17).
+    /// Timer-driven entry point invoked when a scheduled message fires (E-27).
     ///
-    /// The scheduler is not implemented in this MVP, so no [`ScheduledMessage`]
-    /// is ever delivered and the default is a no-op returning
-    /// [`SagaEffect::None`].  A saga that opts into scheduling overrides this
-    /// hook once the scheduler lands.
+    /// Delivered at-least-once: the saga must treat `on_scheduled` idempotently.
+    /// The default is a no-op returning [`SagaEffect::None`]; a saga that opts
+    /// into scheduling overrides this hook and sets a non-`()`
+    /// [`Saga::ScheduledMessage`].
     async fn on_scheduled(
         &mut self,
-        message: ScheduledMessage,
+        message: Self::ScheduledMessage,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         let _ = (message, ctx);
@@ -115,25 +124,3 @@ pub trait Saga: Send + Sync + 'static {
 /// a future issue gives it real fields.
 #[non_exhaustive]
 pub struct SagaSnapshot {}
-
-/// A message delivered to [`Saga::on_scheduled`] when a scheduled timer fires
-/// (E-17).
-///
-/// The scheduler is a follow-up (#50); this is the minimal placeholder the
-/// trait method references.  A future issue turns it into an associated type
-/// carrying the scheduled payload.
-#[non_exhaustive]
-pub struct ScheduledMessage {}
-
-impl ScheduledMessage {
-    /// Construct the minimal `ScheduledMessage` stub.
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl Default for ScheduledMessage {
-    fn default() -> Self {
-        Self::new()
-    }
-}

@@ -9,9 +9,21 @@
 //! variants are exercised separately in `effect_builder_panics.rs`.
 
 mod common;
-use common::{schedule_at_ts, shape_of, Shape};
+use common::{shape_of, Shape};
 
-use nitinol_saga::SagaEffect;
+use std::time::Duration;
+
+use bytes::Bytes;
+use nitinol_saga::{SagaEffect, ScheduleSpec, TimerName};
+
+/// Build a `ScheduleSpec` from a name and delay with an empty payload.
+fn spec(name: &str, after: Duration) -> ScheduleSpec {
+    ScheduleSpec {
+        name: TimerName::new(name),
+        after,
+        payload: Bytes::new(),
+    }
+}
 
 #[test]
 fn empty_returns_none_variant() {
@@ -140,20 +152,17 @@ async fn with_tells_replacing_existing_intents_keeps_only_the_new_list() {
 
 #[test]
 fn with_schedules_attaches_schedules_to_persist_branch() {
-    let ts_a = jiff::Timestamp::from_second(1_700_000_000)
-        .expect("constructing a valid jiff::Timestamp must succeed");
-    let ts_b = jiff::Timestamp::from_second(1_700_000_060)
-        .expect("constructing a valid jiff::Timestamp must succeed");
+    let a = spec("a", Duration::from_secs(30));
+    let b = spec("b", Duration::from_secs(60));
 
-    let effect =
-        SagaEffect::persist(13u32).with_schedules(vec![schedule_at_ts(ts_a), schedule_at_ts(ts_b)]);
+    let effect = SagaEffect::persist(13u32).with_schedules(vec![a.clone(), b.clone()]);
 
     assert_eq!(
         shape_of(&effect),
         Shape::Persist {
             events: vec![13u32],
             tells: 0,
-            schedules: vec![ts_a, ts_b],
+            schedules: vec![a, b],
         },
         "with_schedules(s) must attach the schedules to the Persist branch in order"
     );
@@ -161,14 +170,12 @@ fn with_schedules_attaches_schedules_to_persist_branch() {
 
 #[test]
 fn with_schedules_replacing_existing_schedules_keeps_only_the_new_list() {
-    let old = jiff::Timestamp::from_second(1_600_000_000)
-        .expect("constructing a valid jiff::Timestamp must succeed");
-    let new = jiff::Timestamp::from_second(1_900_000_000)
-        .expect("constructing a valid jiff::Timestamp must succeed");
+    let old = spec("old", Duration::from_secs(1));
+    let new = spec("new", Duration::from_secs(2));
 
     let effect = SagaEffect::persist(2u32)
-        .with_schedules(vec![schedule_at_ts(old)])
-        .with_schedules(vec![schedule_at_ts(new)]);
+        .with_schedules(vec![old])
+        .with_schedules(vec![new.clone()]);
 
     assert_eq!(
         shape_of(&effect),
@@ -184,19 +191,18 @@ fn with_schedules_replacing_existing_schedules_keeps_only_the_new_list() {
 #[tokio::test]
 async fn with_tells_and_with_schedules_compose_on_same_persist() {
     let intent = common::make_tell_intent().await;
-    let ts = jiff::Timestamp::from_second(1_800_000_000)
-        .expect("constructing a valid jiff::Timestamp must succeed");
+    let s = spec("reminder", Duration::from_secs(5));
 
     let effect = SagaEffect::persist(99u32)
         .with_tells(vec![intent])
-        .with_schedules(vec![schedule_at_ts(ts)]);
+        .with_schedules(vec![s.clone()]);
 
     assert_eq!(
         shape_of(&effect),
         Shape::Persist {
             events: vec![99u32],
             tells: 1,
-            schedules: vec![ts],
+            schedules: vec![s],
         },
         "with_tells and with_schedules must compose on the same Persist branch"
     );

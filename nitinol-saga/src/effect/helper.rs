@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use nitinol_eventsource::{Aggregate, AggregateTellTarget, Decider};
 
-use crate::effect::core::{SagaEffect, Schedule, TellIntent};
+use crate::effect::core::{SagaEffect, ScheduleSpec, TellIntent};
+use crate::scheduler::TimerName;
 
 impl<E> SagaEffect<E> {
     /// Returns the identity element of the Monoid — an effect that does nothing.
@@ -106,14 +109,15 @@ impl<E> SagaEffect<E> {
         }
     }
 
-    /// Set (not merge) the list of `Schedule`s attached to a `Persist` branch.
-    /// Calling it twice keeps only the final list.
+    /// Set (not merge) the list of [`ScheduleSpec`]s attached to a `Persist`
+    /// branch.  Calling it twice keeps only the final list.
     ///
     /// # Panics
     ///
     /// Panics if `self` is not a `Persist` variant.  Calling `with_schedules`
-    /// on `None` / `End` / `Sequence` is a Builder contract violation.
-    pub fn with_schedules(self, schedules: Vec<Schedule>) -> Self {
+    /// on `None` / `End` / `Sequence` / `CancelSchedule` is a Builder contract
+    /// violation.
+    pub fn with_schedules(self, schedules: Vec<ScheduleSpec>) -> Self {
         match self {
             Self::Persist { events, tells, .. } => Self::Persist {
                 events,
@@ -125,6 +129,42 @@ impl<E> SagaEffect<E> {
                  call SagaEffect::persist(...) or SagaEffect::persist_all(...) first"
             ),
         }
+    }
+
+    /// Schedule a typed message to be delivered to [`crate::Saga::on_scheduled`]
+    /// after `after` has elapsed, keyed by `name` (E-29).
+    ///
+    /// Builds a `Persist { events: [], tells: [], schedules: [spec] }` whose
+    /// spec carries the `serde_json`-serialized message as its payload.
+    /// Re-using `name` supersedes the earlier schedule.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `serde_json::to_vec(&message)` fails — this indicates a bug in
+    /// the message type's `Serialize` implementation.
+    pub fn schedule<M>(name: TimerName, after: Duration, message: M) -> Self
+    where
+        M: serde::Serialize,
+    {
+        let payload = serde_json::to_vec(&message).map(bytes::Bytes::from).expect(
+            "SagaEffect::schedule: message serialization failed; \
+             ensure the scheduled message type implements serde::Serialize correctly",
+        );
+        Self::Persist {
+            events: Vec::new(),
+            tells: Vec::new(),
+            schedules: vec![ScheduleSpec {
+                name,
+                after,
+                payload,
+            }],
+        }
+    }
+
+    /// Cancel the pending timer registered under `name` for this saga (E-28 /
+    /// E-29).
+    pub fn cancel_schedule(name: TimerName) -> Self {
+        Self::CancelSchedule(name)
     }
 
     /// Append `End` after `self` via the Monoid `combine`, preserving order.

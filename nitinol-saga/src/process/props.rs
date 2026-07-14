@@ -13,6 +13,7 @@ use crate::outbox::RetryPolicy;
 use crate::process::proxy::SagaProxy;
 use crate::process::saga_process::{CrashRestartFactory, Lifecycle, RouteFn, SagaProcess, TellState};
 use crate::saga::Saga;
+use crate::scheduler::SchedulerProxy;
 
 /// Marker: the event codec has not yet been provided.
 pub struct CodecUnset;
@@ -45,6 +46,7 @@ pub struct SagaProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
     codec: C,
     subscription: Sub,
     crash_restart_factory: Option<CrashRestartFactory>,
+    scheduler: Option<SchedulerProxy>,
     #[cfg(test)]
     initial_tell_states: HashMap<u64, TellState>,
 }
@@ -68,6 +70,7 @@ impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
             codec: CodecUnset,
             subscription: SubscriptionUnset,
             crash_restart_factory: None,
+            scheduler: None,
             #[cfg(test)]
             initial_tell_states: HashMap::new(),
         }
@@ -87,6 +90,7 @@ impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
             codec: CodecSet { codec },
             subscription: self.subscription,
             crash_restart_factory: self.crash_restart_factory,
+            scheduler: self.scheduler,
             #[cfg(test)]
             initial_tell_states: self.initial_tell_states,
         }
@@ -122,6 +126,7 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
                 route_fn,
             },
             crash_restart_factory: self.crash_restart_factory,
+            scheduler: self.scheduler,
             #[cfg(test)]
             initial_tell_states: self.initial_tell_states,
         }
@@ -135,6 +140,17 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
         F: Fn(&[u8]) -> Option<TellIntent> + Send + Sync + 'static,
     {
         self.crash_restart_factory = Some(Arc::new(factory));
+        self
+    }
+
+    /// Inject the resident [`SchedulerProxy`] (from
+    /// [`crate::spawn_scheduler`]) so this saga's [`SagaEffect::schedule`] and
+    /// [`SagaEffect::cancel_schedule`] effects drive real timers (E-25).
+    ///
+    /// Without it, schedule markers are still persisted but no timer fires until
+    /// a scheduler-equipped incarnation replays them.
+    pub fn with_scheduler(mut self, scheduler: SchedulerProxy) -> Self {
+        self.scheduler = Some(scheduler);
         self
     }
 
@@ -199,6 +215,7 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let route_fn_for_props = Arc::clone(&route_fn);
         let producer_for_props = Arc::clone(&producer);
         let crash_restart_factory_for_props = self.crash_restart_factory;
+        let scheduler_for_props = self.scheduler;
         #[cfg(test)]
         let initial_tell_states_for_props = self.initial_tell_states;
         let upstream_config_for_props = upstream_config;
@@ -222,6 +239,7 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
                 lifecycle: Lifecycle::Running,
                 upstream_config: upstream_config_for_props.clone(),
                 upstream_cursor: cursor_for_props.clone(),
+                scheduler: scheduler_for_props.clone(),
             }
         });
 

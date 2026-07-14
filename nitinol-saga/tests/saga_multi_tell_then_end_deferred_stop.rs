@@ -76,6 +76,7 @@ impl Saga for TwoTellsThenEndSaga {
     type SubscribedEvent = UpstreamTrigger;
     type Event = SagaMarker;
     type State = ();
+    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
     fn apply(&mut self, _event: SagaMarker) {}

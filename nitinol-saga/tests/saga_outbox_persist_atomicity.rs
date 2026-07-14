@@ -101,6 +101,7 @@ impl Saga for MultiTellSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
     type State = ();
+    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
     fn apply(&mut self, _event: Self::Event) {}
@@ -323,6 +324,7 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
         type SubscribedEvent = OrderPlaced;
         type Event = ReservationRequested;
         type State = ();
+        type ScheduledMessage = ();
         type Error = std::convert::Infallible;
 
         fn apply(&mut self, _event: Self::Event) {}

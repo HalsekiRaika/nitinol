@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
@@ -7,6 +8,7 @@ use nitinol_eventsource::{Aggregate, AggregateTellTarget, Decider};
 
 use crate::effect::tell::TypedSagaTell;
 use crate::error::SagaSideEffectError;
+use crate::scheduler::TimerName;
 
 /// A declarative description of effects produced by a [`crate::Saga::handle`]
 /// call.
@@ -20,32 +22,39 @@ use crate::error::SagaSideEffectError;
 ///
 /// - `None` — Monoid identity, no-op.
 /// - `Persist { events, tells, schedules }` — append the user events together
-///   with one `TellRequested` outbox marker per tell, and one `Scheduled`
-///   marker per schedule, **in a single atomic batch** on the saga's own
-///   event store.  After the append succeeds, each tell is dispatched via the
-///   retry executor.  Schedules are reserved (interpreter is a no-op in this
-///   MVP).
+///   with one `TellRequested` outbox marker per tell, and one
+///   `ScheduleEvent::Scheduled` marker per schedule, **in a single atomic
+///   batch** on the saga's own event store.  After the append succeeds, each
+///   tell is dispatched via the retry executor and each schedule is registered
+///   with the resident `SchedulerProcess` via the injected [`SchedulerProxy`].
 /// - `End` — single-responsibility termination marker.  Stops the saga
 ///   process and tears down its upstream subscription.  Effects placed after
 ///   `End` inside a `Sequence` are not interpreted.
 /// - `Sequence(Vec<SagaEffect<E>>)` — Monoid composition.  Interpreted left
 ///   to right with short-circuit on `End`.
+/// - `CancelSchedule(TimerName)` — name-scoped timer cancellation.  Persists a
+///   `ScheduleEvent::Cancelled` marker and cancels the pending timer.
 pub enum SagaEffect<E> {
     /// No-op — the identity element of the Monoid.
     None,
     /// Persist a batch of user events together with the per-tell `TellRequested`
-    /// markers and the per-schedule `Scheduled` markers in one atomic
-    /// `store::append` call.  See type-level docs for the full contract.
+    /// markers and the per-schedule `ScheduleEvent::Scheduled` markers in one
+    /// atomic `store::append` call.  See type-level docs for the full contract.
     Persist {
         events: Vec<E>,
         tells: Vec<TellIntent>,
-        schedules: Vec<Schedule>,
+        schedules: Vec<ScheduleSpec>,
     },
     /// Stop the saga process.  The runtime cascade-stops the upstream
     /// `DirectPollerProcess` child, preventing further `handle` calls.
     End,
     /// An ordered collection of effects executed sequentially.
     Sequence(Vec<SagaEffect<E>>),
+    /// Cancel the timer registered under a [`TimerName`] for this saga (E-28 /
+    /// E-29).  Interpreted as a `ScheduleEvent::Cancelled` append plus a
+    /// scheduler cancel; equivalent to token-scoped cancel since the saga id is
+    /// fixed to the emitting saga.
+    CancelSchedule(TimerName),
 }
 
 /// Opaque description of a typed command-to-aggregate dispatch.
@@ -147,16 +156,20 @@ impl TellIntent {
     }
 }
 
-/// A timer registration carried inside a `Persist` branch.
+/// A timer registration carried inside a `Persist` branch (E-29).
 ///
-/// In this MVP the interpreter only appends a `Scheduled` outbox marker as
-/// part of the same atomic batch as the user events.  Actual timer
-/// execution is reserved for a follow-up issue (γ).  The `at` field is
-/// `pub` so test code and future scheduler implementations can both read
-/// the wall-clock target without going through an accessor.
-#[derive(Debug, Clone)]
-pub struct Schedule {
-    pub at: jiff::Timestamp,
+/// The interpreter appends a `ScheduleEvent::Scheduled` marker as part of the
+/// same atomic batch as the user events, then registers the timer with the
+/// resident scheduler.  The delay is relative (`after: Duration`), not an
+/// absolute instant, so it survives replay via a persisted wall-clock anchor.
+/// `payload` is the serialized `Saga::ScheduledMessage`.  The fields are `pub`
+/// so a saga can build a spec directly or through
+/// [`crate::SagaEffect::schedule`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduleSpec {
+    pub name: TimerName,
+    pub after: Duration,
+    pub payload: Bytes,
 }
 
 /// A type-safe, object-safe side effect that can be executed asynchronously

@@ -6,7 +6,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
 
 use crate::id::SagaId;
-use crate::outbox::message::{Ended, OutboxEvent, Scheduled, TellAcked, TellFailed, TellRequested};
+use crate::outbox::message::{Ended, OutboxEvent, TellAcked, TellFailed, TellRequested};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TellOutcome {
@@ -28,17 +28,6 @@ impl OutboxAppender {
             crash_restart: crash_restart_payload
                 .filter(|b| !b.is_empty())
                 .map(<[u8]>::to_vec),
-        });
-        appending_system_event(sequence, &message, occurred_at)
-    }
-
-    pub(crate) fn build_scheduled(
-        sequence: u64,
-        at: jiff::Timestamp,
-        occurred_at: jiff::Timestamp,
-    ) -> AppendingEvent {
-        let message = OutboxEvent::Scheduled(Scheduled {
-            at_unix_seconds: at.as_second(),
         });
         appending_system_event(sequence, &message, occurred_at)
     }

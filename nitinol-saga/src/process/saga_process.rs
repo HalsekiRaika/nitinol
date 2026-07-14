@@ -1,19 +1,26 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use bytes::Bytes;
+use futures_core::future::BoxFuture;
 use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::{DurableSubscription, EventEnvelope, SequenceCursor};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::process::{Process, ProcessContext, Receive};
+use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
 
 use crate::context::SagaContext;
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::outbox::{OutboxAppender, RetryPolicy, TellOutcome};
 use crate::process::interpreter::{run_saga_effect, InterpreterCtx};
-use crate::process::replay::replay_and_redispatch;
-use crate::saga::{Saga, ScheduledMessage};
+use crate::process::replay::{replay_and_redispatch, ActiveSchedule};
+use crate::saga::Saga;
+use crate::scheduler::{
+    append_schedule_marker, DispatchFn, ScheduleEvent, SchedulerProxy, Timers,
+};
+use crate::scheduler::{ScheduleToken, TimerName};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Lifecycle {
@@ -52,9 +59,89 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) lifecycle: Lifecycle,
     pub(crate) upstream_config: DurableSubscription<EventEnvelope<S::SubscribedEvent>>,
     pub(crate) upstream_cursor: SequenceCursor,
+    pub(crate) scheduler: Option<SchedulerProxy>,
+}
+
+/// A timer firing delivered to the saga: the scheduled message payload keyed by
+/// its [`TimerName`].  Constructed by the type-erased dispatch closure the
+/// scheduler invokes when a timer elapses.
+pub(crate) struct FireScheduled {
+    pub(crate) name: TimerName,
+    pub(crate) payload: Bytes,
+}
+
+/// Build the type-erased dispatch that the resident scheduler invokes when a
+/// timer fires.  Captures a clone of the saga's own typed proxy so the
+/// scheduler stays saga-type agnostic.
+pub(crate) fn build_fire_dispatch<S: Saga>(
+    proxy: ProcessProxy<SagaProcess<S>>,
+    name: TimerName,
+    payload: Bytes,
+) -> DispatchFn {
+    Arc::new(move || -> BoxFuture<'static, ()> {
+        let proxy = proxy.clone();
+        let name = name.clone();
+        let payload = payload.clone();
+        Box::pin(async move {
+            if let Err(e) = proxy.tell(FireScheduled { name, payload }).await {
+                tracing::warn!(
+                    error = ?e,
+                    "scheduler failed to deliver a timer firing to the saga; \
+                     it may be stopping"
+                );
+            }
+        })
+    })
 }
 
 impl<S: Saga> SagaProcess<S> {
+    fn timers(&self) -> Option<Timers> {
+        self.scheduler
+            .as_ref()
+            .map(|s| Timers::new(self.saga_id.clone(), s.clone()))
+    }
+
+    /// Re-register schedules that replay found still active (persisted
+    /// `Scheduled` with no matching `Cancelled` / `Fired`).  The remaining
+    /// delay is recomputed from the persisted wall-clock anchor; a past
+    /// deadline fires immediately.
+    async fn reregister_active_schedules(
+        &self,
+        active: Vec<ActiveSchedule>,
+        ctx: &mut ProcessContext<Self>,
+    ) {
+        let Some(timers) = self.timers() else {
+            if !active.is_empty() {
+                tracing::warn!(
+                    saga_id = self.saga_id.as_str(),
+                    count = active.len(),
+                    "saga replay found active schedules but no scheduler was injected; \
+                     they will not fire in this incarnation"
+                );
+            }
+            return;
+        };
+        let now_millis = jiff::Timestamp::now().as_millisecond();
+        for sched in active {
+            // Saturating cast: if `after` exceeds i64::MAX milliseconds (~292 million
+            // years) clamp to i64::MAX so saturating_add does not overflow.
+            let after_ms: i64 = i64::try_from(sched.after.as_millis()).unwrap_or(i64::MAX);
+            let deadline = sched
+                .scheduled_at_unix_millis
+                .saturating_add(after_ms);
+            let remaining = deadline - now_millis;
+            let after = if remaining <= 0 {
+                Duration::ZERO
+            } else {
+                // remaining > 0 here; cast to u64 is safe.
+                Duration::from_millis(remaining as u64)
+            };
+            let dispatch =
+                build_fire_dispatch::<S>(ctx.self_proxy().clone(), sched.name.clone(), sched.payload);
+            timers.start_single(sched.name, after, dispatch).await;
+        }
+    }
+
     fn drain_failed_tell_ids(&mut self) -> Vec<u64> {
         let failed: Vec<u64> = self
             .tell_states
@@ -123,9 +210,26 @@ impl<S: Saga> Process for SagaProcess<S> {
             return;
         }
 
+        // Re-register timers that were still pending at the previous
+        // incarnation's stop (E-26): unfired, uncancelled schedules found on the
+        // saga's own stream.
+        self.reregister_active_schedules(outcome.active_schedules, ctx)
+            .await;
+
         self.upstream_config
             .spawn_child(ctx, self.upstream_cursor.clone())
             .await;
+    }
+
+    async fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) {
+        // Saga lifecycle teardown (E-25): cancel every timer this saga owns so
+        // the resident scheduler does not fire into a stopped process.  This is
+        // an in-memory scheduler cancel only — no `Cancelled` marker is
+        // persisted, so a future incarnation replays and re-registers any still
+        // unfired schedule.
+        if let Some(timers) = self.timers() {
+            timers.cancel_all().await;
+        }
     }
 }
 
@@ -182,28 +286,40 @@ impl<S: Saga> Receive<EventEnvelope<S::SubscribedEvent>> for SagaProcess<S> {
             process_ctx: ctx,
             tell_states: &mut self.tell_states,
             lifecycle: &mut self.lifecycle,
+            scheduler: self.scheduler.clone(),
         };
         let _ = run_saga_effect(effect, &mut ictx).await;
         Ok(())
     }
 }
 
-impl<S: Saga> Receive<ScheduledMessage> for SagaProcess<S> {
+impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
     type Response = ();
     type Error = std::convert::Infallible;
 
     async fn recv(
         &mut self,
-        msg: ScheduledMessage,
+        msg: FireScheduled,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
-        // ARCH-001: mirror the `EventEnvelope` guard — scheduled messages
-        // must also be dropped while draining so `on_scheduled` cannot
-        // produce additional effects after the terminal `Ended` marker has
-        // been written.
+        // ARCH-001: mirror the `EventEnvelope` guard — timer firings must also
+        // be dropped while draining so `on_scheduled` cannot produce additional
+        // effects after the terminal `Ended` marker has been written.
         if matches!(self.lifecycle, Lifecycle::Draining) {
             return Ok(());
         }
+
+        let FireScheduled { name, payload } = msg;
+        let message: S::ScheduledMessage = match serde_json::from_slice(&payload) {
+            Ok(message) => message,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "saga scheduled payload failed to deserialize; dropping timer firing"
+                );
+                return Ok(());
+            }
+        };
 
         let current_sequence = self.sequence;
         let drained_failed = self.drain_failed_tell_ids();
@@ -215,13 +331,44 @@ impl<S: Saga> Receive<ScheduledMessage> for SagaProcess<S> {
             jiff::Timestamp::now(),
             drained_failed,
         );
-        let effect = match self.state.on_scheduled(msg, &mut saga_ctx).await {
+        let effect = match self.state.on_scheduled(message, &mut saga_ctx).await {
             Ok(effect) => effect,
             Err(e) => {
                 tracing::warn!(error = %e, "saga on_scheduled failed");
                 return Ok(());
             }
         };
+
+        // Record the fire durably BEFORE running the handler's effect so that
+        // if `on_scheduled` re-schedules under the same `TimerName` the event
+        // stream order becomes:
+        //
+        //   … Scheduled → Fired → (new) Scheduled
+        //
+        // Replay folds these left-to-right per name:
+        //   insert(name) → remove(name) → insert(name)  ⟹  net: active (correct)
+        //
+        // The opposite order (… Scheduled → (new) Scheduled → Fired) would
+        // cause replay to remove the new schedule when it processes the Fired
+        // marker, breaking E-28 / E-26.
+        //
+        // Best-effort once: an append failure is tolerated (at-least-once
+        // delivery permits a replay re-fire).
+        let fired_event = ScheduleEvent::Fired {
+            token: ScheduleToken {
+                saga_id: self.saga_id.clone(),
+                name,
+            },
+            fired_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
+        };
+        append_schedule_marker(
+            &self.store,
+            &self.saga_id,
+            &mut self.sequence,
+            fired_event,
+            jiff::Timestamp::now(),
+        )
+        .await;
 
         let mut ictx = InterpreterCtx {
             state: &mut self.state,
@@ -233,6 +380,7 @@ impl<S: Saga> Receive<ScheduledMessage> for SagaProcess<S> {
             process_ctx: ctx,
             tell_states: &mut self.tell_states,
             lifecycle: &mut self.lifecycle,
+            scheduler: self.scheduler.clone(),
         };
         let _ = run_saga_effect(effect, &mut ictx).await;
         Ok(())

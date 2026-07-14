@@ -5,16 +5,20 @@ use nitinol_eventsource::{Event, SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::EventType;
 
 use crate::outbox::{is_outbox_event_type, OutboxEvent};
+use crate::scheduler::{is_schedule_event_type, ScheduleEvent};
 
 pub(crate) enum SagaPersisted<E> {
     Domain(E),
     Outbox(OutboxEvent),
+    Schedule(ScheduleEvent),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SagaPersistedDecodeError {
     #[error("outbox marker decode failed: {0}")]
     Outbox(#[from] SystemEventDecodeError),
+    #[error("schedule marker decode failed: {0}")]
+    Schedule(SystemEventDecodeError),
     #[error("domain event decode failed: {0}")]
     Domain(#[from] CodecError),
 }
@@ -24,6 +28,7 @@ impl<E: Event> SagaPersisted<E> {
         match self {
             SagaPersisted::Domain(event) => event.variant(),
             SagaPersisted::Outbox(marker) => marker.variant(),
+            SagaPersisted::Schedule(marker) => marker.variant(),
         }
     }
 
@@ -31,6 +36,7 @@ impl<E: Event> SagaPersisted<E> {
         match self {
             SagaPersisted::Domain(event) => codec.encode(event),
             SagaPersisted::Outbox(marker) => Ok(marker.encode()),
+            SagaPersisted::Schedule(marker) => Ok(marker.encode()),
         }
     }
 
@@ -39,8 +45,15 @@ impl<E: Event> SagaPersisted<E> {
         payload: &[u8],
         codec: &dyn ErasedCodec<E>,
     ) -> Result<Self, SagaPersistedDecodeError> {
+        // Classification order: outbox → schedule → domain.  The two framework
+        // families (`nitinol.saga.outbox`, `nitinol.saga.schedule`) are
+        // siblings, so a user event type can match neither.
         if is_outbox_event_type(event_type) {
             Ok(SagaPersisted::Outbox(OutboxEvent::decode(payload)?))
+        } else if is_schedule_event_type(event_type) {
+            ScheduleEvent::decode(payload)
+                .map(SagaPersisted::Schedule)
+                .map_err(SagaPersistedDecodeError::Schedule)
         } else {
             Ok(SagaPersisted::Domain(codec.decode(payload)?))
         }

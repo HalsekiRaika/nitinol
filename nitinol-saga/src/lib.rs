@@ -20,13 +20,19 @@
 //! The runtime `Process` trait is intentionally hidden — the user only
 //! implements [`Saga`].
 //!
-//! # MVP scope
+//! # Capabilities
 //!
 //! - Subscription-driven: the saga subscribes to an upstream [`nitinol_persistence::store::EventStore`]
 //!   via a runtime child `DirectPollerProcess` (catchup + live, at-least-once delivery).
 //!   The poller's lifetime is bound to the saga process; when the saga stops the runtime
 //!   cascade-stops the child poller automatically.
-//! - No scheduler, no compensation, no snapshotting.
+//! - Deadline scheduling: call [`spawn_scheduler`] once at startup to obtain a
+//!   [`SchedulerProxy`], then pass it to [`SagaProps::with_scheduler`].  The saga
+//!   can then emit [`SagaEffect::schedule`] / [`SagaEffect::CancelSchedule`] effects
+//!   and override [`crate::Saga::on_scheduled`] to handle fired timers.  Timers are
+//!   persisted in the saga's own event stream (`SagaPersisted::Schedule`) and
+//!   re-registered on restart (at-least-once delivery; handlers must be idempotent).
+//! - No compensation, no snapshotting.
 //! - Routing is a single closure `Fn(&SubscribedEvent) -> Option<SagaId>`.
 //! - Side-effect failures and persistence failures are logged, not
 //!   propagated (consistent with `Effect::Side` in `nitinol-eventsource`).
@@ -39,11 +45,13 @@ mod outbox;
 mod persisted;
 mod process;
 mod saga;
+mod scheduler;
 
 pub use self::context::SagaContext;
-pub use self::effect::{SagaEffect, Schedule, TellIntent};
+pub use self::effect::{SagaEffect, ScheduleSpec, TellIntent};
 pub use self::id::SagaId;
 pub use self::process::{
     CodecSet, CodecUnset, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset,
 };
-pub use self::saga::{Saga, SagaSnapshot, ScheduledMessage};
+pub use self::saga::{Saga, SagaSnapshot};
+pub use self::scheduler::{spawn_scheduler, ScheduleToken, SchedulerProxy, TimerName};

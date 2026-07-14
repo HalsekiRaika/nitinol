@@ -7,7 +7,19 @@
 
 mod common;
 
-use nitinol_saga::SagaEffect;
+use std::time::Duration;
+
+use bytes::Bytes;
+use nitinol_saga::{SagaEffect, ScheduleSpec, TimerName};
+
+/// Build a `ScheduleSpec` with an empty payload for panic-path tests.
+fn spec() -> ScheduleSpec {
+    ScheduleSpec {
+        name: TimerName::new("x"),
+        after: Duration::from_secs(1),
+        payload: Bytes::new(),
+    }
+}
 
 #[tokio::test]
 #[should_panic]
@@ -34,24 +46,18 @@ async fn with_tells_on_sequence_panics() {
 #[test]
 #[should_panic]
 fn with_schedules_on_none_panics() {
-    let ts = jiff::Timestamp::from_second(1_700_000_000)
-        .expect("constructing a valid jiff::Timestamp must succeed");
-    let _ = SagaEffect::<u32>::empty().with_schedules(vec![common::schedule_at_ts(ts)]);
+    let _ = SagaEffect::<u32>::empty().with_schedules(vec![spec()]);
 }
 
 #[test]
 #[should_panic]
 fn with_schedules_on_end_panics() {
-    let ts = jiff::Timestamp::from_second(1_700_000_000)
-        .expect("constructing a valid jiff::Timestamp must succeed");
-    let _ = SagaEffect::<u32>::end().with_schedules(vec![common::schedule_at_ts(ts)]);
+    let _ = SagaEffect::<u32>::end().with_schedules(vec![spec()]);
 }
 
 #[test]
 #[should_panic]
 fn with_schedules_on_sequence_panics() {
-    let ts = jiff::Timestamp::from_second(1_700_000_000)
-        .expect("constructing a valid jiff::Timestamp must succeed");
     let seq = SagaEffect::persist(1u32).combine(SagaEffect::persist(2u32));
-    let _ = seq.with_schedules(vec![common::schedule_at_ts(ts)]);
+    let _ = seq.with_schedules(vec![spec()]);
 }
