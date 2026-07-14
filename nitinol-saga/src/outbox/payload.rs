@@ -6,7 +6,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
 
 use crate::id::SagaId;
-use crate::outbox::message::{Ended, OutboxMessage, Scheduled, TellAcked, TellFailed, TellRequested};
+use crate::outbox::message::{Ended, OutboxEvent, Scheduled, TellAcked, TellFailed, TellRequested};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TellOutcome {
@@ -23,7 +23,7 @@ impl OutboxAppender {
         crash_restart_payload: Option<&[u8]>,
         occurred_at: jiff::Timestamp,
     ) -> AppendingEvent {
-        let message = OutboxMessage::TellRequested(TellRequested {
+        let message = OutboxEvent::TellRequested(TellRequested {
             tell_id,
             crash_restart: crash_restart_payload
                 .filter(|b| !b.is_empty())
@@ -37,7 +37,7 @@ impl OutboxAppender {
         at: jiff::Timestamp,
         occurred_at: jiff::Timestamp,
     ) -> AppendingEvent {
-        let message = OutboxMessage::Scheduled(Scheduled {
+        let message = OutboxEvent::Scheduled(Scheduled {
             at_unix_seconds: at.as_second(),
         });
         appending_system_event(sequence, &message, occurred_at)
@@ -55,7 +55,7 @@ impl OutboxAppender {
         sequence: u64,
     ) -> bool {
         let now = jiff::Timestamp::now();
-        let event = appending_system_event(sequence, &OutboxMessage::Ended(Ended {}), now);
+        let event = appending_system_event(sequence, &OutboxEvent::Ended(Ended {}), now);
         if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
             tracing::warn!(error = %e, "saga outbox ended marker append failed");
             return false;
@@ -74,12 +74,12 @@ impl OutboxAppender {
         let event = match outcome {
             TellOutcome::Acked => appending_system_event(
                 sequence,
-                &OutboxMessage::TellAcked(TellAcked { tell_id }),
+                &OutboxEvent::TellAcked(TellAcked { tell_id }),
                 now,
             ),
             TellOutcome::Failed => appending_system_event(
                 sequence,
-                &OutboxMessage::TellFailed(TellFailed { tell_id }),
+                &OutboxEvent::TellFailed(TellFailed { tell_id }),
                 now,
             ),
         };
@@ -99,6 +99,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures_core::Stream;
+    use nitinol_eventsource::SystemEvent;
     use nitinol_persistence::error::{AppendError, LoadError};
     use nitinol_persistence::store::EventStream;
     use nitinol_persistence::AppendOutcome;
@@ -111,18 +112,19 @@ mod tests {
             Some(&[]),
             jiff::Timestamp::UNIX_EPOCH,
         );
-        match crate::outbox::message::OutboxMessage::classify(event.event_type, &event.payload) {
-            Some(Ok(crate::outbox::message::OutboxMessage::TellRequested(m))) => {
+        assert!(
+            crate::outbox::is_outbox_event_type(event.event_type),
+            "build_tell_requested must write an outbox-prefixed event type"
+        );
+        match OutboxEvent::decode(&event.payload) {
+            Ok(OutboxEvent::TellRequested(m)) => {
                 assert!(
                     m.crash_restart.is_none(),
                     "empty crash_restart bytes must be normalized to None, got {:?}",
                     m.crash_restart
                 );
             }
-            other => panic!(
-                "expected decoded TellRequested, classify returned unexpected: is_some={}",
-                other.is_some()
-            ),
+            _ => panic!("expected decoded TellRequested from the built outbox payload"),
         }
     }
 

@@ -7,7 +7,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use nitinol_eventsource::codec::ErasedCodec;
-use nitinol_eventsource::Event;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendingEvent, EventType};
 use nitinol_runtime::process::ProcessContext;
@@ -15,6 +14,7 @@ use nitinol_runtime::process::ProcessContext;
 use crate::effect::{Schedule, TellIntent};
 use crate::id::SagaId;
 use crate::outbox::{OutboxAppender, RetryPolicy};
+use crate::persisted::SagaPersisted;
 use crate::process::outbox_executor::spawn_outbox_executor;
 use crate::process::saga_process::{in_flight_count, Lifecycle, SagaProcess, TellState};
 use crate::saga::Saga;
@@ -95,7 +95,10 @@ async fn persist_batch<S: Saga>(
         return InterpretOutcome::Continue;
     }
 
-    let encoded_events = match encode_events::<S>(&events, ictx.codec.as_ref()) {
+    let persisted: Vec<SagaPersisted<S::Event>> =
+        events.into_iter().map(SagaPersisted::Domain).collect();
+
+    let encoded_events = match encode_events::<S>(&persisted, ictx.codec.as_ref()) {
         Some(payloads) => payloads,
         None => return InterpretOutcome::Continue,
     };
@@ -118,8 +121,13 @@ async fn persist_batch<S: Saga>(
 
     *ictx.sequence = next_seq;
 
-    for event in events {
-        ictx.state.apply(event);
+    for persisted_event in persisted {
+        match persisted_event {
+            SagaPersisted::Domain(event) => ictx.state.apply(event),
+            SagaPersisted::Outbox(_) => unreachable!(
+                "persist_batch enqueues only Domain events into the envelope"
+            ),
+        }
     }
 
     for (intent, tell_id) in tells.into_iter().zip(tell_ids) {
@@ -133,12 +141,12 @@ async fn persist_batch<S: Saga>(
 }
 
 fn encode_events<S: Saga>(
-    events: &[S::Event],
+    events: &[SagaPersisted<S::Event>],
     codec: &dyn ErasedCodec<S::Event>,
 ) -> Option<Vec<(EventType, Bytes)>> {
     let mut encoded = Vec::with_capacity(events.len());
     for event in events {
-        match codec.encode(event) {
+        match event.encode(codec) {
             Ok(payload) => encoded.push((event.variant(), payload)),
             Err(e) => {
                 tracing::warn!(error = %e, "saga event encode failed; skipping persist batch");

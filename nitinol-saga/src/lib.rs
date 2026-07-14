@@ -36,6 +36,7 @@ mod effect;
 mod error;
 mod id;
 mod outbox;
+mod persisted;
 mod process;
 mod saga;
 
