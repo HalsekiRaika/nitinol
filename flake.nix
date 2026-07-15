@@ -4,6 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    takt = {
+      url = "github:nrslib/takt";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     codex-cli-nix = {
       url = "github:sadjow/codex-cli-nix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -14,7 +18,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, codex-cli-nix, claude-code-nix }:
+  outputs = { self, nixpkgs, flake-utils, takt, codex-cli-nix, claude-code-nix }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs {
@@ -24,15 +28,27 @@
       in {
         devShells.default = pkgs.mkShell {
           buildInputs = [
+            takt.packages.${system}.default
+
             codex-cli-nix.packages.${system}.default
             claude-code-nix.packages.${system}.default
+
             pkgs.opencode
             pkgs.nodejs_22
+
+            pkgs.bashInteractive
+            pkgs.git
             pkgs.gh
+            pkgs.gnugrep
+            pkgs.ripgrep
+
+            pkgs.rustup
+
             pkgs.pkg-config
             pkgs.openssl
+            pkgs.zlib
             pkgs.gcc
-            pkgs.ripgrep
+
             pkgs.python3
           ];
 
@@ -44,25 +60,21 @@
           ];
 
           shellHook = ''
-            if ! rustup show active-toolchain &> /dev/null; then
+            export CARGO_HOME="''${CARGO_HOME:-$HOME/.cargo}"
+            export RUSTUP_HOME="''${RUSTUP_HOME:-$HOME/.rustup}"
+            export PATH="$CARGO_HOME/bin:$PATH"
+
+            if ! rustup toolchain list | grep -q '^stable'; then
               echo "Installing Rust stable toolchain..."
-              rustup default stable
-              rustup component add clippy rustfmt rust-analyzer rust-src
+              rustup toolchain install stable --profile minimal
             fi
 
-            if ! command -v cargo-dylint &> /dev/null; then
+            rustup default stable
+            rustup component add clippy rustfmt rust-analyzer rust-src
+
+            if ! command -v cargo-dylint >/dev/null 2>&1; then
               echo "Installing cargo-dylint..."
-              cargo install cargo-dylint dylint-link
-            fi
-
-            export NPM_CONFIG_PREFIX="$HOME/.npm-global"
-            export PATH="$NPM_CONFIG_PREFIX/bin:$PATH"
-            export NPM_CONFIG_UPDATE_NOTIFIER=false
-            mkdir -p "$NPM_CONFIG_PREFIX"
-
-            if ! command -v takt &> /dev/null; then
-              echo "Installing TAKT..."
-              npm install -g takt
+              cargo install --locked cargo-dylint dylint-link
             fi
 
             echo "takt     : $(takt --version 2>/dev/null || echo 'installing...')"
