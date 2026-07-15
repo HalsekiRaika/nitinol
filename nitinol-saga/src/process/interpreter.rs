@@ -11,6 +11,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendingEvent, EventType};
 use nitinol_runtime::process::ProcessContext;
 
+use crate::dead_letter::{enqueue_dead_letter, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext};
 use crate::effect::{ScheduleSpec, TellIntent};
 use crate::id::SagaId;
 use crate::outbox::{OutboxAppender, RetryPolicy};
@@ -35,6 +36,7 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     pub(crate) tell_states: &'a mut HashMap<u64, TellState>,
     pub(crate) lifecycle: &'a mut Lifecycle,
     pub(crate) scheduler: Option<SchedulerProxy>,
+    pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
 }
 
 impl<S: Saga> InterpreterCtx<'_, S> {
@@ -48,6 +50,11 @@ impl<S: Saga> InterpreterCtx<'_, S> {
 pub(crate) enum InterpretOutcome {
     Continue,
     Stop,
+    /// A dead-letter append failed inside the interpreter for an upstream-
+    /// delivered message.  The caller (`Receive<UpstreamMessage>::recv`) must
+    /// propagate this as `Err(SagaUpstreamHandlerError)` so the `DirectPoller`
+    /// (via `ask()`) does not advance the upstream cursor (G-27).
+    DlqFailed,
 }
 
 pub(crate) fn run_saga_effect<'a, S: Saga>(
@@ -88,8 +95,10 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
             }
             SagaEffect::Sequence(sub_effects) => {
                 for sub in sub_effects {
-                    if matches!(run_saga_effect(sub, ictx).await, InterpretOutcome::Stop) {
-                        return InterpretOutcome::Stop;
+                    match run_saga_effect(sub, ictx).await {
+                        InterpretOutcome::Stop => return InterpretOutcome::Stop,
+                        InterpretOutcome::DlqFailed => return InterpretOutcome::DlqFailed,
+                        InterpretOutcome::Continue => {}
                     }
                 }
                 InterpretOutcome::Continue
@@ -161,10 +170,57 @@ async fn persist_batch<S: Saga>(
     let registrations =
         append_schedule_specs(&mut appending, &ictx.saga_id, &schedules, &mut next_seq, now);
 
-    if let Err(e) = ictx.store.append(ictx.saga_id.borrow(), appending).await {
-        // Sequence stays at its pre-batch value so the next attempt does not
-        // skip sequence numbers.
-        tracing::warn!(error = %e, "saga atomic persist batch failed; skipping apply");
+    // G-30: staged retry before DLQ.  Sequence stays at its pre-batch value
+    // throughout so no sequence numbers are skipped on failure.
+    let mut last_error = String::new();
+    let mut attempt = 0;
+    let succeeded = loop {
+        attempt += 1;
+        if attempt > 1 {
+            tokio::time::sleep(ictx.retry_policy.backoff_before(attempt)).await;
+        }
+        match ictx.store.append(ictx.saga_id.borrow(), appending.clone()).await {
+            Ok(_) => break true,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    attempt,
+                    max_attempts = ictx.retry_policy.max_attempts,
+                    "saga atomic persist batch failed; will retry if attempts remain"
+                );
+                last_error = e.to_string();
+                if attempt >= ictx.retry_policy.max_attempts {
+                    break false;
+                }
+            }
+        }
+    };
+    if !succeeded {
+        tracing::warn!(
+            max_attempts = ictx.retry_policy.max_attempts,
+            "saga persist batch exhausted staged retries; enqueuing PersistFailed dead letter (G-30)"
+        );
+        let outcome = enqueue_dead_letter(
+            &ictx.store,
+            &ictx.saga_id,
+            ictx.sequence,
+            ictx.enqueue_policy.as_ref(),
+            SagaFailure::PersistFailed { error: last_error },
+            SourceContext::without_upstream(),
+        )
+        .await;
+        // G-27: when the DLQ append also fails, signal DlqFailed so the
+        // caller can propagate Err through recv(), preventing the DirectPoller
+        // (via ask()) from advancing the upstream cursor.  For non-upstream
+        // callers (e.g. FireScheduled), the caller must call stop_self() on
+        // receiving DlqFailed.
+        if matches!(outcome, EnqueueOutcome::AppendFailed) {
+            tracing::error!(
+                saga_id = ictx.saga_id.as_str(),
+                "saga DLQ append failed for PersistFailed; signalling DlqFailed (G-27)"
+            );
+            return InterpretOutcome::DlqFailed;
+        }
         return InterpretOutcome::Continue;
     }
 
@@ -173,7 +229,9 @@ async fn persist_batch<S: Saga>(
     for persisted_event in persisted {
         match persisted_event {
             SagaPersisted::Domain(event) => ictx.state.apply(event),
-            SagaPersisted::Outbox(_) | SagaPersisted::Schedule(_) => unreachable!(
+            SagaPersisted::Outbox(_)
+            | SagaPersisted::Schedule(_)
+            | SagaPersisted::DeadLetter(_) => unreachable!(
                 "persist_batch enqueues only Domain events into the envelope"
             ),
         }
@@ -258,6 +316,7 @@ fn append_tell_requested(
             *next_seq,
             tell_id,
             intent.crash_restart_payload.as_deref(),
+            intent.target_id.as_str(),
             now,
         ));
     }

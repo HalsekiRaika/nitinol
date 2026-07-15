@@ -78,6 +78,7 @@ mod tests {
         OutboxEvent::TellRequested(TellRequested {
             tell_id,
             crash_restart,
+            target: String::new(),
         })
     }
 

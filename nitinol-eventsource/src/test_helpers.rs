@@ -78,4 +78,8 @@ impl<A: Aggregate> AggregateTellTarget<A> for MockAggregateProxy<A> {
     {
         Box::pin(MockAggregateProxy::tell(self, cmd))
     }
+
+    fn aggregate_id_str(&self) -> &str {
+        "mock-aggregate-target"
+    }
 }

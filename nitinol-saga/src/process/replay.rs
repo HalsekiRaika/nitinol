@@ -9,6 +9,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 use nitinol_runtime::process::ProcessContext;
 
+use crate::dead_letter::{enqueue_dead_letter, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
@@ -52,6 +53,7 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     tell_states: &mut HashMap<u64, TellState>,
     crash_restart_factory: Option<&(dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync)>,
     retry_policy: RetryPolicy,
+    enqueue_policy: &dyn EnqueuePolicy,
     ctx: &mut ProcessContext<SagaProcess<S>>,
 ) -> Result<ReplayOutcome, ()> {
     let scan = match scan_stream(saga_id, state, codec, store, sequence).await {
@@ -82,9 +84,10 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
         tell_states,
         crash_restart_factory,
         retry_policy,
+        enqueue_policy,
         ctx,
     )
-    .await;
+    .await?;
     failed.extend(synthetic_failed);
     Ok(ReplayOutcome {
         failed,
@@ -93,8 +96,17 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     })
 }
 
+/// A pending tell entry recovered from a durable `TellRequested` outbox marker.
+struct PendingTell {
+    /// The crash-restart payload, if the `TellRequested` carried one.
+    crash_restart: Option<Bytes>,
+    /// The target aggregate's stream key, if stored in the `TellRequested`
+    /// (absent for events written before this field was added to the proto).
+    target: Option<SagaId>,
+}
+
 struct ReplayScan {
-    pending: HashMap<u64, Option<Bytes>>,
+    pending: HashMap<u64, PendingTell>,
     failed: Vec<u64>,
     ended: bool,
     schedules: HashMap<TimerName, ActiveSchedule>,
@@ -123,7 +135,7 @@ async fn scan_stream<S: Saga>(
 
     futures_util::pin_mut!(stream);
     let mut highest_seq = initial_seq;
-    let mut pending: HashMap<u64, Option<Bytes>> = HashMap::new();
+    let mut pending: HashMap<u64, PendingTell> = HashMap::new();
     let mut failed: Vec<u64> = Vec::new();
     let mut ended = false;
     let mut schedules: HashMap<TimerName, ActiveSchedule> = HashMap::new();
@@ -160,7 +172,7 @@ fn dispatch_loaded<S: Saga>(
     loaded: LoadedEvent,
     state: &mut S,
     codec: &dyn ErasedCodec<S::Event>,
-    pending: &mut HashMap<u64, Option<Bytes>>,
+    pending: &mut HashMap<u64, PendingTell>,
     failed: &mut Vec<u64>,
     ended: &mut bool,
     schedules: &mut HashMap<TimerName, ActiveSchedule>,
@@ -168,12 +180,18 @@ fn dispatch_loaded<S: Saga>(
     match SagaPersisted::classify(loaded.event_type, &loaded.payload, codec) {
         Ok(SagaPersisted::Outbox(marker)) => apply_outbox_message(marker, pending, failed, ended),
         Ok(SagaPersisted::Schedule(marker)) => apply_schedule_marker(marker, schedules),
+        // Dead letters are not folded into saga state — they are an
+        // observability side-channel delivered to subscribers (G-27).
+        Ok(SagaPersisted::DeadLetter(_)) => {}
         Ok(SagaPersisted::Domain(event)) => state.apply(event),
         Err(SagaPersistedDecodeError::Outbox(e)) => {
             tracing::error!(error = %e, "saga outbox marker decode failed; skipping event");
         }
         Err(SagaPersistedDecodeError::Schedule(e)) => {
             tracing::error!(error = %e, "saga schedule marker decode failed; skipping event");
+        }
+        Err(SagaPersistedDecodeError::DeadLetter(e)) => {
+            tracing::error!(error = %e, "saga dead letter decode failed; skipping event");
         }
         Err(SagaPersistedDecodeError::Domain(e)) => {
             tracing::error!(error = %e, "saga event decode failed; skipping event");
@@ -212,13 +230,24 @@ fn apply_schedule_marker(
 
 fn apply_outbox_message(
     message: OutboxEvent,
-    pending: &mut HashMap<u64, Option<Bytes>>,
+    pending: &mut HashMap<u64, PendingTell>,
     failed: &mut Vec<u64>,
     ended: &mut bool,
 ) {
     match message {
         OutboxEvent::TellRequested(m) => {
-            pending.insert(m.tell_id, m.crash_restart.map(Bytes::from));
+            let target = if m.target.is_empty() {
+                None
+            } else {
+                Some(SagaId::new(&m.target))
+            };
+            pending.insert(
+                m.tell_id,
+                PendingTell {
+                    crash_restart: m.crash_restart.map(Bytes::from),
+                    target,
+                },
+            );
         }
         OutboxEvent::TellAcked(m) => {
             pending.remove(&m.tell_id);
@@ -248,19 +277,19 @@ fn intent_of(state: Option<&TellState>) -> Option<TellIntent> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn redispatch_pending<S: Saga>(
     saga_id: &SagaId,
     store: &Arc<dyn EventStore>,
     sequence: &mut u64,
-    pending: HashMap<u64, Option<Bytes>>,
+    pending: HashMap<u64, PendingTell>,
     tell_states: &mut HashMap<u64, TellState>,
     crash_restart_factory: Option<&(dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync)>,
     retry_policy: RetryPolicy,
+    enqueue_policy: &dyn EnqueuePolicy,
     ctx: &mut ProcessContext<SagaProcess<S>>,
-) -> Vec<u64> {
+) -> Result<Vec<u64>, ()> {
     let mut synthetic_failed: Vec<u64> = Vec::new();
-    for (tell_id, crash_restart_payload) in pending {
+    for (tell_id, pending_tell) in pending {
         let resolved = if let Some(intent) = intent_of(tell_states.get(&tell_id)) {
             tracing::debug!(
                 tell_id,
@@ -268,7 +297,7 @@ async fn redispatch_pending<S: Saga>(
             );
             Some(intent)
         } else if let (Some(factory), Some(payload)) =
-            (crash_restart_factory, crash_restart_payload.as_deref())
+            (crash_restart_factory, pending_tell.crash_restart.as_deref())
         {
             match factory(payload) {
                 Some(reconstructed) => {
@@ -292,7 +321,7 @@ async fn redispatch_pending<S: Saga>(
             tracing::warn!(
                 tell_id,
                 has_factory = crash_restart_factory.is_some(),
-                has_payload = crash_restart_payload.is_some(),
+                has_payload = pending_tell.crash_restart.is_some(),
                 "saga replay: pending TellRequested cannot be re-dispatched \
                  (configure crash-restart factory and crash-restart payload to \
                  enable crash-restart re-dispatch); appending synthetic TellFailed"
@@ -318,13 +347,48 @@ async fn redispatch_pending<S: Saga>(
             .await;
             if appended {
                 synthetic_failed.push(tell_id);
+                // Write a DLQ entry only when the target stream key is recoverable.
+                // Legacy streams written before `TellRequested.target` (proto field 3)
+                // was added have `target == None`; emitting `TellFailed` with an empty
+                // target violates the G-28 contract, so those entries are skipped.
+                // The durable outbox marker already records the failure.
+                if let Some(target) = pending_tell.target {
+                    let message = pending_tell.crash_restart.unwrap_or_default();
+                    let outcome = enqueue_dead_letter(
+                        store,
+                        saga_id,
+                        sequence,
+                        enqueue_policy,
+                        SagaFailure::TellFailed { target, message },
+                        SourceContext::without_upstream(),
+                    )
+                    .await;
+                    // G-27: when the DLQ append fails the synthetic TellFailed is
+                    // already written to the outbox, but the DLQ entry is missing.
+                    // Stop so the process is not considered cleanly started; a
+                    // supervised restart will re-evaluate from the durable markers.
+                    if matches!(outcome, EnqueueOutcome::AppendFailed) {
+                        tracing::error!(
+                            tell_id,
+                            "saga replay: DLQ append failed for synthetic TellFailed; \
+                             stopping process (G-27)"
+                        );
+                        return Err(());
+                    }
+                } else {
+                    tracing::warn!(
+                        tell_id,
+                        "saga replay: legacy TellRequested has no target field; \
+                         DLQ entry skipped — outbox marker is the durable failure record"
+                    );
+                }
             } else {
                 *sequence -= 1;
             }
         }
     }
 
-    synthetic_failed
+    Ok(synthetic_failed)
 }
 
 #[cfg(test)]
@@ -530,6 +594,7 @@ mod tests {
             sequence,
             tell_id,
             None,
+            "",
             jiff::Timestamp::now(),
         );
         store
@@ -837,6 +902,140 @@ mod tests {
             failed, 0,
             "pending tell must NOT produce synthetic TellFailed when Ended marker \
              is present (AIR-003 regression)"
+        );
+    }
+
+    /// A store that succeeds the **first** `append` call (routing through the
+    /// inner `InMemoryEventStore`) and fails every subsequent append.  Used to
+    /// allow `OutboxAppender::append_terminal` to succeed while making the DLQ
+    /// enqueue that follows it fail — so the `AppendFailed` path in
+    /// `redispatch_pending` is exercised.
+    struct FailSecondAppendStore {
+        inner: Arc<InMemoryEventStore>,
+        append_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailSecondAppendStore {
+        fn new(inner: Arc<InMemoryEventStore>) -> Arc<dyn EventStore> {
+            Arc::new(Self {
+                inner,
+                append_count: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl EventStore for FailSecondAppendStore {
+        async fn append(
+            &self,
+            key: &str,
+            events: Vec<AppendingEvent>,
+        ) -> Result<AppendOutcome, AppendError> {
+            let count = self
+                .append_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                self.inner.append(key, events).await
+            } else {
+                Err(AppendError::Backend(
+                    "injected: second+ appends fail".into(),
+                ))
+            }
+        }
+
+        async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+            let events: Vec<LoadedEvent> = self.inner.load(query).await?.try_collect().await?;
+            let stream: Pin<
+                Box<dyn Stream<Item = Result<LoadedEvent, LoadError>> + Send + 'static>,
+            > = Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)));
+            Ok(stream)
+        }
+    }
+
+    /// ARCH-REVIEW-001 regression: when `OutboxAppender::append_terminal`
+    /// succeeds for a synthetic TellFailed during replay but the subsequent DLQ
+    /// enqueue fails, `redispatch_pending` must return `Err(())`,
+    /// `replay_and_redispatch` must propagate it, and `on_start` must stop the
+    /// process without wiring the upstream subscription (G-27: DLQ append failure
+    /// must not silently treat the failure as processed).
+    ///
+    /// Concretely: even if the upstream store has a routed event, `Saga::handle`
+    /// must never be called when the replay DLQ append fails.
+    #[tokio::test]
+    async fn replay_dlq_append_failure_stops_saga_and_prevents_upstream_subscription() {
+        let ps = ProcessSystem::new().await;
+
+        let inner_store = Arc::new(InMemoryEventStore::default());
+        let saga_id = SagaId::new("replay-dlq-fail-regression-1");
+
+        // Seed a TellRequested with a non-empty target so the synthetic TellFailed
+        // path reaches the DLQ enqueue.  (Empty target → legacy path, no DLQ.)
+        let seed_event = OutboxAppender::build_tell_requested(
+            1,
+            1,
+            None, // no crash-restart payload → saga has no factory → synthetic TellFailed
+            "some-target-aggregate",
+            jiff::Timestamp::now(),
+        );
+        inner_store
+            .append(saga_id.as_str(), vec![seed_event])
+            .await
+            .expect("seed TellRequested must succeed");
+
+        // First append (OutboxAppender::append_terminal) succeeds.
+        // Second append (DLQ enqueue) fails → replay_and_redispatch returns Err(()).
+        let fail_second: Arc<dyn EventStore> =
+            FailSecondAppendStore::new(Arc::clone(&inner_store));
+
+        let handle_count = Arc::new(AtomicUsize::new(0));
+
+        // Pre-seed an upstream event that would be delivered if the saga subscribed.
+        let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let upstream_ev = nitinol_persistence::AppendingEvent {
+            sequence: 1,
+            event_type: UpstreamEvt::EVENT_TYPE,
+            payload: serde_json::to_vec(&UpstreamEvt)
+                .map(Bytes::from)
+                .expect("encode UpstreamEvt"),
+            occurred_at: jiff::Timestamp::now(),
+        };
+        upstream_store
+            .append("replay-dlq-fail-upstream", vec![upstream_ev])
+            .await
+            .expect("upstream append must succeed");
+
+        let handle_count_clone = Arc::clone(&handle_count);
+        let routed = saga_id.clone();
+        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
+
+        let _proxy = SagaProps::<CountingInertSaga>::new(
+            saga_id.clone(),
+            Arc::clone(&fail_second),
+            move || CountingInertSaga {
+                handle_count: Arc::clone(&handle_count_clone),
+            },
+        )
+        .with_codec(Arc::new(JsonCodec) as Arc<dyn ErasedCodec<SagaEvt>>)
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            Arc::new(JsonCodec) as Arc<dyn ErasedCodec<UpstreamEvt>>,
+            SequenceCursor::Stream {
+                key: "replay-dlq-fail-upstream".to_owned(),
+                after: 0,
+            },
+            route_fn,
+        )
+        .spawn(&ps)
+        .await;
+
+        // Give ample time for any (incorrect) subscription and event delivery.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        assert_eq!(
+            handle_count.load(Ordering::SeqCst),
+            0,
+            "Saga::handle must never be called when replay DLQ append fails — \
+             the process must stop itself instead of subscribing (ARCH-REVIEW-001 / G-27)"
         );
     }
 

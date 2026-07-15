@@ -21,6 +21,7 @@ impl OutboxAppender {
         sequence: u64,
         tell_id: u64,
         crash_restart_payload: Option<&[u8]>,
+        target: &str,
         occurred_at: jiff::Timestamp,
     ) -> AppendingEvent {
         let message = OutboxEvent::TellRequested(TellRequested {
@@ -28,6 +29,7 @@ impl OutboxAppender {
             crash_restart: crash_restart_payload
                 .filter(|b| !b.is_empty())
                 .map(<[u8]>::to_vec),
+            target: target.to_owned(),
         });
         appending_system_event(sequence, &message, occurred_at)
     }
@@ -99,6 +101,7 @@ mod tests {
             1,
             42,
             Some(&[]),
+            "",
             jiff::Timestamp::UNIX_EPOCH,
         );
         assert!(

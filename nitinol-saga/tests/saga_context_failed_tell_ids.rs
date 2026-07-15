@@ -131,6 +131,10 @@ impl<A: Aggregate> AggregateTellTarget<A> for FailingTarget<A> {
     {
         Box::pin(async move { Err(TellError::Send(SendError)) })
     }
+
+    fn aggregate_id_str(&self) -> &str {
+        "test-failing-target"
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -27,8 +27,8 @@
 
 mod common;
 use common::{
-    encode_outbox_tell_acked, encode_outbox_tell_requested, outbox_kind_of, JsonCodec, OutboxKind,
-    OUTBOX_MARKER,
+    encode_outbox_tell_acked, encode_outbox_tell_requested, encode_outbox_tell_requested_with_target,
+    outbox_kind_of, JsonCodec, OutboxKind, OUTBOX_MARKER,
 };
 
 use std::sync::Arc;
@@ -45,7 +45,8 @@ use nitinol_persistence::{
     AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_eventsource::SystemEvent;
+use nitinol_saga::{DeadLetterEvent, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaProps};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -297,5 +298,170 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
         OUTBOX_MARKER.type_key(),
         "the marker's variant-free type_key must still match the reserved outbox key \
          so decode-registry routing keeps recovering the kind from the payload"
+    );
+}
+
+/// Regression test (ARCH-REVIEW-001 / SUPERVISOR-001): when a `TellRequested`
+/// carries a non-empty `target` field (proto field 3, written after the DLQ
+/// replay fix), the replay path must write a `DeadLetterEvent` with
+/// `SagaFailure::TellFailed { target, .. }` in addition to the synthetic
+/// `TellFailed` outbox marker.
+#[tokio::test]
+async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay() {
+    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+
+    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_id = SagaId::new("replay-dlq-with-target-1");
+
+    // Seed a TellRequested (tell_id = 1) WITH target = "inventory-42".
+    // This simulates a stream written after the `target` proto field was added —
+    // the replay path must recover the target and write a DLQ entry.
+    let payload = encode_outbox_tell_requested_with_target(1, None, "inventory-42");
+    append_raw(&saga_store, saga_id.as_str(), 1, OUTBOX_MARKER, payload).await;
+
+    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let routed = saga_id.clone();
+    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
+
+    // Spawn without crash-restart factory and without pre-populated PendingIntents.
+    let _saga_proxy =
+        SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
+            .with_codec(system.codec::<ReservationRequested>())
+            .with_subscription(
+                Arc::clone(&upstream_store),
+                system.codec::<OrderPlaced>(),
+                SequenceCursor::Stream {
+                    key: "no-such-stream".to_owned(),
+                    after: 0,
+                },
+                route_fn,
+            )
+            .spawn(system.process_system())
+            .await;
+
+    // Wait for the replay path to append both the synthetic TellFailed and the
+    // DLQ dead-letter event.
+    let dead_letter_type_key = DeadLetterEvent::EVENT_TYPE.type_key();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let events = loop {
+        let events = load_saga_events(&saga_store, &saga_id).await;
+        let has_failed = events
+            .iter()
+            .any(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))));
+        let has_dead_letter = events
+            .iter()
+            .any(|e| e.event_type.type_key() == dead_letter_type_key);
+        if has_failed && has_dead_letter {
+            break events;
+        }
+        if std::time::Instant::now() >= deadline {
+            let event_types: Vec<_> = events.iter().map(|e| e.event_type.to_string()).collect();
+            panic!(
+                "timed out waiting for synthetic TellFailed + DeadLetterEvent after replay \
+                 (has_failed={has_failed}, has_dead_letter={has_dead_letter}, \
+                 event_types: {:?})",
+                event_types
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let dead_letter_event = events
+        .iter()
+        .find(|e| e.event_type.type_key() == dead_letter_type_key)
+        .expect("DeadLetterEvent must be present in the saga stream");
+
+    let decoded = DeadLetterEvent::decode(&dead_letter_event.payload)
+        .expect("DeadLetterEvent must decode successfully");
+
+    match decoded.failure {
+        SagaFailure::TellFailed { target, .. } => {
+            assert_eq!(
+                target,
+                SagaId::new("inventory-42"),
+                "DLQ TellFailed must carry the target recovered from the TellRequested proto field"
+            );
+        }
+        other => panic!(
+            "DLQ entry must be TellFailed, got: {:?}",
+            other
+        ),
+    }
+}
+
+/// Regression test (ARCH-REVIEW-001): when a `TellRequested` has **no**
+/// `target` field (legacy stream predating proto field 3), the replay path
+/// must write the synthetic `TellFailed` outbox marker but **must NOT** write
+/// a `DeadLetterEvent`.  Emitting `TellFailed` with an empty target would
+/// violate the G-28 contract; the durable outbox marker already records the
+/// failure without producing an invalid DLQ entry.
+#[tokio::test]
+async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay() {
+    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+
+    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_id = SagaId::new("replay-dlq-no-target-1");
+
+    // Seed a TellRequested with NO target (legacy stream — field 3 absent / empty).
+    let payload = encode_outbox_tell_requested(1, None);
+    append_raw(&saga_store, saga_id.as_str(), 1, OUTBOX_MARKER, payload).await;
+
+    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let routed = saga_id.clone();
+    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
+
+    // Spawn without crash-restart factory and without pre-populated PendingIntents.
+    let _saga_proxy =
+        SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
+            .with_codec(system.codec::<ReservationRequested>())
+            .with_subscription(
+                Arc::clone(&upstream_store),
+                system.codec::<OrderPlaced>(),
+                SequenceCursor::Stream {
+                    key: "no-such-stream".to_owned(),
+                    after: 0,
+                },
+                route_fn,
+            )
+            .spawn(system.process_system())
+            .await;
+
+    // Wait for the synthetic TellFailed outbox marker.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let events = load_saga_events(&saga_store, &saga_id).await;
+        let has_failed = events
+            .iter()
+            .any(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))));
+        if has_failed {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let event_types: Vec<_> = events.iter().map(|e| e.event_type.to_string()).collect();
+            panic!(
+                "timed out waiting for synthetic TellFailed from legacy stream (no target field) \
+                 (event_types: {:?})",
+                event_types
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // Allow a brief settling period so any spurious DLQ write would have had time to appear.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let events = load_saga_events(&saga_store, &saga_id).await;
+
+    // No DLQ entry must be written for a legacy stream that lacks a target field —
+    // emitting TellFailed with an empty target would violate G-28.
+    let dead_letter_type_key = DeadLetterEvent::EVENT_TYPE.type_key();
+    let has_dead_letter = events
+        .iter()
+        .any(|e| e.event_type.type_key() == dead_letter_type_key);
+    assert!(
+        !has_dead_letter,
+        "replay must NOT write a DLQ entry for a legacy TellRequested without a target field \
+         (G-28 requires TellFailed.target to be non-empty)"
     );
 }

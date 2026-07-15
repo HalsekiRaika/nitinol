@@ -15,6 +15,11 @@ message OutboxMarker {
 message TellRequested {
   uint64 tell_id = 1;
   optional bytes crash_restart = 2;
+  // Stream key of the target aggregate, stored so replay can write a
+  // `SagaFailure::TellFailed` DLQ entry even when the crash-restart factory
+  // cannot reconstruct the TellIntent.  Empty string means unknown target
+  // (streams written before this field was added).
+  string target = 3;
 }
 
 message TellAcked {

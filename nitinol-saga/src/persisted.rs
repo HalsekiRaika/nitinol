@@ -4,6 +4,7 @@ use nitinol_eventsource::error::CodecError;
 use nitinol_eventsource::{Event, SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::EventType;
 
+use crate::dead_letter::{is_dead_letter_event_type, DeadLetterEvent};
 use crate::outbox::{is_outbox_event_type, OutboxEvent};
 use crate::scheduler::{is_schedule_event_type, ScheduleEvent};
 
@@ -11,6 +12,7 @@ pub(crate) enum SagaPersisted<E> {
     Domain(E),
     Outbox(OutboxEvent),
     Schedule(ScheduleEvent),
+    DeadLetter(DeadLetterEvent),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +21,8 @@ pub(crate) enum SagaPersistedDecodeError {
     Outbox(#[from] SystemEventDecodeError),
     #[error("schedule marker decode failed: {0}")]
     Schedule(SystemEventDecodeError),
+    #[error("dead letter decode failed: {0}")]
+    DeadLetter(SystemEventDecodeError),
     #[error("domain event decode failed: {0}")]
     Domain(#[from] CodecError),
 }
@@ -29,6 +33,7 @@ impl<E: Event> SagaPersisted<E> {
             SagaPersisted::Domain(event) => event.variant(),
             SagaPersisted::Outbox(marker) => marker.variant(),
             SagaPersisted::Schedule(marker) => marker.variant(),
+            SagaPersisted::DeadLetter(event) => event.variant(),
         }
     }
 
@@ -37,6 +42,7 @@ impl<E: Event> SagaPersisted<E> {
             SagaPersisted::Domain(event) => codec.encode(event),
             SagaPersisted::Outbox(marker) => Ok(marker.encode()),
             SagaPersisted::Schedule(marker) => Ok(marker.encode()),
+            SagaPersisted::DeadLetter(event) => Ok(event.encode()),
         }
     }
 
@@ -45,15 +51,20 @@ impl<E: Event> SagaPersisted<E> {
         payload: &[u8],
         codec: &dyn ErasedCodec<E>,
     ) -> Result<Self, SagaPersistedDecodeError> {
-        // Classification order: outbox → schedule → domain.  The two framework
-        // families (`nitinol.saga.outbox`, `nitinol.saga.schedule`) are
-        // siblings, so a user event type can match neither.
+        // Classification order: outbox → schedule → dead_letter → domain.  The
+        // three framework families (`nitinol.saga.{outbox,schedule,dead_letter}`)
+        // are siblings, so a user event type can match none of them.  The domain
+        // branch must stay last to preserve envelope transparency.
         if is_outbox_event_type(event_type) {
             Ok(SagaPersisted::Outbox(OutboxEvent::decode(payload)?))
         } else if is_schedule_event_type(event_type) {
             ScheduleEvent::decode(payload)
                 .map(SagaPersisted::Schedule)
                 .map_err(SagaPersistedDecodeError::Schedule)
+        } else if is_dead_letter_event_type(event_type) {
+            DeadLetterEvent::decode(payload)
+                .map(SagaPersisted::DeadLetter)
+                .map_err(SagaPersistedDecodeError::DeadLetter)
         } else {
             Ok(SagaPersisted::Domain(codec.decode(payload)?))
         }
@@ -114,7 +125,7 @@ mod tests {
     #[test]
     fn outbox_path_classifies_as_outbox_never_domain() {
         let codec = codec();
-        let wire = OutboxAppender::build_tell_requested(1, 7, None, jiff::Timestamp::UNIX_EPOCH);
+        let wire = OutboxAppender::build_tell_requested(1, 7, None, "", jiff::Timestamp::UNIX_EPOCH);
 
         match SagaPersisted::<DomainEvt>::classify(wire.event_type, &wire.payload, &codec) {
             Ok(SagaPersisted::Outbox(OutboxEvent::TellRequested(m))) => assert_eq!(m.tell_id, 7),
@@ -157,7 +168,7 @@ mod tests {
     fn undecodable_outbox_payload_surfaces_an_outbox_decode_error() {
         let codec = codec();
         let outbox_type =
-            OutboxAppender::build_tell_requested(1, 1, None, jiff::Timestamp::UNIX_EPOCH)
+            OutboxAppender::build_tell_requested(1, 1, None, "", jiff::Timestamp::UNIX_EPOCH)
                 .event_type;
         match SagaPersisted::<DomainEvt>::classify(outbox_type, &[], &codec) {
             Err(SagaPersistedDecodeError::Outbox(_)) => {}

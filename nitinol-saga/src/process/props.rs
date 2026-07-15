@@ -2,18 +2,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use nitinol_eventsource::codec::ErasedCodec;
-use nitinol_eventsource::{DurableSubscription, EventEnvelope, SequenceCursor};
+use nitinol_eventsource::{DurableSubscription, SequenceCursor};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::{ProcessSystem, Props};
 
+use crate::dead_letter::{DeadLetterEvent, DlqChildSpawn, EnqueueAll, EnqueuePolicy, make_dlq_child_spawn};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
 use crate::process::proxy::SagaProxy;
-use crate::process::saga_process::{CrashRestartFactory, Lifecycle, RouteFn, SagaProcess, TellState};
+use crate::process::saga_process::{CrashRestartFactory, DecodeFailureRouteFn, Lifecycle, RouteFn, SagaProcess, TellState, UpstreamMessage};
 use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
+use nitinol_runtime::process::{Process, ProcessProxy, Receive};
 
 /// Marker: the event codec has not yet been provided.
 pub struct CodecUnset;
@@ -47,6 +49,9 @@ pub struct SagaProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
     subscription: Sub,
     crash_restart_factory: Option<CrashRestartFactory>,
     scheduler: Option<SchedulerProxy>,
+    enqueue_policy: Option<Arc<dyn EnqueuePolicy>>,
+    dead_letter_subscriber: Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>,
+    decode_failure_route_fn: Option<DecodeFailureRouteFn>,
     #[cfg(test)]
     initial_tell_states: HashMap<u64, TellState>,
 }
@@ -71,6 +76,9 @@ impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
             subscription: SubscriptionUnset,
             crash_restart_factory: None,
             scheduler: None,
+            enqueue_policy: None,
+            dead_letter_subscriber: None,
+            decode_failure_route_fn: None,
             #[cfg(test)]
             initial_tell_states: HashMap::new(),
         }
@@ -91,6 +99,9 @@ impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
             subscription: self.subscription,
             crash_restart_factory: self.crash_restart_factory,
             scheduler: self.scheduler,
+            enqueue_policy: self.enqueue_policy,
+            dead_letter_subscriber: self.dead_letter_subscriber,
+            decode_failure_route_fn: self.decode_failure_route_fn,
             #[cfg(test)]
             initial_tell_states: self.initial_tell_states,
         }
@@ -127,6 +138,9 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
             },
             crash_restart_factory: self.crash_restart_factory,
             scheduler: self.scheduler,
+            enqueue_policy: self.enqueue_policy,
+            dead_letter_subscriber: self.dead_letter_subscriber,
+            decode_failure_route_fn: self.decode_failure_route_fn,
             #[cfg(test)]
             initial_tell_states: self.initial_tell_states,
         }
@@ -154,6 +168,54 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
         self
     }
 
+    /// Override the [`EnqueuePolicy`] that filters which saga failures reach the
+    /// DLQ (G-26).  Without it the default enqueues every failure kind.
+    pub fn with_enqueue_policy(mut self, policy: Arc<dyn EnqueuePolicy>) -> Self {
+        self.enqueue_policy = Some(policy);
+        self
+    }
+
+    /// Register a dead-letter subscriber process (G-29).
+    ///
+    /// When the saga enqueues a [`DeadLetterEvent`] on its own stream, the
+    /// subscriber `P` receives it over a [`nitinol_eventsource::DurableSubscription`]
+    /// so it catches up from the EventStore even if it was down at enqueue time.
+    /// `P`'s type is erased so it never surfaces as a `SagaProps` type
+    /// parameter.
+    ///
+    /// The DLQ direct-poller is started as a **child** of the saga from
+    /// `SagaProcess::on_start` (ARCH-REVIEW-009): when the saga stops the
+    /// runtime cascade-stops the poller automatically, releasing the subscription.
+    pub fn with_dead_letter_subscriber<P>(mut self, subscriber: ProcessProxy<P>) -> Self
+    where
+        P: Process + Receive<DeadLetterEvent, Response = ()> + 'static,
+    {
+        self.dead_letter_subscriber =
+            Some(make_dlq_child_spawn::<SagaProcess<S>, P>(subscriber));
+        self
+    }
+
+    /// Override the decode-failure routing contract (ARCH-REVIEW-002).
+    ///
+    /// When two or more saga instances subscribe to the same upstream event
+    /// type, a corrupt event that cannot be decoded is forwarded to every
+    /// subscriber as `UpstreamMessage::DecodeFailed`.  Without a route
+    /// function every subscriber records a DLQ entry.  Providing this function
+    /// lets the saga decide which instance is the intended recipient:
+    /// - Return `Some(saga_id)` to accept the failure (DLQ recorded only when
+    ///   `saga_id == self.saga_id`).
+    /// - Return `None` to decline the failure (no DLQ recorded for this saga).
+    ///
+    /// Without this call the legacy behaviour applies: every `DecodeFailed` is
+    /// recorded against this saga regardless of other subscribers.
+    pub fn with_decode_failure_route<F>(mut self, route: F) -> Self
+    where
+        F: Fn(&AggregateId, u64) -> Option<SagaId> + Send + Sync + 'static,
+    {
+        self.decode_failure_route_fn = Some(Arc::new(route));
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn with_initial_tell_states(
         mut self,
@@ -176,6 +238,10 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let store = self.store;
         let producer = self.producer;
         let codec = self.codec.codec;
+        let enqueue_policy: Arc<dyn EnqueuePolicy> = self
+            .enqueue_policy
+            .unwrap_or_else(|| Arc::new(EnqueueAll));
+        let dead_letter_subscriber = self.dead_letter_subscriber;
         let route_fn = self.subscription.route_fn;
         let upstream_store = self.subscription.upstream_store;
         let upstream_codec = self.subscription.upstream_codec;
@@ -186,25 +252,37 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
             if loaded.event_type.type_key() != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE.type_key() {
                 return None;
             }
+            // Capture the raw payload before decoding so the draining branch can
+            // preserve it in `SagaFailure::EndedSagaReceivedMessage` (G-28).
+            let raw_payload = loaded.payload.clone();
+            let aggregate_id = AggregateId::new(loaded.stream_key);
+            let sequence = loaded.sequence;
             match codec_for_transform.decode(&loaded.payload) {
-                Ok(event) => Some(EventEnvelope {
-                    aggregate_id: AggregateId::new(loaded.stream_key),
-                    sequence: loaded.sequence,
-                    global_sequence: loaded.global_sequence,
+                Ok(event) => Some(UpstreamMessage::Decoded {
+                    aggregate_id,
+                    sequence,
                     event,
+                    raw_payload,
                 }),
                 Err(e) => {
+                    // G-26: decode failures are forwarded to SagaProcess as
+                    // `UpstreamMessage::DecodeFailed` so the saga can record a
+                    // `DeadLetterEvent` (G-30 immediate, no retry).
                     tracing::warn!(
                         error = %e,
                         event_type = ?loaded.event_type,
-                        "saga upstream decode failed; skipping event",
+                        "saga upstream decode failed; delivering as DecodeFailed dead letter",
                     );
-                    None
+                    Some(UpstreamMessage::DecodeFailed {
+                        aggregate_id,
+                        sequence,
+                        error: e.to_string(),
+                    })
                 }
             }
         };
 
-        let upstream_config = DurableSubscription::<EventEnvelope<S::SubscribedEvent>>::new(
+        let upstream_config = DurableSubscription::<UpstreamMessage<S::SubscribedEvent>>::new(
             upstream_store,
             transform,
         );
@@ -216,6 +294,9 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let producer_for_props = Arc::clone(&producer);
         let crash_restart_factory_for_props = self.crash_restart_factory;
         let scheduler_for_props = self.scheduler;
+        let enqueue_policy_for_props = Arc::clone(&enqueue_policy);
+        let decode_failure_route_fn_for_props = self.decode_failure_route_fn;
+        let dlq_child_spawn_for_props = dead_letter_subscriber;
         #[cfg(test)]
         let initial_tell_states_for_props = self.initial_tell_states;
         let upstream_config_for_props = upstream_config;
@@ -232,6 +313,7 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
                 store: Arc::clone(&store_for_props),
                 codec: Arc::clone(&codec_for_props),
                 route_fn: Arc::clone(&route_fn_for_props),
+                decode_failure_route_fn: decode_failure_route_fn_for_props.clone(),
                 sequence: 0,
                 retry_policy: RetryPolicy::default(),
                 tell_states,
@@ -240,11 +322,13 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
                 upstream_config: upstream_config_for_props.clone(),
                 upstream_cursor: cursor_for_props.clone(),
                 scheduler: scheduler_for_props.clone(),
+                enqueue_policy: Arc::clone(&enqueue_policy_for_props),
+                // DLQ child spawner is passed via Arc so it can be cloned into
+                // each restart incarnation (Props::new is Fn, not FnOnce).
+                dlq_child_spawn: dlq_child_spawn_for_props.clone(),
             }
         });
 
-        let saga_proxy = system.spawn(props).await;
-
-        saga_proxy.into()
+        system.spawn(props).await.into()
     }
 }

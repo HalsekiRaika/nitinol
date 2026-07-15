@@ -159,6 +159,10 @@ pub struct TellRequestedPayload {
     pub tell_id: u64,
     #[prost(bytes = "vec", optional, tag = "2")]
     pub crash_restart: Option<Vec<u8>>,
+    /// Target aggregate stream key (field 3, added with DLQ replay fix).
+    /// Empty string for streams written before this field was added.
+    #[prost(string, tag = "3")]
+    pub target: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -215,6 +219,23 @@ pub fn encode_outbox_tell_requested(tell_id: u64, crash_restart: Option<&[u8]>) 
     encode_outbox_marker(OutboxKind::TellRequested(TellRequestedPayload {
         tell_id,
         crash_restart: crash_restart.map(<[u8]>::to_vec),
+        target: String::new(),
+    }))
+}
+
+/// Encode a `TellRequested` outbox marker with an explicit `target` stream key
+/// (field 3).  Used by tests that exercise the DLQ replay path, which requires
+/// the target to be stored in the durable `TellRequested` record.
+#[allow(dead_code)]
+pub fn encode_outbox_tell_requested_with_target(
+    tell_id: u64,
+    crash_restart: Option<&[u8]>,
+    target: &str,
+) -> Bytes {
+    encode_outbox_marker(OutboxKind::TellRequested(TellRequestedPayload {
+        tell_id,
+        crash_restart: crash_restart.map(<[u8]>::to_vec),
+        target: target.to_owned(),
     }))
 }
 

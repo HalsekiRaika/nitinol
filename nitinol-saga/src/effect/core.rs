@@ -8,6 +8,7 @@ use nitinol_eventsource::{Aggregate, AggregateTellTarget, Decider};
 
 use crate::effect::tell::TypedSagaTell;
 use crate::error::SagaSideEffectError;
+use crate::id::SagaId;
 use crate::scheduler::TimerName;
 
 /// A declarative description of effects produced by a [`crate::Saga::handle`]
@@ -93,6 +94,11 @@ pub struct TellIntent {
     /// (supervised restart via the in-memory `tell_states` registry
     /// still works).  An empty slice is normalised to `None` at the write path.
     pub(crate) crash_restart_payload: Option<Bytes>,
+    /// The target aggregate's stream key, captured from
+    /// [`AggregateTellTarget::aggregate_id_str`] at construction time.  Stored
+    /// so the saga can write `SagaFailure::TellFailed::target` when the tell
+    /// exhausts its retry budget.
+    pub(crate) target_id: SagaId,
 }
 
 impl Clone for TellIntent {
@@ -100,6 +106,7 @@ impl Clone for TellIntent {
         Self {
             side: Arc::clone(&self.side),
             crash_restart_payload: self.crash_restart_payload.clone(),
+            target_id: self.target_id.clone(),
         }
     }
 }
@@ -120,6 +127,14 @@ impl TellIntent {
         C: Clone + Send + Sync + 'static,
         T: AggregateTellTarget<A>,
     {
+        let target_id_str = target.aggregate_id_str();
+        assert!(
+            !target_id_str.is_empty(),
+            "TellIntent: target returned an empty aggregate_id_str(); \
+             implement AggregateTellTarget::aggregate_id_str() to return \
+             the target aggregate's stream key for TellFailed DLQ tracking"
+        );
+        let target_id = SagaId::new(target_id_str);
         Self {
             side: Arc::new(TypedSagaTell {
                 target,
@@ -127,6 +142,7 @@ impl TellIntent {
                 _phantom: PhantomData::<fn() -> A>,
             }),
             crash_restart_payload: None,
+            target_id,
         }
     }
 
@@ -145,6 +161,14 @@ impl TellIntent {
         C: Clone + Send + Sync + 'static,
         T: AggregateTellTarget<A>,
     {
+        let target_id_str = target.aggregate_id_str();
+        assert!(
+            !target_id_str.is_empty(),
+            "TellIntent: target returned an empty aggregate_id_str(); \
+             implement AggregateTellTarget::aggregate_id_str() to return \
+             the target aggregate's stream key for TellFailed DLQ tracking"
+        );
+        let target_id = SagaId::new(target_id_str);
         Self {
             side: Arc::new(TypedSagaTell {
                 target,
@@ -152,6 +176,7 @@ impl TellIntent {
                 _phantom: PhantomData::<fn() -> A>,
             }),
             crash_restart_payload: Some(crash_restart_payload),
+            target_id,
         }
     }
 }

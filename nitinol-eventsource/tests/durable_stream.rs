@@ -12,7 +12,7 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, LoadedEvent};
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Process, ProcessContext, Props, Receive};
-use nitinol_runtime::ProcessSystem;
+use nitinol_runtime::{ProcessSystem, SupervisionStrategy};
 
 #[derive(Clone)]
 struct Evt;
@@ -1075,5 +1075,165 @@ async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
         "re-calling subscribe_from must result in exactly one direct poller \
          delivering each event; observed duplicate delivery suggests an \
          orphan poller from the first subscribe_from is still running"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ARCH-REVIEW-001 regression: DirectPoller cursor must NOT advance when the
+// subscriber handler returns Err (state-consistency contract, G-27).
+// ---------------------------------------------------------------------------
+
+/// A one-shot error injected into a subscriber handler.
+#[derive(Debug)]
+struct InjectedHandlerError;
+
+impl std::fmt::Display for InjectedHandlerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "injected handler failure")
+    }
+}
+
+impl std::error::Error for InjectedHandlerError {}
+
+/// Subscriber that fails exactly once (the first recv call), then succeeds.
+/// Records every sequence number it receives — including re-deliveries.
+struct FailOnceSubscriber {
+    should_fail: Arc<AtomicBool>,
+    sequences_seen: Arc<Mutex<Vec<u64>>>,
+    count: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+}
+
+impl Process for FailOnceSubscriber {}
+
+impl Receive<EventEnvelope<Evt>> for FailOnceSubscriber {
+    type Response = ();
+    type Error = InjectedHandlerError;
+
+    async fn recv(
+        &mut self,
+        msg: EventEnvelope<Evt>,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), Self::Error> {
+        self.sequences_seen.lock().unwrap().push(msg.sequence);
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_one();
+        // Fail exactly once: swap true → false returns the old value.
+        if self.should_fail.swap(false, Ordering::SeqCst) {
+            Err(InjectedHandlerError)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Regression test for ARCH-REVIEW-001 (state-consistency contract).
+///
+/// `poll_direct_once` calls `proxy.ask(value)` and only advances the cursor on
+/// `Ok`. When the subscriber handler returns `Err`, the cursor must stay at its
+/// previous position — the upstream message must be re-delivered on the next
+/// poll, never silently treated as processed.
+///
+/// Verification:
+/// - seq=1 is delivered first. The subscriber returns `Err` → cursor stays at 0.
+/// - On the next poll seq=1 is delivered again. The subscriber returns `Ok` →
+///   cursor advances to 1 → seq=2 is delivered → cursor advances to 2.
+/// - `sequences_seen` must be `[1, 1, 2]` — seq=1 appears twice because the
+///   cursor did not advance on the first `Err` return.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_poller_cursor_not_advanced_when_handler_returns_err() {
+    let system = ProcessSystem::new().await;
+    let store = Arc::new(InMemoryEventStore::default());
+    let agg_id = AggregateId::new("dp-state-consistency-agg");
+
+    append_evt(&store, agg_id.as_str(), 1).await;
+    append_evt(&store, agg_id.as_str(), 2).await;
+
+    let should_fail = Arc::new(AtomicBool::new(true));
+    let sequences_seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let count = Arc::new(AtomicUsize::new(0));
+    let notify = Arc::new(Notify::new());
+
+    let sub = system
+        .spawn(
+            Props::new({
+                let should_fail = Arc::clone(&should_fail);
+                let sequences_seen = Arc::clone(&sequences_seen);
+                let count = Arc::clone(&count);
+                let notify = Arc::clone(&notify);
+                move || FailOnceSubscriber {
+                    should_fail: Arc::clone(&should_fail),
+                    sequences_seen: Arc::clone(&sequences_seen),
+                    count: Arc::clone(&count),
+                    notify: Arc::clone(&notify),
+                }
+            })
+            // Resume keeps the subscriber alive after returning Err so the
+            // re-delivered message can be received by the same process.
+            .with_supervision_strategy(SupervisionStrategy::Resume),
+        )
+        .await;
+
+    let ds = DurableStream::<EventEnvelope<Evt>>::new(
+        ProcessName::new("dp-state-consistency-topic"),
+        Arc::clone(&store) as Arc<dyn EventStore>,
+        to_envelope,
+    )
+    .cursor(SequenceCursor::Stream {
+        key: agg_id.as_str().to_owned(),
+        after: 0,
+    })
+    .with_poll_interval(TEST_POLL_INTERVAL)
+    .spawn(&system)
+    .await
+    .expect("DurableStream::spawn must succeed");
+
+    ds.subscribe_from(
+        &system,
+        sub,
+        SequenceCursor::Stream {
+            key: agg_id.as_str().to_owned(),
+            after: 0,
+        },
+    )
+    .await
+    .expect("subscribe_from must succeed");
+
+    // Wait until recv() has been called 3 times:
+    //   call 1: seq=1 → Err (cursor not advanced)
+    //   call 2: seq=1 → Ok  (cursor advanced to 1)
+    //   call 3: seq=2 → Ok  (cursor advanced to 2)
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let notified = notify.notified();
+            if count.load(Ordering::SeqCst) >= 3 {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "timed out: only {} recv() calls observed (expected 3); \
+             seq=1 must be re-delivered when handler returns Err \
+             (ARCH-REVIEW-001 state-consistency regression)",
+            count.load(Ordering::SeqCst)
+        )
+    });
+
+    let seen = sequences_seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.iter().filter(|&&s| s == 1).count(),
+        2,
+        "seq=1 must be delivered exactly twice: once when the handler returned \
+         Err (cursor not advanced) and again on the retry poll; \
+         got sequences: {seen:?}"
+    );
+    assert_eq!(
+        seen.last().copied(),
+        Some(2),
+        "seq=2 must be delivered after seq=1 succeeds on retry; \
+         got sequences: {seen:?}"
     );
 }

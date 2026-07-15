@@ -79,6 +79,9 @@ impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
         let snapshot_ref = self.snapshot_ref;
         let snapshot_restore = self.snapshot_restore;
 
+        // Capture before moving into the closure so we can pass it to the proxy.
+        let aggregate_id_for_proxy = aggregate_id.clone();
+
         let props = Props::new(move || AggregateProcess {
             state: A::default(),
             aggregate_id: aggregate_id.clone(),
@@ -89,7 +92,8 @@ impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
             snapshot_restore: snapshot_restore.clone(),
         });
 
-        system.spawn(props).await.into()
+        let inner = system.spawn(props).await;
+        AggregateProxy::new(inner, aggregate_id_for_proxy)
     }
 }
 

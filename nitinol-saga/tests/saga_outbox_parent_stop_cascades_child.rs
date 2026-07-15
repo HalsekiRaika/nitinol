@@ -109,6 +109,10 @@ impl<A: Aggregate> AggregateTellTarget<A> for GatedFailingTarget<A> {
             Err(TellError::Send(SendError))
         })
     }
+
+    fn aggregate_id_str(&self) -> &str {
+        "test-gated-failing-target"
+    }
 }
 
 // ---------------------------------------------------------------------------

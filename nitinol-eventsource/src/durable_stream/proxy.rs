@@ -116,6 +116,60 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         let props = self.make_direct_poller_props(subscriber, cursor, None);
         ctx.spawn_child(props).await;
     }
+
+    /// Spawn a [`DirectPollerProcess`] as a runtime **child** of `ctx`'s process,
+    /// forwarding events to an external `subscriber` process.
+    ///
+    /// Unlike [`Self::spawn_child`] (where the subscriber IS `ctx`'s process), this
+    /// method separates the parent (lifecycle owner) from the subscriber (event
+    /// receiver).  The poller's lifetime is tied to `ctx`'s process: when that
+    /// process stops the runtime cascade-stops the child poller automatically.
+    ///
+    /// Use this when a parent process (e.g. a saga) owns the subscription
+    /// lifetime while an external subscriber process receives the events.
+    ///
+    /// `name` must be unique within `ctx`'s children.
+    pub async fn spawn_child_for<Parent, Sub>(
+        &self,
+        ctx: &mut ProcessContext<Parent>,
+        subscriber: ProcessProxy<Sub>,
+        cursor: SequenceCursor,
+        name: ProcessName,
+    ) where
+        Parent: Process,
+        Sub: Process + Receive<T, Response = ()>,
+    {
+        let props = self.make_direct_poller_props(subscriber, cursor, Some(name));
+        ctx.spawn_child(props).await;
+    }
+
+    /// Spawn a [`DirectPollerProcess`] via a [`ProcessSystem`] reference.
+    ///
+    /// Unlike [`Self::spawn_child`] this does not require being inside the
+    /// subscriber's [`ProcessContext`], so it can be called from external
+    /// wiring code that only holds a [`ProcessProxy<S>`].
+    ///
+    /// `poller_name` is caller-supplied so that distinct subscriptions from the
+    /// same subscriber process to different source streams get unique names and
+    /// coexist as separate pollers.  If a direct poller under `poller_name` is
+    /// already registered (e.g., from a previous incarnation with the same
+    /// subscription key), it is stopped and replaced so the subscriber
+    /// re-catchups from `cursor`.  Pollers under different names are unaffected.
+    pub async fn spawn_from<S>(
+        &self,
+        system: &ProcessSystem,
+        subscriber: ProcessProxy<S>,
+        cursor: SequenceCursor,
+        poller_name: ProcessName,
+    ) where
+        S: Process + Receive<T, Response = ()>,
+    {
+        if let Some(existing) = system.lookup_by_name(&poller_name).await {
+            let _ = existing.stop().await;
+        }
+        let props = self.make_direct_poller_props(subscriber, cursor, Some(poller_name));
+        system.spawn(props).await;
+    }
 }
 
 pub(crate) fn shared_poller_name(stream_pid: Pid) -> ProcessName {

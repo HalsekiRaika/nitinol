@@ -9,3 +9,14 @@ pub(crate) enum SagaSideEffectError {
     #[error("send failure: {0}")]
     Send(Box<dyn std::error::Error + Send + Sync>),
 }
+
+/// Error returned from `Receive<UpstreamMessage>::recv` when a dead-letter
+/// append fails for an upstream-delivered message.
+///
+/// Returning this error value from the handler signals the delivery layer
+/// (`DirectPollerProcess` via `ask()`) to NOT advance the upstream cursor,
+/// ensuring the upstream message is never treated as processed even when the
+/// `SagaProcess` subsequently stops.  See G-27 / state-consistency contract.
+#[derive(Debug, thiserror::Error)]
+#[error("dead-letter append failed; upstream message must not be treated as processed (G-27)")]
+pub(crate) struct SagaUpstreamHandlerError;

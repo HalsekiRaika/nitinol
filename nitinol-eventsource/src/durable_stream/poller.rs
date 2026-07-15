@@ -186,14 +186,22 @@ where
         let observed = cursor.observed(&loaded);
         match transform(loaded) {
             Some(value) => {
-                if let Err(e) = proxy.tell(value).await {
-                    tracing::warn!(
-                        error = %e,
-                        "durable_stream: subscriber direct tell failed, subscriber dead"
-                    );
-                    return Ok(());
+                // Use ask() so the cursor only advances when the subscriber's
+                // handler completes successfully.  When the handler returns Err
+                // (e.g. Saga DLQ append failure), ask() propagates that error
+                // and the cursor stays at the same position — the upstream
+                // message is NOT treated as processed (G-27 state-consistency).
+                match proxy.ask(value).await {
+                    Ok(_) => cursor.advance(observed),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "durable_stream: subscriber direct ask failed; \
+                             cursor not advanced — upstream message not treated as processed"
+                        );
+                        return Ok(());
+                    }
                 }
-                cursor.advance(observed);
             }
             None => cursor.advance(observed),
         }

@@ -32,12 +32,26 @@
 //!   and override [`crate::Saga::on_scheduled`] to handle fired timers.  Timers are
 //!   persisted in the saga's own event stream (`SagaPersisted::Schedule`) and
 //!   re-registered on restart (at-least-once delivery; handlers must be idempotent).
-//! - No compensation, no snapshotting.
+//! - Dead-letter queue (DLQ): each saga failure kind is persisted as a
+//!   `SagaPersisted::DeadLetter(`[`DeadLetterEvent`]`)` on the saga's own
+//!   EventStore stream, mixed into the same envelope as domain events (G-27).
+//!   `TellFailed` and `PersistFailed` exhaust staged retry before being enqueued
+//!   (G-30); `HandleFailed`, `DecodeFailed`, `EndedSagaReceivedMessage`, and
+//!   `ScheduledFailed` are enqueued immediately.  A subscriber catches up via
+//!   [`SagaProps::with_dead_letter_subscriber`] (G-29, DurableStream-based
+//!   catchup).  The [`EnqueuePolicy`] returned by
+//!   [`SagaProps::with_enqueue_policy`] controls which failure kinds reach the
+//!   DLQ (G-26); the default enqueues every kind.  Pull API (list /
+//!   mark_processed / evict) is **not implemented** in this crate.
+//! - No snapshotting.
 //! - Routing is a single closure `Fn(&SubscribedEvent) -> Option<SagaId>`.
-//! - Side-effect failures and persistence failures are logged, not
-//!   propagated (consistent with `Effect::Side` in `nitinol-eventsource`).
+//!   Decode failures (where no typed event is available) can be routed with the
+//!   separate [`SagaProps::with_decode_failure_route`] closure.
+//! - Side-effect failures and persistence failures are enqueued to the DLQ
+//!   after staged retry (G-30), not silently logged and discarded.
 
 mod context;
+mod dead_letter;
 mod effect;
 mod error;
 mod id;
@@ -48,6 +62,9 @@ mod saga;
 mod scheduler;
 
 pub use self::context::SagaContext;
+pub use self::dead_letter::{
+    DeadLetterEvent, EnqueueDecision, EnqueuePolicy, SagaFailure, SourceContext,
+};
 pub use self::effect::{SagaEffect, ScheduleSpec, TellIntent};
 pub use self::id::SagaId;
 pub use self::process::{

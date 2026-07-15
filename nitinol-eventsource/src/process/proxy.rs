@@ -1,3 +1,4 @@
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::error::AskError as RuntimeAskError;
 use nitinol_runtime::process::ProcessProxy;
 
@@ -10,22 +11,35 @@ use crate::receive::Receive as EvtReceive;
 /// A typed handle to an `AggregateProcess<A>` with a high-level domain API.
 ///
 /// Wraps `ProcessProxy<AggregateProcess<A>>` so callers interact with domain
-/// types (`ask`, `tell`, `exec`) rather than runtime plumbing.
-pub struct AggregateProxy<A: Aggregate>(pub(crate) ProcessProxy<AggregateProcess<A>>);
+/// types (`ask`, `tell`, `exec`) rather than runtime plumbing.  The
+/// `aggregate_id` is stored alongside the process handle so downstream
+/// consumers can identify the target without a round-trip.
+pub struct AggregateProxy<A: Aggregate> {
+    pub(crate) inner: ProcessProxy<AggregateProcess<A>>,
+    /// The aggregate's stream key — kept here so [`AggregateTellTarget::aggregate_id_str`]
+    /// can return it without sending a query to the process.
+    aggregate_id: AggregateId,
+}
 
 impl<A: Aggregate> Clone for AggregateProxy<A> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<A: Aggregate> From<ProcessProxy<AggregateProcess<A>>> for AggregateProxy<A> {
-    fn from(inner: ProcessProxy<AggregateProcess<A>>) -> Self {
-        Self(inner)
+        Self {
+            inner: self.inner.clone(),
+            aggregate_id: self.aggregate_id.clone(),
+        }
     }
 }
 
 impl<A: Aggregate> AggregateProxy<A> {
+    pub(crate) fn new(inner: ProcessProxy<AggregateProcess<A>>, aggregate_id: AggregateId) -> Self {
+        Self { inner, aggregate_id }
+    }
+
+    /// The aggregate's stream key.
+    pub fn aggregate_id(&self) -> &AggregateId {
+        &self.aggregate_id
+    }
+
     /// Send a command and wait for the persisted events.
     ///
     /// Returns `Vec<A::Event>` containing every event produced and applied by
@@ -38,7 +52,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         A: Decider<C>,
         C: Send + Sync + 'static,
     {
-        self.0.ask(AskCmd(cmd)).await.map_err(map_ask_error)
+        self.inner.ask(AskCmd(cmd)).await.map_err(map_ask_error)
     }
 
     /// Send a command without waiting for a response.
@@ -50,7 +64,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         A: Decider<C>,
         C: Send + Sync + 'static,
     {
-        self.0.tell(AskCmd(cmd)).await.map_err(TellError::Send)
+        self.inner.tell(AskCmd(cmd)).await.map_err(TellError::Send)
     }
 
     /// Send a read-only query and wait for the response.
@@ -64,7 +78,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         A: EvtReceive<M>,
         M: Send + Sync + 'static,
     {
-        self.0.ask(ExecMsg(msg)).await.map_err(map_exec_error)
+        self.inner.ask(ExecMsg(msg)).await.map_err(map_exec_error)
     }
 }
 
