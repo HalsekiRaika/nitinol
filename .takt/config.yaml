@@ -10,13 +10,13 @@ provider_routing:
           effort: medium
     project-consistency-gpt-worker:
       provider: codex
-      model: gpt-5
+      model: gpt-5.6-terra
       provider_options:
         codex:
           reasoning_effort: medium
     project-consistency-gpt-structured:
       provider: codex
-      model: gpt-5
+      model: gpt-5.6-luna
       provider_options:
         codex:
           reasoning_effort: medium

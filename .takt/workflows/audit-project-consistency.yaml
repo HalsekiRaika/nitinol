@@ -1,8 +1,8 @@
 name: audit-project-consistency
 description: >
-  現在有効なFacet、workflow、仕様、実装、テスト、品質ゲートを横断監査し、
-  正規パス.takt/quality-gates/rust-quality.shを実行した機械的証拠も含めて、依存順で次の独立タスクを
-  1件だけキューへ積む。
+  現在のRust向けPolicyを監査基準として、仕様、設計、実装、テスト、文書、既存タスクの
+  整合性を横断監査する。正規パス.takt/quality-gates/rust-quality.shによる機械検査も
+  独立した証拠として評価し、既存タスクと重複しない最優先の改善タスクを1件だけ積む。
 
 max_steps: 12
 initial_step: collect_queue_context
@@ -26,10 +26,14 @@ loop_monitors:
         .takt/runs/project-consistency-audit/mechanical-check.mdを比較し、
         次を判断してください。
 
-        - 計画で列挙した監査対象の網羅率が改善しているか
-        - `.takt/quality-gates/rust-quality.sh`の実行結果と、Facetから導いた期待検査範囲が照合済みか
-        - findingの根拠がfile:line、設定キー、または機械検査ログで示されているか
-        - 未解決事項が「追加監査で解ける問題」か「人間の方針決定が必要な問題」か
+        - Policyから抽出した監査基準のカバレッジが改善しているか
+        - 仕様、設計、実装、テスト、文書、既存タスクの主要領域が監査済みか
+        - `.takt/quality-gates/rust-quality.sh`の実行結果と、Policy由来の
+          機械判定可能要件が照合済みか
+        - findingの根拠がfile:line、Policy基準ID、または機械検査ログで示されているか
+        - 未解決事項が追加監査で解ける問題か、人間の方針決定が必要な問題か
+        - `.takt/quality-gates/rust-quality.sh`以外のTAKT管理リソースを
+          改善対象へ混入させていないか
         - 同じ指摘を言い換えるだけの非生産的な反復になっていないか
       rules:
         - condition: 監査品質と網羅性が十分で、次タスクを安全に選べる
@@ -68,9 +72,11 @@ steps:
     session_key: project-consistency-plan
     session: refresh
     policy:
+      - rust-design
+      - rust-coding
+      - rust-testing
+      - rust-review
       - project-consistency-audit
-    knowledge:
-      - architecture
     instruction: project-consistency-plan
     output_contracts:
       report:
@@ -82,7 +88,7 @@ steps:
         command: "./.takt/quality-gates/project-consistency-machine-check.sh"
         timeout_ms: 1800000
     rules:
-      - condition: 有効Facetと監査対象の棚卸し、および監査分割が完了
+      - condition: Policy監査基準、機械検査期待契約、プロジェクト監査範囲、および3分割計画が完成
         next: audit
       - condition: リポジトリを監査できる状態ではない、または必要な根拠へアクセスできない
         next: ABORT
@@ -99,10 +105,7 @@ steps:
     persona: architecture-reviewer
     policy:
       - review
-      - rust-review
       - project-consistency-audit
-    knowledge:
-      - architecture
     instruction: project-consistency-audit-team-leader
     team_leader:
       max_concurrency: 3
@@ -116,7 +119,7 @@ steps:
         - name: 02-project-consistency-audit.md
           format: project-consistency-audit
     rules:
-      - condition: 全監査パートを統合し、機械検査を含む根拠付きfindingと改善候補の整理が完了
+      - condition: 3監査パートを統合し、Policy準拠と機械検査を含む根拠付きfindingと改善候補の整理が完了
         next: supervise
       - condition: 監査を進行できない
         next: ABORT
@@ -135,8 +138,6 @@ steps:
     policy:
       - review
       - project-consistency-audit
-    knowledge:
-      - architecture
     instruction: project-consistency-supervise
     pass_previous_response: false
     output_contracts:
@@ -148,7 +149,7 @@ steps:
         next: select_task
       - condition: 監査が完全で、現在積むべき独立改善タスクがない
         next: COMPLETE
-      - condition: 監査範囲、機械検査、根拠、重複排除、依存関係のいずれかが不十分
+      - condition: Policy基準、監査範囲、機械検査、根拠、重複排除、依存関係のいずれかが不十分
         next: review
 
   - name: review
@@ -165,10 +166,7 @@ steps:
     session: refresh
     policy:
       - review
-      - rust-review
       - project-consistency-audit
-    knowledge:
-      - architecture
     instruction: project-consistency-review
     pass_previous_response: false
     output_contracts:
@@ -193,8 +191,6 @@ steps:
     session: refresh
     policy:
       - project-consistency-audit
-    knowledge:
-      - architecture
     instruction: |
       01-project-consistency-plan.md、02-project-consistency-audit.md、
       03-project-consistency-supervision.md、および
@@ -207,22 +203,30 @@ steps:
       選定規則:
       1. 既存のpending/runningタスクと実質的に重複する候補を除外する。
       2. 依存関係の上流から選ぶ。ただし、人間の未決定事項を勝手に確定しない。
-      3. 正しさ・契約破壊・データ不整合・workflow/Facetの誤配線・
-         機械検査の実行不能を、cosmeticな整理より優先する。
+      3. 正しさ、公開契約、データ整合性、Policy準拠、再現可能な機械検査の
+         実行不能を、cosmeticな整理より優先する。
       4. `.takt/quality-gates/rust-quality.sh`が失敗した場合、ログから原因を区別する。
          - 製品コードまたはテストの欠陥なら、その欠陥修正を主目的にする。
-         - スクリプト、環境、対象範囲、workflow接続の欠陥なら、品質ゲート修正を主目的にする。
+         - スクリプトの内容、対象範囲、またはプロジェクトで再現可能な環境定義の
+           欠陥なら、その修正を主目的にする。
+         - 操作者固有の一時的な環境問題は、自動タスクへ変換しない。
          - 単に「チェックを再実行する」だけのタスクは作らない。
-      5. 有効Facetが要求する機械判定可能な規則を`.takt/quality-gates/rust-quality.sh`が覆っていない場合、
-         再現可能で過剰に重くない検査として品質ゲートへ追加するタスクを候補にする。
-      6. 1タスクで1つの主目的だけを扱う。「監査結果をすべて直す」のような
+      5. Policyが要求する機械判定可能な規則を
+         `.takt/quality-gates/rust-quality.sh`が覆っていない場合、決定的で再現可能、
+         かつ過剰に重くない検査として追加するタスクを候補にする。
+      6. `.takt/`配下を変更するタスクは、正規パス
+         `.takt/quality-gates/rust-quality.sh`の作成・修正に限る。
+         workflow、Facet、config、provider routing、session、output contract、
+         collectorの変更をタスク化しない。
+      7. Policy自体の矛盾や曖昧さは自動的に修正せず、decision_requiredとして扱う。
+      8. 1タスクで1つの主目的だけを扱う。「監査結果をすべて直す」のような
          横断タスクを作らない。
-      7. 変更対象、非対象、期待成果、検証方法が明確で、通常のdefault-rust
+      9. 変更対象、非対象、期待成果、検証方法が明確で、通常のdefault-rust
          workflowが追加設計なしで処理できる粒度にする。
-      8. 監査finding IDはタスク説明に記載してよいが、ソースコードコメントへ
-         転記するよう指示しない。
-      9. 独立して実行できる高価値タスクがない場合は
-         wait_before_next_scanを返す。
+      10. 監査finding IDとPolicy基準IDはタスク説明に記載してよいが、
+          ソースコードコメントへ転記するよう指示しない。
+      11. 独立して実行できる高価値タスクがない場合は
+          wait_before_next_scanを返す。
 
       structured outputには action, title, type, scope, summary, goals,
       acceptance_criteria, issue を必ず出力してください。
@@ -230,7 +234,7 @@ steps:
       enqueue_new_taskの場合:
       - goalsは1件以上
       - acceptance_criteriaは2件以上
-      - acceptance_criteriaには、該当する機械検査の再実行方法を含める
+      - acceptance_criteriaには、該当する機械検査または限定検証の実行方法を含める
       - issueは { create: false }
 
       wait_before_next_scanの場合:
