@@ -2,17 +2,17 @@
 
 ## 結論
 
-{現在の整合性状態、Policy準拠状態、機械検査状態、最も重要な根本原因を短く要約}
+{現在の整合性状態、Criteria準拠状態、機械検査状態、最も重要な根本原因を短く要約}
 
 ## 監査カバレッジ
 
 | Part | 対象 | 確認済み | 未確認 | 備考 |
 |---|---|---|---|---|
-| 1 | Policy Compliance / Architecture / Rust Implementation | ... | ... | ... |
+| 1 | Criteria Compliance / Architecture / Rust Implementation | ... | ... | ... |
 | 2 | Mechanical Checks / Build and Test Infrastructure | ... | ... | ... |
 | 3 | Goal / Spec / Tests / Documentation / Task Drift | ... | ... | ... |
 
-## Policy準拠サマリー
+## Criteria準拠サマリー
 
 | Criteria ID | 対象 | 判定 | 根拠 | 関連Finding |
 |---|---|---|---|---|
@@ -28,15 +28,15 @@
 
 ## Mechanical Check Coverage
 
-| Contract ID | Policy基準 | 現在の検査 | 実行証拠 | Coverage | Gap / 重複 | 推奨方向 |
+| Contract ID | Criteria | 現在の検査 | 実行証拠 | Coverage | Gap / 重複 | 推奨方向 |
 |---|---|---|---|---|---|---|
 | MC-001 | POL-... | ... | log / script:line | full / partial / none / unknown | ... | ... |
 
 ## Findings
 
-| ID | 分類 | 重大度 | Policy基準 | 根拠 | 観測事実 | 影響 | 最小修正方向 | 状態 |
+| ID | 分類 | 重大度 | Criteria | 根拠 | 観測事実 | 影響 | 最小修正方向 | 状態 |
 |---|---|---|---|---|---|---|---|---|
-| PC-001 | policy_noncompliance / quality_gate / spec_drift / architecture / implementation / tests / docs / task_drift | high / medium / low | POL-... / none | `file:line` / mechanical log | ... | ... | ... | confirmed / inferred / unresolved |
+| PC-001 | criteria_drift / quality_gate / spec_drift / architecture / implementation / tests / docs / task_drift | high / medium / low | POL-... / none | `file:line` / mechanical log | ... | ... | ... | confirmed / inferred / unresolved |
 
 ## Quality Gate Failure Classification
 
@@ -52,7 +52,7 @@
 
 ## Decision Required
 
-| ID | 関連Policy基準 | 決定事項 | 選択肢 | 影響範囲 | 実装前に必要な理由 |
+| ID | 関連Criteria | 決定事項 | 選択肢 | 影響範囲 | 実装前に必要な理由 |
 |---|---|---|---|---|---|
 | ... | POL-... | ... | ... | ... | ... |
 
@@ -71,4 +71,4 @@
 
 | 項目 | 除外理由 |
 |---|---|
-| ... | cosmetic / 根拠不足 / 既存タスクと重複 / 他候補で解消 / Policy決定待ち / TAKT管理リソースで対象外 |
+| ... | cosmetic / 根拠不足 / 既存タスクと重複 / 他候補で解消 / Criteriaまたは仕様の決定待ち / TAKT管理リソースで対象外 |

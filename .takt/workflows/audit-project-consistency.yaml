@@ -1,11 +1,36 @@
 name: audit-project-consistency
 description: >
-  現在のRust向けPolicyを監査基準として、仕様、設計、実装、テスト、文書、既存タスクの
-  整合性を横断監査する。正規パス.takt/quality-gates/rust-quality.shによる機械検査も
-  独立した証拠として評価し、既存タスクと重複しない最優先の改善タスクを1件だけ積む。
+  Audit専用Persona・Policyと、Rust向けPolicyからコンパイルしたrust-audit-standardを用いて、
+  仕様、設計、実装、テスト、文書、既存タスクの整合性を横断監査する。
+  正規rust-quality.shの機械検査を独立証拠として評価し、重複しない改善タスクを1件だけ積む。
 
 max_steps: 12
 initial_step: collect_queue_context
+
+personas:
+  project-consistency-audit-planner: ../facets/personas/project-consistency-audit-planner.md
+  project-consistency-auditor: ../facets/personas/project-consistency-auditor.md
+  project-consistency-audit-supervisor: ../facets/personas/project-consistency-audit-supervisor.md
+  project-consistency-task-selector: ../facets/personas/project-consistency-task-selector.md
+
+policies:
+  project-consistency-audit-control: ../facets/policies/project-consistency-audit-control.md
+  project-consistency-task-selection: ../facets/policies/project-consistency-task-selection.md
+
+knowledge:
+  rust-audit-standard: ../facets/knowledge/rust-audit-standard.md
+
+instructions:
+  project-consistency-plan: ../facets/instructions/project-consistency-plan.md
+  project-consistency-audit-team-leader: ../facets/instructions/project-consistency-audit-team-leader.md
+  project-consistency-supervise: ../facets/instructions/project-consistency-supervise.md
+  project-consistency-review: ../facets/instructions/project-consistency-review.md
+  project-consistency-select-task: ../facets/instructions/project-consistency-select-task.md
+
+report_formats:
+  project-consistency-audit-plan: ../facets/output-contracts/project-consistency-audit-plan.md
+  project-consistency-audit: ../facets/output-contracts/project-consistency-audit.md
+  project-consistency-supervision: ../facets/output-contracts/project-consistency-supervision.md
 
 schemas:
   project-consistency-followup-task: project-consistency-followup-task
@@ -16,25 +41,23 @@ loop_monitors:
       - review
     threshold: 3
     judge:
-      persona: supervisor
+      session_key: project-consistency-loop-supervisor
+      persona: project-consistency-audit-supervisor
       instruction: |
         project consistency audit の supervise → review サイクルが
         {cycle_count} 回繰り返されました。
 
         01-project-consistency-plan.md、02-project-consistency-audit.md、
         03-project-consistency-supervision.md、および
-        .takt/runs/project-consistency-audit/mechanical-check.mdを比較し、
-        次を判断してください。
+        .takt/runs/project-consistency-audit/mechanical-check.mdを比較し、次を判断してください。
 
-        - Policyから抽出した監査基準のカバレッジが改善しているか
+        - 固定Criteria IDのcoverageが改善しているか
         - 仕様、設計、実装、テスト、文書、既存タスクの主要領域が監査済みか
-        - `.takt/quality-gates/rust-quality.sh`の実行結果と、Policy由来の
-          機械判定可能要件が照合済みか
-        - findingの根拠がfile:line、Policy基準ID、または機械検査ログで示されているか
-        - 未解決事項が追加監査で解ける問題か、人間の方針決定が必要な問題か
-        - `.takt/quality-gates/rust-quality.sh`以外のTAKT管理リソースを
-          改善対象へ混入させていないか
-        - 同じ指摘を言い換えるだけの非生産的な反復になっていないか
+        - rust-quality.shの実行結果とCriteria由来の機械判定可能要件が照合済みか
+        - Findingの根拠がfile:line、Criteria ID、または機械検査ログで示されているか
+        - 未解決事項が追加監査で解けるか、人間の方針決定が必要か
+        - rust-quality.sh以外のTAKT管理リソースを改善対象へ混入させていないか
+        - 同じ指摘を言い換えるだけの反復になっていないか
       rules:
         - condition: 監査品質と網羅性が十分で、次タスクを安全に選べる
           next: select_task
@@ -68,15 +91,13 @@ steps:
       - mechanical-check
       - project-consistency-claude-control
     edit: false
-    persona: planner
+    persona: project-consistency-audit-planner
     session_key: project-consistency-plan
     session: refresh
     policy:
-      - rust-design
-      - rust-coding
-      - rust-testing
-      - rust-review
-      - project-consistency-audit
+      - project-consistency-audit-control
+    knowledge:
+      - rust-audit-standard
     instruction: project-consistency-plan
     output_contracts:
       report:
@@ -88,29 +109,27 @@ steps:
         command: "./.takt/quality-gates/project-consistency-machine-check.sh"
         timeout_ms: 1800000
     rules:
-      - condition: Policy監査基準、機械検査期待契約、プロジェクト監査範囲、および3分割計画が完成
+      - condition: Audit Standard、Criteria割当、機械検査期待契約、監査範囲、および3分割計画が完成
         next: audit
       - condition: リポジトリを監査できる状態ではない、または必要な根拠へアクセスできない
         next: ABORT
 
   - name: audit
     tags:
-      - review
       - audit
       - consistency
       - rust
       - mechanical-check
       - project-consistency-claude-control
     edit: false
-    persona: architecture-reviewer
+    persona: project-consistency-auditor
     policy:
-      - review
-      - project-consistency-audit
+      - project-consistency-audit-control
     instruction: project-consistency-audit-team-leader
     team_leader:
       max_concurrency: 3
       max_total_parts: 3
-      part_persona: architecture-reviewer
+      part_persona: project-consistency-auditor
       part_edit: false
       part_tags:
         - project-consistency-gpt-worker
@@ -119,25 +138,23 @@ steps:
         - name: 02-project-consistency-audit.md
           format: project-consistency-audit
     rules:
-      - condition: 3監査パートを統合し、Policy準拠と機械検査を含む根拠付きfindingと改善候補の整理が完了
+      - condition: 3監査パートを統合し、Criteria準拠と機械検査を含む根拠付きFindingと改善候補の整理が完了
         next: supervise
       - condition: 監査を進行できない
         next: ABORT
 
   - name: supervise
     tags:
-      - review
       - supervise
       - consistency
       - mechanical-check
       - project-consistency-claude-control
     edit: false
-    persona: supervisor
+    persona: project-consistency-audit-supervisor
     session_key: project-consistency-supervise
     session: refresh
     policy:
-      - review
-      - project-consistency-audit
+      - project-consistency-audit-control
     instruction: project-consistency-supervise
     pass_previous_response: false
     output_contracts:
@@ -149,24 +166,22 @@ steps:
         next: select_task
       - condition: 監査が完全で、現在積むべき独立改善タスクがない
         next: COMPLETE
-      - condition: Policy基準、監査範囲、機械検査、根拠、重複排除、依存関係のいずれかが不十分
+      - condition: Criteria、監査範囲、機械検査、根拠、重複排除、依存関係のいずれかが不十分
         next: review
 
   - name: review
     tags:
-      - review
       - audit
       - consistency
       - rust
       - mechanical-check
       - project-consistency-gpt-worker
     edit: false
-    persona: architecture-reviewer
+    persona: project-consistency-auditor
     session_key: project-consistency-review
     session: refresh
     policy:
-      - review
-      - project-consistency-audit
+      - project-consistency-audit-control
     instruction: project-consistency-review
     pass_previous_response: false
     output_contracts:
@@ -186,66 +201,12 @@ steps:
       - consistency
       - project-consistency-gpt-structured
     edit: false
-    persona: supervisor
+    persona: project-consistency-task-selector
     session_key: project-consistency-select-task
     session: refresh
     policy:
-      - project-consistency-audit
-    instruction: |
-      01-project-consistency-plan.md、02-project-consistency-audit.md、
-      03-project-consistency-supervision.md、および
-      .takt/runs/project-consistency-audit/mechanical-check.mdを読み、
-      次に実行すべき改善タスクを1件だけ選んでください。
-
-      現在のTAKTタスクキュー:
-      {context:collect_queue_context.queue}
-
-      選定規則:
-      1. 既存のpending/runningタスクと実質的に重複する候補を除外する。
-      2. 依存関係の上流から選ぶ。ただし、人間の未決定事項を勝手に確定しない。
-      3. 正しさ、公開契約、データ整合性、Policy準拠、再現可能な機械検査の
-         実行不能を、cosmeticな整理より優先する。
-      4. `.takt/quality-gates/rust-quality.sh`が失敗した場合、ログから原因を区別する。
-         - 製品コードまたはテストの欠陥なら、その欠陥修正を主目的にする。
-         - スクリプトの内容、対象範囲、またはプロジェクトで再現可能な環境定義の
-           欠陥なら、その修正を主目的にする。
-         - 操作者固有の一時的な環境問題は、自動タスクへ変換しない。
-         - 単に「チェックを再実行する」だけのタスクは作らない。
-      5. Policyが要求する機械判定可能な規則を
-         `.takt/quality-gates/rust-quality.sh`が覆っていない場合、決定的で再現可能、
-         かつ過剰に重くない検査として追加するタスクを候補にする。
-      6. `.takt/`配下を変更するタスクは、正規パス
-         `.takt/quality-gates/rust-quality.sh`の作成・修正に限る。
-         workflow、Facet、config、provider routing、session、output contract、
-         collectorの変更をタスク化しない。
-      7. Policy自体の矛盾や曖昧さは自動的に修正せず、decision_requiredとして扱う。
-      8. 1タスクで1つの主目的だけを扱う。「監査結果をすべて直す」のような
-         横断タスクを作らない。
-      9. 変更対象、非対象、期待成果、検証方法が明確で、通常のdefault-rust
-         workflowが追加設計なしで処理できる粒度にする。
-      10. 監査finding IDとPolicy基準IDはタスク説明に記載してよいが、
-          ソースコードコメントへ転記するよう指示しない。
-      11. 独立して実行できる高価値タスクがない場合は
-          wait_before_next_scanを返す。
-
-      structured outputには action, title, type, scope, summary, goals,
-      acceptance_criteria, issue を必ず出力してください。
-
-      enqueue_new_taskの場合:
-      - goalsは1件以上
-      - acceptance_criteriaは2件以上
-      - acceptance_criteriaには、該当する機械検査または限定検証の実行方法を含める
-      - issueは { create: false }
-
-      wait_before_next_scanの場合:
-      - title, scope, summaryは空文字
-      - typeはchore
-      - goals, acceptance_criteria, labelsは空配列
-      - issueは { create: false }
-
-      actionの候補:
-      - enqueue_new_task
-      - wait_before_next_scan
+      - project-consistency-task-selection
+    instruction: project-consistency-select-task
     structured_output:
       schema_ref: project-consistency-followup-task
     rules:

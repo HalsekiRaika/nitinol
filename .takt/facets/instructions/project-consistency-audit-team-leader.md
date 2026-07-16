@@ -3,7 +3,7 @@
 
 監査開始時に必ず次を読んでください。
 
-- `01-project-consistency-plan.md`のPolicy監査基準表
+- `01-project-consistency-plan.md`のCriteria監査基準表
 - `.takt/runs/project-consistency-audit/mechanical-check.md`
 - `.takt/runs/project-consistency-audit/rust-quality.log`（必要な箇所のみ）
 - 正規パス`.takt/quality-gates/rust-quality.sh`
@@ -17,18 +17,18 @@
 計画の3系統を各partへ1つずつ割り当てます。各partは担当範囲をリポジトリ検索で棚卸ししてから、
 候補を文脈付きで確認してください。単一ファイルの精読だけで全件監査と宣言してはいけません。
 
-### Part 1: Policy Compliance / Architecture / Rust Implementation
+### Part 1: Criteria Compliance / Architecture / Rust Implementation
 
-- 計画で割り当てられた`POL-xxx`基準を、設計、責務境界、Rust実装、公開APIへ照合する。
-- Policy自体の文面やTAKT上の適用方法は評価しない。
-- 違反、準拠、判定不能を基準IDごとに示す。
+- 計画で割り当てられたCriteriaを、設計、責務境界、Rust実装、公開APIへ照合する。
+- Audit Standardや元Policyの文面、TAKT上の適用方法は評価しない。
+- 違反、準拠、判定不能をCriteria IDごとに示す。
 
 ### Part 2: Mechanical Checks / Build and Test Infrastructure
 
 次を独立に判定します。
 
 1. `.takt/quality-gates/rust-quality.sh`の実行結果そのもの
-2. 計画で抽出された機械判定可能なPolicy基準
+2. 計画で割り当てられた機械判定可能なCriteria
 3. スクリプトが実際に実行する検査と対象範囲
 4. Cargo、toolchain、Nix、CIが定義する再現可能な品質環境
 
@@ -44,13 +44,13 @@ FAILは、製品欠陥、テスト欠陥、スクリプト欠陥、プロジェ�
 ## 統合時の要件
 
 - 重複findingを統合し、異なる根本原因を一つに潰さない。
-- findingごとに分類、重大度、Policy基準ID、根拠、影響、最小修正方向を示す。
+- findingごとに分類、重大度、Criteria ID、根拠、影響、最小修正方向を示す。
 - 「コードまたはテストが壊れている」のか「検査が古い、不足、過剰」なのかを区別する。
 - 現在の挙動と文書が異なる場合、どちらが正かを証拠なしに決めない。
 - 既に取得済みの機械検査を同じコマンドで再実行しない。
 - 既存タスクと重複する候補、他候補の完了で消滅する候補を明示する。
 - 改善候補は依存グラフと推奨順序を持たせる。
-- Policy矛盾や人間の決定が必要なものは`decision_required`として分離する。
+- Criteriaまたは仕様の矛盾や人間の決定が必要なものは`decision_required`として分離する。
 - `.takt/`配下の改善候補は`.takt/quality-gates/rust-quality.sh`だけに限定する。
 
 最終レポートはproject-consistency-audit output contractに従ってください。

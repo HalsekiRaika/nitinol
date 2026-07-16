@@ -8,8 +8,8 @@ READY_TO_QUEUE / NO_ACTION / NEEDS_REVIEW
 
 | 領域 | 判定 | 根拠・不足 |
 |---|---|---|
-| Policy監査基準 | OK / NG | ... |
-| Policy準拠coverage | OK / NG | ... |
+| Audit Standard / Criteria | OK / NG | ... |
+| Criteria coverage | OK / NG | ... |
 | Mechanical Check Execution | OK / NG | ... |
 | Mechanical Check Coverage | OK / NG | ... |
 | 仕様・設計・実装 | OK / NG | ... |
@@ -22,13 +22,13 @@ READY_TO_QUEUE / NO_ACTION / NEEDS_REVIEW
 - rust-quality.sh状態:
 - 実行結果:
 - 原因分類の妥当性:
-- Policy期待契約とのcoverage差分:
+- Criteria期待契約とのcoverage差分:
 - 再実行せず判断できるか:
 
 ## Finding品質
 
 - 根拠付きfinding数:
-- Policy基準に紐づくfinding数:
+- Criteriaに紐づくfinding数:
 - quality_gate finding数:
 - 推論として明示されたfinding数:
 - 未解決finding数:
@@ -41,6 +41,6 @@ READY_TO_QUEUE / NO_ACTION / NEEDS_REVIEW
 
 ## 再監査要求
 
-| # | 対象 | Policy基準 | 必要な証拠 | 完了条件 |
+| # | 対象 | Criteria | 必要な証拠 | 完了条件 |
 |---|---|---|---|---|
 | ... | ... | POL-... | ... | ... |
