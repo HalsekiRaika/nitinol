@@ -8,7 +8,7 @@ max_steps: 12
 initial_step: collect_queue_context
 
 schemas:
-  followup-task: followup-task
+  project-consistency-followup-task: project-consistency-followup-task
 
 loop_monitors:
   - cycle:
@@ -247,7 +247,7 @@ steps:
       - enqueue_new_task
       - wait_before_next_scan
     structured_output:
-      schema_ref: followup-task
+      schema_ref: project-consistency-followup-task
     rules:
       - when: structured.select_task.action == "enqueue_new_task"
         next: enqueue_task
