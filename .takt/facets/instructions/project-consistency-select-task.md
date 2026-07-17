@@ -17,17 +17,23 @@
 7. Finding IDとCriteria IDをタスク説明へ記載してよいが、source commentへの転記を要求しない。
 8. 通常の`default-rust` workflowが追加設計なしで処理できる粒度にする。
 
-structured outputには`action`, `title`, `type`, `scope`, `summary`, `goals`,
-`acceptance_criteria`, `labels`, `issue`を必ず出力してください。
+structured outputには`action`, `task_markdown`, `title`, `type`, `scope`, `summary`,
+`goals`, `acceptance_criteria`, `labels`, `issue`を必ず出力してください。
+
+`task_markdown`は`enqueue_task` effectへそのまま渡される、次タスクの完全な指示書です。
+他フィールドの単なるJSON表現ではなく、`default-rust`が追加設計なしで実行できるMarkdownとして、
+少なくともタイトル、背景・根拠、対象範囲、目標、受け入れ条件、検証方法を含めてください。
+`title`、`scope`、`summary`、`goals`、`acceptance_criteria`との内容を一致させてください。
 
 `enqueue_new_task`の場合:
+- `task_markdown`は空でない完全なタスク指示書
 - `goals`は1件以上
 - `acceptance_criteria`は2件以上
 - `acceptance_criteria`に該当する機械検査または限定検証の実行方法を含める
 - `issue`は`{ "create": false }`
 
 `wait_before_next_scan`の場合:
-- `title`, `scope`, `summary`は空文字
+- `task_markdown`, `title`, `scope`, `summary`は空文字
 - `type`は`chore`
 - `goals`, `acceptance_criteria`, `labels`は空配列
 - `issue`は`{ "create": false }`
