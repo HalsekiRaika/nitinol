@@ -181,9 +181,15 @@ steps:
     instruction: project-consistency-select-task
     structured_output:
       schema_ref: project-consistency-followup-task
+    output_contracts:
+      report:
+        - name: 04-project-consistency-task-selection.md
+          format: project-consistency-task-selection
     rules:
-      - when: structured.select_task.action == "wait_before_next_scan"
+      - when: structured.select_task.action == "wait_before_next_scan" && structured.select_task.decision_reason_code != "task_selected" && structured.select_task.decision_reason != "" && structured.select_task.next_scan_condition != ""
         next: COMPLETE
+      - when: structured.select_task.action == "wait_before_next_scan"
+        next: ABORT
       - when: structured.select_task.workflow_target == "default-rust"
         next: enqueue_default_rust
       - when: structured.select_task.workflow_target == "rust-quality-repair-fmt"

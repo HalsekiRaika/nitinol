@@ -44,6 +44,7 @@
 後続failureは同じタスクへ混ぜません。
 
 structured outputには`action`, `workflow_target`, `task_markdown`, `title`, `type`,
+`decision_reason_code`, `decision_reason`, `decision_evidence`, `next_scan_condition`,
 `scope`, `summary`, `goals`, `acceptance_criteria`, `labels`, `issue`を必ず出力してください。
 
 `task_markdown`は選んだWorkflowへそのまま渡される完全な指示書です。
@@ -52,6 +53,10 @@ structured outputには`action`, `workflow_target`, `task_markdown`, `title`, `t
 
 `enqueue_new_task`の場合:
 - `workflow_target`は`none`以外
+- `decision_reason_code`は`task_selected`
+- `decision_reason`に、選定したCandidate/Finding、優先理由、重複・依存確認の結果を具体的に記載する
+- `decision_evidence`に、Candidate ID、Finding ID、Criteria ID、機械検査ログ参照などを1件以上記載する
+- `next_scan_condition`は空文字
 - `task_markdown`は空でない完全なタスク指示書
 - quality recoveryでは対象外のfull gate failureを完了条件へ含めない
 - quality recoveryの検証方法は、対応する限定コマンドを含める
@@ -61,6 +66,10 @@ structured outputには`action`, `workflow_target`, `task_markdown`, `title`, `t
 
 `wait_before_next_scan`の場合:
 - `workflow_target`は`none`
+- `decision_reason_code`は`task_selected`以外から、最も直接的な理由を一つ選ぶ
+- `decision_reason`は空にせず、なぜ現在タスクを投入できないのかを具体的に説明する
+- `decision_evidence`に、除外したCandidate/Finding、重複タスク、依存先、decision ID、または根拠不足箇所を記載する
+- `next_scan_condition`に、次回の選定が可能になる条件を具体的に記載する
 - `task_markdown`, `title`, `scope`, `summary`は空文字
 - `type`は`chore`
 - `goals`, `acceptance_criteria`, `labels`は空配列
