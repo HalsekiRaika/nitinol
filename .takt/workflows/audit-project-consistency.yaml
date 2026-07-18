@@ -216,7 +216,7 @@ steps:
         base_branch:
           name: consistency
           create_if_missing:
-            from: main
+            from: dev
             push: true
         task: "{structured:select_task.task_markdown}"
         issue: "{structured:select_task.issue}"
@@ -238,7 +238,7 @@ steps:
         base_branch:
           name: consistency
           create_if_missing:
-            from: main
+            from: dev
             push: true
         task: "{structured:select_task.task_markdown}"
         issue: "{structured:select_task.issue}"
@@ -260,7 +260,7 @@ steps:
         base_branch:
           name: consistency
           create_if_missing:
-            from: main
+            from: dev
             push: true
         task: "{structured:select_task.task_markdown}"
         issue: "{structured:select_task.issue}"
@@ -282,7 +282,7 @@ steps:
         base_branch:
           name: consistency
           create_if_missing:
-            from: main
+            from: dev
             push: true
         task: "{structured:select_task.task_markdown}"
         issue: "{structured:select_task.issue}"
@@ -304,7 +304,7 @@ steps:
         base_branch:
           name: consistency
           create_if_missing:
-            from: main
+            from: dev
             push: true
         task: "{structured:select_task.task_markdown}"
         issue: "{structured:select_task.issue}"
@@ -326,7 +326,7 @@ steps:
         base_branch:
           name: consistency
           create_if_missing:
-            from: main
+            from: dev
             push: true
         task: "{structured:select_task.task_markdown}"
         issue: "{structured:select_task.issue}"
@@ -348,7 +348,7 @@ steps:
         base_branch:
           name: consistency
           create_if_missing:
-            from: main
+            from: dev
             push: true
         task: "{structured:select_task.task_markdown}"
         issue: "{structured:select_task.issue}"
