@@ -15,24 +15,52 @@
 5. Criteria coverage不足をquality gate変更へ変換する場合、決定的、再現可能、過剰に重くない検査だけを対象にする。
 6. `.takt/`配下の変更は`.takt/quality-gates/rust-quality.sh`だけに限定する。
 7. Finding IDとCriteria IDをタスク説明へ記載してよいが、source commentへの転記を要求しない。
-8. 通常の`default-rust` workflowが追加設計なしで処理できる粒度にする。
+8. 一件のタスクを一つの主目的に限定する。
 
-structured outputには`action`, `task_markdown`, `title`, `type`, `scope`, `summary`,
-`goals`, `acceptance_criteria`, `labels`, `issue`を必ず出力してください。
+## Workflow targetの決定
 
-`task_markdown`は`enqueue_task` effectへそのまま渡される、次タスクの完全な指示書です。
-他フィールドの単なるJSON表現ではなく、`default-rust`が追加設計なしで実行できるMarkdownとして、
-少なくともタイトル、背景・根拠、対象範囲、目標、受け入れ条件、検証方法を含めてください。
-`title`、`scope`、`summary`、`goals`、`acceptance_criteria`との内容を一致させてください。
+`workflow_target`は次から一つだけ選びます。
+
+- `default-rust`
+  - 通常の機能、設計、実装、意味的テスト、文書改善
+  - 現在失敗している特定quality checkの回復自体が主目的ではない
+- `rust-quality-repair-fmt`
+  - `cargo fmt --all -- --check`の既存failureを整形だけで直す
+- `rust-quality-repair-clippy`
+  - 現在のClippy failureまたはClippy実行環境を直す
+- `rust-quality-repair-dylint`
+  - 現在のDylint failureまたはDylint実行環境を直す
+- `rust-quality-repair-test`
+  - 現在の`cargo test` failureを直す
+- `rust-quality-repair-structural`
+  - canonical scriptのstructural check failureを直す
+- `rust-quality-repair-script`
+  - `.takt/quality-gates/rust-quality.sh`自体の欠陥を直す
+- `none`
+  - `wait_before_next_scan`の場合だけ使用する
+
+複数のquality checkが失敗している場合は、full scriptの実行順
+`fmt → clippy → dylint → test → structural`で最初の未解消failureだけを選んでください。
+後続failureは同じタスクへ混ぜません。
+
+structured outputには`action`, `workflow_target`, `task_markdown`, `title`, `type`,
+`scope`, `summary`, `goals`, `acceptance_criteria`, `labels`, `issue`を必ず出力してください。
+
+`task_markdown`は選んだWorkflowへそのまま渡される完全な指示書です。
+少なくともタイトル、背景・根拠、対象範囲、明示的な対象外、目標、受け入れ条件、
+検証方法を含め、他のstructured fieldと内容を一致させてください。
 
 `enqueue_new_task`の場合:
+- `workflow_target`は`none`以外
 - `task_markdown`は空でない完全なタスク指示書
+- quality recoveryでは対象外のfull gate failureを完了条件へ含めない
+- quality recoveryの検証方法は、対応する限定コマンドを含める
 - `goals`は1件以上
 - `acceptance_criteria`は2件以上
-- `acceptance_criteria`に該当する機械検査または限定検証の実行方法を含める
 - `issue`は`{ "create": false }`
 
 `wait_before_next_scan`の場合:
+- `workflow_target`は`none`
 - `task_markdown`, `title`, `scope`, `summary`は空文字
 - `type`は`chore`
 - `goals`, `acceptance_criteria`, `labels`は空配列

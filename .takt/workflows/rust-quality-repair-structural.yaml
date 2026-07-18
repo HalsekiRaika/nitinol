@@ -1,0 +1,84 @@
+name: rust-quality-repair-structural
+description: |
+  既存のstructural checks failureを一件の主目的として修復するquality recovery workflow。
+  full Rust quality gateの対象外failureはblocking条件にしない。
+
+max_steps: 10
+initial_step: repair
+
+steps:
+  - name: repair
+    tags:
+      - coding
+      - fix
+      - rust
+      - quality-recovery
+      - rust-quality-structural
+    edit: true
+    persona: coder
+    session_key: rust-quality-repair-structural
+    session: refresh
+    policy:
+      - coding
+      - testing
+      - rust-coding
+      - rust-quality-recovery
+    knowledge:
+      - architecture
+    required_permission_mode: edit
+    provider_options:
+      claude:
+        effort: high
+        allowed_tools:
+          - Read
+          - Glob
+          - Grep
+          - Edit
+          - Write
+          - Bash
+          - WebSearch
+          - WebFetch
+    instruction: rust-quality-repair-structural
+    quality_gates:
+      - type: command
+        name: rust-quality-structural
+        command: bash ./.takt/quality-gates/rust-quality.sh --scope structural
+        cwd: .
+        timeout_ms: 900000
+    rules:
+      - condition: 対象検査の修復が完了した
+        next: review
+      - condition: 対象検査は既に解消済みで、変更が不要だった
+        next: review
+      - condition: 指定された一件の範囲では修復できない
+        next: ABORT
+      - condition: ユーザーの方針決定が必要
+        next: repair
+        requires_user_input: true
+        interactive_only: true
+
+  - name: review
+    tags:
+      - review
+      - coding
+      - rust
+      - quality-recovery
+      - rust-quality-structural
+    edit: false
+    persona: coding-reviewer
+    session_key: rust-quality-repair-structural-review
+    session: refresh
+    policy:
+      - review
+      - coding
+      - rust-review
+      - rust-quality-recovery
+    pass_previous_response: false
+    instruction: rust-quality-repair-review
+    rules:
+      - condition: 対象検査の修復は妥当で、変更範囲も適切
+        next: COMPLETE
+      - condition: 対象検査または変更内容に修正可能な問題がある
+        next: repair
+      - condition: 対象拡張または設計判断が必要
+        next: ABORT
