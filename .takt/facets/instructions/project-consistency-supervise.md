@@ -1,0 +1,21 @@
+01-project-consistency-plan.mdと02-project-consistency-audit.mdを独立に検証してください。
+コードや設定は変更しません。
+
+確認項目:
+
+1. Audit StandardのRevisionと固定Criteria IDが保持され、適用対象へ正しく割り当てられているか。
+2. Criteriaの主要な適用領域が監査済みか。
+3. 仕様、設計、実装、公開契約、テスト、文書、既存タスクの主要領域が監査済みか。
+4. `.takt/runs/project-consistency-audit/mechanical-check.md`が読み込まれ、結果が反映されているか。
+5. 機械検査のPASS/FAILと、Criteria由来の期待coverageが別々に評価されているか。
+6. FAIL原因が製品、テスト、スクリプト、プロジェクト環境定義、操作者固有環境へ適切に分類されているか。
+7. 各findingにCriteriaIDと具体的根拠があり、推測が事実として書かれていないか。
+8. 同じ根本原因の重複findingが整理されているか。
+9. 改善候補の依存関係、優先度、検証方法が妥当か。
+10. 既存タスクと重複しうる候補が明示されているか。
+11. Criteriaまたは仕様の矛盾や人間の方針決定が必要な問題を、実装タスクとして先走っていないか。
+12. `.takt/quality-gates/rust-quality.sh`以外のTAKT管理リソースがfindingまたは候補へ混入していないか。
+13. 次に1件だけ積むための情報が十分か。
+
+不足があれば、再監査で追加すべき対象、CriteriaID、証拠を具体的に列挙してください。
+問題がなければ、タスク選定に進める理由を示してください。

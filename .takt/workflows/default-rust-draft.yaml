@@ -1,0 +1,164 @@
+name: default-rust-draft
+description: Rust Phase 1。実装 → AIアンチパターンレビュー ⇄ 修正。
+subworkflow:
+  callable: true
+  visibility: internal
+  returns:
+    - need_replan
+workflow_config:
+  provider_options:
+    codex:
+      network_access: true
+    opencode:
+      network_access: true
+max_steps: 30
+initial_step: implement
+loop_monitors:
+  - cycle:
+      - ai-antipattern-review-1st
+      - ai-antipattern-fix
+    threshold: 3
+    judge:
+      persona: supervisor
+      instruction: loop-monitor-ai-antipattern-fix
+      rules:
+        - condition: 健全（進捗あり）
+          next: ai-antipattern-review-1st
+        - condition: 非生産的（改善なし）
+          next: COMPLETE
+steps:
+  - name: implement
+    tags:
+      - coding
+      - implementation
+      - rust
+    edit: true
+    persona: coder
+    provider: claude
+    model: opus
+    session_key: rust-implement
+    session: refresh
+    policy:
+      - coding
+      - testing
+      - rust-coding
+    knowledge:
+      - architecture
+    provider_options:
+      claude:
+        effort: high
+        allowed_tools:
+          - Read
+          - Glob
+          - Grep
+          - Edit
+          - Write
+          - Bash
+          - WebSearch
+          - WebFetch
+    required_permission_mode: edit
+    instruction: rust-implement-after-tests
+    quality_gates:
+      - type: command
+        name: rust-quality
+        command: bash ./.takt/quality-gates/rust-quality.sh
+        cwd: .
+        timeout_ms: 900000
+    rules:
+      - condition: 実装完了
+        next: ai-antipattern-review-1st
+      - condition: 実装未着手（レポートのみ）
+        next: ai-antipattern-review-1st
+      - condition: 判断できない、情報不足
+        return: need_replan
+      - condition: ユーザー入力が必要
+        next: implement
+        requires_user_input: true
+        interactive_only: true
+    output_contracts:
+      report:
+        - name: coder-scope.md
+          format: coder-scope
+        - name: coder-decisions.md
+          format: coder-decisions
+  - name: ai-antipattern-review-1st
+    tags:
+      - review
+      - ai-antipattern
+      - rust
+    edit: false
+    persona: ai-antipattern-reviewer
+    provider: codex
+    model: gpt-5.5
+    session_key: rust-ai-review-first
+    session: refresh
+    policy:
+      - review
+      - ai-antipattern
+    provider_options:
+      claude:
+        allowed_tools:
+          - Read
+          - Glob
+          - Grep
+          - WebSearch
+          - WebFetch
+    instruction: ai-antipattern-review
+    rules:
+      - condition: AI特有の問題なし
+        next: COMPLETE
+      - condition: AI特有の問題あり
+        next: ai-antipattern-fix
+    output_contracts:
+      report:
+        - name: ai-antipattern-review.md
+          format: ai-antipattern-review
+  - name: ai-antipattern-fix
+    tags:
+      - coding
+      - fix
+      - ai-antipattern
+      - rust
+    edit: true
+    persona: coder
+    provider: claude
+    model: sonnet
+    promotion:
+      - at: 3
+        model: opus
+    session_key: rust-ai-fix
+    session: refresh
+    policy:
+      - coding
+      - testing
+      - rust-coding
+    knowledge:
+      - architecture
+    provider_options:
+      claude:
+        effort: high
+        allowed_tools:
+          - Read
+          - Glob
+          - Grep
+          - Edit
+          - Write
+          - Bash
+          - WebSearch
+          - WebFetch
+    required_permission_mode: edit
+    instruction: rust-ai-antipattern-fix
+    pass_previous_response: false
+    quality_gates:
+      - type: command
+        name: rust-quality
+        command: bash ./.takt/quality-gates/rust-quality.sh
+        cwd: .
+        timeout_ms: 900000
+    rules:
+      - condition: AI問題の修正完了
+        next: ai-antipattern-review-1st
+      - condition: 修正不要（指摘対象ファイル/仕様の確認済み）
+        next: COMPLETE
+      - condition: 修正を進行できない
+        next: COMPLETE

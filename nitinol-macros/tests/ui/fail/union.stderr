@@ -1,0 +1,22 @@
+error: #[derive(Event)] does not support unions
+ --> tests/ui/fail/union.rs:8:7
+  |
+8 | union Bad {
+  |       ^^^
+
+error[E0277]: the trait bound `Bad: Copy` is not satisfied
+ --> tests/ui/fail/union.rs:6:10
+  |
+6 | #[derive(Clone, Event)]
+  |          ^^^^^ the trait `Copy` is not implemented for `Bad`
+  |
+note: required by a bound in `std::clone::AssertParamIsCopy`
+ --> $RUST/core/src/clone.rs
+  |
+  | pub struct AssertParamIsCopy<T: Copy + PointeeSized> {
+  |                                 ^^^^ required by this bound in `AssertParamIsCopy`
+help: consider annotating `Bad` with `#[derive(Copy)]`
+  |
+8 + #[derive(Copy)]
+9 | union Bad {
+  |

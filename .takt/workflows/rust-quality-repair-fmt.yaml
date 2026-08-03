@@ -1,0 +1,47 @@
+name: rust-quality-repair-fmt
+description: |
+  既存のcargo fmt failureだけを機械的に修復する、
+  最小のquality recovery workflow。
+
+max_steps: 4
+initial_step: repair
+
+steps:
+  - name: repair
+    tags:
+      - coding
+      - fix
+      - rust
+      - quality-recovery
+      - rust-quality-fmt
+    edit: true
+    persona: coder
+    session_key: rust-quality-repair-fmt
+    session: refresh
+    policy:
+      - coding
+      - rust-coding
+      - rust-quality-recovery
+    required_permission_mode: edit
+    provider_options:
+      claude:
+        effort: low
+        allowed_tools:
+          - Read
+          - Glob
+          - Grep
+          - Edit
+          - Write
+          - Bash
+    instruction: rust-quality-repair-fmt
+    quality_gates:
+      - type: command
+        name: rust-quality-fmt
+        command: bash ./.takt/quality-gates/rust-quality.sh --scope fmt
+        cwd: .
+        timeout_ms: 300000
+    rules:
+      - condition: formatting修復が完了し、意味的変更を加えていない
+        next: COMPLETE
+      - condition: formattingだけでは修復できない
+        next: ABORT

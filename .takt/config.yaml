@@ -1,0 +1,22 @@
+workflow_command_gates:
+  custom_scripts: true
+provider_routing:
+  tags:
+    project-consistency-claude-control:
+      provider: claude
+      model: sonnet
+      provider_options:
+        claude:
+          effort: medium
+    project-consistency-gpt-worker:
+      provider: codex
+      model: gpt-5.6-terra
+      provider_options:
+        codex:
+          reasoning_effort: medium
+    project-consistency-gpt-structured:
+      provider: codex
+      model: gpt-5.6-luna
+      provider_options:
+        codex:
+          reasoning_effort: medium

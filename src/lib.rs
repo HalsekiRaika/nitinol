@@ -1,83 +1,94 @@
-pub use nitinol_core::identifier::*;
-pub use nitinol_core::event::Event;
-pub use nitinol_core::command::Command;
+//! Umbrella crate for the `nitinol` event-sourcing framework.
+//!
+//! Re-exports sub-crates via optional features, Tokio-style.
+//!
+//! # Feature flags
+//!
+//! | Feature        | Contents |
+//! |----------------|---------|
+//! | `runtime`      | `runtime` — actor runtime (`ProcessSystem`, `Process`, …) |
+//! | `persistence`  | `persistence` — persistence abstractions (`EventStore`, IDs, …) |
+//! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
+//! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
+//! | `full`         | All of the above |
+//!
+//! # Example
+//!
+//! ```toml
+//! [dependencies]
+//! nitinol = { version = "0.4", features = ["eventsource"] }
+//! ```
 
-#[cfg(feature = "macro")]
-pub use self::macros::*;
+#[cfg(feature = "runtime")]
+pub use nitinol_runtime as runtime;
 
-#[cfg(feature = "macro")]
-mod macros {
-    pub use nitinol_macro::Event;
-    pub use nitinol_macro::Command;
-}
+#[cfg(feature = "persistence")]
+pub use nitinol_persistence as persistence;
 
-pub mod setup {
-    #[cfg(feature = "eventstream")]
-    pub use nitinol_eventstream::init_eventstream;
-    
-    #[cfg(feature = "persistence")]
-    pub use nitinol_persistence::set_writer;
-    
-    #[cfg(feature = "projection")]
-    pub use nitinol_projection::set_global_projector;
-}
+/// Facade for the `eventsource` feature.
+///
+/// Re-exports all user-facing APIs from `nitinol-eventsource`.
+/// Framework-internal types (`SystemEvent`, `appending_system_event`,
+/// `SystemEventDecodeError`) are intentionally excluded so they are not
+/// discoverable through the umbrella entry point.
+/// Direct consumers of `nitinol-eventsource` can still reach them.
+///
+/// # Visibility contract — `error` sub-module
+///
+/// `SystemEventDecodeError` is a framework-internal type and is excluded from
+/// the `error` facade below. Attempting to import it via the umbrella must fail
+/// at compile time:
+///
+/// ```compile_fail
+/// // SystemEventDecodeError is framework-internal; umbrella must not expose it.
+/// use nitinol::eventsource::error::SystemEventDecodeError;
+/// ```
+#[cfg(feature = "eventsource")]
+pub mod eventsource {
+    pub use nitinol_eventsource::codec;
 
-#[cfg(feature = "eventstream")]
-pub mod eventstream {
-    pub use nitinol_eventstream::eventstream::EventStream;
-    pub use nitinol_eventstream::resolver;
-    pub use nitinol_eventstream::subscriber::EventSubscriber;
-}
-
-#[cfg(feature = "protocol")]
-pub mod protocol {
-    pub use nitinol_protocol::Payload;
-    pub use nitinol_protocol::io;
-}
-
-#[cfg(feature = "process")]
-pub mod process {
-    pub use nitinol_process::any;
-    pub use nitinol_process::manager;
-    pub use nitinol_process::Receptor;
-    pub use nitinol_process::Context;
-    pub use nitinol_process::Process;
-    pub use nitinol_process::task::{EventApplicator, CommandHandler};
-    
-    #[cfg(feature = "persistence")]
-    pub mod persistence {
-        pub use nitinol_persistence::process::*;
-        pub use nitinol_persistence::writer;
+    /// User-facing error types from the eventsource layer.
+    ///
+    /// Framework-internal errors (`SystemEventDecodeError`, `AskHandlerError`,
+    /// `ExecHandlerError`) are intentionally excluded — they form part of the
+    /// internal request/response plumbing and are not part of the public API.
+    pub mod error {
+        pub use nitinol_eventsource::error::AskError;
+        pub use nitinol_eventsource::error::CodecError;
+        pub use nitinol_eventsource::error::EffectExecutionError;
+        pub use nitinol_eventsource::error::ExecError;
+        pub use nitinol_eventsource::error::TellError;
     }
-    
-    #[cfg(feature = "eventstream")]
-    pub mod eventstream {
-        pub use nitinol_eventstream::process::WithStreamPublisher;
-        pub use nitinol_eventstream::process::WithEventSubscriber;
-    }
+
+    pub use nitinol_eventsource::projection;
+    pub use nitinol_eventsource::system;
+
+    pub use nitinol_eventsource::{Aggregate, Snapshotable};
+    pub use nitinol_eventsource::Context;
+    pub use nitinol_eventsource::Decider;
+    pub use nitinol_eventsource::{Effect, SideEffect, SideEffectError};
+    pub use nitinol_eventsource::Event;
+
+    /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
+    /// `use nitinol::eventsource::Event;` brings both into scope (trait in the
+    /// type namespace, derive in the macro namespace — as `serde` does).
+    pub use nitinol_macros::Event;
+
+    pub use nitinol_eventsource::Receive;
+    pub use nitinol_eventsource::{AskError, ExecError, TellError};
+    pub use nitinol_eventsource::{
+        AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset,
+    };
+    pub use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
+    pub use nitinol_eventsource::{
+        EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, Projector,
+        ProjectorProps, TxProvider,
+    };
+    pub use nitinol_eventsource::{
+        CursorSet, CursorUnset, DurableStream, DurableStreamProxy, DurableSubscription,
+        SequenceCursor,
+    };
 }
 
-#[cfg(any(feature = "projection", feature = "eventstream"))]
-pub mod resolver {
-    pub use nitinol_resolver::*;
-}
-
-#[cfg(feature = "projection")]
-pub mod projection {
-    pub use nitinol_projection::projection::*;
-    pub use nitinol_projection::projector;
-    pub use nitinol_projection::resolver;
-}
-
-pub mod errors {
-    pub use nitinol_core::errors::*;
-    
-    #[cfg(feature = "process")]
-    pub use nitinol_process::errors::*;
-    
-    #[cfg(feature = "protocol")]
-    pub use nitinol_protocol::errors::*;
-    
-    #[cfg(feature = "projection")]
-    pub use nitinol_projection::errors::*;
-}
+#[cfg(feature = "saga")]
+pub use nitinol_saga as saga;

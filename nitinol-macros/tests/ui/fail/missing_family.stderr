@@ -1,0 +1,5 @@
+error: #[derive(Event)] requires a `#[event(family = "...")]` attribute
+ --> tests/ui/fail/missing_family.rs:8:8
+  |
+8 | struct Missing;
+  |        ^^^^^^^

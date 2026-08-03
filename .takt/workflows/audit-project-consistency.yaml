@@ -1,0 +1,362 @@
+name: audit-project-consistency
+description: |
+  Audit専用Persona・Policyと、Rust向けPolicyからコンパイルしたrust-audit-standardを用いて、
+  仕様、設計、実装、テスト、文書、既存タスクの整合性を横断監査する。
+  正規rust-quality.shの機械検査を独立証拠として評価し、重複しない改善タスクを1件だけ積む。
+
+max_steps: 12
+initial_step: collect_queue_context
+
+loop_monitors:
+  - cycle:
+      - supervise
+      - review
+    threshold: 3
+    judge:
+      session_key: project-consistency-loop-supervisor
+      persona: project-consistency-audit-supervisor
+      instruction: |
+        project consistency audit の supervise → review サイクルが
+        {cycle_count} 回繰り返されました。
+
+        01-project-consistency-plan.md、02-project-consistency-audit.md、
+        03-project-consistency-supervision.md、および
+        .takt/runs/project-consistency-audit/mechanical-check.mdを比較し、次を判断してください。
+
+        - 固定Criteria IDのcoverageが改善しているか
+        - 仕様、設計、実装、テスト、文書、既存タスクの主要領域が監査済みか
+        - rust-quality.shの実行結果とCriteria由来の機械判定可能要件が照合済みか
+        - Findingの根拠がfile:line、Criteria ID、または機械検査ログで示されているか
+        - 未解決事項が追加監査で解けるか、人間の方針決定が必要か
+        - rust-quality.sh以外のTAKT管理リソースを改善対象へ混入させていないか
+        - 同じ指摘を言い換えるだけの反復になっていないか
+      rules:
+        - condition: 監査品質と網羅性が十分で、次タスクを安全に選べる
+          next: select_task
+        - condition: 新しい根拠または監査範囲が増えており改善が続いている
+          next: review
+        - condition: 監査が停滞し、追加サイクルで改善する見込みがない
+          next: ABORT
+      provider: claude
+      model: sonnet
+      provider_options:
+        claude:
+          effort: medium
+
+steps:
+  - name: collect_queue_context
+    mode: system
+    system_inputs:
+      - type: task_queue_context
+        source: current_project
+        as: queue
+        exclude_current_task: true
+    rules:
+      - when: "true"
+        next: plan
+
+  - name: plan
+    tags:
+      - plan
+      - audit
+      - consistency
+      - mechanical-check
+      - project-consistency-claude-control
+    edit: false
+    persona: project-consistency-audit-planner
+    session_key: project-consistency-plan
+    session: refresh
+    policy:
+      - project-consistency-audit-control
+    knowledge:
+      - rust-audit-standard
+    instruction: project-consistency-plan
+    output_contracts:
+      report:
+        - name: 01-project-consistency-plan.md
+          format: project-consistency-audit-plan
+    quality_gates:
+      - type: command
+        name: collect-rust-quality-evidence
+        command: ./.takt/quality-gates/project-consistency-machine-check.sh
+        timeout_ms: 1800000
+    rules:
+      - condition: Audit Standard、Criteria割当、機械検査期待契約、監査範囲、および3分割計画が完成
+        next: audit
+      - condition: リポジトリを監査できる状態ではない、または必要な根拠へアクセスできない
+        next: ABORT
+
+  - name: audit
+    tags:
+      - audit
+      - consistency
+      - rust
+      - mechanical-check
+      - project-consistency-claude-control
+    edit: false
+    persona: project-consistency-auditor
+    policy:
+      - project-consistency-audit-control
+    instruction: project-consistency-audit-team-leader
+    team_leader:
+      max_concurrency: 3
+      max_total_parts: 3
+      part_persona: project-consistency-auditor
+      part_edit: false
+      part_tags:
+        - project-consistency-gpt-worker
+    output_contracts:
+      report:
+        - name: 02-project-consistency-audit.md
+          format: project-consistency-audit
+    rules:
+      - condition: 3監査パートを統合し、Criteria準拠と機械検査を含む根拠付きFindingと改善候補の整理が完了
+        next: supervise
+      - condition: 監査を進行できない
+        next: ABORT
+
+  - name: supervise
+    tags:
+      - supervise
+      - consistency
+      - mechanical-check
+      - project-consistency-claude-control
+    edit: false
+    persona: project-consistency-audit-supervisor
+    session_key: project-consistency-supervise
+    session: refresh
+    policy:
+      - project-consistency-audit-control
+    instruction: project-consistency-supervise
+    pass_previous_response: false
+    output_contracts:
+      report:
+        - name: 03-project-consistency-supervision.md
+          format: project-consistency-supervision
+    rules:
+      - condition: 監査が完全で、キューへ積む価値のある改善候補が1件以上ある
+        next: select_task
+      - condition: 監査が完全で、現在積むべき独立改善タスクがない
+        next: COMPLETE
+      - condition: Criteria、監査範囲、機械検査、根拠、重複排除、依存関係のいずれかが不十分
+        next: review
+
+  - name: review
+    tags:
+      - audit
+      - consistency
+      - rust
+      - mechanical-check
+      - project-consistency-gpt-worker
+    edit: false
+    persona: project-consistency-auditor
+    session_key: project-consistency-review
+    session: refresh
+    policy:
+      - project-consistency-audit-control
+    instruction: project-consistency-review
+    pass_previous_response: false
+    output_contracts:
+      report:
+        - name: 02-project-consistency-audit.md
+          format: project-consistency-audit
+    rules:
+      - condition: 不足箇所の再監査とレポート更新が完了
+        next: supervise
+      - condition: 追加監査で解決不能なため、人間の方針決定が必要
+        next: ABORT
+
+  - name: select_task
+    tags:
+      - plan
+      - queue
+      - consistency
+      - project-consistency-gpt-structured
+    edit: false
+    persona: project-consistency-task-selector
+    session_key: project-consistency-select-task
+    session: refresh
+    policy:
+      - project-consistency-task-selection
+    instruction: project-consistency-select-task
+    structured_output:
+      schema_ref: project-consistency-followup-task
+    output_contracts:
+      report:
+        - name: 04-project-consistency-task-selection.md
+          format: project-consistency-task-selection
+    rules:
+      - when: structured.select_task.action == "wait_before_next_scan" && structured.select_task.decision_reason_code != "task_selected" && structured.select_task.decision_reason != "" && structured.select_task.next_scan_condition != ""
+        next: COMPLETE
+      - when: structured.select_task.action == "wait_before_next_scan"
+        next: ABORT
+      - when: structured.select_task.workflow_target == "default-rust"
+        next: enqueue_default_rust
+      - when: structured.select_task.workflow_target == "rust-quality-repair-fmt"
+        next: enqueue_quality_fmt
+      - when: structured.select_task.workflow_target == "rust-quality-repair-clippy"
+        next: enqueue_quality_clippy
+      - when: structured.select_task.workflow_target == "rust-quality-repair-dylint"
+        next: enqueue_quality_dylint
+      - when: structured.select_task.workflow_target == "rust-quality-repair-test"
+        next: enqueue_quality_test
+      - when: structured.select_task.workflow_target == "rust-quality-repair-structural"
+        next: enqueue_quality_structural
+      - when: structured.select_task.workflow_target == "rust-quality-repair-script"
+        next: enqueue_quality_script
+      - when: "true"
+        next: ABORT
+
+  - name: enqueue_default_rust
+    mode: system
+    effects:
+      - type: enqueue_task
+        mode: new
+        workflow: default-rust
+        base_branch:
+          name: consistency
+          create_if_missing:
+            from: dev
+            push: true
+        task: "{structured:select_task.task_markdown}"
+        issue: "{structured:select_task.issue}"
+        worktree:
+          enabled: true
+          auto_pr: false
+    rules:
+      - when: effect.enqueue_default_rust.enqueue_task.success == true
+        next: COMPLETE
+      - when: "true"
+        next: ABORT
+
+  - name: enqueue_quality_fmt
+    mode: system
+    effects:
+      - type: enqueue_task
+        mode: new
+        workflow: rust-quality-repair-fmt
+        base_branch:
+          name: consistency
+          create_if_missing:
+            from: dev
+            push: true
+        task: "{structured:select_task.task_markdown}"
+        issue: "{structured:select_task.issue}"
+        worktree:
+          enabled: true
+          auto_pr: false
+    rules:
+      - when: effect.enqueue_quality_fmt.enqueue_task.success == true
+        next: COMPLETE
+      - when: "true"
+        next: ABORT
+
+  - name: enqueue_quality_clippy
+    mode: system
+    effects:
+      - type: enqueue_task
+        mode: new
+        workflow: rust-quality-repair-clippy
+        base_branch:
+          name: consistency
+          create_if_missing:
+            from: dev
+            push: true
+        task: "{structured:select_task.task_markdown}"
+        issue: "{structured:select_task.issue}"
+        worktree:
+          enabled: true
+          auto_pr: false
+    rules:
+      - when: effect.enqueue_quality_clippy.enqueue_task.success == true
+        next: COMPLETE
+      - when: "true"
+        next: ABORT
+
+  - name: enqueue_quality_dylint
+    mode: system
+    effects:
+      - type: enqueue_task
+        mode: new
+        workflow: rust-quality-repair-dylint
+        base_branch:
+          name: consistency
+          create_if_missing:
+            from: dev
+            push: true
+        task: "{structured:select_task.task_markdown}"
+        issue: "{structured:select_task.issue}"
+        worktree:
+          enabled: true
+          auto_pr: false
+    rules:
+      - when: effect.enqueue_quality_dylint.enqueue_task.success == true
+        next: COMPLETE
+      - when: "true"
+        next: ABORT
+
+  - name: enqueue_quality_test
+    mode: system
+    effects:
+      - type: enqueue_task
+        mode: new
+        workflow: rust-quality-repair-test
+        base_branch:
+          name: consistency
+          create_if_missing:
+            from: dev
+            push: true
+        task: "{structured:select_task.task_markdown}"
+        issue: "{structured:select_task.issue}"
+        worktree:
+          enabled: true
+          auto_pr: false
+    rules:
+      - when: effect.enqueue_quality_test.enqueue_task.success == true
+        next: COMPLETE
+      - when: "true"
+        next: ABORT
+
+  - name: enqueue_quality_structural
+    mode: system
+    effects:
+      - type: enqueue_task
+        mode: new
+        workflow: rust-quality-repair-structural
+        base_branch:
+          name: consistency
+          create_if_missing:
+            from: dev
+            push: true
+        task: "{structured:select_task.task_markdown}"
+        issue: "{structured:select_task.issue}"
+        worktree:
+          enabled: true
+          auto_pr: false
+    rules:
+      - when: effect.enqueue_quality_structural.enqueue_task.success == true
+        next: COMPLETE
+      - when: "true"
+        next: ABORT
+
+  - name: enqueue_quality_script
+    mode: system
+    effects:
+      - type: enqueue_task
+        mode: new
+        workflow: rust-quality-repair-script
+        base_branch:
+          name: consistency
+          create_if_missing:
+            from: dev
+            push: true
+        task: "{structured:select_task.task_markdown}"
+        issue: "{structured:select_task.issue}"
+        worktree:
+          enabled: true
+          auto_pr: false
+    rules:
+      - when: effect.enqueue_quality_script.enqueue_task.success == true
+        next: COMPLETE
+      - when: "true"
+        next: ABORT

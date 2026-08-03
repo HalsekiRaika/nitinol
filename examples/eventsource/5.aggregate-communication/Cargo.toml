@@ -1,0 +1,30 @@
+[package]
+name = "eventsource-aggregate-communication"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Aggregate-to-aggregate communication via Effect::Side"
+
+[lib]
+name = "eventsource_aggregate_communication"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eventsource-aggregate-communication"
+path = "src/main.rs"
+
+[dependencies]
+nitinol = { path = "../../..", features = ["eventsource"] }
+nitinol-eventsource = { path = "../../../nitinol-eventsource" }
+nitinol-persistence = { path = "../../../nitinol-persistence" }
+nitinol-runtime = { path = "../../../nitinol-runtime" }
+async-trait = "0.1"
+bytes = "1"
+futures-core = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,0 +1,116 @@
+use nitinol_persistence::AggregateId;
+use nitinol_runtime::error::AskError as RuntimeAskError;
+use nitinol_runtime::process::ProcessProxy;
+
+use crate::aggregate::Aggregate;
+use crate::decider::Decider;
+use crate::error::{AskError, AskHandlerError, ExecError, ExecHandlerError, TellError};
+use crate::process::aggregate_process::{AggregateProcess, AskCmd, ExecMsg};
+use crate::receive::Receive as EvtReceive;
+
+/// A typed handle to an `AggregateProcess<A>` with a high-level domain API.
+///
+/// Wraps `ProcessProxy<AggregateProcess<A>>` so callers interact with domain
+/// types (`ask`, `tell`, `exec`) rather than runtime plumbing.  The
+/// `aggregate_id` is stored alongside the process handle so downstream
+/// consumers can identify the target without a round-trip.
+pub struct AggregateProxy<A: Aggregate> {
+    pub(crate) inner: ProcessProxy<AggregateProcess<A>>,
+    /// The aggregate's stream key — kept here so [`AggregateTellTarget::aggregate_id_str`]
+    /// can return it without sending a query to the process.
+    aggregate_id: AggregateId,
+}
+
+impl<A: Aggregate> Clone for AggregateProxy<A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            aggregate_id: self.aggregate_id.clone(),
+        }
+    }
+}
+
+impl<A: Aggregate> AggregateProxy<A> {
+    pub(crate) fn new(inner: ProcessProxy<AggregateProcess<A>>, aggregate_id: AggregateId) -> Self {
+        Self { inner, aggregate_id }
+    }
+
+    /// The aggregate's stream key.
+    pub fn aggregate_id(&self) -> &AggregateId {
+        &self.aggregate_id
+    }
+
+    /// Send a command and wait for the persisted events.
+    ///
+    /// Returns `Vec<A::Event>` containing every event produced and applied by
+    /// `Decider::decide`.  Side effects are excluded (fire-and-forget).
+    pub async fn ask<C>(
+        &self,
+        cmd: C,
+    ) -> Result<Vec<A::Event>, AskError<<A as Decider<C>>::Rejection>>
+    where
+        A: Decider<C>,
+        C: Send + Sync + 'static,
+    {
+        self.inner.ask(AskCmd(cmd)).await.map_err(map_ask_error)
+    }
+
+    /// Send a command without waiting for a response.
+    ///
+    /// The command is queued and processed in FIFO order; ordering relative to
+    /// later `exec` calls is guaranteed by the single-threaded process loop.
+    pub async fn tell<C>(&self, cmd: C) -> Result<(), TellError>
+    where
+        A: Decider<C>,
+        C: Send + Sync + 'static,
+    {
+        self.inner.tell(AskCmd(cmd)).await.map_err(TellError::Send)
+    }
+
+    /// Send a read-only query and wait for the response.
+    ///
+    /// `exec` does not mutate aggregate state.
+    pub async fn exec<M>(
+        &self,
+        msg: M,
+    ) -> Result<<A as EvtReceive<M>>::Response, ExecError<<A as EvtReceive<M>>::Error>>
+    where
+        A: EvtReceive<M>,
+        M: Send + Sync + 'static,
+    {
+        self.inner.ask(ExecMsg(msg)).await.map_err(map_exec_error)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error mappers
+// ---------------------------------------------------------------------------
+
+fn map_ask_error<R>(e: RuntimeAskError<AskHandlerError<R>>) -> AskError<R>
+where
+    R: std::error::Error + Send + Sync + 'static,
+{
+    match e {
+        RuntimeAskError::Handler(h) => match h {
+            AskHandlerError::Rejection(r) => AskError::Rejection(r),
+            AskHandlerError::Effect(eff) => AskError::Effect(eff),
+        },
+        RuntimeAskError::DeadLetter { .. }
+        | RuntimeAskError::ReplyDropped
+        | RuntimeAskError::Timeout { .. } => AskError::Send(nitinol_runtime::error::SendError),
+    }
+}
+
+fn map_exec_error<E>(e: RuntimeAskError<ExecHandlerError<E>>) -> ExecError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    match e {
+        RuntimeAskError::Handler(h) => match h {
+            ExecHandlerError::Domain(e) => ExecError::Domain(e),
+        },
+        RuntimeAskError::DeadLetter { .. }
+        | RuntimeAskError::ReplyDropped
+        | RuntimeAskError::Timeout { .. } => ExecError::Send(nitinol_runtime::error::SendError),
+    }
+}

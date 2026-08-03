@@ -1,0 +1,116 @@
+name: default-rust
+description: TAKT v0.51.0準拠のRustテスト先行ワークフロー（計画 → テスト → Rust draft → Rust peer 
+  review → COMPLETE）
+workflow_config:
+  provider_options:
+    codex:
+      network_access: true
+    opencode:
+      network_access: true
+max_steps: 30
+initial_step: plan
+steps:
+  - name: plan
+    tags:
+      - plan
+      - rust
+    edit: false
+    persona: planner
+    provider: claude
+    model: opus
+    session_key: rust-plan
+    session: refresh
+    policy:
+      - rust-design
+    knowledge: architecture
+    provider_options:
+      claude:
+        effort: high
+        allowed_tools:
+          - Read
+          - Glob
+          - Grep
+          - Bash
+          - WebSearch
+          - WebFetch
+    rules:
+      - condition: 要件が明確で実装可能
+        next: write_tests
+      - condition: ユーザーが質問をしている（実装タスクではない）
+        next: COMPLETE
+      - condition: 要件が不明確、情報不足
+        next: ABORT
+        appendix: "確認事項:\n- {質問1}\n- {質問2}\n"
+    instruction: rust-plan
+    output_contracts:
+      report:
+        - name: plan.md
+          format: plan
+  - name: write_tests
+    tags:
+      - coding
+      - test-planning
+      - rust
+    edit: true
+    persona: coder
+    provider: claude
+    model: opus
+    session_key: rust-tests
+    session: refresh
+    policy:
+      - coding
+      - testing
+      - rust-testing
+    knowledge:
+      - architecture
+      - unit-testing
+      - e2e-testing
+    provider_options:
+      claude:
+        effort: high
+        allowed_tools:
+          - Read
+          - Glob
+          - Grep
+          - Edit
+          - Write
+          - Bash
+          - WebSearch
+          - WebFetch
+    required_permission_mode: edit
+    instruction: rust-write-tests-first
+    rules:
+      - condition: テスト作成が完了した
+        next: draft
+      - condition: テスト対象が未実装のためテスト作成をスキップする
+        next: draft
+      - condition: テスト作成を進行できない
+        next: ABORT
+      - condition: ユーザーへの確認事項があるためユーザー入力が必要
+        next: write_tests
+        requires_user_input: true
+        interactive_only: true
+    output_contracts:
+      report:
+        - name: test-report.md
+          format: test-report
+  - name: draft
+    kind: workflow_call
+    call: default-rust-draft
+    rules:
+      - condition: COMPLETE
+        next: peer-review
+      - condition: need_replan
+        next: plan
+      - condition: ABORT
+        next: ABORT
+  - name: peer-review
+    kind: workflow_call
+    call: default-rust-peer-review
+    rules:
+      - condition: COMPLETE
+        next: COMPLETE
+      - condition: need_replan
+        next: plan
+      - condition: ABORT
+        next: ABORT

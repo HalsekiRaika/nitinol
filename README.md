@@ -1,3 +1,3 @@
 # Nitinol
 
-An utilities for EventSourcing.
+An Event Sourcing toolkit for Rust.

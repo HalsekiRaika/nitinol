@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package nitinol.saga.dead_letter;
+
+// Dead-letter events for the Saga DLQ (Issue #51, G-27/G-28).  Persisted on the
+// saga's own EventStore stream as `SagaPersisted::DeadLetter(DeadLetterEvent)`,
+// mixed into the same envelope as the outbox and schedule markers.  The `oneof
+// failure` arm is the value-level variant written on the wire
+// (`tell_failed` / `handle_failed` / `persist_failed` /
+// `ended_saga_received_message` / `decode_failed` / `scheduled_failed`).
+message DeadLetterMarker {
+  // Stream sequence this dead letter occupies on the saga stream.
+  uint64 seq = 1;
+  string saga_id = 2;
+  int64 occurred_at_unix_millis = 3;
+  SourceContext source = 4;
+  oneof failure {
+    TellFailed tell_failed = 5;
+    HandleFailed handle_failed = 6;
+    PersistFailed persist_failed = 7;
+    EndedSagaReceivedMessage ended_saga_received_message = 8;
+    DecodeFailed decode_failed = 9;
+    ScheduledFailed scheduled_failed = 10;
+  }
+}
+
+// Context captured at the moment of failure: the causing upstream message's
+// aggregate id and sequence when available (empty / zero otherwise).
+message SourceContext {
+  string aggregate_id = 1;
+  uint64 upstream_sequence = 2;
+}
+
+// A tell that exhausted its staged retry budget (G-30).  `target` is the
+// target aggregate's stream key; `message` carries the tell's crash-restart
+// payload when one was supplied, else empty.
+message TellFailed {
+  string target = 1;
+  bytes message = 2;
+}
+
+// `Saga::handle` returned `Self::Error`.
+message HandleFailed {
+  string error = 1;
+}
+
+// `SagaEffect::Persist` failed to write to the EventStore.
+message PersistFailed {
+  string error = 1;
+}
+
+// A message routed to a saga that had already ended (Draining).  `message`
+// carries the raw wire payload of the dropped message.  For upstream events
+// this is the bytes as loaded from the upstream EventStore; for scheduled
+// firings this is the timer payload.
+message EndedSagaReceivedMessage {
+  bytes message = 1;
+}
+
+// A received message failed to deserialize.
+message DecodeFailed {
+  string error = 1;
+}
+
+// `Saga::on_scheduled` returned `Self::Error`.
+message ScheduledFailed {
+  string error = 1;
+}

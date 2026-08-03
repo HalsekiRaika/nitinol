@@ -1,0 +1,166 @@
+name: default-rust-peer-review
+description: Rust Phase 2。architecture + AI antipattern + Rust coding 
+  reviewの並列レビュー ⇄ 修正後、BuiltIn merge-readiness final gateを実行。
+subworkflow:
+  callable: true
+  visibility: internal
+  returns:
+    - need_replan
+workflow_config:
+  provider_options:
+    codex:
+      network_access: true
+    opencode:
+      network_access: true
+max_steps: 30
+initial_step: reviewers
+loop_monitors:
+  - cycle:
+      - reviewers
+      - final-gate
+      - fix
+    threshold: 3
+    judge:
+      persona: supervisor
+      instruction: loop-monitor-reviewers-fix
+      rules:
+        - condition: 健全（指摘数が減少、修正が反映されている）
+          next: reviewers
+        - condition: 非生産的（同じ指摘が繰り返される）
+          next: ABORT
+steps:
+  - name: reviewers
+    tags:
+      - review
+      - rust
+    parallel:
+      - name: arch-review
+        tags:
+          - review
+          - architecture
+          - rust
+        edit: false
+        persona: architecture-reviewer
+        provider: codex
+        model: gpt-5.5
+        session_key: rust-arch-review
+        session: refresh
+        policy: review
+        knowledge: architecture
+        rules:
+          - condition: approved
+          - condition: needs_fix
+        instruction: review-arch
+        output_contracts:
+          report:
+            - name: architect-review.md
+              format: architecture-review
+      - name: ai-antipattern-review-2nd
+        tags:
+          - review
+          - ai-antipattern
+          - rust
+        edit: false
+        persona: ai-antipattern-reviewer
+        provider: codex
+        model: gpt-5.5
+        session_key: rust-ai-review-second
+        session: refresh
+        policy:
+          - review
+          - ai-antipattern
+        rules:
+          - condition: AI特有の問題なし
+          - condition: AI特有の問題あり
+        instruction: ai-antipattern-review
+        output_contracts:
+          report:
+            - name: ai-antipattern-review.md
+              format: ai-antipattern-review
+      - name: coding-review
+        tags:
+          - review
+          - coding
+          - rust
+        edit: false
+        persona: coding-reviewer
+        provider: codex
+        model: gpt-5.5
+        session_key: rust-coding-review
+        session: refresh
+        policy:
+          - review
+          - coding
+          - rust-review
+        pass_previous_response: false
+        instruction: review-coding
+        rules:
+          - condition: approved
+          - condition: needs_fix
+        output_contracts:
+          report:
+            - name: coding-review.md
+              format: coding-review
+    rules:
+      - condition: all("approved", "AI特有の問題なし", "approved")
+        next: final-gate
+      - condition: any("needs_fix", "AI特有の問題あり", "needs_fix")
+        next: fix
+  - name: final-gate
+    kind: workflow_call
+    call: merge-readiness-final-gate
+    rules:
+      - condition: COMPLETE
+        next: COMPLETE
+      - condition: needs_fix
+        next: fix
+      - condition: need_replan
+        return: need_replan
+      - condition: ABORT
+        next: ABORT
+  - name: fix
+    tags:
+      - coding
+      - fix
+      - rust
+    edit: true
+    persona: coder
+    provider: claude
+    model: sonnet
+    promotion:
+      - at: 3
+        model: opus
+    session_key: rust-peer-fix
+    session: refresh
+    policy:
+      - coding
+      - testing
+      - rust-coding
+    knowledge:
+      - architecture
+    provider_options:
+      claude:
+        effort: high
+        allowed_tools:
+          - Read
+          - Glob
+          - Grep
+          - Edit
+          - Write
+          - Bash
+          - WebSearch
+          - WebFetch
+    required_permission_mode: edit
+    instruction: rust-fix
+    pass_previous_response: false
+    quality_gates:
+      - type: command
+        name: rust-quality
+        command: bash ./.takt/quality-gates/rust-quality.sh
+        cwd: .
+        timeout_ms: 900000
+    rules:
+      - condition: 修正完了
+        next: reviewers
+      - condition: 判断できない、情報不足
+        return: need_replan

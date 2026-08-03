@@ -1,0 +1,28 @@
+[package]
+name = "nitinol-eventsource"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Effect ADT and event sourcing utilities for nitinol"
+
+[features]
+test-helpers = []
+
+[dependencies]
+nitinol-runtime = { path = "../nitinol-runtime" }
+nitinol-persistence = { path = "../nitinol-persistence" }
+async-trait = "0.1"
+bytes = "1"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+jiff = "0.2"
+thiserror = "2"
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

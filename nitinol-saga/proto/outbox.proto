@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package nitinol.saga.outbox;
+
+message OutboxMarker {
+  oneof kind {
+    TellRequested tell_requested = 1;
+    TellAcked tell_acked = 2;
+    TellFailed tell_failed = 3;
+    Scheduled scheduled = 4;
+    Ended ended = 5;
+  }
+}
+
+message TellRequested {
+  uint64 tell_id = 1;
+  optional bytes crash_restart = 2;
+  // Stream key of the target aggregate, stored so replay can write a
+  // `SagaFailure::TellFailed` DLQ entry even when the crash-restart factory
+  // cannot reconstruct the TellIntent.  Empty string means unknown target
+  // (streams written before this field was added).
+  string target = 3;
+}
+
+message TellAcked {
+  uint64 tell_id = 1;
+}
+
+message TellFailed {
+  uint64 tell_id = 1;
+}
+
+message Scheduled {
+  int64 at_unix_seconds = 1;
+}
+
+// Durable terminal marker written when `SagaEffect::End` is interpreted.  Its
+// presence in the saga's own event stream is the signal that the saga has
+// terminated; on a subsequent spawn `on_start` refuses to wire up the upstream
+// subscription (D-14).  Carries no fields — presence is the whole signal.
+message Ended {}

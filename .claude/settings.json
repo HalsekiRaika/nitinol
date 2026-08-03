@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'cargo fmt --check && cargo clippy -- -D warnings -W clippy::manual_async_fn && cargo dylint --all -- --all-targets --all-features'"
+          }
+        ]
+      }
+    ]
+  }
+}

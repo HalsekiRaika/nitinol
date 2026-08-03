@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package nitinol.saga.schedule;
+
+// Marker events for the DeadlineScheduler (Issue #50, E-30).  Persisted on the
+// saga's own EventStore stream as `SagaPersisted::Schedule(ScheduleEvent)`.
+// The `oneof` arm is the value-level variant written on the wire
+// (`scheduled` / `cancelled` / `fired`).
+message ScheduleMarker {
+  oneof kind {
+    Scheduled scheduled = 1;
+    Cancelled cancelled = 2;
+    Fired fired = 3;
+  }
+}
+
+// A registered timer.  `after_nanos` + `scheduled_at_unix_millis` are used to
+// recompute the remaining delay across restarts
+// (`remaining = scheduled_at + after - now`).  `payload` is the serialized
+// `Saga::ScheduledMessage`.  `after_nanos` stores the full-precision nanosecond
+// duration so that sub-millisecond timers and durations up to ~584 years round-
+// trip without loss.
+message Scheduled {
+  string saga_id = 1;
+  string name = 2;
+  uint64 after_nanos = 3;
+  bytes payload = 4;
+  int64 scheduled_at_unix_millis = 5;
+}
+
+// A cancelled timer (name-scoped cancel or re-schedule of the same name).
+message Cancelled {
+  string saga_id = 1;
+  string name = 2;
+  int64 cancelled_at_unix_millis = 3;
+}
+
+// A fired timer — the scheduled message was dispatched to `on_scheduled`.
+message Fired {
+  string saga_id = 1;
+  string name = 2;
+  int64 fired_at_unix_millis = 3;
+}
