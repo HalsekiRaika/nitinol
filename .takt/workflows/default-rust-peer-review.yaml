@@ -11,7 +11,6 @@ workflow_config:
       network_access: true
     opencode:
       network_access: true
-max_steps: 50
 initial_step: reviewers
 loop_monitors:
   # 通常のレビュー差し戻し経路: reviewers -> fix -> reviewers
@@ -124,33 +123,20 @@ steps:
       - condition: any("needs_fix", "AI特有の問題あり", "needs_fix")
         next: fix
   - name: final-gate
-    tags:
-      - review
-      - merge-readiness
-      - rust
-    edit: false
-    persona: merge-readiness-reviewer
-    provider: codex
-    model: gpt-5.5
-    session_key: rust-merge-readiness-final
-    session: refresh
-    policy:
-      - review
-      - merge-readiness-review
-      - report-phase-boundary
-    knowledge:
-      - architecture
-    pass_previous_response: false
-    instruction: merge-readiness-review
+    kind: workflow_call
+    call: merge-readiness-final-gate
+    args:
+      supervise_knowledge:
+        - architecture
     rules:
-      - condition: approved
+      - condition: COMPLETE
         next: COMPLETE
       - condition: needs_fix
         next: fix
-    output_contracts:
-      report:
-        - name: merge-readiness-review.md
-          format: merge-readiness-review
+      - condition: need_replan
+        return: need_replan
+      - condition: ABORT
+        next: ABORT
   - name: fix
     tags:
       - coding

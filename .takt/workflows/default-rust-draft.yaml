@@ -11,7 +11,6 @@ workflow_config:
       network_access: true
     opencode:
       network_access: true
-max_steps: 40
 initial_step: implement
 loop_monitors:
   - cycle:
@@ -20,7 +19,7 @@ loop_monitors:
     threshold: 3
     judge:
       persona: supervisor
-      instruction: loop-monitor-ai-antipattern-fix
+      instruction: loop-monitor-reviewers-fix
       rules:
         - condition: 健全（進捗あり）
           next: ai-antipattern-review-1st

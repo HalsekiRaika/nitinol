@@ -1,5 +1,11 @@
 workflow_command_gates:
   custom_scripts: true
+
+takt_providers:
+  assistant:
+    provider: claude
+    model: claude-fable-5
+
 provider_routing:
   tags:
     project-consistency-claude-control:

@@ -1,5 +1,5 @@
 name: default-rust
-description: TAKT v0.51.0準拠のRustテスト先行ワークフロー（計画 → テスト → Rust draft → Rust peer review → COMPLETE）
+description: TAKT v0.57.0対応のRustテスト先行ワークフロー（計画 → テスト → Rust draft → Rust peer review → COMPLETE）
 workflow_config:
   provider_options:
     codex:

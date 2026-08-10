@@ -52,7 +52,7 @@ steps:
         as: queue
         exclude_current_task: true
     rules:
-      - when: "true"
+      - condition: when(true)
         next: plan
 
   - name: plan
@@ -102,7 +102,7 @@ steps:
     instruction: project-consistency-audit-team-leader
     team_leader:
       max_concurrency: 3
-      max_total_parts: 3
+      initial_max_parts: 3
       part_persona: project-consistency-auditor
       part_edit: false
       part_tags:
@@ -191,25 +191,25 @@ steps:
         - name: 05-project-consistency-task-selection.md
           format: project-consistency-task-selection
     rules:
-      - when: structured.select_task.action == "wait_before_next_scan" && structured.select_task.decision_reason_code != "task_selected" && structured.select_task.decision_reason != "" && structured.select_task.next_scan_condition != ""
+      - condition: when(structured.select_task.action == "wait_before_next_scan" && structured.select_task.decision_reason_code != "task_selected" && structured.select_task.decision_reason != "" && structured.select_task.next_scan_condition != "")
         next: COMPLETE
-      - when: structured.select_task.action == "wait_before_next_scan"
+      - condition: when(structured.select_task.action == "wait_before_next_scan")
         next: ABORT
-      - when: structured.select_task.workflow_target == "default-rust"
+      - condition: when(structured.select_task.workflow_target == "default-rust")
         next: enqueue_default_rust
-      - when: structured.select_task.workflow_target == "rust-quality-repair-fmt"
+      - condition: when(structured.select_task.workflow_target == "rust-quality-repair-fmt")
         next: enqueue_quality_fmt
-      - when: structured.select_task.workflow_target == "rust-quality-repair-clippy"
+      - condition: when(structured.select_task.workflow_target == "rust-quality-repair-clippy")
         next: enqueue_quality_clippy
-      - when: structured.select_task.workflow_target == "rust-quality-repair-dylint"
+      - condition: when(structured.select_task.workflow_target == "rust-quality-repair-dylint")
         next: enqueue_quality_dylint
-      - when: structured.select_task.workflow_target == "rust-quality-repair-test"
+      - condition: when(structured.select_task.workflow_target == "rust-quality-repair-test")
         next: enqueue_quality_test
-      - when: structured.select_task.workflow_target == "rust-quality-repair-structural"
+      - condition: when(structured.select_task.workflow_target == "rust-quality-repair-structural")
         next: enqueue_quality_structural
-      - when: structured.select_task.workflow_target == "rust-quality-repair-script"
+      - condition: when(structured.select_task.workflow_target == "rust-quality-repair-script")
         next: enqueue_quality_script
-      - when: "true"
+      - condition: when(true)
         next: ABORT
 
   - name: enqueue_default_rust
@@ -229,9 +229,9 @@ steps:
           enabled: true
           auto_pr: false
     rules:
-      - when: effect.enqueue_default_rust.enqueue_task.success == true
+      - condition: when(effect.enqueue_default_rust.enqueue_task.success == true)
         next: COMPLETE
-      - when: "true"
+      - condition: when(true)
         next: ABORT
 
   - name: enqueue_quality_fmt
@@ -251,9 +251,9 @@ steps:
           enabled: true
           auto_pr: false
     rules:
-      - when: effect.enqueue_quality_fmt.enqueue_task.success == true
+      - condition: when(effect.enqueue_quality_fmt.enqueue_task.success == true)
         next: COMPLETE
-      - when: "true"
+      - condition: when(true)
         next: ABORT
 
   - name: enqueue_quality_clippy
@@ -273,9 +273,9 @@ steps:
           enabled: true
           auto_pr: false
     rules:
-      - when: effect.enqueue_quality_clippy.enqueue_task.success == true
+      - condition: when(effect.enqueue_quality_clippy.enqueue_task.success == true)
         next: COMPLETE
-      - when: "true"
+      - condition: when(true)
         next: ABORT
 
   - name: enqueue_quality_dylint
@@ -295,9 +295,9 @@ steps:
           enabled: true
           auto_pr: false
     rules:
-      - when: effect.enqueue_quality_dylint.enqueue_task.success == true
+      - condition: when(effect.enqueue_quality_dylint.enqueue_task.success == true)
         next: COMPLETE
-      - when: "true"
+      - condition: when(true)
         next: ABORT
 
   - name: enqueue_quality_test
@@ -317,9 +317,9 @@ steps:
           enabled: true
           auto_pr: false
     rules:
-      - when: effect.enqueue_quality_test.enqueue_task.success == true
+      - condition: when(effect.enqueue_quality_test.enqueue_task.success == true)
         next: COMPLETE
-      - when: "true"
+      - condition: when(true)
         next: ABORT
 
   - name: enqueue_quality_structural
@@ -339,9 +339,9 @@ steps:
           enabled: true
           auto_pr: false
     rules:
-      - when: effect.enqueue_quality_structural.enqueue_task.success == true
+      - condition: when(effect.enqueue_quality_structural.enqueue_task.success == true)
         next: COMPLETE
-      - when: "true"
+      - condition: when(true)
         next: ABORT
 
   - name: enqueue_quality_script
@@ -361,7 +361,7 @@ steps:
           enabled: true
           auto_pr: false
     rules:
-      - when: effect.enqueue_quality_script.enqueue_task.success == true
+      - condition: when(effect.enqueue_quality_script.enqueue_task.success == true)
         next: COMPLETE
-      - when: "true"
+      - condition: when(true)
         next: ABORT
