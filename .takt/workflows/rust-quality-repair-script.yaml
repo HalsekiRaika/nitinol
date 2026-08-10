@@ -21,6 +21,7 @@ steps:
     policy:
       - coding
       - rust-quality-recovery
+      - report-phase-boundary
     required_permission_mode: edit
     provider_options:
       claude:
@@ -66,6 +67,7 @@ steps:
       - review
       - coding
       - rust-quality-recovery
+      - report-phase-boundary
     pass_previous_response: false
     instruction: rust-quality-repair-review
     rules:

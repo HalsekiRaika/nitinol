@@ -40,6 +40,8 @@ steps:
       report:
         - name: plan.md
           format: plan
+    policy:
+      - report-phase-boundary
   - name: write_tests
     tags:
       - coding
@@ -49,6 +51,7 @@ steps:
     policy:
       - coding
       - testing
+      - report-phase-boundary
     knowledge:
       - architecture
       - unit-testing

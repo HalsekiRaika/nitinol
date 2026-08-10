@@ -1,6 +1,5 @@
 name: default-rust-peer-review
-description: Rust Phase 2。architecture + AI antipattern + Rust coding 
-  reviewの並列レビュー ⇄ 修正後、BuiltIn merge-readiness final gateを実行。
+description: Rust Phase 2。architecture + AI antipattern + Rust coding reviewの並列レビュー ⇄ 修正後、BuiltIn merge-readiness final gateを実行。
 subworkflow:
   callable: true
   visibility: internal
@@ -12,12 +11,12 @@ workflow_config:
       network_access: true
     opencode:
       network_access: true
-max_steps: 30
+max_steps: 50
 initial_step: reviewers
 loop_monitors:
+  # 通常のレビュー差し戻し経路: reviewers -> fix -> reviewers
   - cycle:
       - reviewers
-      - final-gate
       - fix
     threshold: 3
     judge:
@@ -26,6 +25,20 @@ loop_monitors:
       rules:
         - condition: 健全（指摘数が減少、修正が反映されている）
           next: reviewers
+        - condition: 非生産的（同じ指摘が繰り返される）
+          next: ABORT
+  # 最終ゲート差し戻し経路: final-gate -> fix -> reviewers -> final-gate
+  - cycle:
+      - final-gate
+      - fix
+      - reviewers
+    threshold: 3
+    judge:
+      persona: supervisor
+      instruction: loop-monitor-reviewers-fix
+      rules:
+        - condition: 健全（指摘数が減少、修正が反映されている）
+          next: final-gate
         - condition: 非生産的（同じ指摘が繰り返される）
           next: ABORT
 steps:
@@ -45,7 +58,9 @@ steps:
         model: gpt-5.5
         session_key: rust-arch-review
         session: refresh
-        policy: review
+        policy:
+          - review
+          - report-phase-boundary
         knowledge: architecture
         rules:
           - condition: approved
@@ -69,13 +84,14 @@ steps:
         policy:
           - review
           - ai-antipattern
+          - report-phase-boundary
         rules:
           - condition: AI特有の問題なし
           - condition: AI特有の問題あり
         instruction: ai-antipattern-review
         output_contracts:
           report:
-            - name: ai-antipattern-review.md
+            - name: ai-antipattern-review-final.md
               format: ai-antipattern-review
       - name: coding-review
         tags:
@@ -92,6 +108,7 @@ steps:
           - review
           - coding
           - rust-review
+          - report-phase-boundary
         pass_previous_response: false
         instruction: review-coding
         rules:
@@ -107,17 +124,33 @@ steps:
       - condition: any("needs_fix", "AI特有の問題あり", "needs_fix")
         next: fix
   - name: final-gate
-    kind: workflow_call
-    call: merge-readiness-final-gate
+    tags:
+      - review
+      - merge-readiness
+      - rust
+    edit: false
+    persona: merge-readiness-reviewer
+    provider: codex
+    model: gpt-5.5
+    session_key: rust-merge-readiness-final
+    session: refresh
+    policy:
+      - review
+      - merge-readiness-review
+      - report-phase-boundary
+    knowledge:
+      - architecture
+    pass_previous_response: false
+    instruction: merge-readiness-review
     rules:
-      - condition: COMPLETE
+      - condition: approved
         next: COMPLETE
       - condition: needs_fix
         next: fix
-      - condition: need_replan
-        return: need_replan
-      - condition: ABORT
-        next: ABORT
+    output_contracts:
+      report:
+        - name: merge-readiness-review.md
+          format: merge-readiness-review
   - name: fix
     tags:
       - coding
@@ -136,6 +169,7 @@ steps:
       - coding
       - testing
       - rust-coding
+      - report-phase-boundary
     knowledge:
       - architecture
     provider_options:

@@ -22,6 +22,7 @@ steps:
       - coding
       - rust-coding
       - rust-quality-recovery
+      - report-phase-boundary
     required_permission_mode: edit
     provider_options:
       claude:

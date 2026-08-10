@@ -68,6 +68,7 @@ steps:
     session: refresh
     policy:
       - project-consistency-audit-control
+      - report-phase-boundary
     knowledge:
       - rust-audit-standard
     instruction: project-consistency-plan
@@ -97,6 +98,7 @@ steps:
     persona: project-consistency-auditor
     policy:
       - project-consistency-audit-control
+      - report-phase-boundary
     instruction: project-consistency-audit-team-leader
     team_leader:
       max_concurrency: 3
@@ -127,6 +129,7 @@ steps:
     session: refresh
     policy:
       - project-consistency-audit-control
+      - report-phase-boundary
     instruction: project-consistency-supervise
     pass_previous_response: false
     output_contracts:
@@ -154,14 +157,15 @@ steps:
     session: refresh
     policy:
       - project-consistency-audit-control
+      - report-phase-boundary
     instruction: project-consistency-review
     pass_previous_response: false
     output_contracts:
       report:
-        - name: 02-project-consistency-audit.md
-          format: project-consistency-audit
+        - name: 04-project-consistency-audit-review.md
+          format: project-consistency-audit-review
     rules:
-      - condition: 不足箇所の再監査とレポート更新が完了
+      - condition: 不足箇所の追加監査と差分レポート作成が完了
         next: supervise
       - condition: 追加監査で解決不能なため、人間の方針決定が必要
         next: ABORT
@@ -178,12 +182,13 @@ steps:
     session: refresh
     policy:
       - project-consistency-task-selection
+      - report-phase-boundary
     instruction: project-consistency-select-task
     structured_output:
       schema_ref: project-consistency-followup-task
     output_contracts:
       report:
-        - name: 04-project-consistency-task-selection.md
+        - name: 05-project-consistency-task-selection.md
           format: project-consistency-task-selection
     rules:
       - when: structured.select_task.action == "wait_before_next_scan" && structured.select_task.decision_reason_code != "task_selected" && structured.select_task.decision_reason != "" && structured.select_task.next_scan_condition != ""

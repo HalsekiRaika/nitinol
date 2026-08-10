@@ -18,6 +18,7 @@
 - method名とownership semanticsが一致するか
 - generic boundの配置がPolicyに合うか
 - コメントが理由ではなくcodeの言い換えになっていないか
+- コメントやrustdocに仕様書などの外部ドキュメントのセクション番号等を書き込んでいないか
 - AI tracking markerがsourceへ残っていないか
 - manual Futureの例外理由が具体的か
 

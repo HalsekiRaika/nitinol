@@ -2,6 +2,13 @@
 Knowledge `rust-audit-standard`を監査基準として使用します。
 Knowledge内のCriteriaは成果物についての評価命題であり、監査者への実装指示ではありません。
 
+## Report Phaseとの境界
+
+- Workflow ContextのReport DirectoryはPhase 1では読み取り専用です。
+- `01-project-consistency-plan.md`を直接作成、変更、移動、削除しないでください。
+- 計画内容はPhase 1の最終回答として返してください。
+- ファイル保存はWorkflowの`output_contracts`とTAKTのReport Phaseが担当します。
+
 このstepの完了後、command quality gateが正規パス
 `.takt/quality-gates/rust-quality.sh`を実行し、
 `.takt/runs/project-consistency-audit/mechanical-check.md`へ結果を保存します。
@@ -52,14 +59,10 @@ Audit StandardやPolicy自体の改善案は作りません。
 ## 4. 監査を3パートへ分割する
 
 1. **Criteria Compliance / Architecture / Rust Implementation**
-   - Criteriaと設計、アーキテクチャ、Rust実装、公開APIの準拠
 2. **Mechanical Checks / Build and Test Infrastructure**
-   - `rust-quality.sh`の実行結果、検査coverage、Cargo、toolchain、Nix、CIとの整合
 3. **Goal / Spec / Tests / Documentation / Task Drift**
-   - 目標、仕様、振る舞い、意味的テストcoverage、文書、既存タスク間のずれ
 
-Part 2の「テスト」はコマンド、対象範囲、実行環境を扱い、Part 3は仕様や失敗モードに対する
-テスト内容の十分性を扱います。各パートについて対象パス、Criteria ID、確認観点、完了条件を示してください。
+各パートについて対象パス、Criteria ID、確認観点、完了条件を示してください。
 
 ## 5. 監査完了条件
 

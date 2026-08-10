@@ -23,6 +23,7 @@ steps:
       - testing
       - rust-coding
       - rust-quality-recovery
+      - report-phase-boundary
     knowledge:
       - architecture
     required_permission_mode: edit
@@ -73,6 +74,7 @@ steps:
       - coding
       - rust-review
       - rust-quality-recovery
+      - report-phase-boundary
     pass_previous_response: false
     instruction: rust-quality-repair-review
     rules:

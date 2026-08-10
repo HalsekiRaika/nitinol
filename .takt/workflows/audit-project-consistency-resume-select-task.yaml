@@ -30,12 +30,13 @@ steps:
     session: refresh
     policy:
       - project-consistency-task-selection
+      - report-phase-boundary
     instruction: project-consistency-select-task
     structured_output:
       schema_ref: project-consistency-followup-task
     output_contracts:
       report:
-        - name: 04-project-consistency-task-selection.md
+        - name: 05-project-consistency-task-selection.md
           format: project-consistency-task-selection
     rules:
       - when: structured.select_task.action == "wait_before_next_scan" && structured.select_task.decision_reason_code != "task_selected" && structured.select_task.decision_reason != "" && structured.select_task.next_scan_condition != ""

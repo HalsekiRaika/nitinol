@@ -1,17 +1,22 @@
-name: default-rust-draft
-description: Rust Phase 1。実装 → AIアンチパターンレビュー ⇄ 修正。
+name: default-draft
+description: default 系の Phase 1。実装 → AI アンチパターン自己レビュー ⇄ 修正 ループ。
 subworkflow:
   callable: true
   visibility: internal
   returns:
     - need_replan
+  params:
+    impl_instruction:
+      type: facet_ref
+      facet_kind: instruction
+      default: implement
 workflow_config:
   provider_options:
     codex:
       network_access: true
     opencode:
       network_access: true
-max_steps: 40
+max_steps: 30
 initial_step: implement
 loop_monitors:
   - cycle:
@@ -25,29 +30,22 @@ loop_monitors:
         - condition: 健全（進捗あり）
           next: ai-antipattern-review-1st
         - condition: 非生産的（改善なし）
-          next: ABORT
+          next: COMPLETE
 steps:
   - name: implement
     tags:
       - coding
-      - implementation
-      - rust
     edit: true
     persona: coder
-    provider: claude
-    model: opus
-    session_key: rust-implement
-    session: refresh
     policy:
       - coding
       - testing
-      - rust-coding
       - report-phase-boundary
+    session: refresh
     knowledge:
       - architecture
     provider_options:
       claude:
-        effort: high
         allowed_tools:
           - Read
           - Glob
@@ -58,13 +56,8 @@ steps:
           - WebSearch
           - WebFetch
     required_permission_mode: edit
-    instruction: rust-implement-after-tests
-    quality_gates:
-      - type: command
-        name: rust-quality
-        command: bash ./.takt/quality-gates/rust-quality.sh
-        cwd: .
-        timeout_ms: 900000
+    instruction:
+      $param: impl_instruction
     rules:
       - condition: 実装完了
         next: ai-antipattern-review-1st
@@ -85,14 +78,8 @@ steps:
   - name: ai-antipattern-review-1st
     tags:
       - review
-      - ai-antipattern
-      - rust
     edit: false
     persona: ai-antipattern-reviewer
-    provider: codex
-    model: gpt-5.5
-    session_key: rust-ai-review-first
-    session: refresh
     policy:
       - review
       - ai-antipattern
@@ -118,28 +105,17 @@ steps:
   - name: ai-antipattern-fix
     tags:
       - coding
-      - fix
-      - ai-antipattern
-      - rust
     edit: true
     persona: coder
-    provider: claude
-    model: sonnet
-    promotion:
-      - at: 3
-        model: opus
-    session_key: rust-ai-fix
-    session: refresh
     policy:
       - coding
       - testing
-      - rust-coding
       - report-phase-boundary
+    session: refresh
     knowledge:
       - architecture
     provider_options:
       claude:
-        effort: high
         allowed_tools:
           - Read
           - Glob
@@ -150,18 +126,12 @@ steps:
           - WebSearch
           - WebFetch
     required_permission_mode: edit
-    instruction: rust-ai-antipattern-fix
+    instruction: ai-antipattern-fix
     pass_previous_response: false
-    quality_gates:
-      - type: command
-        name: rust-quality
-        command: bash ./.takt/quality-gates/rust-quality.sh
-        cwd: .
-        timeout_ms: 900000
     rules:
       - condition: AI問題の修正完了
         next: ai-antipattern-review-1st
       - condition: 修正不要（指摘対象ファイル/仕様の確認済み）
-        next: ai-antipattern-review-1st
+        next: COMPLETE
       - condition: 修正を進行できない
-        return: need_replan
+        next: COMPLETE

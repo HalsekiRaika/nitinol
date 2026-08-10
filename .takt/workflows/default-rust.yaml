@@ -1,13 +1,12 @@
 name: default-rust
-description: TAKT v0.51.0準拠のRustテスト先行ワークフロー（計画 → テスト → Rust draft → Rust peer 
-  review → COMPLETE）
+description: TAKT v0.51.0準拠のRustテスト先行ワークフロー（計画 → テスト → Rust draft → Rust peer review → COMPLETE）
 workflow_config:
   provider_options:
     codex:
       network_access: true
     opencode:
       network_access: true
-max_steps: 30
+max_steps: 60
 initial_step: plan
 steps:
   - name: plan
@@ -22,6 +21,7 @@ steps:
     session: refresh
     policy:
       - rust-design
+      - report-phase-boundary
     knowledge: architecture
     provider_options:
       claude:
@@ -61,6 +61,7 @@ steps:
       - coding
       - testing
       - rust-testing
+      - report-phase-boundary
     knowledge:
       - architecture
       - unit-testing

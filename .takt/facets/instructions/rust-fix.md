@@ -1,12 +1,18 @@
 {extends:fix}
 
+## Report Phaseとの境界
+
+- Workflow ContextのReport Directoryは読み取り専用です。
+- 以下のレビューレポートは参照だけに使用し、直接変更しないでください。
+- 修正結果はPhase 1の最終回答として返してください。レポート保存はTAKTのReport Phaseが担当します。
+
 ## Rust固有の修正手順
 
 ### Architecture Review
 {report:architect-review.md}
 
 ### AI Antipattern Review
-{report:ai-antipattern-review.md}
+{report:ai-antipattern-review-final.md}
 
 ### Rust Coding Review
 {report:coding-review.md}
