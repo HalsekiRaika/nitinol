@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::{shape_of, Shape};
 
@@ -5,9 +6,7 @@ use async_trait::async_trait;
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Debug)]
 struct Incremented;
@@ -69,9 +68,7 @@ impl Decider<IncrementIfLessThan> for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Decider<Increment>: success path
-// ---------------------------------------------------------------------------
 
 /// decide(Increment) returns Effect::Persist([Incremented])
 #[tokio::test]
@@ -94,9 +91,7 @@ async fn decide_increment_returns_persist_incremented() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Decider<IncrementIfLessThan>: success path
-// ---------------------------------------------------------------------------
 
 /// decide(IncrementIfLessThan(1)) when value=0 returns Effect::Persist([Incremented])
 #[tokio::test]
@@ -119,9 +114,7 @@ async fn decide_increment_if_less_than_success() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Decider<IncrementIfLessThan>: rejection path
-// ---------------------------------------------------------------------------
 
 /// decide(IncrementIfLessThan(0)) when value=0 returns AtMaxError
 #[tokio::test]
@@ -135,9 +128,11 @@ async fn decide_increment_if_less_than_rejection() {
 
     // Then
     assert!(result.is_err(), "decide must fail when value >= threshold");
-    // Use .err().unwrap() instead of .unwrap_err() because Effect<E> does not
-    // implement Debug (required by unwrap_err's T: Debug bound).
-    let err = result.err().unwrap();
+    // Use .err() instead of .unwrap_err() because Effect<E> does not implement
+    // Debug (required by unwrap_err's T: Debug bound).
+    let err = result
+        .err()
+        .expect("result is Err, as asserted immediately above");
     assert_eq!(err.0, 0, "AtMaxError must carry the current value");
 }
 
@@ -156,15 +151,15 @@ async fn decide_increment_if_less_than_rejection_at_boundary() {
         result.is_err(),
         "decide must fail at exact boundary (value == threshold)"
     );
-    // Use .err().unwrap() instead of .unwrap_err() because Effect<E> does not
-    // implement Debug (required by unwrap_err's T: Debug bound).
-    let err = result.err().unwrap();
+    // Use .err() instead of .unwrap_err() because Effect<E> does not implement
+    // Debug (required by unwrap_err's T: Debug bound).
+    let err = result
+        .err()
+        .expect("result is Err, as asserted immediately above");
     assert_eq!(err.0, 5, "AtMaxError must carry value 5");
 }
 
-// ---------------------------------------------------------------------------
 // &self immutability: decide must not change aggregate state
-// ---------------------------------------------------------------------------
 
 /// Calling decide(Increment) does not mutate counter.value
 /// — enforced by &self in the trait signature; verified here at runtime.

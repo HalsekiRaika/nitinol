@@ -1,5 +1,4 @@
-//! `ScheduleEvent` — the `SystemEvent` persisted for each timer transition
-//! (Issue #50, E-30).
+//! `ScheduleEvent` — the `SystemEvent` persisted for each timer transition.
 //!
 //! Modelled one-for-one on the `OutboxEvent` canonical example: a reserved
 //! type-level [`EventType`] (`nitinol.saga.schedule`, variant `None`) whose
@@ -60,7 +59,11 @@ impl SystemEvent for ScheduleEvent {
             ScheduleEvent::Cancelled { .. } => Variant::new("cancelled"),
             ScheduleEvent::Fired { .. } => Variant::new("fired"),
         };
-        EventType::with_variant(SCHEDULE_MARKER.family(), SCHEDULE_MARKER.type_name(), variant)
+        EventType::with_variant(
+            SCHEDULE_MARKER.family(),
+            SCHEDULE_MARKER.type_name(),
+            variant,
+        )
     }
 
     fn encode(&self) -> Bytes {
@@ -238,7 +241,7 @@ mod tests {
         }
     }
 
-    // ARCH-001 regression: sub-millisecond and large Duration must survive the
+    // Regression: sub-millisecond and large Duration must survive the
     // encode → decode round trip without truncation.
 
     #[test]
@@ -270,8 +273,7 @@ mod tests {
         // but the cast `u128 as u64` is unchecked and panics in debug mode on overflow.
         // Verify that both the 100-year case and a value just at the u64 nanosecond limit
         // round-trip without overflow.
-        let one_hundred_years =
-            Duration::from_secs(100 * 365 * 24 * 3600);
+        let one_hundred_years = Duration::from_secs(100 * 365 * 24 * 3600);
         let event = ScheduleEvent::Scheduled {
             token: token(),
             after: one_hundred_years,

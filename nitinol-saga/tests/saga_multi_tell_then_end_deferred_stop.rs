@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
@@ -27,8 +28,10 @@ struct UpstreamTrigger {
 }
 
 impl Event for UpstreamTrigger {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("multi_tell_end"), TypeName::new("UpstreamTrigger"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("multi_tell_end"),
+        TypeName::new("UpstreamTrigger"),
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -192,25 +195,26 @@ async fn spawn_two_tells_then_end_saga(
     let target_proxy_clone = target_proxy.clone();
     let routed = saga_id.clone();
 
-    let saga_proxy =
-        SagaProps::<TwoTellsThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            TwoTellsThenEndSaga {
-                target: target_proxy_clone.clone(),
-                handle_count: Arc::clone(&handle_count_clone),
-            }
-        })
-        .with_codec(system.codec::<SagaMarker>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            system.codec::<UpstreamTrigger>(),
-            SequenceCursor::Stream {
-                key: agg_id.as_str().to_owned(),
-                after: 0,
-            },
-            move |_: &UpstreamTrigger| Some(routed.clone()),
-        )
-        .spawn(system.process_system())
-        .await;
+    let saga_proxy = SagaProps::<TwoTellsThenEndSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move || TwoTellsThenEndSaga {
+            target: target_proxy_clone.clone(),
+            handle_count: Arc::clone(&handle_count_clone),
+        },
+    )
+    .with_codec(system.codec::<SagaMarker>())
+    .with_subscription(
+        Arc::clone(&upstream_store),
+        system.codec::<UpstreamTrigger>(),
+        SequenceCursor::Stream {
+            key: agg_id.as_str().to_owned(),
+            after: 0,
+        },
+        move |_: &UpstreamTrigger| Some(routed.clone()),
+    )
+    .spawn(system.process_system())
+    .await;
 
     (
         saga_store,
@@ -245,7 +249,8 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
         .count();
 
     assert_eq!(
-        user_events, 1,
+        user_events,
+        1,
         "the Persist branch must append exactly one user event; events: {:?}",
         events
             .iter()
@@ -257,7 +262,8 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
         "two tells must append exactly two TellRequested markers"
     );
     assert_eq!(
-        acked, 2,
+        acked,
+        2,
         "deferred-stop must wait for BOTH executors: both terminal markers must \
          land (a premature stop after the first would drop the second TellAcked); \
          events: {:?}",
@@ -272,7 +278,7 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
     );
     assert_eq!(
         ended, 1,
-        "reaching End must persist exactly one durable Ended marker (D-14)"
+        "reaching End must persist exactly one durable Ended marker"
     );
 
     let mut seqs: Vec<u64> = events.iter().map(|e| e.sequence).collect();

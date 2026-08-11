@@ -7,12 +7,17 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::{ProcessSystem, Props};
 
-use crate::dead_letter::{DeadLetterEvent, DlqChildSpawn, EnqueueAll, EnqueuePolicy, make_dlq_child_spawn};
+use crate::dead_letter::{
+    make_dlq_child_spawn, DeadLetterEvent, DlqChildSpawn, EnqueueAll, EnqueuePolicy,
+};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
 use crate::process::proxy::SagaProxy;
-use crate::process::saga_process::{CrashRestartFactory, DecodeFailureRouteFn, Lifecycle, RouteFn, SagaProcess, TellState, UpstreamMessage};
+use crate::process::saga_process::{
+    CrashRestartFactory, DecodeFailureRouteFn, Lifecycle, RouteFn, SagaProcess, TellState,
+    UpstreamMessage,
+};
 use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
 use nitinol_runtime::process::{Process, ProcessProxy, Receive};
@@ -159,7 +164,7 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
 
     /// Inject the resident [`SchedulerProxy`] (from
     /// [`crate::spawn_scheduler`]) so this saga's [`SagaEffect::schedule`] and
-    /// [`SagaEffect::cancel_schedule`] effects drive real timers (E-25).
+    /// [`SagaEffect::cancel_schedule`] effects drive real timers.
     ///
     /// Without it, schedule markers are still persisted but no timer fires until
     /// a scheduler-equipped incarnation replays them.
@@ -169,13 +174,13 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
     }
 
     /// Override the [`EnqueuePolicy`] that filters which saga failures reach the
-    /// DLQ (G-26).  Without it the default enqueues every failure kind.
+    /// DLQ.  Without it the default enqueues every failure kind.
     pub fn with_enqueue_policy(mut self, policy: Arc<dyn EnqueuePolicy>) -> Self {
         self.enqueue_policy = Some(policy);
         self
     }
 
-    /// Register a dead-letter subscriber process (G-29).
+    /// Register a dead-letter subscriber process.
     ///
     /// When the saga enqueues a [`DeadLetterEvent`] on its own stream, the
     /// subscriber `P` receives it over a [`nitinol_eventsource::DurableSubscription`]
@@ -184,18 +189,17 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
     /// parameter.
     ///
     /// The DLQ direct-poller is started as a **child** of the saga from
-    /// `SagaProcess::on_start` (ARCH-REVIEW-009): when the saga stops the
+    /// `SagaProcess::on_start`: when the saga stops the
     /// runtime cascade-stops the poller automatically, releasing the subscription.
     pub fn with_dead_letter_subscriber<P>(mut self, subscriber: ProcessProxy<P>) -> Self
     where
         P: Process + Receive<DeadLetterEvent, Response = ()> + 'static,
     {
-        self.dead_letter_subscriber =
-            Some(make_dlq_child_spawn::<SagaProcess<S>, P>(subscriber));
+        self.dead_letter_subscriber = Some(make_dlq_child_spawn::<SagaProcess<S>, P>(subscriber));
         self
     }
 
-    /// Override the decode-failure routing contract (ARCH-REVIEW-002).
+    /// Override the decode-failure routing behaviour.
     ///
     /// When two or more saga instances subscribe to the same upstream event
     /// type, a corrupt event that cannot be decoded is forwarded to every
@@ -217,10 +221,7 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_initial_tell_states(
-        mut self,
-        tell_states: HashMap<u64, TellState>,
-    ) -> Self {
+    pub(crate) fn with_initial_tell_states(mut self, tell_states: HashMap<u64, TellState>) -> Self {
         self.initial_tell_states = tell_states;
         self
     }
@@ -238,9 +239,8 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let store = self.store;
         let producer = self.producer;
         let codec = self.codec.codec;
-        let enqueue_policy: Arc<dyn EnqueuePolicy> = self
-            .enqueue_policy
-            .unwrap_or_else(|| Arc::new(EnqueueAll));
+        let enqueue_policy: Arc<dyn EnqueuePolicy> =
+            self.enqueue_policy.unwrap_or_else(|| Arc::new(EnqueueAll));
         let dead_letter_subscriber = self.dead_letter_subscriber;
         let route_fn = self.subscription.route_fn;
         let upstream_store = self.subscription.upstream_store;
@@ -249,11 +249,13 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
 
         let codec_for_transform = Arc::clone(&upstream_codec);
         let transform = move |loaded: nitinol_persistence::LoadedEvent| {
-            if loaded.event_type.type_key() != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE.type_key() {
+            if loaded.event_type.type_key()
+                != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE.type_key()
+            {
                 return None;
             }
             // Capture the raw payload before decoding so the draining branch can
-            // preserve it in `SagaFailure::EndedSagaReceivedMessage` (G-28).
+            // preserve it in `SagaFailure::EndedSagaReceivedMessage`.
             let raw_payload = loaded.payload.clone();
             let aggregate_id = AggregateId::new(loaded.stream_key);
             let sequence = loaded.sequence;
@@ -265,9 +267,9 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
                     raw_payload,
                 }),
                 Err(e) => {
-                    // G-26: decode failures are forwarded to SagaProcess as
+                    // Decode failures are forwarded to SagaProcess as
                     // `UpstreamMessage::DecodeFailed` so the saga can record a
-                    // `DeadLetterEvent` (G-30 immediate, no retry).
+                    // `DeadLetterEvent` immediately, with no retry.
                     tracing::warn!(
                         error = %e,
                         event_type = ?loaded.event_type,

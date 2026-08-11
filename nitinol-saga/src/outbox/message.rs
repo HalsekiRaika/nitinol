@@ -6,7 +6,9 @@ mod proto {
     include!(concat!(env!("OUT_DIR"), "/nitinol.saga.outbox.rs"));
 }
 
-pub(crate) use self::proto::{Ended, OutboxMarker, Scheduled, TellAcked, TellFailed, TellRequested};
+pub(crate) use self::proto::{
+    Ended, OutboxMarker, Scheduled, TellAcked, TellFailed, TellRequested,
+};
 
 use self::proto::outbox_marker::Kind;
 
@@ -96,7 +98,10 @@ mod tests {
     fn each_marker_writes_its_per_arm_variant_on_the_wire() {
         let cases = [
             (tell_requested(1, None), "tell_requested"),
-            (OutboxEvent::TellAcked(TellAcked { tell_id: 1 }), "tell_acked"),
+            (
+                OutboxEvent::TellAcked(TellAcked { tell_id: 1 }),
+                "tell_acked",
+            ),
             (
                 OutboxEvent::TellFailed(TellFailed { tell_id: 1 }),
                 "tell_failed",

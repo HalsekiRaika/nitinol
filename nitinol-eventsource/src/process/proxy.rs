@@ -32,7 +32,10 @@ impl<A: Aggregate> Clone for AggregateProxy<A> {
 
 impl<A: Aggregate> AggregateProxy<A> {
     pub(crate) fn new(inner: ProcessProxy<AggregateProcess<A>>, aggregate_id: AggregateId) -> Self {
-        Self { inner, aggregate_id }
+        Self {
+            inner,
+            aggregate_id,
+        }
     }
 
     /// The aggregate's stream key.
@@ -82,9 +85,7 @@ impl<A: Aggregate> AggregateProxy<A> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Error mappers
-// ---------------------------------------------------------------------------
 
 fn map_ask_error<R>(e: RuntimeAskError<AskHandlerError<R>>) -> AskError<R>
 where

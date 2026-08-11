@@ -1,3 +1,8 @@
+//! Shared test helpers. Each test binary compiles this module in full but
+//! uses only the subset it needs, so per-binary dead code is expected.
+
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,12 +17,9 @@ use nitinol_persistence::{AggregateId, EventType, Family, LoadedEvent, TypeName}
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaEffect, ScheduleSpec, TellIntent};
 
-// ---------------------------------------------------------------------------
 // JsonCodec — shared across all integration tests
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -32,16 +34,12 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Minimal aggregate used only to obtain an AggregateProxy for Tell tests.
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
-#[allow(dead_code)]
 pub struct TestTarget;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[allow(dead_code)]
 pub struct TestTargetEvent;
 
 impl Event for TestTargetEvent {
@@ -59,7 +57,6 @@ impl Aggregate for TestTarget {
 /// target with a cloned copy).  `Serialize + Deserialize` is required because
 /// `SagaEffect::tell` serializes the command as crash-restart payload.
 #[derive(Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct NoopCmd;
 
 #[async_trait]
@@ -78,9 +75,8 @@ impl Decider<NoopCmd> for TestTarget {
 /// Spin up a minimal system and return a `SagaEffect::tell(...)`.
 ///
 /// Used by unit tests that need to exercise the tell-shaped effect (a
-/// `Persist { events: [], tells: [_], schedules: [] }` value under the
-/// post-#45 ADT) without triggering any real side effect.
-#[allow(dead_code)]
+/// `Persist { events: [], tells: [_], schedules: [] }` value) without
+/// triggering any real side effect.
 pub async fn make_tell_effect<E>() -> SagaEffect<E> {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
@@ -94,7 +90,6 @@ pub async fn make_tell_effect<E>() -> SagaEffect<E> {
 /// Build a single [`TellIntent`] over a freshly spawned no-op aggregate
 /// target so tests can feed it into `SagaEffect::persist(...).with_tells(...)`
 /// without going through the `SagaEffect::tell` convenience helper.
-#[allow(dead_code)]
 pub async fn make_tell_intent() -> TellIntent {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
@@ -105,18 +100,15 @@ pub async fn make_tell_intent() -> TellIntent {
     TellIntent::new(proxy, NoopCmd)
 }
 
-// ---------------------------------------------------------------------------
-// Shape — a PartialEq + Debug mirror of the post-#45 `SagaEffect<E>` ADT used
-// for structural comparison without requiring `SagaEffect` itself to implement
+// Shape — a PartialEq + Debug mirror of the `SagaEffect<E>` ADT used for
+// structural comparison without requiring `SagaEffect` itself to implement
 // PartialEq or Debug.
 //
 // `TellIntent` is opaque (its inner side effect cannot be matched against), so
 // `Persist` records only the *count* of tells.  `ScheduleSpec` is `PartialEq`,
 // so we capture the specs verbatim.
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq)]
-#[allow(dead_code)]
 pub enum Shape<E> {
     None,
     Persist {
@@ -129,7 +121,6 @@ pub enum Shape<E> {
     CancelSchedule,
 }
 
-#[allow(dead_code)]
 pub fn shape_of<E: Clone>(effect: &SagaEffect<E>) -> Shape<E> {
     match effect {
         SagaEffect::None => Shape::None,
@@ -148,12 +139,16 @@ pub fn shape_of<E: Clone>(effect: &SagaEffect<E>) -> Shape<E> {
     }
 }
 
-#[allow(dead_code)]
 pub const OUTBOX_MARKER: EventType =
     EventType::new(Family::new("nitinol.saga"), TypeName::new("outbox"));
 
+/// Type-level identity shared by every schedule marker written on a saga's own
+/// stream.  The per-transition variant (`scheduled` / `cancelled` / `fired`) is
+/// carried alongside this type key, not in it.
+pub const SCHEDULE_MARKER: EventType =
+    EventType::new(Family::new("nitinol.saga"), TypeName::new("schedule"));
+
 #[derive(Clone, PartialEq, prost::Message)]
-#[allow(dead_code)]
 pub struct TellRequestedPayload {
     #[prost(uint64, tag = "1")]
     pub tell_id: u64,
@@ -166,14 +161,12 @@ pub struct TellRequestedPayload {
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
-#[allow(dead_code)]
 pub struct TellIdPayload {
     #[prost(uint64, tag = "1")]
     pub tell_id: u64,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
-#[allow(dead_code)]
 pub struct ScheduledPayload {
     #[prost(int64, tag = "1")]
     pub at_unix_seconds: i64,
@@ -181,13 +174,11 @@ pub struct ScheduledPayload {
 
 /// Mirror of the production `Ended {}` outbox marker (proto tag 5).  The
 /// message carries no fields — its presence in the saga stream is the durable
-/// signal that the saga terminated (D-14).
+/// signal that the saga terminated.
 #[derive(Clone, PartialEq, prost::Message)]
-#[allow(dead_code)]
 pub struct EndedPayload {}
 
 #[derive(Clone, PartialEq, prost::Oneof)]
-#[allow(dead_code)]
 pub enum OutboxKind {
     #[prost(message, tag = "1")]
     TellRequested(TellRequestedPayload),
@@ -202,19 +193,16 @@ pub enum OutboxKind {
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
-#[allow(dead_code)]
 pub struct OutboxMarkerPayload {
     #[prost(oneof = "OutboxKind", tags = "1, 2, 3, 4, 5")]
     pub kind: Option<OutboxKind>,
 }
 
-#[allow(dead_code)]
 pub fn encode_outbox_marker(kind: OutboxKind) -> Bytes {
     let msg = OutboxMarkerPayload { kind: Some(kind) };
     Bytes::from(prost::Message::encode_to_vec(&msg))
 }
 
-#[allow(dead_code)]
 pub fn encode_outbox_tell_requested(tell_id: u64, crash_restart: Option<&[u8]>) -> Bytes {
     encode_outbox_marker(OutboxKind::TellRequested(TellRequestedPayload {
         tell_id,
@@ -226,7 +214,6 @@ pub fn encode_outbox_tell_requested(tell_id: u64, crash_restart: Option<&[u8]>) 
 /// Encode a `TellRequested` outbox marker with an explicit `target` stream key
 /// (field 3).  Used by tests that exercise the DLQ replay path, which requires
 /// the target to be stored in the durable `TellRequested` record.
-#[allow(dead_code)]
 pub fn encode_outbox_tell_requested_with_target(
     tell_id: u64,
     crash_restart: Option<&[u8]>,
@@ -239,24 +226,20 @@ pub fn encode_outbox_tell_requested_with_target(
     }))
 }
 
-#[allow(dead_code)]
 pub fn encode_outbox_tell_acked(tell_id: u64) -> Bytes {
     encode_outbox_marker(OutboxKind::TellAcked(TellIdPayload { tell_id }))
 }
 
-#[allow(dead_code)]
 pub fn encode_outbox_tell_failed(tell_id: u64) -> Bytes {
     encode_outbox_marker(OutboxKind::TellFailed(TellIdPayload { tell_id }))
 }
 
-/// Encode the durable `Ended` terminal marker (proto tag 5) so D-14 tests can
+/// Encode the durable `Ended` terminal marker (proto tag 5) so tests can
 /// seed a "this saga already terminated" stream before spawning the process.
-#[allow(dead_code)]
 pub fn encode_outbox_ended() -> Bytes {
     encode_outbox_marker(OutboxKind::Ended(EndedPayload {}))
 }
 
-#[allow(dead_code)]
 pub fn decode_outbox_kind(payload: &[u8]) -> OutboxKind {
     <OutboxMarkerPayload as prost::Message>::decode(payload)
         .expect("payload must be a valid prost OutboxMarker message")
@@ -264,7 +247,6 @@ pub fn decode_outbox_kind(payload: &[u8]) -> OutboxKind {
         .expect("outbox marker payload must carry a oneof kind")
 }
 
-#[allow(dead_code)]
 pub fn outbox_kind_of(event: &LoadedEvent) -> Option<OutboxKind> {
     (event.event_type.type_key() == OUTBOX_MARKER.type_key())
         .then(|| decode_outbox_kind(&event.payload))

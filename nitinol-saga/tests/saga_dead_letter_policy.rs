@@ -1,4 +1,4 @@
-//! Issue #51 (Saga DLQ) — `EnqueuePolicy` filtering (G-26).
+//! Saga DLQ `EnqueuePolicy` filtering.
 //!
 //! The default policy enqueues **every** failure kind.  A user may override the
 //! policy via `SagaProps::with_enqueue_policy(...)` to suppress selected (or
@@ -6,7 +6,7 @@
 //! stream.  Both directions are asserted here against the public wire contract
 //! (`nitinol.saga.dead_letter`), using a `handle` failure as the trigger.
 //!
-//! Contract assumed (order.md G-26):
+//! Contract assumed:
 //! ```ignore
 //! trait EnqueuePolicy { fn decide(&self, failure: &SagaFailure) -> EnqueueDecision; }
 //! enum EnqueueDecision { Enqueue, Ignore }
@@ -37,9 +37,7 @@ use nitinol_saga::{
     EnqueueDecision, EnqueuePolicy, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaProps,
 };
 
-// ---------------------------------------------------------------------------
 // Local codec + domain
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct JsonCodec;
@@ -120,9 +118,7 @@ impl EnqueuePolicy for IgnoreAll {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 const DEAD_LETTER_TYPE: EventType =
     EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
@@ -192,9 +188,7 @@ async fn wait_for_handle_failed(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Test A — default policy enqueues
-// ---------------------------------------------------------------------------
 
 /// Given no explicit enqueue policy (the default is "enqueue all"),
 /// When a handle failure occurs,
@@ -215,24 +209,25 @@ async fn default_policy_enqueues_the_failure() {
     let handled_for_saga = Arc::clone(&handled);
     let handle_count_for_saga = Arc::clone(&handle_count);
     let routed = saga_id.clone();
-    let _proxy = SagaProps::<AlwaysFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-        AlwaysFailSaga {
-            handled: Arc::clone(&handled_for_saga),
-            handle_count: Arc::clone(&handle_count_for_saga),
-        }
-    })
-    .with_codec(system.codec::<SagaLog>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
-        SequenceCursor::Stream {
-            key: "dlq-default-upstream".to_owned(),
-            after: 0,
-        },
-        move |_event: &Ping| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaProps::<AlwaysFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            AlwaysFailSaga {
+                handled: Arc::clone(&handled_for_saga),
+                handle_count: Arc::clone(&handle_count_for_saga),
+            }
+        })
+        .with_codec(system.codec::<SagaLog>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Ping>(),
+            SequenceCursor::Stream {
+                key: "dlq-default-upstream".to_owned(),
+                after: 0,
+            },
+            move |_event: &Ping| Some(routed.clone()),
+        )
+        .spawn(system.process_system())
+        .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
@@ -253,9 +248,7 @@ async fn default_policy_enqueues_the_failure() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test B — custom "ignore all" policy suppresses enqueue
-// ---------------------------------------------------------------------------
 
 /// Given an `IgnoreAll` enqueue policy,
 /// When a handle failure occurs,
@@ -277,25 +270,26 @@ async fn ignore_all_policy_suppresses_enqueue() {
     let handled_for_saga = Arc::clone(&handled);
     let handle_count_for_saga = Arc::clone(&handle_count);
     let routed = saga_id.clone();
-    let _proxy = SagaProps::<AlwaysFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-        AlwaysFailSaga {
-            handled: Arc::clone(&handled_for_saga),
-            handle_count: Arc::clone(&handle_count_for_saga),
-        }
-    })
-    .with_codec(system.codec::<SagaLog>())
-    .with_enqueue_policy(Arc::new(IgnoreAll))
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
-        SequenceCursor::Stream {
-            key: "dlq-ignore-upstream".to_owned(),
-            after: 0,
-        },
-        move |_event: &Ping| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaProps::<AlwaysFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            AlwaysFailSaga {
+                handled: Arc::clone(&handled_for_saga),
+                handle_count: Arc::clone(&handle_count_for_saga),
+            }
+        })
+        .with_codec(system.codec::<SagaLog>())
+        .with_enqueue_policy(Arc::new(IgnoreAll))
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Ping>(),
+            SequenceCursor::Stream {
+                key: "dlq-ignore-upstream".to_owned(),
+                after: 0,
+            },
+            move |_event: &Ping| Some(routed.clone()),
+        )
+        .spawn(system.process_system())
+        .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await

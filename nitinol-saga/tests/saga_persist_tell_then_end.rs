@@ -1,4 +1,4 @@
-//! Regression test for AI-52-008: when a saga returns
+//! Regression test: when a saga returns
 //! `Persist { tells }.then_end()`, the outbox executor must be able to
 //! append the terminal marker (`TellAcked` or `TellFailed`) **before** the
 //! saga process stops.
@@ -8,6 +8,7 @@
 //! `saga_proxy.tell(OutboxReport)` would fail with a closed-channel
 //! error and no terminal marker would ever reach the store.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
@@ -31,9 +32,7 @@ use nitinol_persistence::{
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
-// ---------------------------------------------------------------------------
 // Domain types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UpstreamEvent {
@@ -41,8 +40,10 @@ struct UpstreamEvent {
 }
 
 impl Event for UpstreamEvent {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("persist_tell_end"), TypeName::new("UpstreamEvent"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("persist_tell_end"),
+        TypeName::new("UpstreamEvent"),
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,13 +52,13 @@ struct SagaDomainEvent {
 }
 
 impl Event for SagaDomainEvent {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("persist_tell_end"), TypeName::new("SagaDomainEvent"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("persist_tell_end"),
+        TypeName::new("SagaDomainEvent"),
+    );
 }
 
-// ---------------------------------------------------------------------------
 // Target aggregate that the saga will tell
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct TargetAggregate {
@@ -90,9 +91,7 @@ impl Decider<TriggerCmd> for TargetAggregate {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Saga: on the first upstream event issue a tell then stop via End
-// ---------------------------------------------------------------------------
 
 struct TellThenEndSaga {
     target: AggregateProxy<TargetAggregate>,
@@ -114,7 +113,11 @@ impl Saga for TellThenEndSaga {
         event: UpstreamEvent,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaDomainEvent>, Self::Error> {
-        *self.handled.lock().unwrap() = true;
+        *self
+            .handled
+            .lock()
+            .expect("handled mutex is never poisoned: no holder panics while the guard is alive") =
+            true;
 
         // Persist a tell AND then stop.  The key contract under test:
         // the outbox executor (spawned by the Persist branch) must be
@@ -127,9 +130,7 @@ impl Saga for TellThenEndSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_upstream(store: &Arc<dyn EventStore>, agg_id: &AggregateId, seq: u64, key: &str) {
     let payload = serde_json::to_vec(&UpstreamEvent {
@@ -161,9 +162,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events")
 }
 
-// ---------------------------------------------------------------------------
 // Test
-// ---------------------------------------------------------------------------
 
 /// When `Persist { tells }.then_end()` is executed, the saga's `End` stop is
 /// deferred until the outbox executor settles the terminal marker.  The store
@@ -217,7 +216,10 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
     // Poll until the saga has handled the event.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if *handled.lock().unwrap() {
+        if *handled
+            .lock()
+            .expect("handled mutex is never poisoned: no holder panics while the guard is alive")
+        {
             break;
         }
         assert!(

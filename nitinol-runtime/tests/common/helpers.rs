@@ -1,3 +1,8 @@
+//! Shared test helpers. Each test binary compiles this module in full but
+//! uses only the subset it needs, so per-binary dead code is expected.
+
+#![allow(dead_code)]
+
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -115,8 +120,6 @@ pub fn test_props(
 
 /// Waits for an AtomicBool flag to become true, with a 5-second timeout.
 /// Panics if the flag does not become true within the timeout.
-// Not all test binaries use this helper; suppress dead_code for those
-#[allow(dead_code)]
 pub async fn wait_for_flag(flag: &AtomicBool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !flag.load(Ordering::SeqCst) {
@@ -129,22 +132,18 @@ pub async fn wait_for_flag(flag: &AtomicBool) {
 }
 
 // ---- Watcher process helpers ----
-// Not all test binaries use these; suppress dead_code for those
 
 /// Watcher process that records the first `Terminated` notification it receives.
-#[allow(dead_code)]
 pub struct WatcherProcess {
     pub received: Arc<Mutex<Option<Terminated>>>,
 }
 
 /// Tell the watcher to start watching the given PID.
-#[allow(dead_code)]
 pub struct WatchPid {
     pub pid: Pid,
 }
 
 /// No-op barrier: when the ask returns, the watcher has processed all prior messages.
-#[allow(dead_code)]
 pub struct Barrier;
 
 impl Receive<WatchPid> for WatcherProcess {
@@ -190,7 +189,6 @@ impl Process for WatcherProcess {
 /// Pass `IdleTimeout::Persistent` when the watcher must outlive a system that
 /// has a short default idle timeout. Pass `IdleTimeout::Inherit` for tests where
 /// the watcher's lifetime is controlled by the system default or explicit stop.
-#[allow(dead_code)]
 pub fn watcher_props(
     received: Arc<Mutex<Option<Terminated>>>,
     idle_timeout: IdleTimeout,
@@ -198,13 +196,11 @@ pub fn watcher_props(
     let props = Props::new(move || WatcherProcess {
         received: received.clone(),
     });
-    let props = props.with_idle_timeout(idle_timeout);
-    props
+    props.with_idle_timeout(idle_timeout)
 }
 
 /// Polls until `received` is `Some`, with a 5-second timeout.
 /// Panics if no `Terminated` notification arrives within the timeout.
-#[allow(dead_code)]
 pub async fn wait_for_terminated(received: &Arc<Mutex<Option<Terminated>>>) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

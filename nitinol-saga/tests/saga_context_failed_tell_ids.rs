@@ -1,6 +1,5 @@
-//! Spec C-9 — `SagaContext::failed_tell_ids`: the saga must be able to detect
-//! `TellFailed` outcomes in a subsequent `Saga::handle` call (regression for
-//! VAL-NEW-nitinol-saga-src-context-L7).
+//! `SagaContext::failed_tell_ids`: the saga must be able to detect
+//! `TellFailed` outcomes in a subsequent `Saga::handle` call.
 //!
 //! Two paths are tested:
 //!
@@ -12,10 +11,11 @@
 //!    appends a `TellFailed` marker during the current run.  The next `handle`
 //!    call must expose the `tell_id` in `ctx.failed_tell_ids()`.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{
-    encode_outbox_tell_failed, encode_outbox_tell_requested, outbox_kind_of, JsonCodec,
-    OutboxKind, OUTBOX_MARKER,
+    encode_outbox_tell_failed, encode_outbox_tell_requested, outbox_kind_of, JsonCodec, OutboxKind,
+    OUTBOX_MARKER,
 };
 
 use std::marker::PhantomData;
@@ -38,9 +38,7 @@ use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
-// ---------------------------------------------------------------------------
 // Domain types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -64,9 +62,7 @@ impl Event for OrderProcessed {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Minimal aggregate — used only so we can build a real TellIntent.
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct DummyTarget;
@@ -99,9 +95,7 @@ impl Decider<DummyCmd> for DummyTarget {
     }
 }
 
-// ---------------------------------------------------------------------------
 // A TellTarget that always returns an error — forces TellFailed via executor.
-// ---------------------------------------------------------------------------
 
 struct FailingTarget<A: Aggregate> {
     _phantom: PhantomData<fn() -> A>,
@@ -137,15 +131,11 @@ impl<A: Aggregate> AggregateTellTarget<A> for FailingTarget<A> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shared capture state: collects the `failed_tell_ids` seen by each `handle`.
-// ---------------------------------------------------------------------------
 
 type Captured = Arc<Mutex<Vec<Vec<u64>>>>;
 
-// ---------------------------------------------------------------------------
 // Replay-path test saga: records `ctx.failed_tell_ids()` on each handle call.
-// ---------------------------------------------------------------------------
 
 struct RecordingSaga {
     captured: Captured,
@@ -174,10 +164,8 @@ impl Saga for RecordingSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Runtime-path test saga: emits a failing tell on the first event, then
 // records failed_tell_ids on the second event.
-// ---------------------------------------------------------------------------
 
 struct RuntimeSaga {
     /// Shared with the test.  Each `handle` call appends the current
@@ -232,9 +220,7 @@ impl Saga for RuntimeSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_raw(
     store: &Arc<dyn EventStore>,
@@ -273,15 +259,14 @@ async fn publish_order_placed(upstream_store: &Arc<dyn EventStore>, order_id: &s
     .await;
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: replay path — TellFailed in event history is surfaced via context.
-// ---------------------------------------------------------------------------
 
 /// When the saga restarts and its event history contains a `TellFailed` marker,
 /// the first `Saga::handle` invocation after `on_start` must expose the
 /// corresponding `tell_id` in `ctx.failed_tell_ids()`.
 ///
-/// This validates spec C-9: "Saga は次の handle で TellFailed を検知して補償判断可能".
+/// This confirms the saga can detect `TellFailed` in the next `handle` call
+/// and decide on compensation.
 #[tokio::test]
 async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
@@ -370,11 +355,9 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 2 (ARCH-45-002 regression): replay synthetic TellFailed surfaces via context.
-// ---------------------------------------------------------------------------
+// Test 2: replay synthetic TellFailed surfaces via context.
 
-/// Regression test for ARCH-45-002 (call-chain-integrity).
+/// Regression test for call-chain integrity on the replay path.
 ///
 /// When the replay path appends a **synthetic** `TellFailed` for an
 /// unresolvable `TellRequested` (no `PendingIntents`, no crash-restart factory,
@@ -469,20 +452,18 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
         vec![5u64],
         "handle must see tell_id=5 in ctx.failed_tell_ids() because the replay \
          path appended synthetic TellFailed(tell_id=5) and must update the \
-         failed-tell-ids accumulator (ARCH-45-002 regression)"
+         failed-tell-ids accumulator"
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: runtime path — executor-appended TellFailed surfaces to next handle.
-// ---------------------------------------------------------------------------
 
 /// When the outbox executor exhausts all retry attempts and appends a
 /// `TellFailed` marker during the current run, the **next** `Saga::handle`
 /// invocation must expose the corresponding `tell_id` in
 /// `ctx.failed_tell_ids()`.
 ///
-/// This validates spec C-9 for the in-process (non-restart) path.
+/// This covers the in-process (non-restart) path.
 #[tokio::test]
 async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
@@ -521,7 +502,7 @@ async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
     // Wait for the first handle call to complete (captured.len() == 1).
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if captured.lock().await.len() >= 1 {
+        if !captured.lock().await.is_empty() {
             break;
         }
         if std::time::Instant::now() >= deadline {

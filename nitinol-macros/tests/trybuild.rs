@@ -1,5 +1,5 @@
-//! Compile-success / compile-failure contract for `#[derive(Event)]`
-//! (`order.md` "テスト: trybuild によるコンパイル成否テスト").
+//! Compile-success / compile-failure contract for `#[derive(Event)]`,
+//! checked with `trybuild`.
 //!
 //! - `tests/ui/pass/*.rs`  — forms that must compile (struct, enum, data-bearing
 //!   enum, empty family, generics).

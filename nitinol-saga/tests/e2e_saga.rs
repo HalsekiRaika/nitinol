@@ -5,6 +5,7 @@
 //!   2. Dispatches the typed command (with `C: Clone`) to the target
 //!   3. Appends a TellAcked outbox marker once the dispatch succeeds
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
@@ -22,7 +23,9 @@ use nitinol_eventsource::{
     Receive as EvtReceive, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
+use nitinol_persistence::{
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -32,7 +35,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.saga"), TypeName::new("OrderPlaced"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("e2e.saga"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,7 +45,8 @@ struct Reserved {
 }
 
 impl Event for Reserved {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.saga"), TypeName::new("Reserved"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("e2e.saga"), TypeName::new("Reserved"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,7 +55,10 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.saga"), TypeName::new("ReservationRequested"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("e2e.saga"),
+        TypeName::new("ReservationRequested"),
+    );
 }
 
 #[derive(Default)]
@@ -152,11 +160,16 @@ impl Saga for ReservationSaga {
         event: Self::SubscribedEvent,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        self.captured.lock().unwrap().push(CapturedContext {
-            saga_id: ctx.saga_id().clone(),
-            sequence: ctx.sequence(),
-        });
-        *self.handle_count.lock().unwrap() += 1;
+        self.captured
+            .lock()
+            .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+            .push(CapturedContext {
+                saga_id: ctx.saga_id().clone(),
+                sequence: ctx.sequence(),
+            });
+        *self.handle_count.lock().expect(
+            "handle_count mutex is never poisoned: no holder panics while the guard is alive",
+        ) += 1;
 
         let persist_own_event = SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
@@ -277,7 +290,12 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
          a single-attempt success must not double-dispatch even though the executor performs retries"
     );
 
-    let captured = captured.lock().unwrap();
+    let captured = {
+        let guard = captured
+            .lock()
+            .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
+        guard.clone()
+    };
     assert_eq!(
         captured.len(),
         1,
@@ -409,13 +427,17 @@ async fn saga_skips_events_not_routed_to_its_instance() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let final_count = *handle_count.lock().unwrap();
+    let final_count = *handle_count
+        .lock()
+        .expect("handle_count mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         final_count, 1,
         "Saga::handle must run exactly once — only the routed event must reach it"
     );
 
-    let captured = captured.lock().unwrap();
+    let captured = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         captured.len(),
         1,

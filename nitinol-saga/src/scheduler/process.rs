@@ -1,4 +1,4 @@
-//! `SchedulerProcess` — the system-wide resident timer core (Issue #50, E-25).
+//! `SchedulerProcess` — the system-wide resident timer core.
 //!
 //! A single non-generic process owns every saga's timers using a **Hashed Wheel
 //! Timer** with [`WHEEL_SIZE`] slots and a [`TICK_INTERVAL`] resolution.  It
@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use futures_core::future::BoxFuture;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
-use nitinol_runtime::{IdleTimeout, Props, ProcessSystem};
+use nitinol_runtime::{IdleTimeout, ProcessSystem, Props};
 
 use crate::id::SagaId;
 use crate::scheduler::token::ScheduleToken;
@@ -69,8 +69,8 @@ fn duration_to_ticks(after: Duration) -> u64 {
         return 1;
     }
     let tick_nanos = TICK_INTERVAL.as_nanos();
-    // Ceiling division: ceil(nanos / tick_nanos)
-    let ticks = (nanos + tick_nanos - 1) / tick_nanos;
+    // Ceiling division keeps the entry in a future slot; flooring could fire early.
+    let ticks = nanos.div_ceil(tick_nanos);
     u64::try_from(ticks).unwrap_or(u64::MAX)
 }
 
@@ -115,10 +115,9 @@ impl SchedulerProcess {
 impl Process for SchedulerProcess {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         // Kick off the recurring wheel tick.
-        ctx.pipe_to_self(
-            async { tokio::time::sleep(TICK_INTERVAL).await },
-            |_| WheelTick,
-        );
+        ctx.pipe_to_self(async { tokio::time::sleep(TICK_INTERVAL).await }, |_| {
+            WheelTick
+        });
     }
 }
 
@@ -152,11 +151,7 @@ impl Receive<RegisterTimer> for SchedulerProcess {
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         // Bump the generation so any earlier wheel entry for this token becomes stale.
-        let generation = self
-            .generations
-            .get(&msg.token)
-            .map(|g| g + 1)
-            .unwrap_or(1);
+        let generation = self.generations.get(&msg.token).map(|g| g + 1).unwrap_or(1);
         self.generations.insert(msg.token.clone(), generation);
 
         // Convert `after` to a number of ticks using ceiling division so the
@@ -211,7 +206,8 @@ impl Receive<CancelAllForSaga> for SchedulerProcess {
         msg: CancelAllForSaga,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
-        self.generations.retain(|token, _| token.saga_id != msg.saga_id);
+        self.generations
+            .retain(|token, _| token.saga_id != msg.saga_id);
         Ok(())
     }
 }
@@ -255,10 +251,9 @@ impl Receive<WheelTick> for SchedulerProcess {
         self.wheel[slot].extend(to_requeue);
 
         // Re-arm the next tick.
-        ctx.pipe_to_self(
-            async { tokio::time::sleep(TICK_INTERVAL).await },
-            |_| WheelTick,
-        );
+        ctx.pipe_to_self(async { tokio::time::sleep(TICK_INTERVAL).await }, |_| {
+            WheelTick
+        });
 
         Ok(())
     }
@@ -275,8 +270,21 @@ pub struct SchedulerProxy {
 }
 
 impl SchedulerProxy {
-    pub(crate) async fn register(&self, token: ScheduleToken, after: Duration, dispatch: DispatchFn) {
-        if let Err(e) = self.inner.tell(RegisterTimer { token, after, dispatch }).await {
+    pub(crate) async fn register(
+        &self,
+        token: ScheduleToken,
+        after: Duration,
+        dispatch: DispatchFn,
+    ) {
+        if let Err(e) = self
+            .inner
+            .tell(RegisterTimer {
+                token,
+                after,
+                dispatch,
+            })
+            .await
+        {
             tracing::warn!(error = ?e, "scheduler register timer failed");
         }
     }
@@ -299,8 +307,7 @@ impl SchedulerProxy {
 /// The process is persistent (never idle-times-out) because it must outlive
 /// individual sagas to keep their timers running.
 pub async fn spawn_scheduler(system: &ProcessSystem) -> SchedulerProxy {
-    let props = Props::new(SchedulerProcess::new)
-        .with_idle_timeout(IdleTimeout::Persistent);
+    let props = Props::new(SchedulerProcess::new).with_idle_timeout(IdleTimeout::Persistent);
     let inner = system.spawn(props).await;
     SchedulerProxy { inner }
 }
@@ -317,7 +324,8 @@ mod tests {
     /// values that previously produced wrong tick counts with floor division.
     #[test]
     fn duration_to_ticks_never_fires_before_deadline() {
-        let tick_ms = u64::try_from(TICK_INTERVAL.as_millis()).unwrap();
+        let tick_ms = u64::try_from(TICK_INTERVAL.as_millis())
+            .expect("tick interval in milliseconds must fit in u64");
 
         // (after_ms, expected_ticks, description)
         let cases: &[(u64, u64, &str)] = &[
@@ -325,8 +333,16 @@ mod tests {
             (1, 1, "1ms → 1 tick (fires after 10ms, still safe)"),
             (9, 1, "9ms → 1 tick (fires after 10ms, safe)"),
             (10, 1, "10ms → exactly 1 tick"),
-            (11, 2, "11ms → 2 ticks (was 1 with floor division — regression)"),
-            (19, 2, "19ms → 2 ticks (was 1 with floor division — regression)"),
+            (
+                11,
+                2,
+                "11ms → 2 ticks (was 1 with floor division — regression)",
+            ),
+            (
+                19,
+                2,
+                "19ms → 2 ticks (was 1 with floor division — regression)",
+            ),
             (20, 2, "20ms → exactly 2 ticks"),
             (21, 3, "21ms → 3 ticks"),
         ];
@@ -344,7 +360,7 @@ mod tests {
         }
     }
 
-    /// Regression test for ARCH-003: slot calculation must not overflow when
+    /// Regression test: slot calculation must not overflow when
     /// `ticks_until` is saturated to [`u64::MAX`] (i.e., `Duration::MAX`).
     ///
     /// Before the fix, `self.current_tick + ticks_until` would overflow for any
@@ -354,7 +370,11 @@ mod tests {
     fn slot_calculation_does_not_overflow_with_max_duration() {
         // duration_to_ticks(Duration::MAX) must saturate to u64::MAX.
         let ticks_until = duration_to_ticks(Duration::MAX);
-        assert_eq!(ticks_until, u64::MAX, "Duration::MAX must saturate to u64::MAX");
+        assert_eq!(
+            ticks_until,
+            u64::MAX,
+            "Duration::MAX must saturate to u64::MAX"
+        );
 
         // Slot calculation with current_tick > 0 must not panic.
         let current_tick: u64 = 1;
@@ -364,7 +384,10 @@ mod tests {
 
         // remaining_rounds uses saturating_sub, so no overflow.
         let remaining_rounds = ticks_until.saturating_sub(1) / WHEEL_SIZE as u64;
-        assert!(remaining_rounds > 0, "remaining_rounds must be non-zero for u64::MAX ticks");
+        assert!(
+            remaining_rounds > 0,
+            "remaining_rounds must be non-zero for u64::MAX ticks"
+        );
     }
 
     /// Verify the slot/rounds formula: an entry inserted `ticks_until` ticks

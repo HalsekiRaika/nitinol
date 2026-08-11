@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 
 use std::time::Duration;
@@ -79,8 +80,8 @@ async fn supervision_strategy_stop_variant_exists() {
 #[tokio::test]
 async fn supervision_strategy_restart_holds_configuration() {
     // Given/When: Restart variant with configuration
-    let strategy = SupervisionStrategy::restart(5, Duration::from_secs(120))
-        .expect("valid restart config");
+    let strategy =
+        SupervisionStrategy::restart(5, Duration::from_secs(120)).expect("valid restart config");
 
     // Then: fields hold the provided values
     match strategy {

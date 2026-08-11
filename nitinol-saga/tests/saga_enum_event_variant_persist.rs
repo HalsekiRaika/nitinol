@@ -6,6 +6,7 @@
 //! `variant()` in `append_user_events`), the stored `LoadedEvent.event_type`
 //! always had `variant=None` for enum saga events.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::JsonCodec;
 
@@ -25,9 +26,7 @@ use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName, V
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
-// ---------------------------------------------------------------------------
 // Upstream aggregate fixtures
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UpstreamTriggered;
@@ -62,9 +61,7 @@ impl Decider<Trigger> for UpstreamAggregate {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Saga event: an enum with arm-specific variant() override
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum WorkflowEvent {
@@ -72,10 +69,8 @@ enum WorkflowEvent {
 }
 
 impl Event for WorkflowEvent {
-    const EVENT_TYPE: EventType = EventType::new(
-        Family::new("variant.saga"),
-        TypeName::new("WorkflowEvent"),
-    );
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("variant.saga"), TypeName::new("WorkflowEvent"));
 
     fn variant(&self) -> EventType {
         let v = match self {
@@ -89,9 +84,7 @@ impl Event for WorkflowEvent {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Saga: emits WorkflowEvent::Started on each upstream trigger
-// ---------------------------------------------------------------------------
 
 struct WorkflowSaga {
     done: Arc<Notify>,
@@ -117,11 +110,12 @@ impl Saga for WorkflowSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helper: collect all events for a saga stream
-// ---------------------------------------------------------------------------
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<nitinol_persistence::LoadedEvent> {
+async fn load_saga_events(
+    store: &Arc<dyn EventStore>,
+    saga_id: &SagaId,
+) -> Vec<nitinol_persistence::LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -131,9 +125,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-// ---------------------------------------------------------------------------
 // Regression test
-// ---------------------------------------------------------------------------
 
 /// When a saga processes an upstream event and persists an enum `WorkflowEvent`
 /// with arm-specific `variant()` override, the `LoadedEvent.event_type.variant()`
@@ -158,28 +150,24 @@ async fn saga_persist_stores_enum_event_variant_in_loaded_event() {
     let done_for_saga = Arc::clone(&done);
 
     let routed = saga_id.clone();
-    let route_fn =
-        move |_event: &UpstreamTriggered| -> Option<SagaId> { Some(routed.clone()) };
+    let route_fn = move |_event: &UpstreamTriggered| -> Option<SagaId> { Some(routed.clone()) };
 
-    let _saga_proxy = SagaProps::<WorkflowSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&store),
-        move || WorkflowSaga {
+    let _saga_proxy =
+        SagaProps::<WorkflowSaga>::new(saga_id.clone(), Arc::clone(&store), move || WorkflowSaga {
             done: Arc::clone(&done_for_saga),
-        },
-    )
-    .with_codec(system.codec::<WorkflowEvent>())
-    .with_subscription(
-        Arc::clone(&store),
-        system.codec::<UpstreamTriggered>(),
-        SequenceCursor::Stream {
-            key: upstream_id.as_str().to_owned(),
-            after: 0,
-        },
-        route_fn,
-    )
-    .spawn(system.process_system())
-    .await;
+        })
+        .with_codec(system.codec::<WorkflowEvent>())
+        .with_subscription(
+            Arc::clone(&store),
+            system.codec::<UpstreamTriggered>(),
+            SequenceCursor::Stream {
+                key: upstream_id.as_str().to_owned(),
+                after: 0,
+            },
+            route_fn,
+        )
+        .spawn(system.process_system())
+        .await;
 
     // Trigger the upstream aggregate to emit one event
     upstream_proxy

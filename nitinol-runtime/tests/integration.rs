@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 
 use std::sync::atomic::Ordering;
@@ -90,7 +91,7 @@ async fn multiple_processes_maintain_independent_state() {
     wait_for_flag(&stopped2).await;
 }
 
-/// Regression test for internal-api-leak (AIR-001):
+/// Regression test for internal-api leaks:
 /// AnyProxy is the only type-erased handle exposed publicly.
 /// The internal DynProxy trait must remain pub(crate) and must NOT
 /// be required by external consumers. This test proves AnyProxy's

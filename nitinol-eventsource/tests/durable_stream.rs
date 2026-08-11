@@ -9,7 +9,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{DurableStream, Event, EventEnvelope, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, LoadedEvent};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadedEvent, TypeName};
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Process, ProcessContext, Props, Receive};
 use nitinol_runtime::{ProcessSystem, SupervisionStrategy};
@@ -55,8 +55,14 @@ impl Receive<EventEnvelope<Evt>> for RecordingSubscriber {
         msg: EventEnvelope<Evt>,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), Self::Error> {
-        self.sequences.lock().unwrap().push(msg.sequence);
-        self.globals.lock().unwrap().push(msg.global_sequence);
+        self.sequences
+            .lock()
+            .expect("sequences mutex is not poisoned; recv never panics while holding it")
+            .push(msg.sequence);
+        self.globals
+            .lock()
+            .expect("globals mutex is not poisoned; recv never panics while holding it")
+            .push(msg.global_sequence);
         self.count.fetch_add(1, Ordering::SeqCst);
         self.notify.notify_one();
         Ok(())
@@ -94,11 +100,17 @@ impl Recorder {
     }
 
     fn seen_sequences(&self) -> Vec<u64> {
-        self.sequences.lock().unwrap().clone()
+        self.sequences
+            .lock()
+            .expect("sequences mutex is not poisoned; the subscriber never panics")
+            .clone()
     }
 
     fn seen_globals(&self) -> Vec<u64> {
-        self.globals.lock().unwrap().clone()
+        self.globals
+            .lock()
+            .expect("globals mutex is not poisoned; the subscriber never panics")
+            .clone()
     }
 
     fn current_count(&self) -> usize {
@@ -574,7 +586,7 @@ async fn durable_stream_subscribe_from_ordering_with_concurrent_live_events() {
         recorder_b.seen_sequences(),
         vec![1, 2, 3, 4],
         "subscribe_from must deliver events in checkpoint sequence order; \
-         catchup events must not be interleaved with live events (AI-DS-003)"
+         catchup events must not be interleaved with live events"
     );
 }
 
@@ -856,7 +868,7 @@ async fn durable_stream_direct_poller_observable_via_registry_lookup_by_name() {
     );
 }
 
-/// After Issue #52 the `DirectPollerProcess` watches only its subscriber, not
+/// The `DirectPollerProcess` watches only its subscriber, not
 /// the parent `DurableStreamProxy`'s shared poller. This frees saga and
 /// projection consumers from holding a `_ds_keepalive` Arc — when the
 /// subscriber stops, the direct poller stops; otherwise it keeps delivering
@@ -982,15 +994,15 @@ async fn durable_stream_subscribe_from_twice_new_poller_stays_in_registry() {
         found.is_some(),
         "lookup_by_name must return the new direct poller after the old one \
          finishes stopping; old poller's unregister must not delete the alias \
-         that the new poller registered (AI-REVIEW-005)"
+         that the new poller registered"
     );
 }
 
 /// `subscribe_from` invoked twice for the same subscriber must stop the
 /// previous direct poller — otherwise both pollers would deliver duplicate
 /// events to the same subscriber. The behaviour is independent of the parent
-/// `DurableStreamProxy`'s lifetime (per Issue #52 the direct poller no
-/// longer watches the proxy).
+/// `DurableStreamProxy`'s lifetime, because the direct poller does not
+/// watch the proxy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
     let system = ProcessSystem::new().await;
@@ -1078,10 +1090,8 @@ async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// ARCH-REVIEW-001 regression: DirectPoller cursor must NOT advance when the
-// subscriber handler returns Err (state-consistency contract, G-27).
-// ---------------------------------------------------------------------------
+// Regression: DirectPoller cursor must NOT advance when the subscriber
+// handler returns Err, so that state stays consistent.
 
 /// A one-shot error injected into a subscriber handler.
 #[derive(Debug)]
@@ -1115,7 +1125,10 @@ impl Receive<EventEnvelope<Evt>> for FailOnceSubscriber {
         msg: EventEnvelope<Evt>,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), Self::Error> {
-        self.sequences_seen.lock().unwrap().push(msg.sequence);
+        self.sequences_seen
+            .lock()
+            .expect("sequences_seen mutex is not poisoned; recv panics never occur")
+            .push(msg.sequence);
         self.count.fetch_add(1, Ordering::SeqCst);
         self.notify.notify_one();
         // Fail exactly once: swap true → false returns the old value.
@@ -1127,7 +1140,7 @@ impl Receive<EventEnvelope<Evt>> for FailOnceSubscriber {
     }
 }
 
-/// Regression test for ARCH-REVIEW-001 (state-consistency contract).
+/// Regression test for cursor state consistency.
 ///
 /// `poll_direct_once` calls `proxy.ask(value)` and only advances the cursor on
 /// `Ok`. When the subscriber handler returns `Err`, the cursor must stay at its
@@ -1217,12 +1230,15 @@ async fn direct_poller_cursor_not_advanced_when_handler_returns_err() {
         panic!(
             "timed out: only {} recv() calls observed (expected 3); \
              seq=1 must be re-delivered when handler returns Err \
-             (ARCH-REVIEW-001 state-consistency regression)",
+             (state-consistency regression)",
             count.load(Ordering::SeqCst)
         )
     });
 
-    let seen = sequences_seen.lock().unwrap().clone();
+    let seen = sequences_seen
+        .lock()
+        .expect("sequences_seen mutex is not poisoned; the subscriber never panics")
+        .clone();
     assert_eq!(
         seen.iter().filter(|&&s| s == 1).count(),
         2,

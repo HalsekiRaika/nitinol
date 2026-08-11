@@ -1,5 +1,4 @@
-//! Tests for the `Combine<L, R>` driver and the `combine_drivers!` macro
-//! introduced in Issue #53.
+//! Tests for the `Combine<L, R>` driver and the `combine_drivers!` macro.
 //!
 //! These tests pin down:
 //! - `Combine<L, R>` dispatches each event to the correct side's `apply()`.
@@ -25,9 +24,7 @@ use nitinol_runtime::error::HandlerError;
 use nitinol_runtime::process::{Combine, Driver, PipeDriver, Process, ProcessContext};
 use nitinol_runtime::{ProcessSystem, Props};
 
-// ---------------------------------------------------------------------------
 // Test process: counts events delivered by each side of a Combine driver.
-// ---------------------------------------------------------------------------
 
 struct CounterProcess;
 
@@ -37,10 +34,8 @@ fn counter_props() -> Props<CounterProcess> {
     Props::new(|| CounterProcess)
 }
 
-// ---------------------------------------------------------------------------
 // Three single-purpose drivers. Each `apply` bumps a distinct counter so the
 // test can tell which branch of the Combine tree fired.
-// ---------------------------------------------------------------------------
 
 struct IntDriver {
     rx: mpsc::Receiver<i32>,
@@ -111,9 +106,7 @@ impl Driver<CounterProcess> for BoolDriver {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn wait_for_count(counter: &AtomicU32, expected: u32, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -135,10 +128,8 @@ fn fresh_counters() -> (Arc<AtomicU32>, Arc<AtomicU32>, Arc<AtomicU32>) {
     )
 }
 
-// ---------------------------------------------------------------------------
 // Drivers used for non-spawning unit-style checks (`supports_idle_timeout`,
 // `pipe_handle`). They never produce events.
-// ---------------------------------------------------------------------------
 
 struct IdleDriverTrue;
 struct IdleDriverFalse;
@@ -179,9 +170,7 @@ impl Driver<CounterProcess> for IdleDriverFalse {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Macro arity 1: `combine_drivers!(A)` is an identity, not a wrapped Combine.
-// ---------------------------------------------------------------------------
 
 /// Given a single driver value,
 /// when wrapped in `combine_drivers!(d)`,
@@ -212,10 +201,8 @@ async fn combine_drivers_macro_single_arg_is_identity() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Macro arity 2: `combine_drivers!(A, B)` produces a `Combine<A, B>` that
 // dispatches each event to the originating side's `apply`.
-// ---------------------------------------------------------------------------
 
 /// Given a Combine of two drivers (one for `i32`, one for `String`),
 /// when events are sent on both channels,
@@ -254,10 +241,8 @@ async fn combine_drivers_two_args_dispatch_events_to_each_side() {
     assert_eq!(str_cnt.load(Ordering::SeqCst), 1);
 }
 
-// ---------------------------------------------------------------------------
 // Macro arity 3: `combine_drivers!(A, B, C)` right-folds to
 // `Combine::new(A, Combine::new(B, C))`. All three sources must deliver.
-// ---------------------------------------------------------------------------
 
 /// Given a Combine of three drivers built via `combine_drivers!`,
 /// when events are sent on all three channels,
@@ -297,11 +282,9 @@ async fn combine_drivers_three_args_dispatch_events_to_all_three_sides() {
     wait_for_count(&bool_cnt, 1, "bool counter = 1").await;
 }
 
-// ---------------------------------------------------------------------------
 // `supports_idle_timeout()` is AND-combined across children. The existing
 // MessageDriver-default `true` plus a tick-style `false` must collapse to
 // `false` so existing IntervalDriver semantics are preserved.
-// ---------------------------------------------------------------------------
 
 /// Given a Combine of two `supports_idle_timeout() == true` drivers,
 /// when `supports_idle_timeout()` is queried,
@@ -357,9 +340,7 @@ async fn combine_supports_idle_timeout_is_false_when_both_children_are_false() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // `pipe_handle()` propagation: Combine surfaces whichever child holds it.
-// ---------------------------------------------------------------------------
 
 /// Given a Combine where the LEFT child is `PipeDriver`,
 /// when `pipe_handle()` is queried,
@@ -424,9 +405,7 @@ async fn combine_pipe_handle_propagates_through_nested_combines() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Type-level checks. These force the published API surface to remain stable.
-// ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
 fn _assert_combine_is_driver<P: Process>(combine: Combine<IdleDriverTrue, IdleDriverTrue>)
@@ -443,6 +422,5 @@ where
 fn _assert_combine_new_takes_two_args() {
     // Constructor must accept exactly two arguments. If `Combine::new` ever
     // grows additional parameters (or shrinks), this signature breaks.
-    let _: Combine<IdleDriverTrue, IdleDriverTrue> =
-        Combine::new(IdleDriverTrue, IdleDriverTrue);
+    let _: Combine<IdleDriverTrue, IdleDriverTrue> = Combine::new(IdleDriverTrue, IdleDriverTrue);
 }

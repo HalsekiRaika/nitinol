@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 
 use std::sync::atomic::Ordering;
@@ -14,9 +15,7 @@ use common::{
     Increment, WatchPid,
 };
 
-// ============================================================
 // Type-property tests
-// ============================================================
 
 /// TerminatedReason::Timeout is a valid variant: PartialEq with itself.
 #[tokio::test]
@@ -53,8 +52,10 @@ async fn terminated_reason_timeout_is_copy() {
 /// TerminatedReason::Timeout is Clone: clone produces an equal value.
 #[tokio::test]
 async fn terminated_reason_timeout_is_clone() {
-    // Given / When: clone the Timeout variant
-    let cloned = TerminatedReason::Timeout.clone();
+    // Given / When: clone the Timeout variant. `Clone::clone` is called
+    // through UFCS rather than method syntax so the `Clone` impl is the thing
+    // under test, not the `Copy` impl that method syntax would resolve to.
+    let cloned = Clone::clone(&TerminatedReason::Timeout);
 
     // Then: the clone equals the original
     assert_eq!(cloned, TerminatedReason::Timeout);
@@ -124,9 +125,7 @@ async fn process_system_with_default_idle_timeout_is_consuming_builder() {
     // Then: method compiles and returns ProcessSystem; no panic
 }
 
-// ============================================================
 // Integration tests
-// ============================================================
 
 /// A process configured with Props::After(d) calls on_stop after the idle period.
 ///
@@ -156,7 +155,8 @@ async fn idle_timeout_after_notifies_watcher_with_timeout_reason() {
     let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let target_props = test_props(started.clone(), stopped.clone(), counter);
-    let target_props = target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
+    let target_props =
+        target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
     let target_proxy = system.spawn(target_props).await;
     let target_pid = target_proxy.pid();
     wait_for_flag(&started).await;
@@ -180,7 +180,9 @@ async fn idle_timeout_after_notifies_watcher_with_timeout_reason() {
 
     // Then: the watcher receives Terminated with who=target_pid and why=Timeout
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::Timeout);
 }
@@ -219,7 +221,9 @@ async fn idle_timeout_inherit_uses_system_default_and_notifies_with_timeout() {
 
     // Then: watcher receives Terminated{why: Timeout}
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::Timeout);
 }
@@ -271,7 +275,9 @@ async fn idle_timeout_persistent_ignores_system_default() {
         .await
         .expect("explicit stop should succeed");
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(
         terminated.why,
         TerminatedReason::Stopped,
@@ -316,7 +322,8 @@ async fn idle_timeout_after_overrides_longer_system_default() {
     // And: a process with its own 50ms timeout (much shorter than the system default)
     let (started, stopped, counter) = tracked_state();
     let target_props = test_props(started.clone(), stopped.clone(), counter);
-    let target_props = target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
+    let target_props =
+        target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
 
     let _proxy = system.spawn(target_props).await;
     wait_for_flag(&started).await;
@@ -335,7 +342,8 @@ async fn idle_message_resets_timeout_timer() {
     let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let target_props = test_props(started.clone(), stopped.clone(), counter);
-    let target_props = target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(100)));
+    let target_props =
+        target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(100)));
     let target_proxy = system.spawn(target_props).await;
     wait_for_flag(&started).await;
 

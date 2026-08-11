@@ -1,4 +1,4 @@
-//! `EventSourceSystem::spawn_aggregate` accepts `Arc<dyn EventStore>` (Issue #40).
+//! `EventSourceSystem::spawn_aggregate` accepts `Arc<dyn EventStore>`.
 //!
 //! The system-level convenience methods follow the same wiring change as
 //! `AggregateProps::new`: the second argument is `Arc<dyn EventStore>`
@@ -39,7 +39,8 @@ struct Counter;
 struct Bumped;
 
 impl Event for Bumped {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.system"), TypeName::new("Bumped"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("e2e.system"), TypeName::new("Bumped"));
 }
 
 impl Aggregate for Counter {
@@ -62,9 +63,7 @@ impl Decider<Bump> for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Runtime: EventSourceSystem::spawn_aggregate takes Arc<dyn EventStore>
-// ---------------------------------------------------------------------------
 
 /// `spawn_aggregate(id, store)` works with `Arc<dyn EventStore>` —
 /// confirming the wiring at the system convenience layer matches the
@@ -88,9 +87,7 @@ async fn spawn_aggregate_accepts_arc_dyn_event_store() {
     assert_eq!(events, vec![Bumped]);
 }
 
-// ---------------------------------------------------------------------------
 // Runtime: aggregate_props (no spawn) accepts Arc<dyn EventStore>
-// ---------------------------------------------------------------------------
 
 /// `aggregate_props(id, store)` returns a builder pre-wired to the store.
 /// The caller can attach further configuration before spawning.

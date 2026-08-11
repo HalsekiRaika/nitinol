@@ -9,6 +9,7 @@
 //! Reserved-prefix invariant (`nitinol.saga.outbox.*`) is asserted separately
 //! in `saga_outbox_persist_atomicity.rs`.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{shape_of, JsonCodec, Shape};
 

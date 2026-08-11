@@ -12,7 +12,8 @@ struct Reserved {
 }
 
 impl Event for Reserved {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("mock.proxy"), TypeName::new("Reserved"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("mock.proxy"), TypeName::new("Reserved"));
 }
 
 #[derive(Default)]

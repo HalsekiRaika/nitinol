@@ -27,24 +27,21 @@ use nitinol_persistence::store::{
     EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore,
 };
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, TypeName, PersistedSnapshot, ProjectionId,
+    AggregateId, AppendingEvent, EventType, Family, PersistedSnapshot, ProjectionId, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: event
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("SysIntIncremented"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new(""), TypeName::new("SysIntIncremented"));
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: aggregate (non-snapshotable)
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Counter {
@@ -59,9 +56,7 @@ impl Aggregate for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: aggregate (snapshotable, snapshot = u64)
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct CounterWithSnapshot {
@@ -88,9 +83,7 @@ impl Snapshotable for CounterWithSnapshot {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: commands and queries
-// ---------------------------------------------------------------------------
 
 struct Increment;
 struct GetCount;
@@ -141,9 +134,7 @@ impl EvtReceive<GetCount> for CounterWithSnapshot {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: JsonCodec — generic serde_json-backed Codec
-// ---------------------------------------------------------------------------
 
 /// Unit-struct codec backed by serde_json.
 /// Implements Codec<E> for any E that is Serialize + DeserializeOwned.
@@ -164,9 +155,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: Projector for Incremented events
-// ---------------------------------------------------------------------------
 
 struct CountingProjector {
     count: Arc<AtomicUsize>,
@@ -188,9 +177,7 @@ impl Projector<Incremented> for CountingProjector {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expected: usize) {
     tokio::time::timeout(Duration::from_millis(500), async {
@@ -206,9 +193,7 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
     .unwrap_or_else(|_| panic!("timed out waiting for {expected} calls"));
 }
 
-// ---------------------------------------------------------------------------
 // Test: EventSourceSystem builder creates a system
-// ---------------------------------------------------------------------------
 
 /// EventSourceSystem::new(ps).with_codec::<C>().build() compiles and produces
 /// an EventSourceSystem that exposes process_system().
@@ -224,9 +209,7 @@ async fn event_source_system_builder_produces_system() {
     let _ = system.process_system();
 }
 
-// ---------------------------------------------------------------------------
 // Test: spawn_aggregate creates a working proxy
-// ---------------------------------------------------------------------------
 
 /// spawn_aggregate creates an AggregateProxy that accepts commands.
 #[tokio::test]
@@ -250,9 +233,7 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test: second spawn_aggregate replays state
-// ---------------------------------------------------------------------------
 
 /// After ask(Increment) on process 1, spawning a second process with the same id
 /// and the same `Arc<dyn EventStore>` replays the stored event and restores count to 1.
@@ -284,9 +265,7 @@ async fn spawn_aggregate_second_process_replays_state() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test: sequential ask calls accumulate state
-// ---------------------------------------------------------------------------
 
 /// Three sequential ask(Increment) calls advance the counter to 3.
 #[tokio::test]
@@ -310,9 +289,7 @@ async fn spawn_aggregate_sequential_increments_accumulate_state() {
     assert_eq!(count, 3, "count must be 3 after three Increment commands");
 }
 
-// ---------------------------------------------------------------------------
 // Test: system.codec() returns a usable Arc<dyn ErasedCodec<E>>
-// ---------------------------------------------------------------------------
 
 /// system.codec::<E>() returns a codec that can encode and decode E.
 #[tokio::test]
@@ -333,9 +310,7 @@ async fn system_codec_returns_usable_erased_codec() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test: system.codec() integrates with ProjectorProps::with_event
-// ---------------------------------------------------------------------------
 
 /// system.codec::<E>() can be passed to ProjectorProps::with_event() to configure
 /// a projector that processes catch-up events.
@@ -356,7 +331,9 @@ async fn system_codec_integrates_with_projector_props() {
             vec![AppendingEvent {
                 sequence: 1,
                 event_type: EventType::new(Family::new(""), TypeName::new("SysIntIncremented")),
-                payload: serde_json::to_vec(&Incremented).map(Bytes::from).unwrap(),
+                payload: serde_json::to_vec(&Incremented).map(Bytes::from).expect(
+                    "Incremented is a plain Serialize unit struct, so JSON encoding cannot fail",
+                ),
                 occurred_at: jiff::Timestamp::now(),
             }],
         )
@@ -392,9 +369,7 @@ async fn system_codec_integrates_with_projector_props() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test: aggregate_props wires codec and allows manual snapshot configuration
-// ---------------------------------------------------------------------------
 
 /// system.aggregate_props() returns a pre-wired AggregateProps.
 /// Passing it the snapshot persistor and codec allows snapshotable aggregates

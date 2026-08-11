@@ -21,23 +21,20 @@ use nitinol_eventsource::{
     Receive as EvtReceive,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName, LoadQuery};
+use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: event
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.agg"), TypeName::new("Incremented"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("e2e.agg"), TypeName::new("Incremented"));
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: aggregate
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Counter {
@@ -52,9 +49,7 @@ impl Aggregate for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: commands and queries
-// ---------------------------------------------------------------------------
 
 struct Increment;
 struct GetCount;
@@ -82,9 +77,7 @@ impl EvtReceive<GetCount> for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: JsonCodec (serde_json-backed)
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct JsonCodec;
@@ -101,9 +94,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: ask() returns the persisted event
-// ---------------------------------------------------------------------------
 
 /// Given a fresh Counter aggregate backed by InMemoryEventStore + JsonCodec,
 /// When ask(Increment) is called,
@@ -129,9 +120,7 @@ async fn e2e_ask_persists_event_and_returns_it() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 2: persisted event is recovered after process restart (replay)
-// ---------------------------------------------------------------------------
 
 /// Given one ask(Increment) was processed by process 1 (event persisted),
 /// When a second process is spawned for the same AggregateId,
@@ -163,9 +152,7 @@ async fn e2e_persisted_event_survives_process_restart() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: multiple asks advance sequence monotonically
-// ---------------------------------------------------------------------------
 
 /// Given three sequential ask(Increment) calls on the same process,
 /// When the counter state and stored events are inspected,

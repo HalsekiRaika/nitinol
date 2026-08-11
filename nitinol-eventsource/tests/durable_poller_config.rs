@@ -20,7 +20,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{DurableSubscription, Event, EventEnvelope, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, LoadedEvent};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadedEvent, TypeName};
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::{Process, ProcessContext, Props, Receive};
 use nitinol_runtime::ProcessSystem;
@@ -29,7 +29,8 @@ use nitinol_runtime::ProcessSystem;
 struct Evt;
 
 impl Event for Evt {
-    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("DurableSubscriptionEvt"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new(""), TypeName::new("DurableSubscriptionEvt"));
 }
 
 fn to_envelope(loaded: LoadedEvent) -> Option<EventEnvelope<Evt>> {
@@ -61,9 +62,7 @@ async fn append_evt(store: &InMemoryEventStore, key: &str, sequence: u64) {
 
 const TEST_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-// ---------------------------------------------------------------------------
 // Subscriber process that calls `DurableSubscription::spawn_child` in on_start
-// ---------------------------------------------------------------------------
 
 struct SubscriberViaConfig {
     config: DurableSubscription<EventEnvelope<Evt>>,
@@ -122,9 +121,22 @@ async fn wait_for_count(count: &Arc<AtomicUsize>, notify: &Arc<Notify>, expected
     });
 }
 
-// ---------------------------------------------------------------------------
+/// Waits until `on_start` has recorded the child poller's Pid and returns it.
+async fn wait_for_child_pid(slot: &Arc<tokio::sync::Mutex<Option<Pid>>>) -> Pid {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(pid) = *slot.lock().await {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for on_start to record child pid"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 // Tests
-// ---------------------------------------------------------------------------
 
 /// `DurableSubscription::spawn_child` delivers upstream catchup events to the
 /// subscriber process.
@@ -208,23 +220,7 @@ async fn durable_poller_config_registers_poller_as_child() {
         })
         .await;
 
-    // Wait for on_start to complete and the child Pid to be recorded.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if child_pid_out.lock().await.is_some() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for on_start to record child pid"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-
-    let child_pid = child_pid_out
-        .lock()
-        .await
-        .expect("child pid must be Some after on_start");
+    let child_pid = wait_for_child_pid(&child_pid_out).await;
 
     // The child poller must be registered in the flat process registry.
     assert!(
@@ -271,19 +267,7 @@ async fn durable_poller_config_poller_stops_with_subscriber() {
         })
         .await;
 
-    // Wait for on_start and the child Pid.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if child_pid_out.lock().await.is_some() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for on_start to record child pid"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    let child_pid = child_pid_out.lock().await.unwrap();
+    let child_pid = wait_for_child_pid(&child_pid_out).await;
 
     // Deliver one event to confirm the poller is live.
     append_evt(&store, agg.as_str(), 1).await;
@@ -306,7 +290,7 @@ async fn durable_poller_config_poller_stops_with_subscriber() {
     }
 }
 
-/// Regression for ARCH-REVIEW-006: when the subscriber process restarts, the
+/// Regression: when the subscriber process restarts, the
 /// poller is re-spawned as a child on each `on_start`. If the poller called
 /// `ctx.watch(subscriber)` unconditionally, each restart cycle would add a
 /// *new* (stopped) poller PID to the subscriber's watcher set, causing an
@@ -412,7 +396,10 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
         child_pids: cpas.clone(),
     })
     .with_idle_timeout(IdleTimeout::Persistent)
-    .with_supervision_strategy(SupervisionStrategy::restart(3, std::time::Duration::from_secs(10)).expect("valid restart config"));
+    .with_supervision_strategy(
+        SupervisionStrategy::restart(3, std::time::Duration::from_secs(10))
+            .expect("valid restart config"),
+    );
 
     let proxy = system.spawn(props).await;
 
@@ -422,7 +409,10 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
         if on_start_count.load(Ordering::SeqCst) >= 1 {
             break;
         }
-        assert!(Instant::now() < deadline, "timed out waiting for first on_start");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for first on_start"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -438,7 +428,10 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
         if on_start_count.load(Ordering::SeqCst) >= 2 {
             break;
         }
-        assert!(Instant::now() < deadline, "timed out waiting for restart on_start");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for restart on_start"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -454,7 +447,10 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
         if on_start_count.load(Ordering::SeqCst) >= 3 {
             break;
         }
-        assert!(Instant::now() < deadline, "timed out waiting for second restart on_start");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for second restart on_start"
+        );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
@@ -467,9 +463,9 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
     // spurious Terminated → on_terminated call.
     assert!(
         !on_terminated_called.load(Ordering::SeqCst),
-        "ARCH-REVIEW-006 regression: on_terminated must NOT be called for \
-         child pollers across subscriber restarts; each poller is a hierarchy \
-         child and must not register an explicit DeathWatch on the subscriber"
+        "on_terminated must NOT be called for child pollers across subscriber \
+         restarts; each poller is a hierarchy child and must not register an \
+         explicit DeathWatch on the subscriber"
     );
 
     // Cleanup.

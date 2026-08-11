@@ -9,7 +9,9 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 use nitinol_runtime::process::ProcessContext;
 
-use crate::dead_letter::{enqueue_dead_letter, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext};
+use crate::dead_letter::{
+    enqueue_dead_letter, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext,
+};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
@@ -19,6 +21,14 @@ use crate::process::outbox_executor::spawn_outbox_executor;
 use crate::process::saga_process::{SagaProcess, TellState};
 use crate::saga::Saga;
 use crate::scheduler::{ScheduleEvent, TimerName};
+
+/// Rebuilds a [`TellIntent`] from the serialized command a `TellRequested`
+/// carried, so a tell pending at crash time can be re-dispatched once the
+/// OS process restarts and the in-memory intent is gone.
+///
+/// Returns `None` when the payload cannot be reconstructed; replay then
+/// appends a synthetic `TellFailed` instead of silently dropping the tell.
+type CrashRestartFactory<'a> = &'a (dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync);
 
 /// A schedule that replay found still active — a persisted `Scheduled` with no
 /// later `Cancelled` / `Fired` for the same name.  Re-registered with the
@@ -36,7 +46,7 @@ pub(crate) struct ReplayOutcome {
     /// synthesised for un-redispatchable pending tells).
     pub(crate) failed: Vec<u64>,
     /// `true` when the stream carries a durable `Ended` marker — the saga
-    /// terminated in a previous incarnation and must not be revived (D-14).
+    /// terminated in a previous incarnation and must not be revived.
     pub(crate) ended: bool,
     /// Schedules still pending after replay, to be re-registered with the
     /// scheduler.  Empty when the saga has ended.
@@ -51,7 +61,7 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     store: &Arc<dyn EventStore>,
     sequence: &mut u64,
     tell_states: &mut HashMap<u64, TellState>,
-    crash_restart_factory: Option<&(dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync)>,
+    crash_restart_factory: Option<CrashRestartFactory<'_>>,
     retry_policy: RetryPolicy,
     enqueue_policy: &dyn EnqueuePolicy,
     ctx: &mut ProcessContext<SagaProcess<S>>,
@@ -60,13 +70,13 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
         Some(s) => s,
         // store.load() or stream iteration failed — the terminated state is
         // unknown.  Fail safe (not fail-open): return Err so on_start stops
-        // the process without subscribing (D-14 contract).
+        // the process without subscribing.
         None => return Err(()),
     };
-    // D-14: when the stream carries a durable `Ended` marker the saga terminated
+    // When the stream carries a durable `Ended` marker the saga terminated
     // in a previous incarnation.  Skip `redispatch_pending` entirely so that any
     // in-flight `TellRequested` entries are NOT re-executed after termination.
-    // Ended sagas also skip schedule re-registration (E-30).
+    // Ended sagas also skip schedule re-registration.
     if scan.ended {
         return Ok(ReplayOutcome {
             failed: scan.failed,
@@ -181,7 +191,7 @@ fn dispatch_loaded<S: Saga>(
         Ok(SagaPersisted::Outbox(marker)) => apply_outbox_message(marker, pending, failed, ended),
         Ok(SagaPersisted::Schedule(marker)) => apply_schedule_marker(marker, schedules),
         // Dead letters are not folded into saga state — they are an
-        // observability side-channel delivered to subscribers (G-27).
+        // observability side-channel delivered to subscribers.
         Ok(SagaPersisted::DeadLetter(_)) => {}
         Ok(SagaPersisted::Domain(event)) => state.apply(event),
         Err(SagaPersistedDecodeError::Outbox(e)) => {
@@ -277,13 +287,14 @@ fn intent_of(state: Option<&TellState>) -> Option<TellIntent> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn redispatch_pending<S: Saga>(
     saga_id: &SagaId,
     store: &Arc<dyn EventStore>,
     sequence: &mut u64,
     pending: HashMap<u64, PendingTell>,
     tell_states: &mut HashMap<u64, TellState>,
-    crash_restart_factory: Option<&(dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync)>,
+    crash_restart_factory: Option<CrashRestartFactory<'_>>,
     retry_policy: RetryPolicy,
     enqueue_policy: &dyn EnqueuePolicy,
     ctx: &mut ProcessContext<SagaProcess<S>>,
@@ -350,7 +361,7 @@ async fn redispatch_pending<S: Saga>(
                 // Write a DLQ entry only when the target stream key is recoverable.
                 // Legacy streams written before `TellRequested.target` (proto field 3)
                 // was added have `target == None`; emitting `TellFailed` with an empty
-                // target violates the G-28 contract, so those entries are skipped.
+                // target is not allowed, so those entries are skipped.
                 // The durable outbox marker already records the failure.
                 if let Some(target) = pending_tell.target {
                     let message = pending_tell.crash_restart.unwrap_or_default();
@@ -363,7 +374,7 @@ async fn redispatch_pending<S: Saga>(
                         SourceContext::without_upstream(),
                     )
                     .await;
-                    // G-27: when the DLQ append fails the synthetic TellFailed is
+                    // When the DLQ append fails the synthetic TellFailed is
                     // already written to the outbox, but the DLQ entry is missing.
                     // Stop so the process is not considered cleanly started; a
                     // supervised restart will re-evaluate from the durable markers.
@@ -371,7 +382,7 @@ async fn redispatch_pending<S: Saga>(
                         tracing::error!(
                             tell_id,
                             "saga replay: DLQ append failed for synthetic TellFailed; \
-                             stopping process (G-27)"
+                             stopping process"
                         );
                         return Err(());
                     }
@@ -536,7 +547,8 @@ mod tests {
     }
 
     /// A store that always fails `load()`.  Used to simulate an unreachable event
-    /// store during replay, verifying the fail-safe D-14 guard (AIR-004).
+    /// store during replay, verifying the fail-safe guard against reviving a
+    /// possibly-terminated saga.
     struct FailLoadStore;
 
     #[async_trait]
@@ -558,7 +570,7 @@ mod tests {
     }
 
     /// A saga that counts every `handle` call.  Used to assert that the upstream
-    /// subscription is never wired when replay fails (AIR-004).
+    /// subscription is never wired when replay fails.
     #[derive(Default)]
     struct CountingInertSaga {
         handle_count: Arc<AtomicUsize>,
@@ -603,11 +615,7 @@ mod tests {
             .expect("seed TellRequested must succeed");
     }
 
-    async fn seed_ended(
-        store: &Arc<InMemoryEventStore>,
-        saga_id: &SagaId,
-        sequence: u64,
-    ) {
+    async fn seed_ended(store: &Arc<InMemoryEventStore>, saga_id: &SagaId, sequence: u64) {
         let store_dyn: Arc<dyn EventStore> = Arc::clone(store) as Arc<dyn EventStore>;
         let ok = OutboxAppender::append_ended(&store_dyn, saga_id, sequence).await;
         assert!(ok, "seed Ended must succeed");
@@ -777,8 +785,7 @@ mod tests {
 
         seed_tell_requested(&store, &saga_id, 1, 1).await;
 
-        let intent =
-            TellIntent::new::<MarkerAggregate, MarkerCmd, _>(mock.clone(), MarkerCmd);
+        let intent = TellIntent::new::<MarkerAggregate, MarkerCmd, _>(mock.clone(), MarkerCmd);
         let mut initial_tell_states = HashMap::new();
         initial_tell_states.insert(1u64, TellState::AppendFailed(intent));
 
@@ -840,7 +847,7 @@ mod tests {
         );
     }
 
-    /// AIR-003 regression: when the saga stream carries both a `TellRequested`
+    /// Regression test: when the saga stream carries both a `TellRequested`
     /// and a durable `Ended` marker, `replay_and_redispatch` must skip
     /// `redispatch_pending` entirely.  Even with a live in-memory intent
     /// available, no `TellAcked` or `TellFailed` must be appended.
@@ -896,12 +903,12 @@ mod tests {
         assert_eq!(
             acked, 0,
             "pending tell must NOT be redispatched when Ended marker is present \
-             (AIR-003 regression)"
+             (regression)"
         );
         assert_eq!(
             failed, 0,
             "pending tell must NOT produce synthetic TellFailed when Ended marker \
-             is present (AIR-003 regression)"
+             is present (regression)"
         );
     }
 
@@ -916,7 +923,7 @@ mod tests {
     }
 
     impl FailSecondAppendStore {
-        fn new(inner: Arc<InMemoryEventStore>) -> Arc<dyn EventStore> {
+        fn into_store(inner: Arc<InMemoryEventStore>) -> Arc<dyn EventStore> {
             Arc::new(Self {
                 inner,
                 append_count: std::sync::atomic::AtomicUsize::new(0),
@@ -952,12 +959,12 @@ mod tests {
         }
     }
 
-    /// ARCH-REVIEW-001 regression: when `OutboxAppender::append_terminal`
+    /// Regression test: when `OutboxAppender::append_terminal`
     /// succeeds for a synthetic TellFailed during replay but the subsequent DLQ
     /// enqueue fails, `redispatch_pending` must return `Err(())`,
     /// `replay_and_redispatch` must propagate it, and `on_start` must stop the
-    /// process without wiring the upstream subscription (G-27: DLQ append failure
-    /// must not silently treat the failure as processed).
+    /// process without wiring the upstream subscription — a DLQ append failure
+    /// must not silently treat the failure as processed.
     ///
     /// Concretely: even if the upstream store has a routed event, `Saga::handle`
     /// must never be called when the replay DLQ append fails.
@@ -985,7 +992,7 @@ mod tests {
         // First append (OutboxAppender::append_terminal) succeeds.
         // Second append (DLQ enqueue) fails → replay_and_redispatch returns Err(()).
         let fail_second: Arc<dyn EventStore> =
-            FailSecondAppendStore::new(Arc::clone(&inner_store));
+            FailSecondAppendStore::into_store(Arc::clone(&inner_store));
 
         let handle_count = Arc::new(AtomicUsize::new(0));
 
@@ -1035,11 +1042,11 @@ mod tests {
             handle_count.load(Ordering::SeqCst),
             0,
             "Saga::handle must never be called when replay DLQ append fails — \
-             the process must stop itself instead of subscribing (ARCH-REVIEW-001 / G-27)"
+             the process must stop itself instead of subscribing"
         );
     }
 
-    /// AIR-004 regression: when `EventStore::load` fails during replay the
+    /// Regression test: when `EventStore::load` fails during replay the
     /// terminated state is unknown.  `replay_and_redispatch` must return `Err`
     /// so `on_start` stops the process instead of subscribing to upstream events
     /// with an indeterminate terminated state (fail-safe, not fail-open).
@@ -1102,7 +1109,7 @@ mod tests {
             handle_count.load(Ordering::SeqCst),
             0,
             "Saga::handle must never be called when EventStore::load fails during \
-             replay — the process must stop itself instead of subscribing (AIR-004)"
+             replay — the process must stop itself instead of subscribing"
         );
     }
 }

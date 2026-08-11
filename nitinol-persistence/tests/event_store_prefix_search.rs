@@ -1,4 +1,4 @@
-//! Integration tests for [`LoadQuery`] hierarchical prefix search (Issue #66).
+//! Integration tests for [`LoadQuery`] hierarchical prefix search.
 
 use std::borrow::Borrow;
 

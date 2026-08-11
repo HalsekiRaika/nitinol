@@ -1,4 +1,4 @@
-//! Spec C-8 atomicity invariant: a `Persist { events, tells, schedules }`
+//! Atomicity invariant: a `Persist { events, tells, schedules }`
 //! branch must append the user events, the per-tell `TellRequested` markers,
 //! and the per-schedule `Scheduled` markers in **one** atomic batch on the
 //! saga's own event store.
@@ -8,6 +8,7 @@
 //! would think it had emitted a tell that no executor will ever pick up on
 //! replay.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
@@ -26,7 +27,9 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
+use nitinol_persistence::{
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
@@ -36,7 +39,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("atomic"), TypeName::new("OrderPlaced"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("atomic"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -45,7 +49,8 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("atomic"), TypeName::new("ReservationRequested"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("atomic"), TypeName::new("ReservationRequested"));
 }
 
 #[derive(Default)]
@@ -62,7 +67,8 @@ struct InventoryReserved {
 }
 
 impl Event for InventoryReserved {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("atomic"), TypeName::new("InventoryReserved"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("atomic"), TypeName::new("InventoryReserved"));
 }
 
 #[derive(Clone)]
@@ -334,7 +340,12 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
             event: Self::SubscribedEvent,
             _ctx: &mut SagaContext,
         ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-            self.captured.lock().unwrap().push(event.sku.clone());
+            self.captured
+                .lock()
+                .expect(
+                    "captured mutex is never poisoned: no holder panics while the guard is alive",
+                )
+                .push(event.sku.clone());
             let effect = SagaEffect::persist(ReservationRequested { sku: event.sku });
             self.notify.notify_one();
             Ok(effect)

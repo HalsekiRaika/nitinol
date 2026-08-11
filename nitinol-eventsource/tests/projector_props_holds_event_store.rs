@@ -1,4 +1,4 @@
-//! `ProjectorProps::new` accepts `Arc<dyn EventStore>` directly (Issue #40).
+//! `ProjectorProps::new` accepts `Arc<dyn EventStore>` directly.
 //!
 //! The projector process now owns its event-store reference inline; it
 //! catches up by calling `store.load` directly instead of asking an
@@ -22,12 +22,10 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, ProjectionId};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Minimal Ping fixture
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct PingEvent;
@@ -68,9 +66,7 @@ impl Projector<PingEvent> for CountingProjector {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Compile-time type assertion
-// ---------------------------------------------------------------------------
 
 /// `ProjectorProps::new` MUST accept `Arc<dyn EventStore>` as its 2nd
 /// argument.  Not a `#[test]` — the compiler enforces the signature.
@@ -92,9 +88,7 @@ fn _assert_sig_projector_props_new_accepts_arc_dyn_event_store(
     });
 }
 
-// ---------------------------------------------------------------------------
 // Runtime: catchup processes pre-loaded events via direct store
-// ---------------------------------------------------------------------------
 
 /// A projector spawned with Arc<dyn EventStore> catches up by reading events
 /// pre-loaded into the same store — confirming the projector calls

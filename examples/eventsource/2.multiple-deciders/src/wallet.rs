@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 use nitinol::eventsource::Event;
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Receive as EvtReceive};
 
-// ---------------------------------------------------------------------------
 // Events
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Deposited {
@@ -25,10 +23,8 @@ pub struct Withdrawn {
     pub amount: u64,
 }
 
-// ---------------------------------------------------------------------------
 // A wallet holds multiple event types via the `Sequence` variant of `Effect`.
 // The aggregate must fold both event kinds — use an enum as the event union.
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
 #[serde(tag = "kind")]
@@ -38,9 +34,7 @@ pub enum WalletEvent {
     Withdrawn(Withdrawn),
 }
 
-// ---------------------------------------------------------------------------
 // Aggregate state
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 pub struct Wallet {
@@ -58,9 +52,7 @@ impl Aggregate for Wallet {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Commands
-// ---------------------------------------------------------------------------
 
 pub struct Deposit {
     pub amount: u64,
@@ -72,9 +64,7 @@ pub struct Withdraw {
 
 pub struct GetBalance;
 
-// ---------------------------------------------------------------------------
 // Rejection types
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 #[error("insufficient funds: balance {balance} < amount {amount}")]
@@ -83,9 +73,7 @@ pub struct InsufficientFunds {
     pub amount: u64,
 }
 
-// ---------------------------------------------------------------------------
 // Decider / Receive implementations
-// ---------------------------------------------------------------------------
 
 #[async_trait]
 impl Decider<Deposit> for Wallet {

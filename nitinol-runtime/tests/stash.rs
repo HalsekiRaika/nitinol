@@ -1,8 +1,8 @@
-//! Tests for Issue #60: `StashDriver` body — message stash queue + unstash.
+//! Tests for the `StashDriver` body — message stash queue + unstash.
 //!
-//! Issue #56 reserved the API surface (`ctx.stash` / `ctx.unstash_all`) as a
-//! no-op stub. This issue lands the real queue / replay machinery. These tests
-//! pin down the behaviors decided in `order.md` (lines 36-41):
+//! The API surface (`ctx.stash` / `ctx.unstash_all`) started as a no-op stub;
+//! the real queue / replay machinery now backs it. These tests pin down the
+//! following behaviors:
 //!
 //! 1. A message stashed via `ctx.stash` is, after `unstash_all`, processed
 //!    BEFORE newly arrived messages, in FIFO order.
@@ -33,9 +33,7 @@ use nitinol_runtime::error::{AskError, HandlerError, StashError};
 use nitinol_runtime::process::{Driver, Process, ProcessContext, Receive};
 use nitinol_runtime::{ProcessSystem, Props, StashCapacity};
 
-// ===========================================================================
 // Ordering fixture (behaviors 1, 2, 5)
-// ===========================================================================
 //
 // While `active == false` the process stashes every `Work`. Once `active`
 // flips (via `UnstashAll` / `UnstashN`) the unstashed `Work`s replay through
@@ -59,7 +57,10 @@ impl Receive<Work> for OrderProcess {
     type Error = Infallible;
     async fn recv(&mut self, msg: Work, ctx: &mut ProcessContext<Self>) -> Result<(), Infallible> {
         if self.active {
-            self.log.lock().unwrap().push(msg.0);
+            self.log
+                .lock()
+                .expect("log mutex is never poisoned: no handler panics while holding it")
+                .push(msg.0);
         } else {
             ctx.stash(msg)
                 .await
@@ -105,7 +106,11 @@ impl Receive<GetLog> for OrderProcess {
         _: GetLog,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<Vec<u32>, Infallible> {
-        Ok(self.log.lock().unwrap().clone())
+        Ok(self
+            .log
+            .lock()
+            .expect("log mutex is never poisoned: no handler panics while holding it")
+            .clone())
     }
 }
 
@@ -113,9 +118,7 @@ fn order_props() -> Props<OrderProcess> {
     Props::new(OrderProcess::default)
 }
 
-// ---------------------------------------------------------------------------
 // Behavior 1: stashed messages replay BEFORE new arrivals, in FIFO order.
-// ---------------------------------------------------------------------------
 
 /// Given a process that stashes `Work(1)`, `Work(2)`, `Work(3)` while inactive,
 /// when `UnstashAll` flips it active and `Work(4)` arrives afterward,
@@ -146,9 +149,7 @@ async fn unstash_all_replays_stashed_before_new_arrivals_in_fifo_order() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Behavior 2: unstash(n) re-delivers exactly N; the remainder stays stashed.
-// ---------------------------------------------------------------------------
 
 /// Given five stashed `Work` messages,
 /// when `unstash(2)` runs,
@@ -186,9 +187,7 @@ async fn unstash_n_redelivers_exactly_n_and_keeps_the_rest_stashed() {
     );
 }
 
-// ===========================================================================
 // Capacity fixture (behavior 3)
-// ===========================================================================
 //
 // Each `Probe` (tell) stashes a separate `Filler` and records whether the
 // stash succeeded. `Filler` is never unstashed, so the `stashed` queue only
@@ -218,7 +217,10 @@ impl Receive<Probe> for FullProcess {
     async fn recv(&mut self, _: Probe, ctx: &mut ProcessContext<Self>) -> Result<(), Infallible> {
         let outcome = ctx.stash(Filler).await;
         let full = matches!(outcome, Err(StashError::Full));
-        self.results.lock().unwrap().push(!full);
+        self.results
+            .lock()
+            .expect("results mutex is never poisoned: no handler panics while holding it")
+            .push(!full);
         Ok(())
     }
 }
@@ -231,7 +233,11 @@ impl Receive<GetResults> for FullProcess {
         _: GetResults,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<Vec<bool>, Infallible> {
-        Ok(self.results.lock().unwrap().clone())
+        Ok(self
+            .results
+            .lock()
+            .expect("results mutex is never poisoned: no handler panics while holding it")
+            .clone())
     }
 }
 
@@ -269,9 +275,7 @@ async fn stash_returns_full_error_when_buffer_is_at_capacity() {
     );
 }
 
-// ===========================================================================
 // Drop fixture (behavior 4)
-// ===========================================================================
 //
 // `Hold` is delivered via `ask` and stashed. A successful stash retains the
 // reply channel (caller stays pending); a full-stash drop releases it, so the
@@ -353,9 +357,7 @@ async fn full_stash_drops_ask_reply_with_reply_dropped() {
     first.abort();
 }
 
-// ===========================================================================
 // Always-operational fixture (behavior 5)
-// ===========================================================================
 //
 // A user-supplied driver occupies the `with_driver` slot. The Core trio
 // (including `StashDriver`) is still composed underneath, so stash/unstash
@@ -389,8 +391,14 @@ async fn stash_is_always_operational_even_with_a_user_driver() {
     let system = ProcessSystem::new().await;
     let proxy = system.spawn(order_props().with_driver(InertDriver)).await;
 
-    proxy.tell(Work(1)).await.expect("tell Work(1) must succeed");
-    proxy.tell(Work(2)).await.expect("tell Work(2) must succeed");
+    proxy
+        .tell(Work(1))
+        .await
+        .expect("tell Work(1) must succeed");
+    proxy
+        .tell(Work(2))
+        .await
+        .expect("tell Work(2) must succeed");
     proxy
         .tell(UnstashAll)
         .await

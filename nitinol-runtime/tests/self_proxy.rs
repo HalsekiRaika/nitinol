@@ -1,5 +1,4 @@
-//! Tests for the new `ProcessContext<P>` generic and `ctx.self_proxy()` API
-//! introduced in Issue #52.
+//! Tests for the `ProcessContext<P>` generic and the `ctx.self_proxy()` API.
 //!
 //! Specifically, these tests pin down:
 //! - `ProcessContext<P>` is generic over the hosting process type `P`
@@ -21,10 +20,8 @@ use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
 use nitinol_runtime::{ProcessSystem, Props};
 
-// ---------------------------------------------------------------------------
 // Test fixture: a process that captures its own `pid()` and `self_proxy().pid()`
 // from inside `on_start`, and also keeps a clone of its self proxy.
-// ---------------------------------------------------------------------------
 
 struct SelfAwareProcess {
     /// `ctx.pid()` observed during `on_start`.
@@ -185,9 +182,7 @@ async fn wait_for_some<T: Clone + Send>(slot: &Arc<Mutex<Option<T>>>) -> T {
     }
 }
 
-// ---------------------------------------------------------------------------
 // `ctx.self_proxy()` identity properties.
-// ---------------------------------------------------------------------------
 
 /// Given a spawned process,
 /// when `on_start` observes both `ctx.pid()` and `ctx.self_proxy().pid()`,
@@ -276,9 +271,7 @@ async fn cloned_self_proxy_routes_to_same_process() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Pipe-to-Self via `ctx.self_proxy().tell(...)` inside a handler.
-// ---------------------------------------------------------------------------
 
 /// Given a process whose `Receive<PipeToSelf>` clones the self proxy and
 /// uses it to send `Echo` back on the same mailbox,
@@ -335,11 +328,9 @@ async fn self_proxy_pipe_to_self_delivers_followup_message() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Static type-level assertions about the `self_proxy()` return signature.
 // These compile-only checks force the new API surface to remain stable:
 // changing the signature back to `&mut` or an owned value would fail to build.
-// ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
 fn assert_self_proxy_returns_shared_reference<P: Process>(
@@ -359,9 +350,7 @@ fn assert_process_context_is_generic_over_p<P: Process>(_ctx: &ProcessContext<P>
     // compiling.
 }
 
-// ---------------------------------------------------------------------------
 // Edge case: the captured proxy outlives the spawning scope.
-// ---------------------------------------------------------------------------
 
 /// Given a captured self proxy,
 /// when the original `spawn_proxy` is dropped,
@@ -408,10 +397,8 @@ async fn captured_self_proxy_survives_spawn_proxy_drop() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // PID monotonicity sanity check: two spawned processes get different PIDs and
 // each ctx.self_proxy() reflects its own process's PID.
-// ---------------------------------------------------------------------------
 
 /// Given two independently spawned processes,
 /// when each captures `ctx.self_proxy().pid()` inside on_start,
@@ -464,10 +451,8 @@ async fn each_processs_self_proxy_reflects_its_own_pid() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // `self_proxy().pid()` is stable across handler invocations: the same captured
 // PID is observed regardless of which message is being processed.
-// ---------------------------------------------------------------------------
 
 struct PidProbe;
 
@@ -512,10 +497,8 @@ async fn self_proxy_pid_is_stable_across_handler_invocations() {
     assert_eq!(pid1, pid2);
 }
 
-// ---------------------------------------------------------------------------
 // Helper: avoid unused-warning noise for the AtomicU64 type that callers of
 // `wait_for_some` instantiate. Not a behavior test.
-// ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
 fn _atomic_u64_compile_check() -> AtomicU64 {

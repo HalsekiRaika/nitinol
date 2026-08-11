@@ -7,9 +7,7 @@ use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::{IdleTimeout, ProcessSystem, Props, SupervisionStrategy};
 
-// ---------------------------------------------------------------------------
 // Internal messages
-// ---------------------------------------------------------------------------
 
 pub(crate) struct SaveSnapshot {
     pub(crate) snapshot: PersistedSnapshot,
@@ -19,9 +17,7 @@ pub(crate) struct LoadLatestSnapshot {
     pub(crate) aggregate_id: AggregateId,
 }
 
-// ---------------------------------------------------------------------------
 // SnapshotPersistor
-// ---------------------------------------------------------------------------
 
 /// Persistence actor that exclusively owns an `Arc<dyn SnapshotStore>`.
 ///
@@ -82,9 +78,7 @@ impl From<ProcessProxy<SnapshotPersistor>> for SnapshotPersistorProxy {
     }
 }
 
-// ---------------------------------------------------------------------------
 // SnapshotPersistorRef
-// ---------------------------------------------------------------------------
 
 /// Typed, cloneable handle to a `SnapshotPersistor` actor.
 ///

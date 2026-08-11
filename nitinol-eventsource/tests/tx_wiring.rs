@@ -22,12 +22,10 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::error::CheckpointError;
 use nitinol_persistence::store::{CheckpointStore, EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, ProjectionId};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: minimal event type
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct TickEvent;
@@ -50,9 +48,7 @@ impl Codec<TickEvent> for TickCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: MockTx
-// ---------------------------------------------------------------------------
 
 /// A concrete transaction token produced by MockTxProvider.
 /// The unique `id` enables identity verification between begin() and commit().
@@ -60,9 +56,7 @@ pub struct MockTx {
     pub id: u64,
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: MockTxProvider + observable state
-// ---------------------------------------------------------------------------
 
 /// Records invocations of begin(), commit(), and rollback() for test assertions.
 pub struct MockTxProviderState {
@@ -120,9 +114,7 @@ impl TxProvider for MockTxProvider {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: MockCheckpointStore
-// ---------------------------------------------------------------------------
 
 /// A CheckpointStore with Tx = MockTx.
 ///
@@ -150,7 +142,14 @@ impl CheckpointStore for MockCheckpointStore {
     type Tx = MockTx;
 
     async fn load(&self, id: &ProjectionId) -> Result<Option<u64>, CheckpointError> {
-        Ok(self.state.lock().unwrap().get(id).copied())
+        Ok(self
+            .state
+            .lock()
+            .expect(
+                "state mutex is never poisoned: no checkpoint operation panics while holding it",
+            )
+            .get(id)
+            .copied())
     }
 
     async fn save(
@@ -162,14 +161,17 @@ impl CheckpointStore for MockCheckpointStore {
         if tx.is_some() {
             self.saved_with_tx.store(true, Ordering::SeqCst);
         }
-        self.state.lock().unwrap().insert(id.clone(), seq);
+        self.state
+            .lock()
+            .expect(
+                "state mutex is never poisoned: no checkpoint operation panics while holding it",
+            )
+            .insert(id.clone(), seq);
         Ok(())
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: TxCapturingProjector
-// ---------------------------------------------------------------------------
 
 /// Projector that records whether ctx.tx() returned Some during project().
 struct TxCapturingProjector {
@@ -177,9 +179,7 @@ struct TxCapturingProjector {
     notify: Arc<Notify>,
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: FailingProjector
-// ---------------------------------------------------------------------------
 
 /// Concrete error type for use in FailingProjector.
 #[derive(Debug)]
@@ -230,9 +230,7 @@ impl Projector<TickEvent, MockTx> for TxCapturingProjector {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helper: append one TickEvent to the store
-// ---------------------------------------------------------------------------
 
 async fn append_tick(store: &InMemoryEventStore, agg_id: &AggregateId, seq: u64) {
     store
@@ -249,9 +247,7 @@ async fn append_tick(store: &InMemoryEventStore, agg_id: &AggregateId, seq: u64)
         .expect("append must succeed");
 }
 
-// ---------------------------------------------------------------------------
 // Helper: wait for a Notify with a timeout
-// ---------------------------------------------------------------------------
 
 async fn wait_for(notify: &Arc<Notify>) {
     tokio::time::timeout(Duration::from_millis(500), notify.notified())
@@ -259,9 +255,7 @@ async fn wait_for(notify: &Arc<Notify>) {
         .expect("timed out waiting for project() to be called");
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: ctx.tx() returns Some when TxProvider is configured
-// ---------------------------------------------------------------------------
 
 /// When TxProvider is configured on ProjectorProps, the framework must call
 /// provider.begin() and populate ProjectionContext with the resulting Tx.
@@ -308,9 +302,7 @@ async fn tx_provider_supplies_tx_to_projection_context() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 2: ExactlyOnce + TxProvider calls checkpoint save with Some(tx)
-// ---------------------------------------------------------------------------
 
 /// In ExactlyOnce mode with a TxProvider, the framework must call
 /// checkpoint_store.save(..., Some(&mut tx)) rather than save(..., None).
@@ -357,9 +349,7 @@ async fn exactly_once_with_tx_provider_saves_checkpoint_in_same_tx() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: TxProvider.commit() is called after a successful project()
-// ---------------------------------------------------------------------------
 
 /// After project() returns Ok, the framework must call provider.commit(tx)
 /// to complete the transaction.  provider.rollback() must NOT be called.
@@ -410,10 +400,8 @@ async fn tx_provider_commit_called_after_successful_project() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 4: project() failure triggers rollback, commit is not called,
 //         and checkpoint is not persisted
-// ---------------------------------------------------------------------------
 
 /// When project() returns Err in ExactlyOnce + TxProvider mode, the framework
 /// must call provider.rollback(tx), NOT commit.  The checkpoint store must NOT
@@ -478,9 +466,7 @@ async fn tx_provider_rollback_called_when_project_fails() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 5: Without TxProvider, ctx.tx() returns None (baseline preserved)
-// ---------------------------------------------------------------------------
 
 /// Without a TxProvider, ctx.tx() must still return None.
 /// This verifies that the default (Tx = ()) path is not affected by the T2 change.

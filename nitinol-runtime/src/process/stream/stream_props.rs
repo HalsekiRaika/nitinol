@@ -3,7 +3,9 @@ use std::pin::Pin;
 
 use crate::error::SpawnError;
 use crate::ident::{Pid, ProcessName};
-use crate::process::props::{MailboxCapacity, PipeCapacity, Props, StashCapacity, SupervisionStrategy};
+use crate::process::props::{
+    MailboxCapacity, PipeCapacity, Props, StashCapacity, SupervisionStrategy,
+};
 use crate::process::spawn::SpawnEnv;
 use crate::process::spawnable::{SpawnDispatch, Spawnable};
 use crate::process::stream::Stream;

@@ -1,4 +1,4 @@
-//! Tests for `ProcessContext<P>::pipe_to_self` (Issue #53).
+//! Tests for `ProcessContext<P>::pipe_to_self`.
 //!
 //! These tests pin down the externally observable contract of the new API:
 //! - A future's `Ok` output is delivered as a typed message via the mapper.
@@ -25,14 +25,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 
 use nitinol_runtime::error::HandlerError;
-use nitinol_runtime::process::{
-    Driver, PipeDriver, Process, ProcessContext, Receive,
-};
+use nitinol_runtime::process::{Driver, PipeDriver, Process, ProcessContext, Receive};
 use nitinol_runtime::{ProcessSystem, Props};
 
-// ---------------------------------------------------------------------------
 // Fixture: a process that collects piped results and lets the test inspect them.
-// ---------------------------------------------------------------------------
 
 /// What the process saw from the mapper closure on each piped result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +96,7 @@ impl Receive<StartPipe> for PipeProcess {
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         ctx.pipe_to_self(std::future::ready(msg.value), |result| {
-            // Per spec, the mapper sees Result<F::Output, PipePanic>.
+            // By contract, the mapper sees Result<F::Output, PipePanic>.
             match result {
                 Ok(v) => Delivered(Observed::Value(v)),
                 Err(p) => Delivered(Observed::Panic(format!("{p}"))),
@@ -185,14 +181,20 @@ impl Receive<StartTwoPipes> for PipeProcess {
                 tokio::time::sleep(Duration::from_millis(slow_ms)).await;
                 slow_value
             },
-            |result| Delivered(Observed::Value(result.unwrap())),
+            |result| {
+                Delivered(Observed::Value(result.expect(
+                    "the slow future cannot fail: it only sleeps and returns a value",
+                )))
+            },
         );
 
         // Second: immediate future. The lifecycle loop must be able to
         // make progress on this one even while the slow one is in-flight.
         let fast_value = msg.fast_value;
         ctx.pipe_to_self(std::future::ready(fast_value), |result| {
-            Delivered(Observed::Value(result.unwrap()))
+            Delivered(Observed::Value(result.expect(
+                "`ready` future cannot fail: it resolves immediately to a value",
+            )))
         });
 
         Ok(())
@@ -269,9 +271,7 @@ async fn wait_for_at_least(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Happy path: success result is delivered as a typed message.
-// ---------------------------------------------------------------------------
 
 /// Given a process spawned via `system.spawn` (PipeDriver auto-composed),
 /// when its handler calls `ctx.pipe_to_self(ready(42), |Ok(v)| Delivered(v))`,
@@ -301,10 +301,8 @@ async fn pipe_to_self_delivers_future_value_as_mapped_message() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Continuation semantics: the StartPipe handler returns BEFORE the piped
 // follow-up message is processed.
-// ---------------------------------------------------------------------------
 
 /// Given a handler that calls `pipe_to_self` and then increments a counter
 /// just before returning, when StartPipe is delivered, then the counter
@@ -344,9 +342,7 @@ async fn pipe_to_self_runs_as_continuation_not_reentrantly() {
     assert_eq!(snap, vec![Observed::Value(7)]);
 }
 
-// ---------------------------------------------------------------------------
 // Multiple in-flight futures: completion order is decoupled from registration.
-// ---------------------------------------------------------------------------
 
 /// Given two piped futures — one slow (sleeps), one immediate —,
 /// when both are registered in that order via a single handler,
@@ -402,10 +398,8 @@ async fn pipe_to_self_fast_future_completes_before_slow() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Panic capture: a future that panics during poll is delivered as
 // `Err(PipePanic)` to the mapper, not propagated out of the lifecycle loop.
-// ---------------------------------------------------------------------------
 
 /// Given a piped future whose body panics with a `&'static str`,
 /// when it is polled by the PipeDriver,
@@ -489,12 +483,10 @@ async fn pipe_panic_payload_is_accessible_via_payload_accessor() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Issue #56 inversion: under the unified spawn entry, the Core `PipeDriver`
-// is ALWAYS composed, so `ctx.pipe_to_self` never panics on a "missing
+// Inversion: under the unified spawn entry, the Core `PipeDriver` is
+// ALWAYS composed, so `ctx.pipe_to_self` never panics on a "missing
 // driver" basis. The probe here is now a positive check that the always-
 // composed driver actually delivers the piped follow-up.
-// ---------------------------------------------------------------------------
 
 /// Process used only to host the "no PipeDriver" probe driver. Its handlers
 /// are never called — the driver itself drives behavior via `apply`.
@@ -615,11 +607,9 @@ async fn pipe_to_self_does_not_panic_under_unified_spawn_entry() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // `Driver::pipe_handle` default implementation returns `None`. Existing
 // driver implementations (MessageDriver-pub(crate), the external
 // IntervalDriver, custom test drivers) must not need to implement it.
-// ---------------------------------------------------------------------------
 
 struct NoPipeDriver;
 
@@ -666,10 +656,8 @@ async fn pipe_driver_pipe_handle_returns_some() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // `PipePanic` formatting: Display must succeed for both `&'static str` and
 // `String` payloads, since both are common panic payload shapes.
-// ---------------------------------------------------------------------------
 
 /// Given a piped future that panics with `&'static str`,
 /// then `format!("{p}")` on the resulting `PipePanic` produces a non-empty
@@ -688,7 +676,9 @@ async fn pipe_panic_display_renders_static_str_payload() {
         .await;
 
     proxy
-        .tell(StartPipePanic { msg: "display-check" })
+        .tell(StartPipePanic {
+            msg: "display-check",
+        })
         .await
         .expect("tell must succeed");
 

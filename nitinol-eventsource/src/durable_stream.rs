@@ -16,7 +16,7 @@ mod stream;
 ///
 /// Chosen as a balance between catch-up latency and event-store load.
 /// Override via `with_poll_interval` on either builder.
-pub(self) const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub use self::cursor::SequenceCursor;
 pub use self::proxy::{DurableStreamProxy, DurableSubscription};

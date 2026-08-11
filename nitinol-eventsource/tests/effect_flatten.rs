@@ -1,10 +1,9 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::{shape_of, Shape};
 use nitinol_eventsource::Effect;
 
-// ---------------------------------------------------------------------------
 // flatten()
-// ---------------------------------------------------------------------------
 
 /// flatten() of None is a no-op
 #[test]

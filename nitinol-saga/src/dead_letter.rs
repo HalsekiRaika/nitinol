@@ -1,14 +1,14 @@
-//! Saga-owned Dead Letter Queue (Issue #51).
+//! Saga-owned Dead Letter Queue.
 //!
 //! Each saga failure kind, when it occurs, is enqueued — subject to the
 //! per-saga [`EnqueuePolicy`] — as a [`DeadLetterEvent`] on the saga's **own**
-//! EventStore stream (`SagaPersisted::DeadLetter`, G-27), mixed into the same
+//! EventStore stream (`SagaPersisted::DeadLetter`), mixed into the same
 //! envelope as the outbox and schedule markers.  A [`DurableStream`] subscriber
-//! (G-29) catches up and receives the events.
+//! catches up and receives the events.
 //!
 //! This is a fresh, persisted, order-preserving implementation — distinct from
 //! the in-memory, best-effort, system-wide `DeadLetterProcess` in
-//! `nitinol-runtime` (G-25), which is neither imported nor reused here.
+//! `nitinol-runtime`, which is neither imported nor reused here.
 //!
 //! [`DurableStream`]: nitinol_eventsource::DurableStream
 
@@ -56,7 +56,7 @@ pub(crate) enum EnqueueOutcome {
 ///
 /// Callers **must** handle [`EnqueueOutcome::AppendFailed`]: when the policy
 /// says `Enqueue` but the store write fails, the upstream message must not be
-/// silently treated as processed (G-27 persisted DLQ contract).
+/// silently treated as processed — the persisted DLQ must stay authoritative.
 pub(crate) async fn enqueue_dead_letter(
     store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
@@ -113,7 +113,11 @@ mod tests {
 
         async fn load(&self, _query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
             let stream: Pin<
-                Box<dyn Stream<Item = Result<nitinol_persistence::LoadedEvent, LoadError>> + Send + '_>,
+                Box<
+                    dyn Stream<Item = Result<nitinol_persistence::LoadedEvent, LoadError>>
+                        + Send
+                        + '_,
+                >,
             > = Box::pin(futures_util::stream::empty());
             Ok(stream)
         }
@@ -127,7 +131,7 @@ mod tests {
         }
     }
 
-    /// ARCH-REVIEW-005 regression: when policy says `Ignore`, the outcome must
+    /// Regression test: when policy says `Ignore`, the outcome must
     /// be `Ignored` — not `AppendFailed`.  Callers rely on this to distinguish
     /// "intentionally skipped" from "write failure".
     #[tokio::test]
@@ -141,7 +145,9 @@ mod tests {
             &saga_id,
             &mut sequence,
             &IgnoreAllPolicy,
-            SagaFailure::HandleFailed { error: "e".to_owned() },
+            SagaFailure::HandleFailed {
+                error: "e".to_owned(),
+            },
             SourceContext::without_upstream(),
         )
         .await;
@@ -150,10 +156,10 @@ mod tests {
         assert_eq!(sequence, 0, "sequence must not advance when policy ignores");
     }
 
-    /// ARCH-REVIEW-005 regression: when policy says `Enqueue` but the store
+    /// Regression test: when policy says `Enqueue` but the store
     /// append fails, the outcome must be `AppendFailed` so callers can stop the
-    /// process (G-27 persisted DLQ contract).  Before this fix the return value
-    /// was discarded and the failure was silently lost.
+    /// process and keep the persisted DLQ authoritative.  Before this fix the
+    /// return value was discarded and the failure was silently lost.
     #[tokio::test]
     async fn enqueue_outcome_is_append_failed_when_store_rejects_write() {
         let store: Arc<dyn EventStore> = Arc::new(AlwaysFailStore);
@@ -165,7 +171,9 @@ mod tests {
             &saga_id,
             &mut sequence,
             &EnqueueAll,
-            SagaFailure::HandleFailed { error: "e".to_owned() },
+            SagaFailure::HandleFailed {
+                error: "e".to_owned(),
+            },
             SourceContext::without_upstream(),
         )
         .await;

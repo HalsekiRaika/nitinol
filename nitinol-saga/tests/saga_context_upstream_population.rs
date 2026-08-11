@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::JsonCodec;
 
@@ -22,8 +23,10 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("saga.ctx.upstream"), TypeName::new("OrderPlaced"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("saga.ctx.upstream"),
+        TypeName::new("OrderPlaced"),
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,13 +70,16 @@ impl Saga for CapturingSaga {
         _event: Self::SubscribedEvent,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        self.captured.lock().unwrap().push(CapturedUpstream {
-            saga_id: ctx.saga_id().clone(),
-            saga_sequence: ctx.sequence(),
-            upstream_aggregate_id: ctx.upstream_aggregate_id().clone(),
-            upstream_sequence: ctx.upstream_sequence(),
-            now: ctx.now(),
-        });
+        self.captured
+            .lock()
+            .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+            .push(CapturedUpstream {
+                saga_id: ctx.saga_id().clone(),
+                saga_sequence: ctx.sequence(),
+                upstream_aggregate_id: ctx.upstream_aggregate_id().clone(),
+                upstream_sequence: ctx.upstream_sequence(),
+                now: ctx.now(),
+            });
         self.notify.notify_one();
         Ok(SagaEffect::None)
     }
@@ -112,7 +118,14 @@ async fn wait_for_count(
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let notified = notify.notified();
-            if captured.lock().unwrap().len() >= expected {
+            if captured
+                .lock()
+                .expect(
+                    "captured mutex is never poisoned: no holder panics while the guard is alive",
+                )
+                .len()
+                >= expected
+            {
                 return;
             }
             notified.await;
@@ -122,7 +135,12 @@ async fn wait_for_count(
     .unwrap_or_else(|_| {
         panic!(
             "timed out waiting for {expected} handle() calls (got {})",
-            captured.lock().unwrap().len()
+            captured
+                .lock()
+                .expect(
+                    "captured mutex is never poisoned: no holder panics while the guard is alive"
+                )
+                .len()
         )
     });
 }
@@ -167,7 +185,9 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
 
     wait_for_count(&captured, &notify, 1).await;
 
-    let captured = captured.lock().unwrap();
+    let captured = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(captured.len(), 1);
     assert_eq!(
         captured[0].upstream_aggregate_id, order_id,
@@ -217,7 +237,9 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
 
     wait_for_count(&captured, &notify, 3).await;
 
-    let captured = captured.lock().unwrap();
+    let captured = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     let upstream_seqs: Vec<u64> = captured.iter().map(|c| c.upstream_sequence).collect();
     assert_eq!(
         upstream_seqs,
@@ -268,7 +290,9 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
 
     wait_for_count(&captured, &notify, 1).await;
 
-    let captured = captured.lock().unwrap();
+    let captured = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     let observed = captured[0].now;
 
     assert_ne!(
@@ -324,7 +348,9 @@ async fn saga_context_existing_accessors_remain_saga_scoped() {
 
     wait_for_count(&captured, &notify, 1).await;
 
-    let captured = captured.lock().unwrap();
+    let captured = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         captured[0].saga_id, saga_id,
         "ctx.saga_id() must remain the saga instance id, not the upstream aggregate id"

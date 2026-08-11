@@ -1,9 +1,9 @@
-//! Tests for Issue #56: `Props<P>` self-consuming builder chain.
+//! Tests for the `Props<P>` self-consuming builder chain.
 //!
-//! Pre-spec, `Props::with_*` returned `&mut Self`, forcing intermediate
+//! Previously, `Props::with_*` returned `&mut Self`, forcing intermediate
 //! `let mut props = ...; props.with_x(...); props.with_y(...);` boilerplate
-//! at every call site. The spec changes the signature to `self -> Self` so
-//! the builder forms a single expression:
+//! at every call site. The signature is now `self -> Self` so the builder
+//! forms a single expression:
 //!
 //! ```text
 //! let props = Props::new(factory)
@@ -46,10 +46,8 @@ use nitinol_runtime::{
     SupervisionStrategy,
 };
 
-// ---------------------------------------------------------------------------
 // Fixture: a no-op process used only for builder-shape tests where the value
 // flow matters more than handler behavior.
-// ---------------------------------------------------------------------------
 
 struct NoOpProcess;
 impl Process for NoOpProcess {}
@@ -58,12 +56,10 @@ fn noop_props() -> Props<NoOpProcess> {
     Props::new(|| NoOpProcess)
 }
 
-// ---------------------------------------------------------------------------
 // Type-level: each `with_*` returns `Self`, not `&mut Self`.
 //
 // If a setter ever regresses back to `&mut Self`, the rebinding to a typed
 // `Props<NoOpProcess>` stops compiling because `&mut Self != Self`.
-// ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
 fn _with_supervision_strategy_returns_self_by_value() {
@@ -101,12 +97,10 @@ fn _with_name_returns_self_by_value() {
     let _: Props<NoOpProcess> = p.with_name(ProcessName::new("builder-chain"));
 }
 
-// ---------------------------------------------------------------------------
-// Type-level: the spec's full chain compiles as one expression.
+// Type-level: the full chain compiles as one expression.
 //
 // If any setter regresses to `&mut Self` or any return type drifts, this
 // stops compiling — a single point of failure for the chain shape.
-// ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
 fn _full_builder_chain_compiles_as_single_expression() {
@@ -120,10 +114,8 @@ fn _full_builder_chain_compiles_as_single_expression() {
         .with_name(ProcessName::new("chain"));
 }
 
-// ---------------------------------------------------------------------------
 // Round-trip via behavior: `with_name(name)` is observable through the registry
 // after spawn.
-// ---------------------------------------------------------------------------
 
 /// Given a `Props::with_name("named-via-with-name")` value,
 /// when the process is spawned,
@@ -147,9 +139,7 @@ async fn with_name_registers_process_under_supplied_name() {
     assert_eq!(typed.pid(), proxy.pid());
 }
 
-// ---------------------------------------------------------------------------
 // Round-trip via behavior: `with_idle_timeout` controls when the process stops.
-// ---------------------------------------------------------------------------
 
 /// Process that records when it stops via an atomic flag — enough surface to
 /// observe `with_idle_timeout`'s effect.
@@ -197,10 +187,8 @@ async fn with_idle_timeout_after_triggers_stop_within_window() {
     wait_for_flag(&stopped).await;
 }
 
-// ---------------------------------------------------------------------------
 // with_driver: a custom Driver<P> can be attached via the builder chain. The
 // spawn path composes it with the Core drivers (Message + Pipe + Stash).
-// ---------------------------------------------------------------------------
 
 /// Test process that exposes a counter the custom driver bumps on each event.
 struct DrivenProcess {
@@ -284,10 +272,8 @@ async fn with_driver_attaches_custom_driver_and_runs_apply() {
     wait_for_count(&ticks, 3).await;
 }
 
-// ---------------------------------------------------------------------------
 // with_driver composes ON TOP OF the Core drivers — the user mailbox (tell/ask)
 // still works on a process whose Props had `with_driver` applied.
-// ---------------------------------------------------------------------------
 
 /// `tell` arrives at a `Receive<...>` handler defined on the user process.
 struct MessageCounter {

@@ -1,9 +1,10 @@
-//! `flatten` tests for the post-#45 `SagaEffect` ADT.
+//! `flatten` tests for the `SagaEffect` ADT.
 //!
 //! `flatten` recursively hoists inner `Sequence` elements to the parent level,
 //! collapses all-None to None, and unwraps single-element sequences.  Leaf
 //! variants (Persist, End) are returned unchanged.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{shape_of, Shape};
 
@@ -199,13 +200,16 @@ fn flatten_sequence_with_end_keeps_end_inline() {
 
 #[test]
 fn combine_result_and_flatten_match_for_associative_groupings() {
+    // `End` leaves keep the groupings as real multi-element `Sequence`s: a pure
+    // `Persist` chain folds into one `Persist`, which would leave `flatten`
+    // nothing to do and hollow out this test.
     let left = SagaEffect::persist(1u32)
+        .combine(SagaEffect::end())
         .combine(SagaEffect::persist(2u32))
-        .combine(SagaEffect::persist(3u32))
         .flatten();
 
     let right = SagaEffect::persist(1u32)
-        .combine(SagaEffect::persist(2u32).combine(SagaEffect::persist(3u32)))
+        .combine(SagaEffect::end().combine(SagaEffect::persist(2u32)))
         .flatten();
 
     assert_eq!(

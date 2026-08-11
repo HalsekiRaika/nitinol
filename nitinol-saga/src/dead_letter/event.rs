@@ -1,5 +1,4 @@
-//! `DeadLetterEvent` — the `SystemEvent` persisted for each saga failure
-//! (Issue #51, G-28).
+//! `DeadLetterEvent` — the `SystemEvent` persisted for each saga failure.
 //!
 //! Modelled one-for-one on the `ScheduleEvent` / `OutboxEvent` canonical
 //! examples: a reserved type-level [`EventType`] (`nitinol.saga.dead_letter`,
@@ -39,13 +38,13 @@ struct MissingFailure;
 struct MissingSourceContext;
 
 #[derive(Debug, thiserror::Error)]
-#[error("dead letter TellFailed.target must not be empty (G-28 required field)")]
+#[error("dead letter TellFailed.target must not be empty; it is a required field")]
 struct EmptyTellTarget;
 
-/// The specific saga failure a dead letter records (G-26 / G-28).
+/// The specific saga failure a dead letter records.
 #[derive(Clone, Debug)]
 pub enum SagaFailure {
-    /// A tell that exhausted its staged retry budget (G-30).  `target` is the
+    /// A tell that exhausted its staged retry budget.  `target` is the
     /// target aggregate's stream key; `message` is the tell's crash-restart
     /// payload when one was supplied, else empty.
     TellFailed { target: SagaId, message: Bytes },
@@ -135,9 +134,11 @@ impl SystemEvent for DeadLetterEvent {
             SagaFailure::DecodeFailed { error } => ProtoFailure::DecodeFailed(DecodeFailed {
                 error: error.clone(),
             }),
-            SagaFailure::ScheduledFailed { error } => ProtoFailure::ScheduledFailed(ScheduledFailed {
-                error: error.clone(),
-            }),
+            SagaFailure::ScheduledFailed { error } => {
+                ProtoFailure::ScheduledFailed(ScheduledFailed {
+                    error: error.clone(),
+                })
+            }
         };
         let marker = DeadLetterMarker {
             seq: self.seq,
@@ -157,7 +158,7 @@ impl SystemEvent for DeadLetterEvent {
             .map_err(SystemEventDecodeError::new)?;
         let failure = match marker.failure {
             Some(ProtoFailure::TellFailed(m)) => {
-                // G-28: `TellFailed.target` is a required field — an empty
+                // `TellFailed.target` is a required field — an empty
                 // string is never a valid target stream key.  Reject it here
                 // so invalid payloads cannot be re-injected from the EventStore
                 // or subscriber catchup path.
@@ -177,7 +178,9 @@ impl SystemEvent for DeadLetterEvent {
                 }
             }
             Some(ProtoFailure::DecodeFailed(m)) => SagaFailure::DecodeFailed { error: m.error },
-            Some(ProtoFailure::ScheduledFailed(m)) => SagaFailure::ScheduledFailed { error: m.error },
+            Some(ProtoFailure::ScheduledFailed(m)) => {
+                SagaFailure::ScheduledFailed { error: m.error }
+            }
             None => return Err(SystemEventDecodeError::new(MissingFailure)),
         };
         let source = marker
@@ -202,7 +205,9 @@ impl SystemEvent for DeadLetterEvent {
 /// `nitinol.saga.dead_letter` is a sibling of `nitinol.saga.outbox` and
 /// `nitinol.saga.schedule`, so the classifications never overlap.
 pub(crate) fn is_dead_letter_event_type(event_type: EventType) -> bool {
-    event_type.to_path().is_within(&DEAD_LETTER_MARKER.to_path())
+    event_type
+        .to_path()
+        .is_within(&DEAD_LETTER_MARKER.to_path())
 }
 
 /// Append a single dead-letter event at `*sequence + 1`, advancing `*sequence`
@@ -356,7 +361,7 @@ mod tests {
     #[test]
     fn decode_reports_error_for_payload_missing_source_context() {
         // Build a well-formed TellFailed payload with `source` explicitly absent.
-        // G-28 requires `source` — a missing field must be rejected, not silently
+        // `source` is required — a missing field must be rejected, not silently
         // defaulted.
         let marker = proto::DeadLetterMarker {
             seq: 1,
@@ -371,13 +376,13 @@ mod tests {
         let payload = prost::Message::encode_to_vec(&marker);
         assert!(
             DeadLetterEvent::decode(&payload).is_err(),
-            "decode must fail when `source` context is absent (G-28 required field)"
+            "decode must fail when `source` context is absent (required field)"
         );
     }
 
-    /// ARCH-REVIEW-006 regression: `DeadLetterEvent::decode()` must reject a
+    /// Regression test: `DeadLetterEvent::decode()` must reject a
     /// `TellFailed` marker whose `target` field is empty.  An empty target is
-    /// never a valid saga stream key (G-28); allowing it would let invalid
+    /// never a valid saga stream key; allowing it would let invalid
     /// `SagaFailure::TellFailed { target: "" }` re-enter from EventStore replay
     /// or subscriber catchup.
     #[test]
@@ -398,11 +403,11 @@ mod tests {
         let payload = prost::Message::encode_to_vec(&marker);
         assert!(
             DeadLetterEvent::decode(&payload).is_err(),
-            "decode must fail when TellFailed.target is empty (G-28 required field)"
+            "decode must fail when TellFailed.target is empty (required field)"
         );
     }
 
-    /// ARCH-REVIEW-006 positive case: a non-empty `target` round-trips correctly
+    /// Positive case: a non-empty `target` round-trips correctly
     /// through decode (guards against overly strict validation).
     #[test]
     fn decode_accepts_tell_failed_with_non_empty_target() {

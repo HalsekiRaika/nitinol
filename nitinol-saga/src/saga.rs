@@ -46,13 +46,13 @@ pub trait Saga: Send + Sync + 'static {
 
     /// Domain-level error type produced by [`Saga::handle`].
     ///
-    /// Per spec, MVP only logs handle errors and continues; this type exists
+    /// The MVP only logs handle errors and continues; this type exists
     /// to keep the signature symmetrical with `Decider::Rejection` and to
     /// give the implementation a place to surface diagnostics.
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// The typed payload delivered to [`Saga::on_scheduled`] when a scheduled
-    /// timer fires (E-27).
+    /// timer fires.
     ///
     /// [`SagaEffect::schedule`](crate::SagaEffect::schedule) serializes a value
     /// of this type into the schedule's payload; on firing it is deserialized
@@ -74,7 +74,7 @@ pub trait Saga: Send + Sync + 'static {
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error>;
 
-    /// Capture a snapshot of the saga's state (B-5b).
+    /// Capture a snapshot of the saga's state.
     ///
     /// The MVP takes no snapshots, so the default returns `None`.  A future
     /// snapshotting implementation overrides this to return a
@@ -84,7 +84,7 @@ pub trait Saga: Send + Sync + 'static {
         None
     }
 
-    /// Reconstruct the saga from a previously captured [`SagaSnapshot`] (B-5b).
+    /// Reconstruct the saga from a previously captured [`SagaSnapshot`].
     ///
     /// This is a stub: with no snapshotting in the MVP there is no way to
     /// obtain a `SagaSnapshot`, so the default panics.  Implementors that
@@ -100,7 +100,7 @@ pub trait Saga: Send + Sync + 'static {
         )
     }
 
-    /// Timer-driven entry point invoked when a scheduled message fires (E-27).
+    /// Timer-driven entry point invoked when a scheduled message fires.
     ///
     /// Delivered at-least-once: the saga must treat `on_scheduled` idempotently.
     /// The default is a no-op returning [`SagaEffect::None`]; a saga that opts
@@ -116,7 +116,7 @@ pub trait Saga: Send + Sync + 'static {
     }
 }
 
-/// Opaque handle to a captured saga snapshot (B-5b).
+/// Opaque handle to a captured saga snapshot.
 ///
 /// Snapshotting is not implemented in this MVP; this type is the trait-level
 /// placeholder referenced by [`Saga::snapshot`] and [`Saga::from_snapshot`].

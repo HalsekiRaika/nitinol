@@ -1,4 +1,4 @@
-//! Derive macros for the `nitinol` event-sourcing framework (Issue #65).
+//! Derive macros for the `nitinol` event-sourcing framework.
 //!
 //! `#[derive(Event)]` is pure sugar for the hand-written `impl Event` pattern:
 //! it generates the type-level `EVENT_TYPE` const and, for enums, a per-arm

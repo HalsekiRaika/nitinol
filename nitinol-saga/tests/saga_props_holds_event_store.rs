@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::JsonCodec;
 

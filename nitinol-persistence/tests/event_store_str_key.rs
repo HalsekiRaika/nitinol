@@ -1,4 +1,4 @@
-//! New EventStore key API tests (Issue #40).
+//! Tests for the `EventStore` key API.
 //!
 //! Verifies the redesigned event-store key abstraction:
 //!
@@ -30,9 +30,7 @@ use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /// Constructs an `AppendingEvent` without an `aggregate_id` field — the key
 /// is provided exclusively by `EventStore::append`.
@@ -45,9 +43,7 @@ fn make_event(sequence: u64, event_type: EventType, payload: &'static [u8]) -> A
     }
 }
 
-// ---------------------------------------------------------------------------
 // AggregateId / Borrow<str>
-// ---------------------------------------------------------------------------
 
 /// AggregateId implements Borrow<str> so it can be passed wherever &str is
 /// expected via `.borrow()`.
@@ -63,9 +59,7 @@ fn aggregate_id_borrows_as_str() {
     assert_eq!(borrowed, "agg-borrow");
 }
 
-// ---------------------------------------------------------------------------
 // EventStore::append accepts &str
-// ---------------------------------------------------------------------------
 
 /// EventStore::append accepts a plain &str key (not &AggregateId).
 #[tokio::test]
@@ -103,9 +97,7 @@ async fn append_accepts_aggregate_id_via_borrow() {
     assert_eq!(outcome.stream_version, 1);
 }
 
-// ---------------------------------------------------------------------------
 // LoadQuery::by_stream
-// ---------------------------------------------------------------------------
 
 /// LoadQuery::by_stream accepts a &str literal and produces a query that
 /// targets the corresponding stream.
@@ -155,9 +147,7 @@ async fn load_by_stream_with_aggregate_id_returns_matching_events() {
     assert_eq!(events[0].stream_key, "agg-by-stream");
 }
 
-// ---------------------------------------------------------------------------
 // LoadQuery: stream_key / from_stream_sequence renamed fields
-// ---------------------------------------------------------------------------
 
 /// LoadQuery exposes `stream_key: Option<String>` and
 /// `from_stream_sequence: Option<u64>` (renamed from `aggregate_id` /
@@ -198,9 +188,7 @@ async fn load_query_uses_renamed_stream_fields() {
     assert_eq!(events[1].sequence, 3);
 }
 
-// ---------------------------------------------------------------------------
 // LoadedEvent.stream_key
-// ---------------------------------------------------------------------------
 
 /// LoadedEvent exposes `stream_key: String` (renamed from `aggregate_id`).
 #[tokio::test]
@@ -226,9 +214,7 @@ async fn loaded_event_exposes_stream_key_string() {
     assert_eq!(key, "loaded-stream-key");
 }
 
-// ---------------------------------------------------------------------------
 // SequenceConflict carries String
-// ---------------------------------------------------------------------------
 
 /// Sequence conflict returns `AppendError::SequenceConflict(String)` carrying
 /// the stream key as a String.
@@ -261,9 +247,7 @@ async fn sequence_conflict_error_carries_string_key() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Empty batch on the new key shape still works
-// ---------------------------------------------------------------------------
 
 /// Empty batches remain a no-op under the new &str-key API.
 #[tokio::test]
@@ -282,9 +266,7 @@ async fn empty_batch_with_str_key_is_noop() {
     assert_eq!(outcome.stream_version, 0);
 }
 
-// ---------------------------------------------------------------------------
 // Arc<dyn EventStore>: the trait remains dyn-compatible after the refactor
-// ---------------------------------------------------------------------------
 
 /// EventStore is dyn-compatible — the change to `&str`-keyed methods must NOT
 /// regress the ability to use `Arc<dyn EventStore>`.  This is the central
@@ -311,14 +293,12 @@ async fn event_store_is_dyn_compatible() {
     assert_eq!(events.len(), 1);
 }
 
-// ---------------------------------------------------------------------------
 // Same EventStore serves multiple stream-key types side-by-side
-// ---------------------------------------------------------------------------
 
 /// AggregateId and a plain &str saga key can append to the same InMemoryEventStore
 /// without interfering — both are first-class stream keys via Borrow<str>.
 /// This is the scenario the Borrow<str> abstraction was introduced to support
-/// (`SagaId` and `AggregateId` share one physical store, per F-21 (a)).
+/// (`SagaId` and `AggregateId` share one physical store).
 #[tokio::test]
 async fn distinct_stream_keys_coexist_in_one_store() {
     // Given

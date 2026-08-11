@@ -1,14 +1,15 @@
+//! Shared test helpers. Each test binary compiles this module in full but
+//! uses only the subset it needs, so per-binary dead code is expected.
+
+#![allow(dead_code)]
+
 use nitinol_eventsource::Effect;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
-// ---------------------------------------------------------------------------
 // Minimal dummy process used by tell() tests.
-// ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub struct TestProcess;
 
-#[allow(dead_code)]
 pub struct TestMsg;
 
 impl Process for TestProcess {}
@@ -26,11 +27,9 @@ impl Receive<TestMsg> for TestProcess {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shape — a PartialEq + Debug mirror of Effect<E> used for structural
 // comparison without requiring Effect itself to implement PartialEq or Debug.
 // The Side variant does not carry data because Box<dyn SideEffect> is opaque.
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq)]
 pub enum Shape<E> {

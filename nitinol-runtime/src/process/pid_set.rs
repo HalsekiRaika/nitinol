@@ -81,7 +81,10 @@ impl PidSet {
         };
         // Update old tail to point forward to the new entry.
         if let Some(tail_pid) = self.tail {
-            self.nodes.get_mut(&tail_pid).unwrap().next = Some(pid);
+            self.nodes
+                .get_mut(&tail_pid)
+                .expect("tail always names a live node")
+                .next = Some(pid);
         }
         self.nodes.insert(pid, node);
         self.tail = Some(pid);
@@ -97,11 +100,21 @@ impl PidSet {
         };
         // Stitch prev and next together, bypassing the removed entry.
         match node.prev {
-            Some(prev_pid) => self.nodes.get_mut(&prev_pid).unwrap().next = node.next,
+            Some(prev_pid) => {
+                self.nodes
+                    .get_mut(&prev_pid)
+                    .expect("prev link always names a live node")
+                    .next = node.next
+            }
             None => self.head = node.next,
         }
         match node.next {
-            Some(next_pid) => self.nodes.get_mut(&next_pid).unwrap().prev = node.prev,
+            Some(next_pid) => {
+                self.nodes
+                    .get_mut(&next_pid)
+                    .expect("next link always names a live node")
+                    .prev = node.prev
+            }
             None => self.tail = node.prev,
         }
         true
@@ -168,13 +181,12 @@ mod tests {
         assert!(set.contains(&p1));
     }
 
-    /// Spec compliance (order.md): PidSet must preserve insertion order after
-    /// mid-set removal. Linked-list deletion keeps the live elements in their
-    /// original positions.
+    /// `PidSet` must preserve insertion order after mid-set removal.
+    /// Linked-list deletion keeps the live elements in their original
+    /// positions.
     ///
-    /// Regression for family_tag `spec-noncompliance`
-    /// (ARCH-REVIEW-013 / VAL-NEW-pidset-order-regression-L44):
-    /// After removing p2 from [p1, p2, p3, p4], the remaining order must be
+    /// Regression guard for insertion-order loss on removal:
+    /// after removing p2 from [p1, p2, p3, p4], the remaining order must be
     /// [p1, p3, p4] — NOT [p1, p4, p3] as swap-remove would produce.
     #[test]
     fn remove_preserves_insertion_order() {
@@ -226,10 +238,8 @@ mod tests {
         assert!(!set.remove(&p));
     }
 
-    /// Regression for family_tag `spec-noncompliance`
-    /// (VAL-NEW-reverse-stop-after-removal-L312):
-    /// `iter_rev` after removal of a non-last element must yield live PIDs in
-    /// reverse insertion order.
+    /// Regression: `iter_rev` after removal of a non-last element must yield
+    /// live PIDs in reverse insertion order.
     #[test]
     fn iter_rev_reflects_insertion_order_after_removal() {
         let mut set = PidSet::new();
@@ -268,8 +278,7 @@ mod tests {
         assert_eq!(set.iter().count(), 0);
     }
 
-    /// Regression for family_tag `spec-noncompliance` (ARCH-REVIEW-022):
-    /// repeated mid-set removals and re-insertions must keep `contains` and
+    /// Regression: repeated mid-set removals and re-insertions must keep `contains` and
     /// `len` consistent with the live set — no stale index entries.
     #[test]
     fn remove_o1_and_contains_consistent_after_churn() {
@@ -303,9 +312,9 @@ mod tests {
         assert_eq!(rev[0], p_new);
     }
 
-    /// Regression for family_tag `scalability-violation` (ARCH-REVIEW-024):
-    /// after churn, internal storage must not grow proportional to the
-    /// cumulative spawn count — only proportional to the max concurrent count.
+    /// Regression: after churn, internal storage must not grow proportional
+    /// to the cumulative spawn count — only proportional to the max
+    /// concurrent count.
     ///
     /// With the doubly-linked list implementation `internal_len() == len()`
     /// always, so both are checked here.

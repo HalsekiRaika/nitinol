@@ -8,9 +8,7 @@ use nitinol_eventsource::{Aggregate, Context, Event};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::process::{Process, ProcessContext};
 
-// ---------------------------------------------------------------------------
 // Fixtures for nitinol_eventsource::Receive
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Debug)]
 struct Counted;
@@ -48,11 +46,9 @@ impl Receive<GetValue> for ReadCounter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures for nitinol_runtime::process::Receive (RuntimeReceive)
 // Used to demonstrate coexistence — both traits can be implemented in the
 // same file without conflicting.
-// ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
 struct DummyProcess;
@@ -74,9 +70,7 @@ impl RuntimeReceive<DummyMsg> for DummyProcess {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Receive<GetValue>: response from state
-// ---------------------------------------------------------------------------
 
 /// recv(GetValue) returns the current counter value without mutating state
 #[tokio::test]
@@ -114,9 +108,7 @@ async fn recv_with_zero_state_returns_zero() {
     assert_eq!(value, 0, "recv must return 0 for default state");
 }
 
-// ---------------------------------------------------------------------------
 // &self immutability: recv must not change aggregate state
-// ---------------------------------------------------------------------------
 
 /// Calling recv(GetValue) does not mutate ReadCounter.value
 /// — enforced by &self in the trait signature; verified here at runtime.
@@ -142,9 +134,7 @@ async fn recv_does_not_mutate_state_via_self_ref() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Coexistence: both Receive traits compile in the same scope
-// ---------------------------------------------------------------------------
 
 /// nitinol_eventsource::Receive and nitinol_runtime::process::Receive can be
 /// imported simultaneously by aliasing one.

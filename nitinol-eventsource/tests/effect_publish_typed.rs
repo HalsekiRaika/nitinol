@@ -8,9 +8,7 @@ use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Stream};
 use nitinol_runtime::{ProcessSystem, Props};
 
-// ---------------------------------------------------------------------------
 // Fixtures: typed message
-// ---------------------------------------------------------------------------
 
 /// A typed domain message used to test typed stream publish.
 ///
@@ -21,9 +19,7 @@ struct TypedMsg {
     value: u32,
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: receiver process
-// ---------------------------------------------------------------------------
 
 /// Captures each received TypedMsg so the test can inspect it.
 ///
@@ -45,15 +41,15 @@ impl Receive<TypedMsg> for MsgReceiver {
         msg: TypedMsg,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), Self::Error> {
-        *self.received.lock().unwrap() = Some(msg);
+        *self.received.lock().expect(
+            "received mutex is never poisoned: no holder panics while the guard is alive",
+        ) = Some(msg);
         self.notify.notify_one();
         Ok(())
     }
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: Effect::publish with typed stream returns Side variant
-// ---------------------------------------------------------------------------
 
 /// Effect::publish(ProcessProxy<Stream<TypedMsg>>, TypedMsg) must return Effect::Side.
 #[tokio::test]
@@ -61,7 +57,9 @@ async fn effect_publish_typed_returns_side_variant() {
     // Given: a running system with a typed Stream<TypedMsg>
     let system = ProcessSystem::new().await;
     let stream: ProcessProxy<Stream<TypedMsg>> = system
-        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(ProcessName::new("effect-publish-typed-side")))
+        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(
+            ProcessName::new("effect-publish-typed-side"),
+        ))
         .await
         .expect("spawn_stream must succeed");
 
@@ -75,9 +73,7 @@ async fn effect_publish_typed_returns_side_variant() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 2: Typed published message reaches typed subscriber — round-trip
-// ---------------------------------------------------------------------------
 
 /// A typed message published via Effect::publish must be delivered to the
 /// subscriber of the typed stream.
@@ -93,7 +89,9 @@ async fn effect_publish_typed_delivers_message_to_subscriber() {
     // Given: a typed stream with one subscriber
     let system = ProcessSystem::new().await;
     let stream: ProcessProxy<Stream<TypedMsg>> = system
-        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(ProcessName::new("effect-publish-typed-roundtrip")))
+        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(
+            ProcessName::new("effect-publish-typed-roundtrip"),
+        ))
         .await
         .expect("spawn_stream must succeed");
 
@@ -130,7 +128,13 @@ async fn effect_publish_typed_delivers_message_to_subscriber() {
     tokio::time::timeout(Duration::from_millis(500), async {
         loop {
             let notified = notify.notified();
-            if received.lock().unwrap().is_some() {
+            if received
+                .lock()
+                .expect(
+                    "received mutex is never poisoned: no holder panics while the guard is alive",
+                )
+                .is_some()
+            {
                 return;
             }
             notified.await;
@@ -141,7 +145,7 @@ async fn effect_publish_typed_delivers_message_to_subscriber() {
 
     let received_msg = received
         .lock()
-        .unwrap()
+        .expect("received mutex is never poisoned: no holder panics while the guard is alive")
         .clone()
         .expect("must have received a message");
     assert_eq!(
@@ -150,9 +154,7 @@ async fn effect_publish_typed_delivers_message_to_subscriber() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: Effect::publish is symmetric with Effect::tell (compile-time check)
-// ---------------------------------------------------------------------------
 
 /// Effect::publish<T>(stream: ProcessProxy<Stream<T>>, msg: T) must accept
 /// the same type parameter T in both the stream and message position.
@@ -167,7 +169,9 @@ async fn effect_publish_type_parameter_is_consistent_between_stream_and_message(
     // Given
     let system = ProcessSystem::new().await;
     let stream: ProcessProxy<Stream<TypedMsg>> = system
-        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(ProcessName::new("effect-publish-typed-consistency")))
+        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(
+            ProcessName::new("effect-publish-typed-consistency"),
+        ))
         .await
         .expect("spawn_stream must succeed");
 
@@ -184,9 +188,7 @@ async fn effect_publish_type_parameter_is_consistent_between_stream_and_message(
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 4: Multiple subscribers all receive the typed message
-// ---------------------------------------------------------------------------
 
 /// When a Stream<TypedMsg> has multiple subscribers, all of them must receive
 /// the message published via Effect::publish.  This tests the broadcast semantics
@@ -196,7 +198,9 @@ async fn effect_publish_typed_broadcasts_to_all_subscribers() {
     // Given: a typed stream with two subscribers
     let system = ProcessSystem::new().await;
     let stream: ProcessProxy<Stream<TypedMsg>> = system
-        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(ProcessName::new("effect-publish-typed-broadcast")))
+        .spawn(nitinol_runtime::StreamProps::<TypedMsg>::new(
+            ProcessName::new("effect-publish-typed-broadcast"),
+        ))
         .await
         .expect("spawn_stream must succeed");
 
@@ -237,7 +241,13 @@ async fn effect_publish_typed_broadcasts_to_all_subscribers() {
         tokio::time::timeout(Duration::from_millis(500), async {
             loop {
                 let notified = notify.notified();
-                if recv.lock().unwrap().is_some() {
+                if recv
+                    .lock()
+                    .expect(
+                        "receiver mutex is never poisoned: no holder panics while the guard is alive",
+                    )
+                    .is_some()
+                {
                     return;
                 }
                 notified.await;
@@ -246,7 +256,11 @@ async fn effect_publish_typed_broadcasts_to_all_subscribers() {
         .await
         .expect("each subscriber must receive the message within 500 ms");
 
-        let msg = recv.lock().unwrap().clone().expect("must have received");
+        let msg = recv
+            .lock()
+            .expect("receiver mutex is never poisoned: no holder panics while the guard is alive")
+            .clone()
+            .expect("must have received");
         assert_eq!(
             msg, expected,
             "all subscribers must receive the same typed message"

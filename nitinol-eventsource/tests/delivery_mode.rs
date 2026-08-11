@@ -31,12 +31,10 @@ use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, Pro
 use nitinol_persistence::store::{
     CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, ProjectionId};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: event type
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct Evt;
@@ -45,9 +43,7 @@ impl Event for Evt {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Evt"));
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: codec
-// ---------------------------------------------------------------------------
 
 struct UnitCodec;
 
@@ -63,13 +59,11 @@ impl Codec<Evt> for UnitCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: ConditionallyFailingProjector
 //
 // When `should_fail` is true, project() returns an error.
 // When false, project() succeeds.
 // The call count and notify are shared so tests can observe execution.
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 #[error("intentional project failure")]
@@ -100,9 +94,7 @@ impl Projector<Evt> for ConditionallyFailingProjector {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_evt(store: &InMemoryEventStore, agg_id: &AggregateId, sequence: u64) {
     store
@@ -155,9 +147,7 @@ async fn wait_for_checkpoint(
     .unwrap_or_else(|_| panic!("timed out waiting for checkpoint to reach {:?}", expected));
 }
 
-// ---------------------------------------------------------------------------
 // Test: AtMostOnce — checkpoint is advanced even when project() fails
-// ---------------------------------------------------------------------------
 
 /// With AtMostOnce, the checkpoint is saved BEFORE calling project().
 /// If project() fails, the checkpoint has already advanced — the event is
@@ -213,9 +203,7 @@ async fn at_most_once_checkpoint_advanced_even_when_project_fails() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test: AtMostOnce — checkpoint advances on success too
-// ---------------------------------------------------------------------------
 
 /// With AtMostOnce, a successful project() also results in the checkpoint
 /// being saved (it was saved before the call).
@@ -263,9 +251,7 @@ async fn at_most_once_checkpoint_advanced_on_success() {
     wait_for_checkpoint(&checkpoint_store, &projection_id, Some(3)).await;
 }
 
-// ---------------------------------------------------------------------------
 // Test: AtLeastOnce — checkpoint NOT saved when project() fails
-// ---------------------------------------------------------------------------
 
 /// With AtLeastOnce (default), the checkpoint is saved AFTER a successful
 /// project(). When project() fails, the checkpoint is not updated — the
@@ -321,9 +307,7 @@ async fn at_least_once_checkpoint_not_saved_when_project_fails() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test: AtLeastOnce — checkpoint is saved after successful project()
-// ---------------------------------------------------------------------------
 
 /// With AtLeastOnce, a successful project() results in the checkpoint being
 /// saved. This guarantees the event is not re-processed on the next startup
@@ -369,9 +353,7 @@ async fn at_least_once_checkpoint_saved_after_successful_project() {
     wait_for_checkpoint(&checkpoint_store, &projection_id, Some(3)).await;
 }
 
-// ---------------------------------------------------------------------------
 // Test: AtLeastOnce — re-processing occurs after restart when project failed
-// ---------------------------------------------------------------------------
 
 /// Verify the at-least-once guarantee end-to-end:
 /// 1. Projector fails on event at seq=2.
@@ -495,9 +477,7 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     wait_for_checkpoint(&checkpoint_store, &projection_id, Some(2)).await;
 }
 
-// ---------------------------------------------------------------------------
 // Test: ExactlyOnce — framework does NOT save checkpoint
-// ---------------------------------------------------------------------------
 
 /// With ExactlyOnce, the framework never saves the checkpoint — even on
 /// successful project(). The user is expected to save both the read-model

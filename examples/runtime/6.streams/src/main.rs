@@ -95,7 +95,9 @@ async fn demo_fanout_broadcast() {
     info!("Fan-out broadcast");
     let system = ProcessSystem::new().await;
     let stream = system
-        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(ProcessName::new("temperature")))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(
+            ProcessName::new("temperature"),
+        ))
         .await
         .expect("spawn_stream should succeed");
 
@@ -144,7 +146,9 @@ async fn demo_unsubscribe() {
     info!("Unsubscribe");
     let system = ProcessSystem::new().await;
     let stream = system
-        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(ProcessName::new("temperature-unsub")))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(
+            ProcessName::new("temperature-unsub"),
+        ))
         .await
         .expect("spawn_stream should succeed");
 
@@ -198,7 +202,9 @@ async fn demo_auto_cleanup() {
     info!("Auto-cleanup on subscriber stop");
     let system = ProcessSystem::new().await;
     let stream = system
-        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(ProcessName::new("temperature-cleanup")))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(
+            ProcessName::new("temperature-cleanup"),
+        ))
         .await
         .expect("spawn_stream should succeed");
 

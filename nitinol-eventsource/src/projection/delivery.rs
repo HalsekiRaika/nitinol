@@ -30,22 +30,20 @@ where
             >,
         > + Send,
 {
-    let use_tx = tx_provider.is_some() && mode == DeliveryMode::ExactlyOnce;
-
-    if use_tx {
-        let provider = tx_provider.unwrap();
-        apply_with_tx(
-            mode,
-            store,
-            pid,
-            current_checkpoint,
-            sequence,
-            provider,
-            project_fn,
-        )
-        .await
-    } else {
-        apply_no_tx(mode, store, pid, current_checkpoint, sequence, project_fn).await
+    match tx_provider {
+        Some(provider) if mode == DeliveryMode::ExactlyOnce => {
+            apply_with_tx(
+                mode,
+                store,
+                pid,
+                current_checkpoint,
+                sequence,
+                provider,
+                project_fn,
+            )
+            .await
+        }
+        _ => apply_no_tx(mode, store, pid, current_checkpoint, sequence, project_fn).await,
     }
 }
 

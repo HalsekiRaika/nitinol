@@ -83,11 +83,9 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         let transform = Arc::clone(&self.transform);
         let initial_cursor = cursor;
         let driver = IntervalDriver::<DirectPollerProcess<T, S>>::new(self.poll_interval);
-        let restart_strategy = SupervisionStrategy::restart(
-            POLLER_RESTART_MAX_RETRIES,
-            POLLER_RESTART_WITHIN,
-        )
-        .expect("POLLER_RESTART_WITHIN is a positive duration constant");
+        let restart_strategy =
+            SupervisionStrategy::restart(POLLER_RESTART_MAX_RETRIES, POLLER_RESTART_WITHIN)
+                .expect("POLLER_RESTART_WITHIN is a positive duration constant");
         let mut props = Props::new(move || DirectPollerProcess {
             store: Arc::clone(&store),
             subscriber: subscriber.clone(),

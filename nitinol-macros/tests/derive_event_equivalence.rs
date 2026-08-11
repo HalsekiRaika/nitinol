@@ -1,6 +1,6 @@
-//! Behavioral equivalence tests for `#[derive(Event)]` (Issue #65).
+//! Behavioral equivalence tests for `#[derive(Event)]`.
 //!
-//! The derive is specified as pure sugar (`order.md`): its expansion must be
+//! The derive is pure sugar: its expansion must be
 //! *functionally equivalent* to the hand-written `impl Event` pattern pinned in
 //! `nitinol-eventsource/tests/event_variant.rs`. The hand-written naming rule is
 //! "type name = type identifier, variant = arm identifier"; these tests assert
@@ -15,9 +15,7 @@
 use nitinol::eventsource::Event;
 use nitinol::persistence::{EventType, Family, TypeName, Variant};
 
-// ---------------------------------------------------------------------------
 // struct: type-level identity (variant None), default variant() inherited
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Event)]
 #[event(family = "shop.orders")]
@@ -32,7 +30,10 @@ fn struct_event_type_matches_handwritten_const() {
 
     assert_eq!(Incremented::EVENT_TYPE, expected);
     assert_eq!(Incremented::EVENT_TYPE.family(), Family::new("shop.orders"));
-    assert_eq!(Incremented::EVENT_TYPE.type_name(), TypeName::new("Incremented"));
+    assert_eq!(
+        Incremented::EVENT_TYPE.type_name(),
+        TypeName::new("Incremented")
+    );
     assert_eq!(Incremented::EVENT_TYPE.variant(), None);
 }
 
@@ -47,9 +48,7 @@ fn struct_value_variant_is_type_level_identity() {
     assert_eq!(event.variant().variant(), None);
 }
 
-// ---------------------------------------------------------------------------
 // struct: empty family, mirroring `Family::new("")` in event_variant.rs
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Event)]
 #[event(family = "")]
@@ -61,7 +60,10 @@ struct EmptyFamily;
 #[test]
 fn struct_empty_family_is_preserved_verbatim() {
     assert_eq!(EmptyFamily::EVENT_TYPE.family(), Family::new(""));
-    assert_eq!(EmptyFamily::EVENT_TYPE.type_name(), TypeName::new("EmptyFamily"));
+    assert_eq!(
+        EmptyFamily::EVENT_TYPE.type_name(),
+        TypeName::new("EmptyFamily")
+    );
     assert_eq!(EmptyFamily::EVENT_TYPE.variant(), None);
 
     // Display omits the empty family prefix (persistence contract), proving the
@@ -69,9 +71,7 @@ fn struct_empty_family_is_preserved_verbatim() {
     assert_eq!(format!("{}", EmptyFamily::EVENT_TYPE), "EmptyFamily");
 }
 
-// ---------------------------------------------------------------------------
 // enum: const is type-level (variant None); variant() fills the active arm
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Event)]
 #[event(family = "saga.upstream")]
@@ -112,8 +112,14 @@ fn enum_variant_returns_arm_identifier() {
         ),
     );
 
-    assert_eq!(OrderEvent::Placed.variant().variant(), Some(Variant::new("Placed")));
-    assert_eq!(OrderEvent::Cancelled.variant().variant(), Some(Variant::new("Cancelled")));
+    assert_eq!(
+        OrderEvent::Placed.variant().variant(),
+        Some(Variant::new("Placed"))
+    );
+    assert_eq!(
+        OrderEvent::Cancelled.variant().variant(),
+        Some(Variant::new("Cancelled"))
+    );
 }
 
 /// Given an enum event whose arms carry `Some(variant)` identities, When
@@ -121,14 +127,21 @@ fn enum_variant_returns_arm_identifier() {
 /// type-level `EVENT_TYPE` (so value-level events route to the type handler).
 #[test]
 fn enum_arms_share_type_key_with_const() {
-    assert_eq!(OrderEvent::Placed.variant().type_key(), OrderEvent::EVENT_TYPE.type_key());
-    assert_eq!(OrderEvent::Cancelled.variant().type_key(), OrderEvent::EVENT_TYPE.type_key());
+    assert_eq!(
+        OrderEvent::Placed.variant().type_key(),
+        OrderEvent::EVENT_TYPE.type_key()
+    );
+    assert_eq!(
+        OrderEvent::Cancelled.variant().type_key(),
+        OrderEvent::EVENT_TYPE.type_key()
+    );
 }
 
-// ---------------------------------------------------------------------------
 // enum: unit / tuple / struct arms all match; arm fields are ignored
-// ---------------------------------------------------------------------------
 
+// Arm payloads exist only so the derive has tuple/struct shapes to expand over;
+// the tests read `variant()`, never the field values.
+#[allow(dead_code)]
 #[derive(Clone, Event)]
 #[event(family = "domain")]
 enum Mixed {
@@ -144,7 +157,10 @@ enum Mixed {
 fn enum_variant_handles_all_arm_shapes() {
     let unit = Mixed::Unit;
     let tuple = Mixed::Tuple(7, String::from("x"));
-    let structured = Mixed::Struct { id: 9, name: String::from("y") };
+    let structured = Mixed::Struct {
+        id: 9,
+        name: String::from("y"),
+    };
 
     assert_eq!(unit.variant().variant(), Some(Variant::new("Unit")));
     assert_eq!(tuple.variant().variant(), Some(Variant::new("Tuple")));
@@ -152,13 +168,17 @@ fn enum_variant_handles_all_arm_shapes() {
 
     assert_eq!(unit.variant().type_key(), Mixed::EVENT_TYPE.type_key());
     assert_eq!(tuple.variant().type_key(), Mixed::EVENT_TYPE.type_key());
-    assert_eq!(structured.variant().type_key(), Mixed::EVENT_TYPE.type_key());
+    assert_eq!(
+        structured.variant().type_key(),
+        Mixed::EVENT_TYPE.type_key()
+    );
 }
 
-// ---------------------------------------------------------------------------
 // generics: split_for_impl passes type params / where-clause through
-// ---------------------------------------------------------------------------
 
+// `inner` exists only to give the type a parameter for `split_for_impl` to pass
+// through; the tests read `EVENT_TYPE` and `variant()`, never the field value.
+#[allow(dead_code)]
 #[derive(Clone, Event)]
 #[event(family = "generic")]
 struct Wrapper<T: Clone + Send + Sync + 'static> {

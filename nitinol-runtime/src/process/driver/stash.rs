@@ -40,7 +40,12 @@ impl<P: Process> Driver<P> for StashDriver<P> {
     type Event = UserTask<P>;
 
     fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        let popped = self.inner.lock().unwrap().ready.pop_front();
+        let popped = self
+            .inner
+            .lock()
+            .expect("stash lock was poisoned by a panicking holder")
+            .ready
+            .pop_front();
         async move {
             match popped {
                 Some(task) => Some(task),
@@ -73,7 +78,10 @@ impl<P: Process> Clone for StashHandle<P> {
 
 impl<P: Process> StashHandle<P> {
     pub(crate) fn try_stash(&self, task: UserTask<P>) -> Result<(), UserTask<P>> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("stash lock was poisoned by a panicking holder");
         if inner.stashed.len() >= inner.capacity.get() {
             return Err(task);
         }
@@ -82,7 +90,10 @@ impl<P: Process> StashHandle<P> {
     }
 
     pub(crate) fn unstash(&self, n: usize) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("stash lock was poisoned by a panicking holder");
         let count = n.min(inner.stashed.len());
         for _ in 0..count {
             let task = inner
@@ -94,7 +105,10 @@ impl<P: Process> StashHandle<P> {
     }
 
     pub(crate) fn unstash_all(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("stash lock was poisoned by a panicking holder");
         let drained = std::mem::take(&mut inner.stashed);
         inner.ready.extend(drained);
     }

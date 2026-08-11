@@ -1,12 +1,11 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::{shape_of, Shape, TestMsg, TestProcess};
 use nitinol_eventsource::Effect;
 use nitinol_runtime::process::Props;
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Monoid: identity element (None)
-// ---------------------------------------------------------------------------
 
 /// None combined on the left is the identity: None.combine(a) == a
 #[test]
@@ -73,9 +72,7 @@ async fn combine_none_right_identity_holds_for_side_variant() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Monoid: associativity
-// ---------------------------------------------------------------------------
 
 /// (a.combine(b)).combine(c) and a.combine(b.combine(c)) produce identical shapes
 #[test]

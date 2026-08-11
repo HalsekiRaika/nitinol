@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package nitinol.saga.dead_letter;
 
-// Dead-letter events for the Saga DLQ (Issue #51, G-27/G-28).  Persisted on the
+// Dead-letter events for the Saga DLQ.  Persisted on the
 // saga's own EventStore stream as `SagaPersisted::DeadLetter(DeadLetterEvent)`,
 // mixed into the same envelope as the outbox and schedule markers.  The `oneof
 // failure` arm is the value-level variant written on the wire
@@ -31,7 +31,7 @@ message SourceContext {
   uint64 upstream_sequence = 2;
 }
 
-// A tell that exhausted its staged retry budget (G-30).  `target` is the
+// A tell that exhausted its staged retry budget.  `target` is the
 // target aggregate's stream key; `message` carries the tell's crash-restart
 // payload when one was supplied, else empty.
 message TellFailed {

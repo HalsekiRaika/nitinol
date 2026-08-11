@@ -6,6 +6,6 @@ mod system;
 pub use self::process::{
     BoxedMessage, DeadLetter, DefaultDriver, IdleTimeout, MailboxCapacity, Message, PidSet,
     PipeCapacity, Props, RestartConfig, StashCapacity, Stream, StreamProps, Subscriber,
-    SuppressDeadLetterLog, SupervisionStrategy, Terminated, TerminatedReason,
+    SupervisionStrategy, SuppressDeadLetterLog, Terminated, TerminatedReason,
 };
 pub use self::system::{DeadLetterStream, ProcessSystem};

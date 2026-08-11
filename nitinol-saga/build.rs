@@ -26,8 +26,8 @@ fn main() {
         println!("cargo:rerun-if-changed={proto}");
     }
 
-    let file_descriptors = protox::compile(PROTOS, [PROTO_INCLUDE])
-        .expect("failed to compile the saga proto schemas");
+    let file_descriptors =
+        protox::compile(PROTOS, [PROTO_INCLUDE]).expect("failed to compile the saga proto schemas");
 
     prost_build::Config::new()
         .compile_fds(file_descriptors)

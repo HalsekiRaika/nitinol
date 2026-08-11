@@ -1,4 +1,4 @@
-//! Constructor / Builder tests for the post-#45 `SagaEffect` ADT.
+//! Constructor / Builder tests for the `SagaEffect` ADT.
 //!
 //! Covers the public surface:
 //! - `empty()` / `end()` / `persist()` / `persist_all()` / `tell()`
@@ -8,6 +8,7 @@
 //! Panics for misuse of `with_tells` / `with_schedules` on non-`Persist`
 //! variants are exercised separately in `effect_builder_panics.rs`.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{shape_of, Shape};
 
@@ -102,7 +103,7 @@ async fn tell_constructor_returns_persist_with_single_tell_intent() {
             schedules: vec![],
         },
         "SagaEffect::tell(target, cmd) must return Persist {{ events: [], tells: [1], schedules: [] }} — \
-         tells live inside Persist after the #45 redesign, never as a top-level Tell variant"
+         tells live inside Persist, never as a top-level Tell variant"
     );
 }
 
@@ -208,6 +209,45 @@ async fn with_tells_and_with_schedules_compose_on_same_persist() {
     );
 }
 
+#[tokio::test]
+async fn merged_persist_pair_is_still_a_valid_with_tells_receiver() {
+    let intent = common::make_tell_intent().await;
+
+    let merged = SagaEffect::persist(1u32).combine(SagaEffect::persist(2u32));
+    let effect = merged.with_tells(vec![intent]);
+
+    assert_eq!(
+        shape_of(&effect),
+        Shape::Persist {
+            events: vec![1u32, 2],
+            tells: 1,
+            schedules: vec![],
+        },
+        "chaining two Persist branches yields a Persist, so with_tells keeps a \
+         legal receiver; folding the pair into a Sequence instead would turn this \
+         builder call into a panic"
+    );
+}
+
+#[test]
+fn merged_persist_pair_is_still_a_valid_with_schedules_receiver() {
+    let s = spec("after-merge", Duration::from_secs(3));
+
+    let merged = SagaEffect::persist(1u32).combine(SagaEffect::persist(2u32));
+    let effect = merged.with_schedules(vec![s.clone()]);
+
+    assert_eq!(
+        shape_of(&effect),
+        Shape::Persist {
+            events: vec![1u32, 2],
+            tells: 0,
+            schedules: vec![s],
+        },
+        "chaining two Persist branches yields a Persist, so with_schedules keeps a \
+         legal receiver and the merged events survive the builder call"
+    );
+}
+
 #[test]
 fn then_end_on_persist_appends_end_as_sequence_in_order() {
     let effect = SagaEffect::persist(5u32).then_end();
@@ -239,7 +279,9 @@ fn then_end_on_none_collapses_to_end() {
 
 #[test]
 fn then_end_on_sequence_appends_end_to_existing_sequence() {
-    let seq = SagaEffect::persist(1u32).combine(SagaEffect::persist(2u32));
+    // `Persist.combine(Persist)` folds into a single `Persist`, so the Sequence
+    // premise is built from leaves that never merge.
+    let seq = SagaEffect::persist(1u32).combine(SagaEffect::cancel_schedule(TimerName::new("t")));
     let effect = seq.then_end();
 
     assert_eq!(
@@ -250,11 +292,7 @@ fn then_end_on_sequence_appends_end_to_existing_sequence() {
                 tells: 0,
                 schedules: vec![],
             },
-            Shape::Persist {
-                events: vec![2u32],
-                tells: 0,
-                schedules: vec![],
-            },
+            Shape::CancelSchedule,
             Shape::End,
         ]),
         "Sequence.then_end() must append End to the flat Sequence, not introduce nesting"

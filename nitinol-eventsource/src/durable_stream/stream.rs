@@ -114,7 +114,9 @@ where
     T: 'static + Send + Sync + Clone,
 {
     pub async fn spawn(self, system: &ProcessSystem) -> Result<DurableStreamProxy<T>, SpawnError> {
-        let stream_proxy = system.spawn(StreamProps::<T>::new(self.topic.clone())).await?;
+        let stream_proxy = system
+            .spawn(StreamProps::<T>::new(self.topic.clone()))
+            .await?;
         let publisher = stream_proxy.clone();
         let DurableStream {
             store,
@@ -134,11 +136,9 @@ where
         let producer_start_open = Arc::clone(&start_open);
         let producer_cursor = initial_cursor;
 
-        let restart_strategy = SupervisionStrategy::restart(
-            POLLER_RESTART_MAX_RETRIES,
-            POLLER_RESTART_WITHIN,
-        )
-        .expect("POLLER_RESTART_WITHIN is a positive duration constant");
+        let restart_strategy =
+            SupervisionStrategy::restart(POLLER_RESTART_MAX_RETRIES, POLLER_RESTART_WITHIN)
+                .expect("POLLER_RESTART_WITHIN is a positive duration constant");
 
         let driver = IntervalDriver::<DurablePollerProcess<T>>::new(poll_interval);
         let poller_name = shared_poller_name(stream_proxy.pid());

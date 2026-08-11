@@ -1,10 +1,10 @@
-//! Tests for Issue #56: Capacity enums and the ConfigError type that backs
+//! Tests for the capacity enums and the ConfigError type that backs
 //! `bounded(0)` rejection.
 //!
 //! Pinned-down contract:
 //! - `MailboxCapacity`, `StashCapacity`, and `PipeCapacity` each expose
-//!   `Inherit` and `Bounded(NonZeroUsize)` variants — the uniform shape from
-//!   the spec's "Capacity enums" section.
+//!   `Inherit` and `Bounded(NonZeroUsize)` variants — one uniform shape
+//!   shared by all three capacity enums.
 //! - Each capacity type has a `bounded(n: usize) -> Result<Self, ConfigError>`
 //!   smart constructor that:
 //!     - returns `Err(ConfigError::ZeroCapacity)` for `n == 0`, so no caller
@@ -20,16 +20,14 @@ use std::num::NonZeroUsize;
 use nitinol_runtime::error::ConfigError;
 use nitinol_runtime::{MailboxCapacity, PipeCapacity, StashCapacity};
 
-// ---------------------------------------------------------------------------
 // MailboxCapacity
-// ---------------------------------------------------------------------------
 
 /// Given the `Inherit` variant of `MailboxCapacity`,
 /// when constructed directly,
 /// then the value matches the `Inherit` pattern.
 ///
 /// This pins down that `Inherit` is constructible without any argument and is
-/// the spec's "read the System default" marker the spawn boundary expects.
+/// the "read the System default" marker the spawn boundary expects.
 #[test]
 fn mailbox_capacity_inherit_variant_exists() {
     let cap = MailboxCapacity::Inherit;
@@ -74,10 +72,8 @@ fn mailbox_capacity_bounded_positive_returns_ok_bounded() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // StashCapacity (same shape — separate tests so a regression points at the
 // affected enum directly, not at a single shared parameterized test).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn stash_capacity_inherit_variant_exists() {
@@ -110,9 +106,7 @@ fn stash_capacity_bounded_positive_returns_ok_bounded() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // PipeCapacity
-// ---------------------------------------------------------------------------
 
 #[test]
 fn pipe_capacity_inherit_variant_exists() {
@@ -145,9 +139,7 @@ fn pipe_capacity_bounded_positive_returns_ok_bounded() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // ConfigError
-// ---------------------------------------------------------------------------
 
 /// `ConfigError::ZeroCapacity` is the variant used by every `*Capacity::bounded(0)`
 /// — pinned down so the error path stays a single shared variant across the

@@ -17,7 +17,8 @@ use crate::scheduler::TimerName;
 /// `SagaEffect<E>` is a Monoid: [`SagaEffect::None`] is the identity element
 /// and [`SagaEffect::combine`] is the associative binary operation.  The
 /// [`SagaEffect::Sequence`] variant accumulates leaves in a flat list;
-/// `combine` introduces no nesting.
+/// `combine` introduces no nesting and folds an adjacent `Persist × Persist`
+/// junction into one `Persist` so the pair is written as a single atomic batch.
 ///
 /// # Variants
 ///
@@ -32,7 +33,12 @@ use crate::scheduler::TimerName;
 ///   process and tears down its upstream subscription.  Effects placed after
 ///   `End` inside a `Sequence` are not interpreted.
 /// - `Sequence(Vec<SagaEffect<E>>)` — Monoid composition.  Interpreted left
-///   to right with short-circuit on `End`.
+///   to right with short-circuit on `End`.  All variants are public, so a
+///   `Sequence` can be hand-built without going through `combine`; the
+///   interpreter re-applies `combine`'s adjacent `Persist × Persist` merge to
+///   every effect before interpreting it, so the single-atomic-batch
+///   guarantee documented on `Persist` holds regardless of how the effect was
+///   constructed.
 /// - `CancelSchedule(TimerName)` — name-scoped timer cancellation.  Persists a
 ///   `ScheduleEvent::Cancelled` marker and cancels the pending timer.
 pub enum SagaEffect<E> {
@@ -51,8 +57,8 @@ pub enum SagaEffect<E> {
     End,
     /// An ordered collection of effects executed sequentially.
     Sequence(Vec<SagaEffect<E>>),
-    /// Cancel the timer registered under a [`TimerName`] for this saga (E-28 /
-    /// E-29).  Interpreted as a `ScheduleEvent::Cancelled` append plus a
+    /// Cancel the timer registered under a [`TimerName`] for this saga.
+    /// Interpreted as a `ScheduleEvent::Cancelled` append plus a
     /// scheduler cancel; equivalent to token-scoped cancel since the saga id is
     /// fixed to the emitting saga.
     CancelSchedule(TimerName),
@@ -181,7 +187,7 @@ impl TellIntent {
     }
 }
 
-/// A timer registration carried inside a `Persist` branch (E-29).
+/// A timer registration carried inside a `Persist` branch.
 ///
 /// The interpreter appends a `ScheduleEvent::Scheduled` marker as part of the
 /// same atomic batch as the user events, then registers the timer with the

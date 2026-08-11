@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::JsonCodec;
 
@@ -66,7 +67,10 @@ impl Saga for RecordingSaga {
         event: Self::SubscribedEvent,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        self.captured.lock().unwrap().push(event.sku.clone());
+        self.captured
+            .lock()
+            .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+            .push(event.sku.clone());
         self.notify.notify_one();
         Ok(SagaEffect::None)
     }
@@ -119,7 +123,14 @@ async fn wait_for_count(captured: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let notified = notify.notified();
-            if captured.lock().unwrap().len() >= expected {
+            if captured
+                .lock()
+                .expect(
+                    "captured mutex is never poisoned: no holder panics while the guard is alive",
+                )
+                .len()
+                >= expected
+            {
                 return;
             }
             notified.await;
@@ -129,7 +140,12 @@ async fn wait_for_count(captured: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>
     .unwrap_or_else(|_| {
         panic!(
             "timed out waiting for {expected} handle() calls (got {})",
-            captured.lock().unwrap().len()
+            captured
+                .lock()
+                .expect(
+                    "captured mutex is never poisoned: no holder panics while the guard is alive"
+                )
+                .len()
         )
     });
 }
@@ -176,7 +192,10 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
 
     wait_for_count(&captured, &notify, 3).await;
 
-    let seen = captured.lock().unwrap().clone();
+    let seen = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+        .clone();
     assert_eq!(
         seen,
         vec!["SKU-A".to_owned(), "SKU-B".to_owned(), "SKU-C".to_owned()],
@@ -234,7 +253,10 @@ async fn saga_catchup_respects_route_fn_filtering() {
     wait_for_count(&captured, &notify, 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let seen = captured.lock().unwrap().clone();
+    let seen = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+        .clone();
     assert_eq!(
         seen,
         vec!["MATCH-1".to_owned(), "MATCH-2".to_owned()],
@@ -284,7 +306,10 @@ async fn saga_catchup_resumes_from_cursor_after_value() {
     wait_for_count(&captured, &notify, 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let seen = captured.lock().unwrap().clone();
+    let seen = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+        .clone();
     assert_eq!(
         seen,
         vec!["SKU-3".to_owned(), "SKU-4".to_owned()],
@@ -333,7 +358,10 @@ async fn saga_receives_live_events_after_catchup_via_durable_stream() {
     append_order_placed(&upstream_store, &order_id, 2, "LIVE").await;
 
     wait_for_count(&captured, &notify, 2).await;
-    let seen = captured.lock().unwrap().clone();
+    let seen = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+        .clone();
     assert_eq!(
         seen,
         vec!["CATCHUP".to_owned(), "LIVE".to_owned()],
@@ -383,7 +411,10 @@ async fn saga_catchup_ignores_events_of_other_types() {
     wait_for_count(&captured, &notify, 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let seen = captured.lock().unwrap().clone();
+    let seen = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+        .clone();
     assert_eq!(
         seen,
         vec!["ORDER-1".to_owned(), "ORDER-2".to_owned()],
@@ -432,7 +463,10 @@ async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
 
     wait_for_count(&captured, &notify, 4).await;
 
-    let seen = captured.lock().unwrap().clone();
+    let seen = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+        .clone();
     assert_eq!(
         seen,
         vec![

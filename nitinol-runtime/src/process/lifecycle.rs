@@ -8,7 +8,9 @@ use tokio::sync::mpsc;
 
 use crate::ident::{Pid, ProcessName};
 use crate::process::dead_letter::DeadLetterProxy;
-use crate::process::driver::{Combine, Driver, FusedDriver, MessageDriver, PipeDriver, StashDriver, StashHandle};
+use crate::process::driver::{
+    Combine, Driver, FusedDriver, MessageDriver, PipeDriver, StashDriver, StashHandle,
+};
 use crate::process::pid_set::PidSet;
 use crate::process::props::{MailboxCapacity, PipeCapacity, StashCapacity, SupervisionStrategy};
 use crate::process::registry::ProcessRegistry;
@@ -239,12 +241,12 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
                         if ctx.children.contains(&who) {
                             ctx.children.remove(&who);
                             let was_explicit =
-                                ctx.explicit_watches.lock().unwrap().remove(&who);
+                                ctx.untrack_explicit_watch(&who);
                             if was_explicit {
                                 state.on_terminated(Terminated { who, why }, &mut ctx).await;
                             }
                         } else {
-                            ctx.explicit_watches.lock().unwrap().remove(&who);
+                            ctx.untrack_explicit_watch(&who);
                             state.on_terminated(Terminated { who, why }, &mut ctx).await;
                         }
                     }
@@ -338,7 +340,10 @@ async fn lifecycle_loop<P: Process, D: Driver<P>>(args: LifecycleLoopArgs<P, D>)
         if !watchers.contains(&parent_pid) {
             if let Some(proxy) = registry.lookup(parent_pid).await {
                 let _ = proxy
-                    .send_system_signal(SystemSignal::Terminated { who: pid, why: reason })
+                    .send_system_signal(SystemSignal::Terminated {
+                        who: pid,
+                        why: reason,
+                    })
                     .await;
             }
         }
@@ -379,7 +384,7 @@ async fn stop_children_and_wait<P: Process>(
         match sys_rx.recv().await {
             Some(SystemSignal::Terminated { who, .. }) if ctx.children.contains(&who) => {
                 ctx.children.remove(&who);
-                ctx.explicit_watches.lock().unwrap().remove(&who);
+                ctx.untrack_explicit_watch(&who);
             }
             Some(SystemSignal::Watch { watcher_pid }) => {
                 watchers.insert(watcher_pid);
@@ -435,13 +440,13 @@ async fn stop_children_for_restart<P: Process>(
         match sys_rx.recv().await {
             Some(SystemSignal::Terminated { who, why }) if ctx.children.contains(&who) => {
                 ctx.children.remove(&who);
-                let was_explicit = ctx.explicit_watches.lock().unwrap().remove(&who);
+                let was_explicit = ctx.untrack_explicit_watch(&who);
                 if was_explicit {
                     pending_terminated.push((who, why));
                 }
             }
             Some(SystemSignal::Terminated { who, why }) => {
-                ctx.explicit_watches.lock().unwrap().remove(&who);
+                ctx.untrack_explicit_watch(&who);
                 pending_terminated.push((who, why));
             }
             Some(SystemSignal::Stop) => {
@@ -528,7 +533,7 @@ mod tests {
         sys_tx
             .send(SystemSignal::Watch { watcher_pid })
             .await
-            .unwrap();
+            .expect("system channel must accept Watch before the loop starts");
 
         let supervision = SupervisionConfig {
             producer: Box::new(|| NoOpProcess),
@@ -544,7 +549,9 @@ mod tests {
             registry: registry.clone(),
         };
 
-        let stash_driver = StashDriver::<NoOpProcess>::new(NonZeroUsize::new(8).unwrap());
+        let stash_driver = StashDriver::<NoOpProcess>::new(
+            NonZeroUsize::new(8).expect("literal stash capacity must be > 0"),
+        );
         let stash_handle = stash_driver.handle();
 
         let args = LifecycleLoopArgs {
@@ -579,7 +586,10 @@ mod tests {
              supports_idle_timeout() returns false"
         );
 
-        sys_tx.send(SystemSignal::Stop).await.unwrap();
+        sys_tx
+            .send(SystemSignal::Stop)
+            .await
+            .expect("system channel must accept Stop while the loop is running");
         loop_handle.await.expect("lifecycle_loop task panicked");
 
         let signal = watcher_sys_rx
@@ -600,11 +610,9 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // ARCH-REVIEW-004 regression: watch / unwatch must take &self, not &mut self.
+    // Regression: watch / unwatch must take &self, not &mut self.
     // If either method required exclusive access, this function would fail to
     // compile, catching the regression before any runtime test runs.
-    // -----------------------------------------------------------------------
     #[allow(dead_code)]
     fn _assert_watch_unwatch_are_shared_ref(ctx: &ProcessContext<NoOpProcess>, pid: Pid) {
         // Calling these on a *shared* reference is the compile-time proof.

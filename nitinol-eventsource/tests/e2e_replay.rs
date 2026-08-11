@@ -23,24 +23,22 @@ use nitinol_persistence::store::{
     EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore,
 };
 use nitinol_persistence::{
-    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, TypeName, LoadQuery, PersistedSnapshot,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, PersistedSnapshot,
+    TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: event
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Debug)]
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.replay"), TypeName::new("Incremented"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("e2e.replay"), TypeName::new("Incremented"));
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: aggregate (no snapshot)
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Counter {
@@ -55,9 +53,7 @@ impl Aggregate for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: aggregate (with Snapshotable)
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct SnapshotableCounter {
@@ -84,9 +80,7 @@ impl Snapshotable for SnapshotableCounter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: commands and queries
-// ---------------------------------------------------------------------------
 
 struct Increment;
 struct GetCount;
@@ -137,9 +131,7 @@ impl EvtReceive<GetCount> for SnapshotableCounter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: pass-through codec for Incremented (no payload to encode)
-// ---------------------------------------------------------------------------
 
 struct TestCodec;
 
@@ -155,9 +147,7 @@ impl Codec<Incremented> for TestCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: big-endian u64 codec for u64 snapshots
-// ---------------------------------------------------------------------------
 
 struct BigEndianU64Codec;
 
@@ -180,9 +170,7 @@ impl Codec<u64> for BigEndianU64Codec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: SlowEventStore — wraps InMemoryEventStore with a load delay
-// ---------------------------------------------------------------------------
 
 struct SlowEventStore {
     inner: Arc<InMemoryEventStore>,
@@ -205,9 +193,7 @@ impl EventStore for SlowEventStore {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers: spawn helpers
-// ---------------------------------------------------------------------------
 
 async fn spawn_counter(
     system: &ProcessSystem,
@@ -233,9 +219,7 @@ async fn spawn_snapshotable_counter(
         .await
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: replay restores state after process restart
-// ---------------------------------------------------------------------------
 
 /// Given three ask(Increment) calls via process 1 (3 events persisted),
 /// When a second process is spawned for the same AggregateId,
@@ -266,9 +250,7 @@ async fn e2e_replay_restores_state_after_process_restart() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 2: message sent during slow replay is processed after on_start
-// ---------------------------------------------------------------------------
 
 /// Given a SlowEventStore that delays load() by 50 ms,
 /// and 2 events pre-written to the inner store,
@@ -311,9 +293,7 @@ async fn e2e_message_sent_during_slow_replay_is_processed_after() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: replay with snapshot restores state correctly
-// ---------------------------------------------------------------------------
 
 /// Given a snapshot at sequence=3 (value=3) followed by 2 additional events (seq=4,5),
 /// When a new process is spawned for the same AggregateId,

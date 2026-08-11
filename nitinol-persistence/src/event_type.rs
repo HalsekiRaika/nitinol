@@ -223,9 +223,7 @@ impl fmt::Display for EventType {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Owned round-trippable projection of EventType components
-// ---------------------------------------------------------------------------
 
 /// Owned representation of [`EventType`] components for serialisation /
 /// deserialisation at wire or storage boundaries.
@@ -294,8 +292,12 @@ impl ParsedEventType {
         if segs.len() < 2 {
             return None;
         }
-        let variant = segs.pop().unwrap();
-        let type_name = segs.pop().unwrap();
+        let variant = segs
+            .pop()
+            .expect("segment count was checked to be at least 2");
+        let type_name = segs
+            .pop()
+            .expect("segment count was checked to be at least 2");
         let family = segs.join(".");
         Some(Self {
             family,

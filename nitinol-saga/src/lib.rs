@@ -34,21 +34,21 @@
 //!   re-registered on restart (at-least-once delivery; handlers must be idempotent).
 //! - Dead-letter queue (DLQ): each saga failure kind is persisted as a
 //!   `SagaPersisted::DeadLetter(`[`DeadLetterEvent`]`)` on the saga's own
-//!   EventStore stream, mixed into the same envelope as domain events (G-27).
-//!   `TellFailed` and `PersistFailed` exhaust staged retry before being enqueued
-//!   (G-30); `HandleFailed`, `DecodeFailed`, `EndedSagaReceivedMessage`, and
+//!   EventStore stream, mixed into the same envelope as domain events.
+//!   `TellFailed` and `PersistFailed` exhaust staged retry before being enqueued;
+//!   `HandleFailed`, `DecodeFailed`, `EndedSagaReceivedMessage`, and
 //!   `ScheduledFailed` are enqueued immediately.  A subscriber catches up via
-//!   [`SagaProps::with_dead_letter_subscriber`] (G-29, DurableStream-based
+//!   [`SagaProps::with_dead_letter_subscriber`] (DurableStream-based
 //!   catchup).  The [`EnqueuePolicy`] returned by
 //!   [`SagaProps::with_enqueue_policy`] controls which failure kinds reach the
-//!   DLQ (G-26); the default enqueues every kind.  Pull API (list /
+//!   DLQ; the default enqueues every kind.  Pull API (list /
 //!   mark_processed / evict) is **not implemented** in this crate.
 //! - No snapshotting.
 //! - Routing is a single closure `Fn(&SubscribedEvent) -> Option<SagaId>`.
 //!   Decode failures (where no typed event is available) can be routed with the
 //!   separate [`SagaProps::with_decode_failure_route`] closure.
 //! - Side-effect failures and persistence failures are enqueued to the DLQ
-//!   after staged retry (G-30), not silently logged and discarded.
+//!   after staged retry, not silently logged and discarded.
 
 mod context;
 mod dead_letter;

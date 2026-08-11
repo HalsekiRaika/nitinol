@@ -16,9 +16,7 @@ use crate::process::snapshot_persistor::SnapshotPersistorProxy;
 use crate::receive::Receive as EvtReceive;
 use crate::Effect;
 
-// ---------------------------------------------------------------------------
 // Type alias for the snapshot restoration callback
-// ---------------------------------------------------------------------------
 
 /// A heap-allocated, shareable function that restores an aggregate from a
 /// snapshot payload.  Stored as `Option<SnapshotRestoreFn<A>>` so it is set
@@ -28,14 +26,12 @@ use crate::Effect;
 /// snapshot codec) and then calls `A::restore`.
 pub(crate) type SnapshotRestoreFn<A> = Arc<dyn Fn(&[u8]) -> Result<A, CodecError> + Send + Sync>;
 
-// ---------------------------------------------------------------------------
 // Internal message wrappers
 //
 // The runtime dispatches messages by type.  Wrapping command types in `AskCmd`
 // and query types in `ExecMsg` prevents accidental dispatch to the wrong impl
 // and allows both `Decider<C>` and `eventsource::Receive<M>` to coexist on
 // the same `AggregateProcess<A>` without overlapping trait bounds.
-// ---------------------------------------------------------------------------
 
 /// Routes a domain command through the `Decider<C>` path.
 pub(crate) struct AskCmd<C>(pub(crate) C);
@@ -43,9 +39,7 @@ pub(crate) struct AskCmd<C>(pub(crate) C);
 /// Routes a domain query through the `eventsource::Receive<M>` path.
 pub(crate) struct ExecMsg<M>(pub(crate) M);
 
-// ---------------------------------------------------------------------------
 // AggregateProcess
-// ---------------------------------------------------------------------------
 
 /// The runtime `Process` that hosts an aggregate and handles commands / queries.
 pub struct AggregateProcess<A: Aggregate> {
@@ -119,9 +113,7 @@ impl<A: Aggregate> Process for AggregateProcess<A> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Receive<AskCmd<C>>: command processing (Decider path)
-// ---------------------------------------------------------------------------
 
 impl<A, C> Receive<AskCmd<C>> for AggregateProcess<A>
 where
@@ -157,9 +149,7 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
 // Receive<ExecMsg<M>>: query processing (eventsource::Receive path)
-// ---------------------------------------------------------------------------
 
 impl<A, M> Receive<ExecMsg<M>> for AggregateProcess<A>
 where
@@ -182,12 +172,10 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
 // Effect executor for AggregateProcess
 //
 // Handles Persist (append + apply), Apply (apply only), Side (fire-and-forget),
 // Sequence (ordered execution), and None (no-op).
-// ---------------------------------------------------------------------------
 
 fn run_effect<'a, A: Aggregate>(
     effect: Effect<A::Event>,

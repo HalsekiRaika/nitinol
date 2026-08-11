@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::{encode_outbox_tell_acked, JsonCodec};
 
@@ -24,8 +25,10 @@ use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 struct Triggered;
 
 impl Event for Triggered {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("e2e.envelope.upstream"), TypeName::new("Triggered"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("e2e.envelope.upstream"),
+        TypeName::new("Triggered"),
+    );
 }
 
 #[derive(Default)]
@@ -76,7 +79,10 @@ impl Saga for EnvelopeSaga {
     type Error = Infallible;
 
     fn apply(&mut self, event: DomainEvt) {
-        self.applied.lock().unwrap().push(event);
+        self.applied
+            .lock()
+            .expect("applied mutex is never poisoned: no holder panics while the guard is alive")
+            .push(event);
     }
 
     async fn handle(
@@ -125,27 +131,24 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
     let persisted_for_saga = Arc::clone(&persisted);
     let routed = saga_id.clone();
 
-    let _saga_proxy = SagaProps::<EnvelopeSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&store),
-        move || EnvelopeSaga {
+    let _saga_proxy =
+        SagaProps::<EnvelopeSaga>::new(saga_id.clone(), Arc::clone(&store), move || EnvelopeSaga {
             applied: Arc::clone(&applied_for_saga),
             persisted: Arc::clone(&persisted_for_saga),
             note: "persisted-by-handle".to_owned(),
-        },
-    )
-    .with_codec(system.codec::<DomainEvt>())
-    .with_subscription(
-        Arc::clone(&store),
-        system.codec::<Triggered>(),
-        SequenceCursor::Stream {
-            key: upstream_id.as_str().to_owned(),
-            after: 0,
-        },
-        move |_event: &Triggered| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+        })
+        .with_codec(system.codec::<DomainEvt>())
+        .with_subscription(
+            Arc::clone(&store),
+            system.codec::<Triggered>(),
+            SequenceCursor::Stream {
+                key: upstream_id.as_str().to_owned(),
+                after: 0,
+            },
+            move |_event: &Triggered| Some(routed.clone()),
+        )
+        .spawn(system.process_system())
+        .await;
 
     upstream_proxy
         .ask(Trigger)
@@ -212,8 +215,10 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
 
     let saga_id = SagaId::new("envelope-replay-saga");
 
-    let domain_payload =
-        serde_json::to_vec(&DomainEvt { note: "seeded-domain".to_owned() }).expect("encode");
+    let domain_payload = serde_json::to_vec(&DomainEvt {
+        note: "seeded-domain".to_owned(),
+    })
+    .expect("encode");
     let domain_event = AppendingEvent {
         sequence: 1,
         event_type: DomainEvt::EVENT_TYPE,
@@ -245,31 +250,32 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let _saga_proxy = SagaProps::<EnvelopeSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&store),
-        move || EnvelopeSaga {
+    let _saga_proxy =
+        SagaProps::<EnvelopeSaga>::new(saga_id.clone(), Arc::clone(&store), move || EnvelopeSaga {
             applied: Arc::clone(&applied_for_saga),
             persisted: Arc::clone(&persisted_for_saga),
             note: "unused-on-replay".to_owned(),
-        },
-    )
-    .with_codec(system.codec::<DomainEvt>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Triggered>(),
-        SequenceCursor::Stream {
-            key: "no-such-upstream".to_owned(),
-            after: 0,
-        },
-        inert_route,
-    )
-    .spawn(system.process_system())
-    .await;
+        })
+        .with_codec(system.codec::<DomainEvt>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Triggered>(),
+            SequenceCursor::Stream {
+                key: "no-such-upstream".to_owned(),
+                after: 0,
+            },
+            inert_route,
+        )
+        .spawn(system.process_system())
+        .await;
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        if applied.lock().unwrap().len() >= 1 {
+        if !applied
+            .lock()
+            .expect("applied mutex is never poisoned: no holder panics while the guard is alive")
+            .is_empty()
+        {
             break;
         }
         assert!(
@@ -280,7 +286,9 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let applied = applied.lock().unwrap();
+    let applied = applied
+        .lock()
+        .expect("applied mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         applied.len(),
         1,

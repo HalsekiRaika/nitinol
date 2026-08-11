@@ -1,4 +1,4 @@
-//! Spec D-14: a saga that has durably terminated must not be revived.
+//! A saga that has durably terminated must not be revived.
 //!
 //! Termination is recorded by a durable `Ended` outbox marker in the saga's
 //! own event stream (persisted when `SagaEffect::End` is interpreted).  On a
@@ -14,6 +14,7 @@
 //! - end-to-end: a saga that reaches `End` (persisting the marker itself) is
 //!   skipped when a fresh process is spawned over the same store.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{encode_outbox_ended, JsonCodec, OUTBOX_MARKER};
 
@@ -35,9 +36,7 @@ use nitinol_persistence::{
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
-// ---------------------------------------------------------------------------
 // Domain types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -61,9 +60,7 @@ impl Event for ReservationRequested {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Sagas
-// ---------------------------------------------------------------------------
 
 /// Records every `handle` call and never terminates.  Used to observe whether
 /// the upstream subscription was wired up at all.
@@ -120,9 +117,7 @@ impl Saga for EndOnFirstSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_order_placed(
     store: &Arc<dyn EventStore>,
@@ -207,9 +202,7 @@ async fn spawn_recording_saga(
     .await
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 /// Baseline / positive control: a saga with a fresh (empty) stream must handle
 /// the routed upstream event.  Without this, the skip test below could pass
@@ -250,7 +243,7 @@ async fn non_terminated_saga_handles_routed_event() {
     );
 }
 
-/// Core D-14: when the saga stream already carries a durable `Ended` marker,
+/// When the saga stream already carries a durable `Ended` marker,
 /// `on_start` must refuse to spawn the upstream subscription, so `handle` is
 /// never called for a routed upstream event.
 #[tokio::test]
@@ -312,25 +305,24 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     let first_count = Arc::new(AtomicUsize::new(0));
     let first_count_clone = Arc::clone(&first_count);
     let routed = saga_id.clone();
-    let first_proxy = SagaProps::<EndOnFirstSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || EndOnFirstSaga {
-            handle_count: Arc::clone(&first_count_clone),
-        },
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-        move |_event: &OrderPlaced| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+    let first_proxy =
+        SagaProps::<EndOnFirstSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            EndOnFirstSaga {
+                handle_count: Arc::clone(&first_count_clone),
+            }
+        })
+        .with_codec(system.codec::<ReservationRequested>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<OrderPlaced>(),
+            SequenceCursor::Stream {
+                key: order_id.as_str().to_owned(),
+                after: 0,
+            },
+            move |_event: &OrderPlaced| Some(routed.clone()),
+        )
+        .spawn(system.process_system())
+        .await;
 
     // Wait until the End interpretation has durably persisted the Ended marker.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -338,7 +330,12 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
         let events = load_saga_events(&saga_store, &saga_id).await;
         let ended = events
             .iter()
-            .filter(|e| matches!(common::outbox_kind_of(e), Some(common::OutboxKind::Ended(_))))
+            .filter(|e| {
+                matches!(
+                    common::outbox_kind_of(e),
+                    Some(common::OutboxKind::Ended(_))
+                )
+            })
             .count();
         if ended >= 1 {
             break;

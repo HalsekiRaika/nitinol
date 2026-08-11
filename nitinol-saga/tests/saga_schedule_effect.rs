@@ -1,5 +1,4 @@
-//! Construction / Builder tests for the DeadlineScheduler effect surface
-//! (Issue #50, E-29).
+//! Construction / Builder tests for the DeadlineScheduler effect surface.
 //!
 //! These pin the public effect API introduced by the scheduler:
 //! - `ScheduleSpec { name, after, payload }` replaces the old `Schedule { at }`.
@@ -7,12 +6,12 @@
 //! - `SagaEffect::with_schedules(Vec<ScheduleSpec>)` attaches schedules to a
 //!   `Persist` branch (set, not merge — same semantics as `with_tells`).
 //! - `SagaEffect::schedule(name, after, msg)` is the typed convenience builder
-//!   that serialises the scheduled message into the spec's `payload`.
+//!   that serialises the scheduled message into the `ScheduleSpec`'s `payload`.
 //! - `SagaEffect::CancelSchedule(TimerName)` is the new name-scoped cancel
 //!   variant, reachable via `SagaEffect::cancel_schedule(name)`.
 //!
 //! The tests are intentionally self-contained (no `mod common`) so they do not
-//! couple to the shared `Shape` helper, which mirrors the pre-#50
+//! couple to the shared `Shape` helper, which still mirrors the older
 //! `Schedule { at }` layout and is migrated separately.
 
 use std::time::Duration;
@@ -76,8 +75,7 @@ fn with_schedules_attaches_specs_to_persist_branch_in_order() {
     };
 
     // When they are attached to a Persist branch
-    let effect =
-        SagaEffect::persist(7u32).with_schedules(vec![first.clone(), second.clone()]);
+    let effect = SagaEffect::persist(7u32).with_schedules(vec![first.clone(), second.clone()]);
 
     // Then the branch keeps both, in order, alongside the user event
     let schedules = persist_schedules(&effect);
@@ -129,10 +127,14 @@ fn schedule_builder_serialises_message_into_payload() {
     // When the typed convenience builder is used
     let effect = SagaEffect::<u32>::schedule(TimerName::new("reminder"), after, msg.clone());
 
-    // Then it yields a Persist branch with exactly one spec whose payload is the
+    // Then it yields a Persist branch with exactly one schedule entry whose payload is the
     // serialised message, carrying the given name and delay
     let schedules = persist_schedules(&effect);
-    assert_eq!(schedules.len(), 1, "schedule() must produce exactly one spec");
+    assert_eq!(
+        schedules.len(),
+        1,
+        "schedule() must produce exactly one schedule entry"
+    );
     assert_eq!(schedules[0].name, TimerName::new("reminder"));
     assert_eq!(schedules[0].after, after);
 
@@ -162,7 +164,10 @@ fn schedule_builder_produces_no_user_events_or_tells() {
             tells,
             schedules,
         } => {
-            assert!(events.is_empty(), "schedule() must not persist a user event");
+            assert!(
+                events.is_empty(),
+                "schedule() must not persist a user event"
+            );
             assert!(tells.is_empty(), "schedule() must not attach a tell");
             assert_eq!(schedules.len(), 1);
         }
@@ -190,7 +195,7 @@ fn cancel_schedule_builder_returns_cancel_variant_with_name() {
 
 #[test]
 fn cancel_schedule_variant_is_constructible_directly() {
-    // The variant is public per E-29 and must be matchable/constructible.
+    // The variant is public and must be matchable/constructible.
     let effect: SagaEffect<u32> = SagaEffect::CancelSchedule(TimerName::new("t"));
     assert!(matches!(effect, SagaEffect::CancelSchedule(_)));
 }

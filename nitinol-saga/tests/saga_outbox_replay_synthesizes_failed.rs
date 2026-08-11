@@ -1,4 +1,4 @@
-//! Spec C-9 / replay path — synthetic `TellFailed` and negative cases.
+//! Replay path — synthetic `TellFailed` and negative cases.
 //!
 //! ## Positive case
 //!
@@ -25,10 +25,11 @@
 //! registered, crash-restart bytes present), see
 //! `saga_tell_crash_restart_redispatch.rs`.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{
-    encode_outbox_tell_acked, encode_outbox_tell_requested, encode_outbox_tell_requested_with_target,
-    outbox_kind_of, JsonCodec, OutboxKind, OUTBOX_MARKER,
+    encode_outbox_tell_acked, encode_outbox_tell_requested,
+    encode_outbox_tell_requested_with_target, outbox_kind_of, JsonCodec, OutboxKind, OUTBOX_MARKER,
 };
 
 use std::sync::Arc;
@@ -39,14 +40,16 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
+use nitinol_eventsource::SystemEvent;
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_eventsource::SystemEvent;
-use nitinol_saga::{DeadLetterEvent, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaProps};
+use nitinol_saga::{
+    DeadLetterEvent, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaProps,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -284,7 +287,7 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
         .iter()
         .find(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .expect("the synthetic TellFailed marker must be present");
-    // Issue #66: outbox markers now carry a per-arm variant on the wire. The
+    // Outbox markers carry a per-arm variant on the wire. The
     // synthetic TellFailed must write the `tell_failed` variant so the marker is
     // queryable by Materialized Path, while its variant-free `type_key` still
     // equals `OUTBOX_MARKER`'s so `classify`/routing keeps decoding it.
@@ -301,7 +304,7 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
     );
 }
 
-/// Regression test (ARCH-REVIEW-001 / SUPERVISOR-001): when a `TellRequested`
+/// Regression test: when a `TellRequested`
 /// carries a non-empty `target` field (proto field 3, written after the DLQ
 /// replay fix), the replay path must write a `DeadLetterEvent` with
 /// `SagaFailure::TellFailed { target, .. }` in addition to the synthetic
@@ -383,18 +386,15 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
                 "DLQ TellFailed must carry the target recovered from the TellRequested proto field"
             );
         }
-        other => panic!(
-            "DLQ entry must be TellFailed, got: {:?}",
-            other
-        ),
+        other => panic!("DLQ entry must be TellFailed, got: {:?}", other),
     }
 }
 
-/// Regression test (ARCH-REVIEW-001): when a `TellRequested` has **no**
+/// Regression test: when a `TellRequested` has **no**
 /// `target` field (legacy stream predating proto field 3), the replay path
 /// must write the synthetic `TellFailed` outbox marker but **must NOT** write
 /// a `DeadLetterEvent`.  Emitting `TellFailed` with an empty target would
-/// violate the G-28 contract; the durable outbox marker already records the
+/// be invalid; the durable outbox marker already records the
 /// failure without producing an invalid DLQ entry.
 #[tokio::test]
 async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay() {
@@ -447,14 +447,14 @@ async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay(
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    }
 
     // Allow a brief settling period so any spurious DLQ write would have had time to appear.
     tokio::time::sleep(Duration::from_millis(200)).await;
     let events = load_saga_events(&saga_store, &saga_id).await;
 
     // No DLQ entry must be written for a legacy stream that lacks a target field —
-    // emitting TellFailed with an empty target would violate G-28.
+    // emitting TellFailed with an empty target would be invalid.
     let dead_letter_type_key = DeadLetterEvent::EVENT_TYPE.type_key();
     let has_dead_letter = events
         .iter()
@@ -462,6 +462,6 @@ async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay(
     assert!(
         !has_dead_letter,
         "replay must NOT write a DLQ entry for a legacy TellRequested without a target field \
-         (G-28 requires TellFailed.target to be non-empty)"
+         (TellFailed.target must be non-empty)"
     );
 }

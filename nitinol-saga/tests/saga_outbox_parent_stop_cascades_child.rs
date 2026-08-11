@@ -1,7 +1,7 @@
-//! Issue #59 behavior 3: when the parent saga stops, an in-flight outbox
-//! executor child must cascade-stop with it.
+//! When the parent saga stops, an in-flight outbox executor child must
+//! cascade-stop with it.
 //!
-//! Under the post-#59 design the outbox executor is a short-lived child
+//! The outbox executor is a short-lived child
 //! process spawned via `ctx.spawn_child(OutboxExecutorProcess { .. })`, so it
 //! is registered in the saga's supervision tree.  The retry backoff lives in
 //! the executor's custom Driver `next()`, which is multiplexed with the
@@ -15,10 +15,11 @@
 //! appending a terminal marker.  The saga stream therefore retains its
 //! `TellRequested` marker with **no** `TellAcked` and **no** `TellFailed`.
 //!
-//! Against the pre-#59 bare-`tokio::spawn` implementation this test fails: the
-//! detached task is outside the supervision tree, so stopping the saga does
-//! not stop it — it runs the full retry budget and appends `TellFailed`.
+//! Against a bare-`tokio::spawn` implementation this test fails: a detached
+//! task is outside the supervision tree, so stopping the saga does not stop
+//! it — it runs the full retry budget and appends `TellFailed`.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
@@ -39,19 +40,19 @@ use nitinol_eventsource::{
     SequenceCursor, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
+use nitinol_persistence::{
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+};
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
-// ---------------------------------------------------------------------------
 // A TellTarget that fails every dispatch attempt.  The first attempt blocks on
 // a semaphore gate until the test releases it; this lets the test deterministe
 // reach the "executor is in-flight, retries not yet exhausted" state, issue the
 // stop, and only then let the first attempt return.  Later attempts (if the
 // stop has not cascaded yet) fail immediately so the executor is never wedged
 // inside `apply()` — its only cancellation points are the backoff waits.
-// ---------------------------------------------------------------------------
 
 struct GatedFailingTarget<A: Aggregate> {
     attempts: Arc<AtomicUsize>,
@@ -104,7 +105,10 @@ impl<A: Aggregate> AggregateTellTarget<A> for GatedFailingTarget<A> {
                 // Signal the test that the executor has begun its first
                 // attempt, then block until the test releases the gate.
                 reached.notify_one();
-                gate.acquire().await.expect("gate semaphore must stay open").forget();
+                gate.acquire()
+                    .await
+                    .expect("gate semaphore must stay open")
+                    .forget();
             }
             Err(TellError::Send(SendError))
         })
@@ -115,9 +119,7 @@ impl<A: Aggregate> AggregateTellTarget<A> for GatedFailingTarget<A> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Domain types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -125,7 +127,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("cascade_stop"), TypeName::new("OrderPlaced"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("cascade_stop"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,7 +137,10 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("cascade_stop"), TypeName::new("ReservationRequested"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("cascade_stop"),
+        TypeName::new("ReservationRequested"),
+    );
 }
 
 #[derive(Default)]
@@ -144,7 +150,10 @@ struct Inventory;
 struct InventoryReserved;
 
 impl Event for InventoryReserved {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("cascade_stop"), TypeName::new("InventoryReserved"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("cascade_stop"),
+        TypeName::new("InventoryReserved"),
+    );
 }
 
 impl Aggregate for Inventory {
@@ -197,9 +206,7 @@ impl Saga for CascadeSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_order_placed(
     store: &Arc<dyn EventStore>,
@@ -243,9 +250,7 @@ fn count_matching(events: &[LoadedEvent], pred: impl Fn(&OutboxKind) -> bool) ->
         .count()
 }
 
-// ---------------------------------------------------------------------------
 // Test
-// ---------------------------------------------------------------------------
 
 /// Stopping the saga while its outbox executor is in-flight must cascade-stop
 /// the executor (it is a supervision-tree child), so the executor never reaches
@@ -300,9 +305,12 @@ async fn parent_stop_cascades_to_in_flight_outbox_executor_child() {
     // Wait until the executor has begun its first attempt (and is now blocked
     // on the gate).  At this point the tell is in-flight but retries are not
     // exhausted, so no terminal marker can have been written.
-    tokio::time::timeout(Duration::from_secs(3), target.first_attempt_reached.notified())
-        .await
-        .expect("outbox executor must begin its first attempt within 3 seconds");
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        target.first_attempt_reached.notified(),
+    )
+    .await
+    .expect("outbox executor must begin its first attempt within 3 seconds");
 
     let events = load_saga_events(&saga_store, &saga_id).await;
     assert_eq!(

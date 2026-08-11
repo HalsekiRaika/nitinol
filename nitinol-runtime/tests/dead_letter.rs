@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 
 use std::future::Future;
@@ -449,7 +450,7 @@ async fn ask_to_stopped_process_returns_ask_error_dead_letter() {
 
     // Then: AskError::DeadLetter is returned
     assert!(result.is_err());
-    match result.unwrap_err() {
+    match result.expect_err("ask to a stopped process must fail with a dead letter") {
         AskError::DeadLetter { .. } => {}
         other => panic!("expected AskError::DeadLetter, got {:?}", other),
     }

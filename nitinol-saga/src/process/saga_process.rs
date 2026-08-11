@@ -15,15 +15,13 @@ use crate::dead_letter::{
     enqueue_dead_letter, DlqChildSpawn, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext,
 };
 use crate::effect::TellIntent;
+use crate::error::SagaUpstreamHandlerError;
 use crate::id::SagaId;
 use crate::outbox::{OutboxAppender, RetryPolicy, TellOutcome};
-use crate::error::SagaUpstreamHandlerError;
 use crate::process::interpreter::{run_saga_effect, InterpretOutcome, InterpreterCtx};
 use crate::process::replay::{replay_and_redispatch, ActiveSchedule};
 use crate::saga::Saga;
-use crate::scheduler::{
-    append_schedule_marker, DispatchFn, ScheduleEvent, SchedulerProxy, Timers,
-};
+use crate::scheduler::{append_schedule_marker, DispatchFn, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName};
 
 /// A typed upstream event delivered to the saga by its `DirectPollerProcess`.
@@ -31,7 +29,7 @@ use crate::scheduler::{ScheduleToken, TimerName};
 /// Either the successfully decoded event (carrying both typed and raw bytes for
 /// the draining dead-letter path) or a decode failure that the transform could
 /// not recover — both are forwarded to `SagaProcess` so the process can record
-/// a `SagaFailure::DecodeFailed` dead letter (G-26 / G-30 immediate).
+/// a `SagaFailure::DecodeFailed` dead letter immediately.
 pub(crate) enum UpstreamMessage<E> {
     /// Upstream event decoded successfully.
     Decoded {
@@ -44,7 +42,7 @@ pub(crate) enum UpstreamMessage<E> {
     },
     /// The upstream codec failed to decode the event payload.  Routing is
     /// impossible without a typed event, so the failure is always delivered to
-    /// this saga for DLQ recording (G-26).
+    /// this saga for DLQ recording.
     DecodeFailed {
         aggregate_id: AggregateId,
         sequence: u64,
@@ -76,7 +74,7 @@ pub(crate) type CrashRestartFactory = Arc<dyn Fn(&[u8]) -> Option<TellIntent> + 
 
 pub(crate) type RouteFn<E> = Arc<dyn Fn(&E) -> Option<SagaId> + Send + Sync>;
 
-/// Optional decode-failure routing function (ARCH-REVIEW-002).
+/// Optional decode-failure routing function.
 ///
 /// When two sagas subscribe to the same upstream stream and a corrupt event
 /// arrives, the transform delivers `UpstreamMessage::DecodeFailed` to every
@@ -88,7 +86,8 @@ pub(crate) type RouteFn<E> = Arc<dyn Fn(&E) -> Option<SagaId> + Send + Sync>;
 /// `saga_id == self.saga_id`).  Return `None` to decline (no DLQ).
 /// When absent, every `DecodeFailed` is recorded against this saga (legacy
 /// behaviour).
-pub(crate) type DecodeFailureRouteFn = Arc<dyn Fn(&AggregateId, u64) -> Option<SagaId> + Send + Sync>;
+pub(crate) type DecodeFailureRouteFn =
+    Arc<dyn Fn(&AggregateId, u64) -> Option<SagaId> + Send + Sync>;
 
 pub struct SagaProcess<S: Saga> {
     pub(crate) state: S,
@@ -106,7 +105,7 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) upstream_cursor: SequenceCursor,
     pub(crate) scheduler: Option<SchedulerProxy>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
-    /// DLQ child poller spawner (ARCH-REVIEW-009).
+    /// DLQ child poller spawner.
     ///
     /// When `with_dead_letter_subscriber` is configured, `on_start` spawns the
     /// DLQ direct-poller as a child so the saga stop's cascade stops the poller
@@ -178,9 +177,7 @@ impl<S: Saga> SagaProcess<S> {
             // Saturating cast: if `after` exceeds i64::MAX milliseconds (~292 million
             // years) clamp to i64::MAX so saturating_add does not overflow.
             let after_ms: i64 = i64::try_from(sched.after.as_millis()).unwrap_or(i64::MAX);
-            let deadline = sched
-                .scheduled_at_unix_millis
-                .saturating_add(after_ms);
+            let deadline = sched.scheduled_at_unix_millis.saturating_add(after_ms);
             let remaining = deadline - now_millis;
             let after = if remaining <= 0 {
                 Duration::ZERO
@@ -188,8 +185,11 @@ impl<S: Saga> SagaProcess<S> {
                 // remaining > 0 here; cast to u64 is safe.
                 Duration::from_millis(remaining as u64)
             };
-            let dispatch =
-                build_fire_dispatch::<S>(ctx.self_proxy().clone(), sched.name.clone(), sched.payload);
+            let dispatch = build_fire_dispatch::<S>(
+                ctx.self_proxy().clone(),
+                sched.name.clone(),
+                sched.payload,
+            );
             timers.start_single(sched.name, after, dispatch).await;
         }
     }
@@ -218,7 +218,8 @@ impl<S: Saga> SagaProcess<S> {
     /// Returns `true` when the dead letter was written (or ignored by policy),
     /// and `false` when the policy required writing but the store append failed.
     /// Callers that receive `false` **must** stop the process so the upstream
-    /// message is not treated as processed (G-27 persisted DLQ contract).
+    /// message is not treated as processed — the persisted DLQ must stay
+    /// authoritative.
     async fn record_dead_letter(&mut self, failure: SagaFailure, source: SourceContext) -> bool {
         !matches!(
             enqueue_dead_letter(
@@ -255,7 +256,7 @@ impl<S: Saga> Process for SagaProcess<S> {
             Ok(o) => o,
             // store.load() failed — the terminated state cannot be determined.
             // Fail safe: stop the process without subscribing so a possibly-
-            // terminated saga is not revived (D-14).
+            // terminated saga is not revived.
             Err(()) => {
                 tracing::error!(
                     saga_id = self.saga_id.as_str(),
@@ -271,7 +272,7 @@ impl<S: Saga> Process for SagaProcess<S> {
             self.tell_states.insert(tell_id, TellState::Failed);
         }
 
-        // D-14: a saga whose stream carries a durable `Ended` marker terminated
+        // A saga whose stream carries a durable `Ended` marker terminated
         // in a previous incarnation.  Refuse to wire up the upstream
         // subscription — so `Saga::handle` can never run again — and stop the
         // inert process to release its resources.
@@ -287,7 +288,7 @@ impl<S: Saga> Process for SagaProcess<S> {
         }
 
         // Re-register timers that were still pending at the previous
-        // incarnation's stop (E-26): unfired, uncancelled schedules found on the
+        // incarnation's stop: unfired, uncancelled schedules found on the
         // saga's own stream.
         self.reregister_active_schedules(outcome.active_schedules, ctx)
             .await;
@@ -296,7 +297,7 @@ impl<S: Saga> Process for SagaProcess<S> {
             .spawn_child(ctx, self.upstream_cursor.clone())
             .await;
 
-        // G-29 / ARCH-REVIEW-009: spawn the DLQ direct-poller as a child of
+        // Spawn the DLQ direct-poller as a child of
         // this saga process so that when the saga stops the runtime
         // cascade-stops the DLQ poller automatically.  Without child binding
         // the poller would outlive the saga as long as the subscriber is alive.
@@ -306,7 +307,7 @@ impl<S: Saga> Process for SagaProcess<S> {
     }
 
     async fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) {
-        // Saga lifecycle teardown (E-25): cancel every timer this saga owns so
+        // Saga lifecycle teardown: cancel every timer this saga owns so
         // the resident scheduler does not fire into a stopped process.  This is
         // an in-memory scheduler cancel only — no `Cancelled` marker is
         // persisted, so a future incarnation replays and re-registers any still
@@ -320,7 +321,8 @@ impl<S: Saga> Process for SagaProcess<S> {
 impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
     type Response = ();
     /// Returning `Err(SagaUpstreamHandlerError)` signals the `DirectPoller`
-    /// (via `ask()`) to NOT advance the upstream cursor (G-27 state-consistency).
+    /// (via `ask()`) to NOT advance the upstream cursor, keeping the saga
+    /// state consistent with what was actually processed.
     type Error = SagaUpstreamHandlerError;
 
     async fn recv(
@@ -328,12 +330,12 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
         msg: UpstreamMessage<S::SubscribedEvent>,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), SagaUpstreamHandlerError> {
-        // G-26 / G-30 immediate: the upstream codec could not decode the event.
-        // Without a typed event routing is impossible, so the failure is
-        // delivered to this saga for DLQ recording unless a
-        // `decode_failure_route_fn` is configured that routes it elsewhere
-        // (ARCH-REVIEW-002: prevent every subscribed saga from recording a
-        // duplicate DLQ entry for the same corrupt upstream event).
+        // The upstream codec could not decode the event.  The failure is
+        // recorded immediately: without a typed event routing is impossible,
+        // so it is delivered to this saga for DLQ recording unless a
+        // `decode_failure_route_fn` is configured that routes it elsewhere,
+        // which prevents every subscribed saga from recording a duplicate DLQ
+        // entry for the same corrupt upstream event.
         let (aggregate_id, sequence, event, raw_payload) = match msg {
             UpstreamMessage::DecodeFailed {
                 aggregate_id,
@@ -362,12 +364,12 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
                     .record_dead_letter(SagaFailure::DecodeFailed { error }, source)
                     .await
                 {
-                    // G-27: return Err so the DirectPoller (via ask()) does NOT
+                    // Return Err so the DirectPoller (via ask()) does NOT
                     // advance the upstream cursor — the runtime will stop this
                     // process via handler-failure supervision.
                     tracing::error!(
                         saga_id = self.saga_id.as_str(),
-                        "saga DLQ append failed for DecodeFailed; signalling upstream handler error (G-27)"
+                        "saga DLQ append failed for DecodeFailed; signalling upstream handler error"
                     );
                     return Err(SagaUpstreamHandlerError);
                 }
@@ -393,27 +395,29 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             upstream_sequence: sequence,
         };
 
-        // D-14 / ARCH-001: once `End` has been interpreted and the durable
+        // Once `End` has been interpreted and the durable
         // `Ended` marker persisted, the lifecycle transitions to `Draining`
         // while in-flight tells settle.  Upstream events routed here during
         // draining must not reach `Saga::handle` — doing so could produce
         // additional effects that violate the terminal lifecycle contract.  The
-        // dropped message is recorded as a dead letter (G-30 immediate) with
-        // its raw wire payload preserved (G-28).
+        // dropped message is recorded as a dead letter immediately, with its
+        // raw wire payload preserved.
         if matches!(self.lifecycle, Lifecycle::Draining) {
             if !self
                 .record_dead_letter(
-                    SagaFailure::EndedSagaReceivedMessage { message: raw_payload },
+                    SagaFailure::EndedSagaReceivedMessage {
+                        message: raw_payload,
+                    },
                     source,
                 )
                 .await
             {
-                // G-27: return Err so the DirectPoller (via ask()) does NOT
+                // Return Err so the DirectPoller (via ask()) does NOT
                 // advance the upstream cursor — the runtime will stop this
                 // process via handler-failure supervision.
                 tracing::error!(
                     saga_id = self.saga_id.as_str(),
-                    "saga DLQ append failed for EndedSagaReceivedMessage; signalling upstream handler error (G-27)"
+                    "saga DLQ append failed for EndedSagaReceivedMessage; signalling upstream handler error"
                 );
                 return Err(SagaUpstreamHandlerError);
             }
@@ -435,15 +439,20 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             Err(e) => {
                 tracing::warn!(error = %e, "saga handle failed");
                 if !self
-                    .record_dead_letter(SagaFailure::HandleFailed { error: e.to_string() }, source)
+                    .record_dead_letter(
+                        SagaFailure::HandleFailed {
+                            error: e.to_string(),
+                        },
+                        source,
+                    )
                     .await
                 {
-                    // G-27: return Err so the DirectPoller (via ask()) does NOT
+                    // Return Err so the DirectPoller (via ask()) does NOT
                     // advance the upstream cursor — the runtime will stop this
                     // process via handler-failure supervision.
                     tracing::error!(
                         saga_id = self.saga_id.as_str(),
-                        "saga DLQ append failed for HandleFailed; signalling upstream handler error (G-27)"
+                        "saga DLQ append failed for HandleFailed; signalling upstream handler error"
                     );
                     return Err(SagaUpstreamHandlerError);
                 }
@@ -464,7 +473,7 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             scheduler: self.scheduler.clone(),
             enqueue_policy: Arc::clone(&self.enqueue_policy),
         };
-        // G-27: if the interpreter signals DlqFailed (PersistFailed DLQ
+        // If the interpreter signals DlqFailed (PersistFailed DLQ
         // append also failed), propagate Err so the DirectPoller (via ask())
         // does NOT advance the upstream cursor.
         if matches!(
@@ -474,7 +483,7 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             tracing::error!(
                 saga_id = self.saga_id.as_str(),
                 "saga DLQ append failed for PersistFailed (upstream handler); \
-                 signalling upstream handler error (G-27)"
+                 signalling upstream handler error"
             );
             return Err(SagaUpstreamHandlerError);
         }
@@ -491,7 +500,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         msg: FireScheduled,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
-        // ARCH-001: mirror the `EventEnvelope` guard — timer firings must also
+        // Mirror the `EventEnvelope` guard — timer firings must also
         // be dropped while draining so `on_scheduled` cannot produce additional
         // effects after the terminal `Ended` marker has been written.  The
         // dropped firing is recorded as a dead letter (its raw payload retained).
@@ -505,7 +514,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
                 )
                 .await
             {
-                // G-27: DLQ append failed — stop so the timer firing is not
+                // DLQ append failed — stop so the timer firing is not
                 // treated as processed; a supervised restart will retry.
                 tracing::error!(
                     saga_id = self.saga_id.as_str(),
@@ -526,12 +535,14 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
                 );
                 if !self
                     .record_dead_letter(
-                        SagaFailure::DecodeFailed { error: e.to_string() },
+                        SagaFailure::DecodeFailed {
+                            error: e.to_string(),
+                        },
                         SourceContext::without_upstream(),
                     )
                     .await
                 {
-                    // G-27: DLQ append failed — stop so the timer firing is not
+                    // DLQ append failed — stop so the timer firing is not
                     // treated as processed; a supervised restart will retry.
                     tracing::error!(
                         saga_id = self.saga_id.as_str(),
@@ -559,12 +570,14 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
                 tracing::warn!(error = %e, "saga on_scheduled failed");
                 if !self
                     .record_dead_letter(
-                        SagaFailure::ScheduledFailed { error: e.to_string() },
+                        SagaFailure::ScheduledFailed {
+                            error: e.to_string(),
+                        },
                         SourceContext::without_upstream(),
                     )
                     .await
                 {
-                    // G-27: DLQ append failed — stop so the timer firing is not
+                    // DLQ append failed — stop so the timer firing is not
                     // treated as processed; a supervised restart will retry.
                     tracing::error!(
                         saga_id = self.saga_id.as_str(),
@@ -587,7 +600,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         //
         // The opposite order (… Scheduled → (new) Scheduled → Fired) would
         // cause replay to remove the new schedule when it processes the Fired
-        // marker, breaking E-28 / E-26.
+        // marker, breaking timer cancellation and re-registration.
         //
         // Best-effort once: an append failure is tolerated (at-least-once
         // delivery permits a replay re-fire).
@@ -685,7 +698,8 @@ impl<S: Saga> Receive<OutboxReport> for SagaProcess<S> {
                     // Capture target_id and crash-restart payload from the
                     // in-memory intent before the state entry is replaced.
                     let intent_data = match self.tell_states.get(&msg.tell_id) {
-                        Some(TellState::Pending(intent)) | Some(TellState::AppendFailed(intent)) => {
+                        Some(TellState::Pending(intent))
+                        | Some(TellState::AppendFailed(intent)) => {
                             let target = intent.target_id.clone();
                             let message = intent.crash_restart_payload.clone().unwrap_or_default();
                             Some((target, message))
@@ -703,7 +717,7 @@ impl<S: Saga> Receive<OutboxReport> for SagaProcess<S> {
                     if let Some((target, message)) = intent_data {
                         // The terminal `tell_failed` outbox marker is already
                         // persisted above (staged retry exhausted), so this dead
-                        // letter lands *after* it — G-30 timing.
+                        // letter lands *after* it.
                         if !self
                             .record_dead_letter(
                                 SagaFailure::TellFailed { target, message },
@@ -711,7 +725,7 @@ impl<S: Saga> Receive<OutboxReport> for SagaProcess<S> {
                             )
                             .await
                         {
-                            // G-27: DLQ append failed — stop so the outcome is
+                            // DLQ append failed — stop so the outcome is
                             // not treated as processed; a supervised restart
                             // will retry from the terminal outbox marker.
                             tracing::error!(
@@ -814,13 +828,13 @@ mod tests {
         let saga_id = SagaId::new("sequence-skip-regression");
         let mut sequence: u64 = 0;
 
-        let ok = append_terminal_and_claim(&store, &saga_id, &mut sequence, TellOutcome::Acked, 1)
-            .await;
+        let ok =
+            append_terminal_and_claim(&store, &saga_id, &mut sequence, TellOutcome::Acked, 1).await;
         assert!(!ok, "must return false when EventStore::append fails");
         assert_eq!(sequence, 0, "sequence must not advance on store failure");
 
-        let ok = append_terminal_and_claim(&store, &saga_id, &mut sequence, TellOutcome::Acked, 1)
-            .await;
+        let ok =
+            append_terminal_and_claim(&store, &saga_id, &mut sequence, TellOutcome::Acked, 1).await;
         assert!(ok, "must return true when EventStore::append succeeds");
         assert_eq!(
             sequence, 1,

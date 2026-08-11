@@ -1,5 +1,4 @@
-//! `EnqueuePolicy` — the per-saga filter deciding which failures reach the DLQ
-//! (Issue #51, G-26).
+//! `EnqueuePolicy` — the per-saga filter deciding which failures reach the DLQ.
 
 use crate::dead_letter::event::SagaFailure;
 
@@ -21,7 +20,7 @@ pub trait EnqueuePolicy: Send + Sync {
     fn decide(&self, failure: &SagaFailure) -> EnqueueDecision;
 }
 
-/// The default policy: enqueue every failure kind (G-26).
+/// The default policy: enqueue every failure kind.
 pub(crate) struct EnqueueAll;
 
 impl EnqueuePolicy for EnqueueAll {

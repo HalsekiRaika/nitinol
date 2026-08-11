@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 
 use std::future::Future;
@@ -68,7 +69,7 @@ async fn tell_to_stopped_process_returns_send_error() {
 
     // Then: the result is Err(SendError)
     assert!(result.is_err());
-    let _: SendError = result.unwrap_err();
+    let _: SendError = result.expect_err("tell to a stopped process must fail");
 }
 
 /// `stop()` on an already-stopped process returns `SendError`.
@@ -90,7 +91,7 @@ async fn stop_on_already_stopped_process_returns_send_error() {
 
     // Then: Err(SendError) is returned
     assert!(result.is_err());
-    let _: SendError = result.unwrap_err();
+    let _: SendError = result.expect_err("stop on an already-stopped process must fail");
 }
 
 /// `poison()` on an already-stopped process returns `SendError`.
@@ -112,7 +113,7 @@ async fn poison_on_already_stopped_process_returns_send_error() {
 
     // Then: Err(SendError) is returned
     assert!(result.is_err());
-    let _: SendError = result.unwrap_err();
+    let _: SendError = result.expect_err("poison on an already-stopped process must fail");
 }
 
 /// `SendError` implements `std::error::Error` (required for `thiserror` chain).
@@ -222,12 +223,16 @@ async fn spawn_stream_duplicate_returns_spawn_error() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("se-dup");
     system
-        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic.clone()))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(
+            topic.clone(),
+        ))
         .await
         .expect("first spawn_stream should succeed");
 
     // When: a second stream is spawned with the same topic
-    let result = system.spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic)).await;
+    let result = system
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
+        .await;
 
     // Then: Err(SpawnError) is returned and error type is statically known
     let err: SpawnError = match result {

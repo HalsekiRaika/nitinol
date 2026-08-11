@@ -71,8 +71,7 @@ async fn temperature_reading_boxed_and_downcast_recovers_original_value() {
     let result = boxed.downcast_ref::<TemperatureReading>();
 
     // Then: the original sensor name and temperature are recovered
-    assert!(result.is_some());
-    let recovered = result.unwrap();
+    let recovered = result.expect("downcast to the original message type must succeed");
     assert_eq!(recovered.sensor, "sensor-x");
     assert!((recovered.celsius - 42.0).abs() < f64::EPSILON);
 }

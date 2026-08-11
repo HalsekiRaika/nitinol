@@ -1,4 +1,4 @@
-//! Spec D-13: the `End` variant is the single-responsibility termination
+//! The `End` variant is the single-responsibility termination
 //! marker.  Interpreting it must stop the saga process (`ctx.stop_self()`),
 //! which causes the subscriber to stop via the direct poller's subscriber
 //! watch, and in turn tears down the upstream subscription.
@@ -6,6 +6,7 @@
 //! Also exercises the Sequence short-circuit invariant: effects placed after
 //! `End` inside a Sequence are not interpreted (the interpreter must break).
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::JsonCodec;
 
@@ -69,7 +70,9 @@ impl Saga for PersistThenEndSaga {
         event: Self::SubscribedEvent,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        *self.handle_count.lock().unwrap() += 1;
+        *self.handle_count.lock().expect(
+            "handle_count mutex is never poisoned: no holder panics while the guard is alive",
+        ) += 1;
 
         // After-End effect is a Persist that would be observable in the stream
         // (a second user event at sequence 2) if the Sequence short-circuit
@@ -190,7 +193,9 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     append_order_placed(&upstream_store, &order_id, 2, "SECOND").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let final_handle_count = *handle_count.lock().unwrap();
+    let final_handle_count = *handle_count
+        .lock()
+        .expect("handle_count mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         final_handle_count, 1,
         "after End, the saga process must be stopped; \

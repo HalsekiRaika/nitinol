@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package nitinol.saga.schedule;
 
-// Marker events for the DeadlineScheduler (Issue #50, E-30).  Persisted on the
+// Marker events for the DeadlineScheduler.  Persisted on the
 // saga's own EventStore stream as `SagaPersisted::Schedule(ScheduleEvent)`.
 // The `oneof` arm is the value-level variant written on the wire
 // (`scheduled` / `cancelled` / `fired`).

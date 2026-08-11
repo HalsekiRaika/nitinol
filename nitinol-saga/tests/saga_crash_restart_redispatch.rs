@@ -1,10 +1,11 @@
-//! Spec C-9 / replay path — **crash-restart re-dispatch**: when the saga
+//! Replay path — **crash-restart re-dispatch**: when the saga
 //! process starts after a full OS-process crash (no in-memory
 //! `PendingIntents`), the replay path must re-dispatch pending tells using
 //! the crash-restart factory registered via
 //! `SagaProps::with_crash_restart_factory`, provided that the `TellRequested`
 //! marker carries crash-restart bytes.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{encode_outbox_tell_requested, outbox_kind_of, JsonCodec, OutboxKind, OUTBOX_MARKER};
 
@@ -25,10 +26,8 @@ use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEv
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
-// ---------------------------------------------------------------------------
 // Domain types — minimal; Reserve is a unit struct so the crash-restart
 // bytes can be anything (the factory ignores them and always returns Reserve).
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -46,8 +45,10 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("crash_restart"), TypeName::new("ReservationRequested"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("crash_restart"),
+        TypeName::new("ReservationRequested"),
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -90,9 +91,7 @@ impl Decider<Reserve> for Inventory {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Inert saga — only the on_start replay path is exercised.
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct InertSaga;
@@ -116,9 +115,7 @@ impl Saga for InertSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_raw(
     store: &Arc<dyn EventStore>,
@@ -151,9 +148,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-// ---------------------------------------------------------------------------
 // Test
-// ---------------------------------------------------------------------------
 
 /// When the saga restarts after a full OS-process crash (no `PendingIntents`),
 /// and the `TellRequested` marker carries crash-restart bytes, and a factory

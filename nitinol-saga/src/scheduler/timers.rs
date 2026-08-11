@@ -1,4 +1,4 @@
-//! `Timers` — the per-saga view over the shared [`SchedulerProxy`] (E-25).
+//! `Timers` — the per-saga view over the shared [`SchedulerProxy`].
 //!
 //! Binds a saga's [`SagaId`] to the resident scheduler so the effect
 //! interpreter and lifecycle hooks name their timer operations
@@ -30,8 +30,15 @@ impl Timers {
 
     /// Register a single-shot timer under `name`, replacing any earlier timer
     /// with the same name (`startSingleTimer` semantics).
-    pub(crate) async fn start_single(&self, name: TimerName, after: Duration, dispatch: DispatchFn) {
-        self.scheduler.register(self.token(name), after, dispatch).await;
+    pub(crate) async fn start_single(
+        &self,
+        name: TimerName,
+        after: Duration,
+        dispatch: DispatchFn,
+    ) {
+        self.scheduler
+            .register(self.token(name), after, dispatch)
+            .await;
     }
 
     /// Cancel the timer registered under `name`, if any.

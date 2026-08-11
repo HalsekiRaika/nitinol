@@ -45,7 +45,10 @@ impl EventStore for InMemoryEventStore {
         key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self
+            .state
+            .lock()
+            .expect("in-memory event state lock was poisoned by a panicking holder");
 
         // Empty batch: no-op — return current max sequence (0 if no events exist yet)
         if events.is_empty() {
@@ -106,7 +109,10 @@ impl EventStore for InMemoryEventStore {
     }
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        let state = self.state.lock().unwrap();
+        let state = self
+            .state
+            .lock()
+            .expect("in-memory event state lock was poisoned by a panicking holder");
 
         let mut matching: Vec<LoadedEvent> = state
             .events

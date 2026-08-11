@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::JsonCodec;
 
@@ -85,7 +86,10 @@ impl Saga for RecordingSaga {
         event: Self::SubscribedEvent,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        self.captured.lock().unwrap().push(ctx.saga_id().clone());
+        self.captured
+            .lock()
+            .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+            .push(ctx.saga_id().clone());
         let notify = Arc::clone(&self.done);
         let effect = SagaEffect::persist(ReservationRequested { sku: event.sku });
         notify.notify_one();
@@ -205,14 +209,15 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
         "aggregate stream must coexist with saga stream in the same store"
     );
 
-    let captured = captured.lock().unwrap();
+    let captured = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0].as_str(), "direct-store-saga-1");
 }
 
-/// Regression test for ARCH-SAGA-002:
-/// Dropping all `SagaProxy` handles must NOT stop the upstream `DurableStream`
-/// subscription.  The subscription lifetime is owned by `SagaProcess` itself,
+/// Regression test: dropping all `SagaProxy` handles must NOT stop the
+/// upstream `DurableStream` subscription.  The subscription lifetime is owned by `SagaProcess` itself,
 /// so the process continues receiving and persisting events after every handle
 /// has been released.
 #[tokio::test]

@@ -1,8 +1,8 @@
-//! Tests for Issue #56: unified `ProcessSystem::spawn` entry point.
+//! Tests for the unified `ProcessSystem::spawn` entry point.
 //!
-//! The pre-spec API exposed five spawn entry points
+//! The earlier API exposed five spawn entry points
 //! (`spawn` / `spawn_named` / `spawn_with_driver` / `spawn_named_with_driver` /
-//! `spawn_stream`). The spec collapses them into ONE — `ps.spawn(_)` —
+//! `spawn_stream`). They are now collapsed into ONE — `ps.spawn(_)` —
 //! parameterized by what is being spawned:
 //!
 //! | Old                                       | New                                        |
@@ -17,12 +17,12 @@
 //! - `ps.spawn(props)` accepts a `Props<P>` and returns `ProcessProxy<P>`.
 //! - `ps.spawn(stream_props)` accepts a `StreamProps<T>` and returns
 //!   `ProcessProxy<Stream<T>>` — same `spawn` method, different argument type
-//!   (the spec's `Spawnable` unification).
+//!   (the unified `Spawnable` entry).
 //! - A child spawned via `ctx.spawn_child(props.with_driver(...))` works —
 //!   `spawn_child_with_driver` is collapsed too.
 //! - Spawning a `StreamProps` whose topic is already registered surfaces a
-//!   `SpawnError` (the same uniqueness contract `spawn_stream` provided
-//!   pre-spec, preserved under the unified entry).
+//!   `SpawnError` (the same uniqueness contract the former `spawn_stream`
+//!   provided, preserved under the unified entry).
 //!
 //! StreamProps-specific behavior (Supervision::Resume immutability, capacity
 //! delegation) lives in `stream_props.rs`.
@@ -37,13 +37,9 @@ use tokio::sync::mpsc;
 use nitinol_runtime::error::HandlerError;
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Driver, Process, ProcessContext, Receive};
-use nitinol_runtime::{
-    BoxedMessage, ProcessSystem, Props, Stream, StreamProps,
-};
+use nitinol_runtime::{BoxedMessage, ProcessSystem, Props, Stream, StreamProps};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 struct TickProcess {
     ticks: Arc<AtomicU32>,
@@ -108,9 +104,7 @@ async fn wait_for_count(counter: &AtomicU32, expected: u32) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // `ps.spawn(props)` — Props<P> path
-// ---------------------------------------------------------------------------
 
 /// Given a plain `Props<TickProcess>`,
 /// when `system.spawn(props).await` runs,
@@ -121,21 +115,17 @@ async fn spawn_with_props_starts_user_process() {
     let ticks = Arc::new(AtomicU32::new(0));
     let started = Arc::new(AtomicBool::new(false));
 
-    let _proxy = system
-        .spawn(tick_props(ticks, Arc::clone(&started)))
-        .await;
+    let _proxy = system.spawn(tick_props(ticks, Arc::clone(&started))).await;
 
     wait_for_flag(&started).await;
 }
 
-// ---------------------------------------------------------------------------
 // `ps.spawn(props.with_name(name))` — name absorbed into Props
-// ---------------------------------------------------------------------------
 
 /// Given `Props::with_name("unified-named")`,
 /// when spawned via the unified entry,
 /// then the process is discoverable via `lookup_by_name`.
-/// Replaces the pre-spec `spawn_named`.
+/// Replaces the former `spawn_named`.
 #[tokio::test]
 async fn spawn_resolves_with_name_alias_in_registry() {
     let system = ProcessSystem::new().await;
@@ -144,9 +134,7 @@ async fn spawn_resolves_with_name_alias_in_registry() {
     let name = ProcessName::new("unified-named");
 
     let proxy = system
-        .spawn(
-            tick_props(ticks, Arc::clone(&started)).with_name(name.clone()),
-        )
+        .spawn(tick_props(ticks, Arc::clone(&started)).with_name(name.clone()))
         .await;
     wait_for_flag(&started).await;
 
@@ -160,15 +148,13 @@ async fn spawn_resolves_with_name_alias_in_registry() {
     assert_eq!(typed.pid(), proxy.pid());
 }
 
-// ---------------------------------------------------------------------------
 // `ps.spawn(props.with_driver(driver))` — replaces spawn_with_driver
-// ---------------------------------------------------------------------------
 
 /// Given `Props::with_driver(ChannelDriver)`,
 /// when spawned via the unified entry and three events are pushed onto the
 /// driver's channel,
 /// then the driver's `apply` runs three times — proving the unified entry
-/// composes the custom driver into the lifecycle loop just like the pre-spec
+/// composes the custom driver into the lifecycle loop just like the former
 /// `spawn_with_driver` did.
 #[tokio::test]
 async fn spawn_with_added_driver_runs_custom_apply() {
@@ -191,11 +177,9 @@ async fn spawn_with_added_driver_runs_custom_apply() {
     wait_for_count(&ticks, 3).await;
 }
 
-// ---------------------------------------------------------------------------
 // `ps.spawn(props.with_name(...).with_driver(...))` — fully unified
-// ---------------------------------------------------------------------------
 
-/// Given `Props::with_name(...).with_driver(...)` (the spec's collapsing of
+/// Given `Props::with_name(...).with_driver(...)` (the replacement for
 /// `spawn_named_with_driver`),
 /// when spawned via the unified entry,
 /// then the process is both discoverable by name AND driven by the custom
@@ -230,14 +214,12 @@ async fn spawn_with_name_and_added_driver_runs_both_features() {
     assert_eq!(typed.pid(), proxy.pid());
 }
 
-// ---------------------------------------------------------------------------
 // `ps.spawn(StreamProps::<T>::new(topic))` — replaces spawn_stream
-// ---------------------------------------------------------------------------
 
 /// Given a `StreamProps::<BoxedMessage>::new("stream-via-unified")`,
 /// when spawned via the unified entry,
 /// then a `ProcessProxy<Stream<BoxedMessage>>` is returned and the topic is
-/// registered in the registry. Replaces the pre-spec `spawn_stream`.
+/// registered in the registry. Replaces the former `spawn_stream`.
 #[tokio::test]
 async fn spawn_with_stream_props_returns_stream_proxy_and_registers_topic() {
     let system = ProcessSystem::new().await;
@@ -289,10 +271,8 @@ async fn spawn_with_stream_props_rejects_duplicate_topic() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // `ctx.spawn_child(props.with_driver(...))` — child path mirrors the system
 // path (no `spawn_child_with_driver`).
-// ---------------------------------------------------------------------------
 
 /// Child process whose Driver bumps a counter through `with_driver`.
 struct ChildTick {

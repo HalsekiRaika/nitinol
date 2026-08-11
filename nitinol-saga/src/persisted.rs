@@ -125,7 +125,8 @@ mod tests {
     #[test]
     fn outbox_path_classifies_as_outbox_never_domain() {
         let codec = codec();
-        let wire = OutboxAppender::build_tell_requested(1, 7, None, "", jiff::Timestamp::UNIX_EPOCH);
+        let wire =
+            OutboxAppender::build_tell_requested(1, 7, None, "", jiff::Timestamp::UNIX_EPOCH);
 
         match SagaPersisted::<DomainEvt>::classify(wire.event_type, &wire.payload, &codec) {
             Ok(SagaPersisted::Outbox(OutboxEvent::TellRequested(m))) => assert_eq!(m.tell_id, 7),

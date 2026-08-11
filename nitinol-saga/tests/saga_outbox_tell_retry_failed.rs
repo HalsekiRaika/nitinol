@@ -1,4 +1,4 @@
-//! Spec C-9 staged retry: when every dispatch attempt fails, the executor
+//! Staged retry: when every dispatch attempt fails, the executor
 //! retries up to the default RetryPolicy limit and then appends a `TellFailed`
 //! outbox marker to the saga stream.
 //!
@@ -6,6 +6,7 @@
 //! exercise only the unrecoverable path); the success path is covered in
 //! e2e_saga.rs / saga_outbox_persist_atomicity.rs.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
@@ -26,16 +27,16 @@ use nitinol_eventsource::{
     SequenceCursor, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
+use nitinol_persistence::{
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+};
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
-// ---------------------------------------------------------------------------
 // A custom TellTarget that always returns Err(TellError::Send(SendError)).
 // Counts every dispatch attempt so the test can verify the retry executor
 // actually retried — and exactly that many times.
-// ---------------------------------------------------------------------------
 
 struct FailingTellTarget<A: Aggregate> {
     attempts: Arc<AtomicUsize>,
@@ -85,9 +86,7 @@ impl<A: Aggregate> AggregateTellTarget<A> for FailingTellTarget<A> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Domain types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -95,7 +94,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("retry"), TypeName::new("OrderPlaced"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("retry"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,7 +104,8 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("retry"), TypeName::new("ReservationRequested"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("retry"), TypeName::new("ReservationRequested"));
 }
 
 #[derive(Default)]
@@ -114,7 +115,8 @@ struct Inventory;
 struct InventoryReserved;
 
 impl Event for InventoryReserved {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("retry"), TypeName::new("InventoryReserved"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("retry"), TypeName::new("InventoryReserved"));
 }
 
 impl Aggregate for Inventory {
@@ -228,7 +230,7 @@ async fn wait_for_tell_failed(
 
 #[tokio::test]
 async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack() {
-    // Pinned to the default RetryPolicy as locked in the plan §4:
+    // Pinned to the default RetryPolicy:
     //   max_attempts: 3, initial_backoff: 100ms, multiplier: 2.0
     // 1 initial + 2 retries = 3 total attempts; total backoff: 100ms + 200ms.
     // Use a generous timeout to absorb scheduler jitter.
@@ -318,6 +320,6 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
         EXPECTED_ATTEMPTS,
         "the retry executor must perform exactly RetryPolicy::max_attempts attempts \
          (default {EXPECTED_ATTEMPTS}: 1 initial + 2 retries); \
-         a different count means RetryPolicy::default() drifted from the plan §4 contract"
+         a different count means RetryPolicy::default() drifted from its documented defaults"
     );
 }

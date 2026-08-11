@@ -1,4 +1,4 @@
-//! Scheduler identity types (Issue #50, E-28).
+//! Scheduler identity types.
 
 use crate::id::SagaId;
 

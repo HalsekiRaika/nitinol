@@ -1,11 +1,11 @@
-//! End-to-end behaviour of the DeadlineScheduler (Issue #50).
+//! End-to-end behaviour of the DeadlineScheduler.
 //!
 //! These integration tests exercise the full data flow across modules:
 //! `SagaEffect::schedule` / `cancel_schedule` → interpreter → `SchedulerProcess`
 //! timer → `Saga::on_scheduled` dispatch → `SagaPersisted::Schedule` events on
 //! the saga's own `EventStore` stream.
 //!
-//! ## API contract assumed by these tests (from plan.md / order.md E-25..E-30)
+//! ## API contract assumed by these tests
 //!
 //! - `Saga::ScheduledMessage` associated type; `on_scheduled(msg:
 //!   Self::ScheduledMessage, ctx)`.
@@ -16,7 +16,7 @@
 //!   `SagaProps::with_scheduler(SchedulerProxy)` to inject it.
 //! - Schedule events are appended to the saga stream with an `EventType` whose
 //!   type key is `nitinol.saga.schedule` and whose per-arm variant is
-//!   `scheduled` / `cancelled` / `fired` (E-30).
+//!   `scheduled` / `cancelled` / `fired`.
 //!
 //! If a name differs in the implementation, only the wiring lines below need to
 //! be reconciled — the asserted behaviour is the requirement.
@@ -38,7 +38,7 @@ use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TimerName};
 
 // Local JSON codec — self-contained so this file does not couple to the shared
-// `common` module (which is migrated off the pre-#50 `Schedule` layout).
+// `common` module.
 use nitinol_eventsource::codec::Codec;
 
 #[derive(Default)]
@@ -56,9 +56,7 @@ impl<E: Serialize + for<'de> Deserialize<'de> + 'static> Codec<E> for JsonCodec 
     }
 }
 
-// ---------------------------------------------------------------------------
 // Domain
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Trigger {
@@ -123,18 +121,19 @@ impl Saga for TimerSaga {
         message: Reminder,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Recorded>, Self::Error> {
-        self.fired.lock().expect("fired mutex").push(message.note.clone());
+        self.fired
+            .lock()
+            .expect("fired mutex")
+            .push(message.note.clone());
         Ok(SagaEffect::persist(Recorded {
             label: format!("fired:{}", message.note),
         }))
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
-/// Type-level identity of a schedule event (E-30): family `nitinol.saga`,
+/// Type-level identity of a schedule event: family `nitinol.saga`,
 /// type name `schedule`.  Per-arm variants (`scheduled` / `cancelled` /
 /// `fired`) share this type key.
 const SCHEDULE_TYPE: EventType =
@@ -196,9 +195,7 @@ async fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 /// Given a saga that schedules a `Reminder` after a short delay,
 /// When the timer elapses,
@@ -254,7 +251,10 @@ async fn schedule_fires_and_delivers_typed_message() {
     .await;
 
     let seen = fired.lock().expect("fired mutex").clone();
-    assert!(ok, "the scheduled reminder must fire within 5s; fired={seen:?}");
+    assert!(
+        ok,
+        "the scheduled reminder must fire within 5s; fired={seen:?}"
+    );
     assert_eq!(
         seen,
         vec!["hello".to_owned()],
@@ -265,7 +265,7 @@ async fn schedule_fires_and_delivers_typed_message() {
 /// Given a schedule and its subsequent firing,
 /// Then the saga's own stream carries a `scheduled` marker (on schedule) and a
 /// `fired` marker (on dispatch), both under the `nitinol.saga.schedule` type
-/// key (E-26 / E-30).
+/// key.
 #[tokio::test]
 async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
     let ps = ProcessSystem::new().await;
@@ -338,7 +338,7 @@ async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
     );
 }
 
-/// E-28 (`startSingleTimer` semantics): re-scheduling the same `TimerName`
+/// `startSingleTimer` semantics: re-scheduling the same `TimerName`
 /// auto-cancels the earlier registration, so only the latest schedule fires.
 #[tokio::test]
 async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
@@ -416,7 +416,7 @@ async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
     );
 }
 
-/// E-29: `cancel_schedule(name)` cancels a pending timer so it never fires, and
+/// `cancel_schedule(name)` cancels a pending timer so it never fires, and
 /// records a `cancelled` marker on the saga stream.
 #[tokio::test]
 async fn cancel_schedule_prevents_the_timer_from_firing() {
@@ -495,7 +495,7 @@ async fn cancel_schedule_prevents_the_timer_from_firing() {
     );
 }
 
-/// E-26: a fresh saga incarnation started against a store that already holds an
+/// A fresh saga incarnation started against a store that already holds an
 /// unfired `scheduled` marker must re-register the timer from replay and fire
 /// it — even though this incarnation never receives the upstream trigger itself.
 #[tokio::test]
@@ -526,8 +526,10 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
     let fired_1_producer = Arc::clone(&fired_1);
     let routed_1 = saga_id.clone();
     let _proxy_1 =
-        SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || TimerSaga {
-            fired: Arc::clone(&fired_1_producer),
+        SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            TimerSaga {
+                fired: Arc::clone(&fired_1_producer),
+            }
         })
         .with_codec(system.codec::<Recorded>())
         .with_subscription(
@@ -555,7 +557,10 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(scheduled_seen, "incarnation #1 must persist a `scheduled` marker");
+    assert!(
+        scheduled_seen,
+        "incarnation #1 must persist a `scheduled` marker"
+    );
 
     // Incarnation #2 shares the same saga id + store + scheduler but subscribes
     // to an EMPTY upstream, so it can only learn about the schedule via replay.
@@ -564,8 +569,10 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
     let fired_2_producer = Arc::clone(&fired_2);
     let routed_2 = saga_id.clone();
     let _proxy_2 =
-        SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || TimerSaga {
-            fired: Arc::clone(&fired_2_producer),
+        SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            TimerSaga {
+                fired: Arc::clone(&fired_2_producer),
+            }
         })
         .with_codec(system.codec::<Recorded>())
         .with_subscription(
@@ -601,11 +608,9 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// ARCH-004 regression: Fired marker ordering when on_scheduled re-schedules
-// ---------------------------------------------------------------------------
+// Regression: Fired marker ordering when on_scheduled re-schedules
 
-/// Typed payload for the ARCH-004 regression saga.  `generation` controls
+/// Typed payload for the marker-ordering regression saga.  `generation` controls
 /// whether `on_scheduled` re-schedules: generation 0 triggers a re-schedule
 /// under the same name with generation 1; generation 1 is a no-op.  This
 /// keeps the behaviour identical regardless of which incarnation handles the
@@ -620,7 +625,7 @@ struct GenerationReminder {
 /// exactly once (controlled by `generation` in the payload, not by a
 /// per-instance counter, so the semantics are incarnation-independent).
 ///
-/// This exercises the ARCH-004 ordering fix: `Fired` must be persisted before
+/// This exercises the marker ordering rule: `Fired` must be persisted before
 /// the new `Scheduled` so that replay folds the stream as:
 ///   insert(name) → remove(name) → insert(name)  ⟹  active
 /// rather than:
@@ -647,7 +652,10 @@ impl Saga for OnceRescheduleSaga {
         Ok(SagaEffect::schedule(
             TimerName::new("repeat"),
             Duration::from_millis(event.after_millis),
-            GenerationReminder { note: event.note, generation: 0 },
+            GenerationReminder {
+                note: event.note,
+                generation: 0,
+            },
         ))
     }
 
@@ -656,7 +664,10 @@ impl Saga for OnceRescheduleSaga {
         message: GenerationReminder,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Recorded>, Self::Error> {
-        self.fires.lock().expect("fires mutex").push(message.note.clone());
+        self.fires
+            .lock()
+            .expect("fires mutex")
+            .push(message.note.clone());
         // Re-schedule under the same name only for generation 0.
         if message.generation == 0 {
             return Ok(SagaEffect::schedule(
@@ -672,7 +683,7 @@ impl Saga for OnceRescheduleSaga {
     }
 }
 
-/// ARCH-004 regression: when `on_scheduled` re-schedules under the same
+/// Regression: when `on_scheduled` re-schedules under the same
 /// `TimerName`, the second incarnation (replay) must still see the
 /// re-scheduled timer as active and eventually fire it.
 ///
@@ -711,26 +722,25 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
     let fires_1 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_1_producer = Arc::clone(&fires_1);
     let routed_1 = saga_id.clone();
-    let _proxy_1 = SagaProps::<OnceRescheduleSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || OnceRescheduleSaga {
-            fires: Arc::clone(&fires_1_producer),
-        },
-    )
-    .with_codec(system.codec::<Recorded>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Trigger>(),
-        SequenceCursor::Stream {
-            key: "deadline-upstream-arch004".to_owned(),
-            after: 0,
-        },
-        move |_event: &Trigger| Some(routed_1.clone()),
-    )
-    .with_scheduler(scheduler.clone())
-    .spawn(system.process_system())
-    .await;
+    let _proxy_1 =
+        SagaProps::<OnceRescheduleSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            OnceRescheduleSaga {
+                fires: Arc::clone(&fires_1_producer),
+            }
+        })
+        .with_codec(system.codec::<Recorded>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Trigger>(),
+            SequenceCursor::Stream {
+                key: "deadline-upstream-arch004".to_owned(),
+                after: 0,
+            },
+            move |_event: &Trigger| Some(routed_1.clone()),
+        )
+        .with_scheduler(scheduler.clone())
+        .spawn(system.process_system())
+        .await;
 
     // Wait for incarnation #1 to fire the first timer and persist the
     // re-scheduled "repeat" timer.
@@ -769,10 +779,23 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
         })
         .collect();
     // positions should be: (_, "scheduled"), (_, "fired"), (_, "scheduled")
-    assert_eq!(schedule_positions.len(), 3, "must have 3 schedule-family events");
-    assert_eq!(schedule_positions[0].1, "scheduled", "first schedule event must be 'scheduled'");
-    assert_eq!(schedule_positions[1].1, "fired", "Fired must precede the re-scheduled Scheduled");
-    assert_eq!(schedule_positions[2].1, "scheduled", "re-scheduled event must follow Fired");
+    assert_eq!(
+        schedule_positions.len(),
+        3,
+        "must have 3 schedule-family events"
+    );
+    assert_eq!(
+        schedule_positions[0].1, "scheduled",
+        "first schedule event must be 'scheduled'"
+    );
+    assert_eq!(
+        schedule_positions[1].1, "fired",
+        "Fired must precede the re-scheduled Scheduled"
+    );
+    assert_eq!(
+        schedule_positions[2].1, "scheduled",
+        "re-scheduled event must follow Fired"
+    );
 
     // Incarnation #2: shares the same store but subscribes to an empty
     // upstream, so it can only learn about the re-schedule via replay.
@@ -781,26 +804,25 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
     let fires_2 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_2_producer = Arc::clone(&fires_2);
     let routed_2 = saga_id.clone();
-    let _proxy_2 = SagaProps::<OnceRescheduleSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || OnceRescheduleSaga {
-            fires: Arc::clone(&fires_2_producer),
-        },
-    )
-    .with_codec(system.codec::<Recorded>())
-    .with_subscription(
-        Arc::clone(&upstream_empty),
-        system.codec::<Trigger>(),
-        SequenceCursor::Stream {
-            key: "deadline-upstream-arch004-empty".to_owned(),
-            after: 0,
-        },
-        move |_event: &Trigger| Some(routed_2.clone()),
-    )
-    .with_scheduler(scheduler.clone())
-    .spawn(system.process_system())
-    .await;
+    let _proxy_2 =
+        SagaProps::<OnceRescheduleSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            OnceRescheduleSaga {
+                fires: Arc::clone(&fires_2_producer),
+            }
+        })
+        .with_codec(system.codec::<Recorded>())
+        .with_subscription(
+            Arc::clone(&upstream_empty),
+            system.codec::<Trigger>(),
+            SequenceCursor::Stream {
+                key: "deadline-upstream-arch004-empty".to_owned(),
+                after: 0,
+            },
+            move |_event: &Trigger| Some(routed_2.clone()),
+        )
+        .with_scheduler(scheduler.clone())
+        .spawn(system.process_system())
+        .await;
 
     // Incarnation #2 must fire the re-scheduled timer (the "first-2nd" one).
     let fires_2_check = Arc::clone(&fires_2);
