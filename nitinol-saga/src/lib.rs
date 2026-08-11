@@ -36,13 +36,19 @@
 //!   `SagaPersisted::DeadLetter(`[`DeadLetterEvent`]`)` on the saga's own
 //!   EventStore stream, mixed into the same envelope as domain events.
 //!   `TellFailed` and `PersistFailed` exhaust staged retry before being enqueued;
-//!   `HandleFailed`, `DecodeFailed`, `EndedSagaReceivedMessage`, and
-//!   `ScheduledFailed` are enqueued immediately.  A subscriber catches up via
+//!   `HandleFailed`, `DecodeFailed`, `EndedSagaReceivedMessage`,
+//!   `ScheduledFailed`, and `TellFailedHookFailed` are enqueued immediately.
+//!   A subscriber catches up via
 //!   [`SagaProps::with_dead_letter_subscriber`] (DurableStream-based
 //!   catchup).  The [`EnqueuePolicy`] returned by
 //!   [`SagaProps::with_enqueue_policy`] controls which failure kinds reach the
 //!   DLQ; the default enqueues every kind.  Pull API (list /
 //!   mark_processed / evict) is **not implemented** in this crate.
+//! - Tell-failure compensation: when a tell exhausts its retry budget the saga
+//!   is notified through [`Saga::on_tell_failed`] as soon as the failure
+//!   settles, so a compensating [`SagaEffect`] runs without waiting for another
+//!   upstream event.  Failures recovered by replay instead reach the saga
+//!   through [`SagaContext::failed_tell_ids`].
 //! - No snapshotting.
 //! - Routing is a single closure `Fn(&SubscribedEvent) -> Option<SagaId>`.
 //!   Decode failures (where no typed event is available) can be routed with the

@@ -234,6 +234,171 @@ impl<S: Saga> SagaProcess<S> {
             EnqueueOutcome::AppendFailed
         )
     }
+
+    /// Lend the interpreter everything it mutates on this process, so every
+    /// entry point that runs a [`SagaEffect`] does so against the same state.
+    fn interpreter_ctx<'a>(
+        &'a mut self,
+        process_ctx: &'a mut ProcessContext<Self>,
+    ) -> InterpreterCtx<'a, S> {
+        InterpreterCtx {
+            state: &mut self.state,
+            saga_id: self.saga_id.clone(),
+            sequence: &mut self.sequence,
+            store: Arc::clone(&self.store),
+            codec: Arc::clone(&self.codec),
+            retry_policy: self.retry_policy.clone(),
+            process_ctx,
+            tell_states: &mut self.tell_states,
+            lifecycle: &mut self.lifecycle,
+            scheduler: self.scheduler.clone(),
+            enqueue_policy: Arc::clone(&self.enqueue_policy),
+        }
+    }
+
+    /// Account for a tell whose terminal `tell_failed` marker has just been
+    /// persisted: record it durably, then either notify the saga or — once the
+    /// saga has ended — drop the report.
+    ///
+    /// The failure leaves this method through exactly one of two channels, so
+    /// it is never announced twice: the entry is removed from `tell_states`
+    /// when the hook is notified, and kept there for
+    /// [`SagaContext::failed_tell_ids`] otherwise.
+    async fn settle_failed_tell(&mut self, tell_id: u64, ctx: &mut ProcessContext<Self>) {
+        // The target and crash-restart payload live only in the in-memory
+        // intent, so they are captured before the entry is disposed of.
+        let captured = self
+            .tell_states
+            .get(&tell_id)
+            .and_then(|state| match state {
+                TellState::Pending(intent) | TellState::AppendFailed(intent) => Some((
+                    intent.target_id.clone(),
+                    intent.crash_restart_payload.clone().unwrap_or_default(),
+                )),
+                TellState::Failed => None,
+            });
+        let Some((target, message)) = captured else {
+            tracing::warn!(
+                tell_id,
+                "saga: TellFailed received for unknown or already-failed tell; \
+                 DLQ entry skipped (target not available)"
+            );
+            self.tell_states.insert(tell_id, TellState::Failed);
+            return;
+        };
+
+        // The terminal `tell_failed` outbox marker is already persisted (staged
+        // retry exhausted), so this dead letter lands after it — and before any
+        // compensation the saga runs in response.
+        if !self
+            .record_dead_letter(
+                SagaFailure::TellFailed {
+                    target: target.clone(),
+                    message,
+                },
+                SourceContext::without_upstream(),
+            )
+            .await
+        {
+            // DLQ append failed — the failure is not durably recorded, so it
+            // must not drive a compensation.  Stop instead; a supervised
+            // restart replays it from the terminal outbox marker.
+            self.tell_states.insert(tell_id, TellState::Failed);
+            tracing::error!(
+                saga_id = self.saga_id.as_str(),
+                tell_id,
+                "saga DLQ append failed for TellFailed; stopping for supervised restart"
+            );
+            let _ = ctx.stop_self().await;
+            return;
+        }
+
+        if matches!(self.lifecycle, Lifecycle::Draining) {
+            // A saga that has already written its terminal marker must produce
+            // no further effects, so the report is dropped; the dead letter
+            // above is what keeps the failure observable.
+            self.tell_states.insert(tell_id, TellState::Failed);
+            tracing::debug!(
+                tell_id,
+                "saga ended while this tell was in flight; its failure is dropped \
+                 instead of reaching the tell-failure hook"
+            );
+            return;
+        }
+
+        // Dropping the entry before the hook runs both keeps the failure out of
+        // the drain path and lets an `End` returned by the hook stop the saga
+        // at once rather than leaving it waiting on this settled tell.
+        self.tell_states.remove(&tell_id);
+        self.notify_tell_failed(target, tell_id, ctx).await;
+    }
+
+    /// Hand a settled tell failure to the saga and interpret whatever
+    /// compensation it returns, so a saga whose upstream has gone quiet still
+    /// reacts to the failure.
+    ///
+    /// `tell_id` reaches the saga through the context rather than the `target`
+    /// argument because several tells may share one target aggregate.
+    async fn notify_tell_failed(
+        &mut self,
+        target: SagaId,
+        tell_id: u64,
+        ctx: &mut ProcessContext<Self>,
+    ) {
+        let current_sequence = self.sequence;
+        let mut saga_ctx = SagaContext::new(
+            self.saga_id.clone(),
+            current_sequence,
+            AggregateId::new(""),
+            0,
+            jiff::Timestamp::now(),
+            vec![tell_id],
+        );
+        let effect = match self.state.on_tell_failed(target, &mut saga_ctx).await {
+            Ok(effect) => effect,
+            Err(e) => {
+                tracing::warn!(error = %e, tell_id, "saga on_tell_failed failed");
+                if !self
+                    .record_dead_letter(
+                        SagaFailure::TellFailedHookFailed {
+                            error: e.to_string(),
+                        },
+                        SourceContext::without_upstream(),
+                    )
+                    .await
+                {
+                    // DLQ append failed — stop so the rejected compensation is
+                    // not treated as accounted for; a supervised restart
+                    // replays the failure from the terminal outbox marker.
+                    tracing::error!(
+                        saga_id = self.saga_id.as_str(),
+                        tell_id,
+                        "saga DLQ append failed for TellFailedHookFailed; \
+                         stopping for supervised restart"
+                    );
+                    let _ = ctx.stop_self().await;
+                }
+                return;
+            }
+        };
+
+        let mut ictx = self.interpreter_ctx(ctx);
+        // The outcome report does not arrive through the DirectPoller, so there
+        // is no upstream cursor to withhold; stop instead when the compensation
+        // could neither be persisted nor dead-lettered.
+        if matches!(
+            run_saga_effect(effect, &mut ictx).await,
+            InterpretOutcome::DlqFailed
+        ) {
+            tracing::error!(
+                saga_id = self.saga_id.as_str(),
+                tell_id,
+                "saga DLQ append failed for PersistFailed (tell-failure hook); \
+                 stopping for supervised restart"
+            );
+            let _ = ctx.stop_self().await;
+        }
+    }
 }
 
 impl<S: Saga> Process for SagaProcess<S> {
@@ -460,19 +625,7 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             }
         };
 
-        let mut ictx = InterpreterCtx {
-            state: &mut self.state,
-            saga_id: self.saga_id.clone(),
-            sequence: &mut self.sequence,
-            store: Arc::clone(&self.store),
-            codec: Arc::clone(&self.codec),
-            retry_policy: self.retry_policy.clone(),
-            process_ctx: ctx,
-            tell_states: &mut self.tell_states,
-            lifecycle: &mut self.lifecycle,
-            scheduler: self.scheduler.clone(),
-            enqueue_policy: Arc::clone(&self.enqueue_policy),
-        };
+        let mut ictx = self.interpreter_ctx(ctx);
         // If the interpreter signals DlqFailed (PersistFailed DLQ
         // append also failed), propagate Err so the DirectPoller (via ask())
         // does NOT advance the upstream cursor.
@@ -620,19 +773,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         )
         .await;
 
-        let mut ictx = InterpreterCtx {
-            state: &mut self.state,
-            saga_id: self.saga_id.clone(),
-            sequence: &mut self.sequence,
-            store: Arc::clone(&self.store),
-            codec: Arc::clone(&self.codec),
-            retry_policy: self.retry_policy.clone(),
-            process_ctx: ctx,
-            tell_states: &mut self.tell_states,
-            lifecycle: &mut self.lifecycle,
-            scheduler: self.scheduler.clone(),
-            enqueue_policy: Arc::clone(&self.enqueue_policy),
-        };
+        let mut ictx = self.interpreter_ctx(ctx);
         // FireScheduled is not delivered via DirectPoller so there is no
         // upstream cursor to withhold; call stop_self() to ensure the process
         // does not silently continue when a PersistFailed DLQ append also fails.
@@ -694,49 +835,7 @@ impl<S: Saga> Receive<OutboxReport> for SagaProcess<S> {
                 TellOutcome::Acked => {
                     self.tell_states.remove(&msg.tell_id);
                 }
-                TellOutcome::Failed => {
-                    // Capture target_id and crash-restart payload from the
-                    // in-memory intent before the state entry is replaced.
-                    let intent_data = match self.tell_states.get(&msg.tell_id) {
-                        Some(TellState::Pending(intent))
-                        | Some(TellState::AppendFailed(intent)) => {
-                            let target = intent.target_id.clone();
-                            let message = intent.crash_restart_payload.clone().unwrap_or_default();
-                            Some((target, message))
-                        }
-                        _ => {
-                            tracing::warn!(
-                                tell_id = msg.tell_id,
-                                "saga: TellFailed received for unknown or already-failed tell; \
-                                 DLQ entry skipped (target not available)"
-                            );
-                            None
-                        }
-                    };
-                    self.tell_states.insert(msg.tell_id, TellState::Failed);
-                    if let Some((target, message)) = intent_data {
-                        // The terminal `tell_failed` outbox marker is already
-                        // persisted above (staged retry exhausted), so this dead
-                        // letter lands *after* it.
-                        if !self
-                            .record_dead_letter(
-                                SagaFailure::TellFailed { target, message },
-                                SourceContext::without_upstream(),
-                            )
-                            .await
-                        {
-                            // DLQ append failed — stop so the outcome is
-                            // not treated as processed; a supervised restart
-                            // will retry from the terminal outbox marker.
-                            tracing::error!(
-                                saga_id = self.saga_id.as_str(),
-                                tell_id = msg.tell_id,
-                                "saga DLQ append failed for TellFailed; stopping for supervised restart"
-                            );
-                            let _ = ctx.stop_self().await;
-                        }
-                    }
-                }
+                TellOutcome::Failed => self.settle_failed_tell(msg.tell_id, ctx).await,
             }
         } else {
             match self.tell_states.remove(&msg.tell_id) {

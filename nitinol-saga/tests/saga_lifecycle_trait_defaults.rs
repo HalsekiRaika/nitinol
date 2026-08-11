@@ -4,6 +4,7 @@
 //!
 //! - `snapshot(&self)` defaults to `None` (no snapshot taken).
 //! - `on_scheduled(..)` defaults to a no-op that returns `SagaEffect::None`.
+//! - `on_tell_failed(..)` defaults to a no-op that returns `SagaEffect::None`.
 //!
 //! `from_snapshot` also gains a default (`unimplemented!()`); it is
 //! intentionally not exercised here because it is a panic-by-default stub and
@@ -89,5 +90,26 @@ async fn default_on_scheduled_returns_none_effect() {
         shape_of(&effect),
         Shape::None,
         "the default on_scheduled must produce SagaEffect::None"
+    );
+}
+
+/// The default `on_tell_failed` implementation must be a no-op that yields
+/// `SagaEffect::None`.  `StubSaga` overrides only the required methods, so this
+/// test also pins that a saga written before the hook existed still compiles
+/// and still reacts to a tell failure with no effect at all.
+#[tokio::test]
+async fn default_on_tell_failed_returns_none_effect() {
+    let mut saga = StubSaga;
+    let mut ctx = SagaContext::test_context(SagaId::new("on-tell-failed-default"), 0);
+
+    let effect = saga
+        .on_tell_failed(SagaId::new("unreachable-target"), &mut ctx)
+        .await
+        .expect("the default on_tell_failed must return Ok");
+
+    assert_eq!(
+        shape_of(&effect),
+        Shape::None,
+        "the default on_tell_failed must produce SagaEffect::None"
     );
 }

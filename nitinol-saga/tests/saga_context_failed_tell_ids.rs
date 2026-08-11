@@ -8,8 +8,11 @@
 //!    the corresponding `tell_id` in `ctx.failed_tell_ids()`.
 //!
 //! 2. **Runtime path** — the outbox executor exhausts all retry attempts and
-//!    appends a `TellFailed` marker during the current run.  The next `handle`
-//!    call must expose the `tell_id` in `ctx.failed_tell_ids()`.
+//!    appends a `TellFailed` marker during the current run.  That failure is
+//!    delivered to `Saga::on_tell_failed` the moment it settles, so it is
+//!    already accounted for: the next `handle` call must **not** see the same
+//!    `tell_id` again in `ctx.failed_tell_ids()`.  Only replay-sourced
+//!    failures reach the saga through this slice.
 
 #[path = "common/helpers.rs"]
 mod common;
@@ -456,16 +459,21 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     );
 }
 
-// Test 3: runtime path — executor-appended TellFailed surfaces to next handle.
+// Test 3: runtime path — an executor-appended TellFailed is reported through
+// the tell-failure hook, so it is not repeated to the next handle.
 
 /// When the outbox executor exhausts all retry attempts and appends a
-/// `TellFailed` marker during the current run, the **next** `Saga::handle`
-/// invocation must expose the corresponding `tell_id` in
-/// `ctx.failed_tell_ids()`.
+/// `TellFailed` marker during the current run, the failure is handed to
+/// `Saga::on_tell_failed` immediately.  The **next** `Saga::handle` invocation
+/// must therefore see an empty `ctx.failed_tell_ids()` — the same failure is
+/// never announced twice.
 ///
-/// This covers the in-process (non-restart) path.
+/// `RuntimeSaga` leaves `on_tell_failed` at its trait default, so this pins
+/// the deduplication itself rather than any compensating behaviour: an
+/// implementation that notifies the hook but leaves the entry in the drain
+/// path would surface the `tell_id` here a second time.
 #[tokio::test]
-async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
+async fn runtime_tell_failed_is_not_repeated_to_the_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
@@ -565,11 +573,13 @@ async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
         snapshots[0].is_empty(),
         "first handle must see an empty failed_tell_ids (no tell has failed yet)"
     );
-    // Second handle: the executor appended TellFailed between the two events.
-    assert_eq!(
-        snapshots[1].len(),
-        1,
-        "second handle must see exactly one failed tell_id \
-         (the tell from the first handle exhausted its retries)"
+    // Second handle: the executor appended TellFailed between the two events,
+    // and the tell-failure hook already consumed it.
+    assert!(
+        snapshots[1].is_empty(),
+        "second handle must see an empty failed_tell_ids: the failure was \
+         already delivered to on_tell_failed when the executor settled, and \
+         announcing it again here would be a duplicate notification; got {:?}",
+        snapshots[1]
     );
 }

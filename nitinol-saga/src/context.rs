@@ -10,10 +10,9 @@ pub struct SagaContext {
     upstream_aggregate_id: AggregateId,
     upstream_sequence: u64,
     now: jiff::Timestamp,
-    /// `tell_id`s whose outbox executors appended `TellFailed` since the last
-    /// `handle` call, or whose `TellFailed` marker was seen during replay on
-    /// restart.  The saga inspects this slice to detect unrecoverable tell
-    /// failures and trigger compensation.
+    /// `tell_id`s of unrecoverable tell failures this invocation is told about.
+    /// Which failures land here depends on the entry point: see
+    /// [`SagaContext::failed_tell_ids`].
     failed_tell_ids: Vec<u64>,
 }
 
@@ -86,13 +85,23 @@ impl SagaContext {
         self.now
     }
 
-    /// `tell_id`s whose executor appended `TellFailed` since the last `handle`
-    /// call, or whose `TellFailed` marker was detected during replay on restart.
+    /// `tell_id`s of unrecoverable tell failures the saga has not yet been told
+    /// about.
     ///
-    /// The saga reads this slice to detect unrecoverable tell failures and
-    /// decide whether to trigger compensation.  The slice is drained every time
-    /// `handle` is invoked — successive calls will not see the same `tell_id`
+    /// In [`crate::Saga::handle`] and [`crate::Saga::on_scheduled`] this carries
+    /// the failures recovered by replay on restart — `TellFailed` markers found
+    /// on the saga's own stream, and the synthetic ones written for tells that
+    /// could not be re-dispatched.  A failure that settles while the saga is
+    /// running goes to [`crate::Saga::on_tell_failed`] the moment it happens
+    /// and does **not** reappear here, so the same failure is never announced
     /// twice.
+    ///
+    /// In [`crate::Saga::on_tell_failed`] this carries exactly the one
+    /// `tell_id` that invocation is about, which is how a saga with several
+    /// outstanding tells tells them apart.
+    ///
+    /// The slice is drained on every invocation — successive calls will not see
+    /// the same `tell_id` twice.
     pub fn failed_tell_ids(&self) -> &[u64] {
         &self.failed_tell_ids
     }

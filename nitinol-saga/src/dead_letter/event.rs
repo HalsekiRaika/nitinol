@@ -22,7 +22,7 @@ mod proto {
 use self::proto::dead_letter_marker::Failure as ProtoFailure;
 use self::proto::{
     DeadLetterMarker, DecodeFailed, EndedSagaReceivedMessage, HandleFailed, PersistFailed,
-    ScheduledFailed, SourceContext as ProtoSourceContext, TellFailed,
+    ScheduledFailed, SourceContext as ProtoSourceContext, TellFailed, TellFailedHookFailed,
 };
 
 /// Reserved type-level identity shared by every dead-letter event.
@@ -59,6 +59,10 @@ pub enum SagaFailure {
     DecodeFailed { error: String },
     /// `Saga::on_scheduled` returned `Self::Error`.
     ScheduledFailed { error: String },
+    /// `Saga::on_tell_failed` returned `Self::Error`, so the compensation the
+    /// saga would have run never happened.  The tell failure that triggered the
+    /// hook is recorded separately as its own [`SagaFailure::TellFailed`].
+    TellFailedHookFailed { error: String },
 }
 
 /// Context captured at the moment of failure.
@@ -106,6 +110,7 @@ impl SystemEvent for DeadLetterEvent {
             }
             SagaFailure::DecodeFailed { .. } => Variant::new("decode_failed"),
             SagaFailure::ScheduledFailed { .. } => Variant::new("scheduled_failed"),
+            SagaFailure::TellFailedHookFailed { .. } => Variant::new("tell_failed_hook_failed"),
         };
         EventType::with_variant(
             DEAD_LETTER_MARKER.family(),
@@ -136,6 +141,11 @@ impl SystemEvent for DeadLetterEvent {
             }),
             SagaFailure::ScheduledFailed { error } => {
                 ProtoFailure::ScheduledFailed(ScheduledFailed {
+                    error: error.clone(),
+                })
+            }
+            SagaFailure::TellFailedHookFailed { error } => {
+                ProtoFailure::TellFailedHookFailed(TellFailedHookFailed {
                     error: error.clone(),
                 })
             }
@@ -180,6 +190,9 @@ impl SystemEvent for DeadLetterEvent {
             Some(ProtoFailure::DecodeFailed(m)) => SagaFailure::DecodeFailed { error: m.error },
             Some(ProtoFailure::ScheduledFailed(m)) => {
                 SagaFailure::ScheduledFailed { error: m.error }
+            }
+            Some(ProtoFailure::TellFailedHookFailed(m)) => {
+                SagaFailure::TellFailedHookFailed { error: m.error }
             }
             None => return Err(SystemEventDecodeError::new(MissingFailure)),
         };
@@ -302,6 +315,12 @@ mod tests {
                 },
                 "scheduled_failed",
             ),
+            (
+                SagaFailure::TellFailedHookFailed {
+                    error: "e".to_owned(),
+                },
+                "tell_failed_hook_failed",
+            ),
         ];
         for (failure, expected) in cases {
             let e = event(failure);
@@ -331,6 +350,25 @@ mod tests {
                     _ => panic!("expected decoded TellFailed"),
                 }
             }
+            Err(e) => panic!("decode failed: {e}"),
+        }
+    }
+
+    /// The hook rejection carries the saga's own error text, and it must come
+    /// back as `TellFailedHookFailed` — not as the `TellFailed` that records
+    /// the underlying tell failure.
+    #[test]
+    fn tell_failed_hook_failed_round_trips_through_the_enum_codec() {
+        let e = event(SagaFailure::TellFailedHookFailed {
+            error: "compensation refused".to_owned(),
+        });
+        match DeadLetterEvent::decode(&e.encode()) {
+            Ok(decoded) => match decoded.failure {
+                SagaFailure::TellFailedHookFailed { error } => {
+                    assert_eq!(error, "compensation refused");
+                }
+                other => panic!("expected decoded TellFailedHookFailed, got {other:?}"),
+            },
             Err(e) => panic!("decode failed: {e}"),
         }
     }

@@ -6,6 +6,7 @@ use nitinol_eventsource::Event;
 
 use crate::context::SagaContext;
 use crate::effect::SagaEffect;
+use crate::id::SagaId;
 
 /// Event-sourced process manager.
 ///
@@ -112,6 +113,42 @@ pub trait Saga: Send + Sync + 'static {
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         let _ = (message, ctx);
+        Ok(SagaEffect::None)
+    }
+
+    /// Failure entry point invoked when a tell dispatched by this saga has
+    /// exhausted its retry budget.
+    ///
+    /// Without this hook a saga whose upstream fell silent would never learn
+    /// that its tell failed, and its compensation would never run.  The hook is
+    /// therefore called the moment the failure settles, and the
+    /// [`SagaEffect`] it returns is interpreted exactly like the one
+    /// [`Saga::handle`] returns — so a compensating event reaches the saga's
+    /// stream with no further upstream event involved.
+    ///
+    /// `target` is the target aggregate's stream key, and
+    /// [`SagaContext::failed_tell_ids`] carries the single failed tell this
+    /// invocation is about, so a saga with several outstanding tells can tell
+    /// them apart.  A failure announced here is not repeated through
+    /// `failed_tell_ids` on the next [`Saga::handle`] call.
+    ///
+    /// The hook is skipped — and the failure survives only as a dead letter —
+    /// once the saga has ended and is draining its in-flight tells, because a
+    /// terminated saga must produce no further effects.
+    ///
+    /// Delivered at-least-once across restarts: an incarnation that dies before
+    /// the compensation is durable replays the failure, which then reaches
+    /// [`Saga::handle`] through `failed_tell_ids`.  Compensations must
+    /// therefore be idempotent.
+    ///
+    /// The default is a no-op returning [`SagaEffect::None`].  Returning `Err`
+    /// records a dead letter instead of a compensation.
+    async fn on_tell_failed(
+        &mut self,
+        target: SagaId,
+        ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let _ = (target, ctx);
         Ok(SagaEffect::None)
     }
 }
