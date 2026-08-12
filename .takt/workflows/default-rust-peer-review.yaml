@@ -172,7 +172,6 @@ steps:
           - WebFetch
     required_permission_mode: edit
     instruction: rust-fix
-    pass_previous_response: false
     quality_gates:
       - type: command
         name: rust-quality
