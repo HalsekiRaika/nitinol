@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
-use bytes::Bytes;
 use futures_util::StreamExt;
 use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_persistence::store::EventStore;
@@ -14,13 +12,13 @@ use crate::dead_letter::{
 };
 use crate::effect::TellIntent;
 use crate::id::SagaId;
+use crate::journal::{ActiveSchedule, JournalState, PendingTell};
 use crate::outbox::RetryPolicy;
-use crate::outbox::{OutboxAppender, OutboxEvent, TellOutcome};
+use crate::outbox::{OutboxAppender, TellOutcome};
 use crate::persisted::{SagaPersisted, SagaPersistedDecodeError};
 use crate::process::outbox_executor::spawn_outbox_executor;
 use crate::process::saga_process::{SagaProcess, TellState};
 use crate::saga::Saga;
-use crate::scheduler::{ScheduleEvent, TimerName};
 
 /// Rebuilds a [`TellIntent`] from the serialized command a `TellRequested`
 /// carried, so a tell pending at crash time can be re-dispatched once the
@@ -29,16 +27,6 @@ use crate::scheduler::{ScheduleEvent, TimerName};
 /// Returns `None` when the payload cannot be reconstructed; replay then
 /// appends a synthetic `TellFailed` instead of silently dropping the tell.
 type CrashRestartFactory<'a> = &'a (dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync);
-
-/// A schedule that replay found still active — a persisted `Scheduled` with no
-/// later `Cancelled` / `Fired` for the same name.  Re-registered with the
-/// resident scheduler on `on_start`.
-pub(crate) struct ActiveSchedule {
-    pub(crate) name: TimerName,
-    pub(crate) after: Duration,
-    pub(crate) payload: Bytes,
-    pub(crate) scheduled_at_unix_millis: i64,
-}
 
 /// Outcome of replaying the saga's own event stream on `on_start`.
 pub(crate) struct ReplayOutcome {
@@ -66,31 +54,32 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     enqueue_policy: &dyn EnqueuePolicy,
     ctx: &mut ProcessContext<SagaProcess<S>>,
 ) -> Result<ReplayOutcome, ()> {
-    let scan = match scan_stream(saga_id, state, codec, store, sequence).await {
-        Some(s) => s,
+    let journal = match load_journal(saga_id, state, codec, store, *sequence).await {
+        Some(j) => j,
         // store.load() or stream iteration failed — the terminated state is
         // unknown.  Fail safe (not fail-open): return Err so on_start stops
         // the process without subscribing.
         None => return Err(()),
     };
+    *sequence = journal.sequence;
     // When the stream carries a durable `Ended` marker the saga terminated
     // in a previous incarnation.  Skip `redispatch_pending` entirely so that any
     // in-flight `TellRequested` entries are NOT re-executed after termination.
     // Ended sagas also skip schedule re-registration.
-    if scan.ended {
+    if journal.ended {
         return Ok(ReplayOutcome {
-            failed: scan.failed,
+            failed: journal.failed_tell_ids,
             ended: true,
             active_schedules: Vec::new(),
         });
     }
-    let active_schedules: Vec<ActiveSchedule> = scan.schedules.into_values().collect();
-    let mut failed = scan.failed;
+    let active_schedules: Vec<ActiveSchedule> = journal.active_schedules.into_values().collect();
+    let mut failed = journal.failed_tell_ids;
     let synthetic_failed = redispatch_pending(
         saga_id,
         store,
         sequence,
-        scan.pending,
+        journal.pending_tells,
         tell_states,
         crash_restart_factory,
         retry_policy,
@@ -106,33 +95,22 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     })
 }
 
-/// A pending tell entry recovered from a durable `TellRequested` outbox marker.
-struct PendingTell {
-    /// The crash-restart payload, if the `TellRequested` carried one.
-    crash_restart: Option<Bytes>,
-    /// The target aggregate's stream key, if stored in the `TellRequested`
-    /// (absent for events written before this field was added to the proto).
-    target: Option<SagaId>,
-}
-
-struct ReplayScan {
-    pending: HashMap<u64, PendingTell>,
-    failed: Vec<u64>,
-    ended: bool,
-    schedules: HashMap<TimerName, ActiveSchedule>,
-}
-
-async fn scan_stream<S: Saga>(
+/// Load the saga's own stream from `from_sequence + 1` and fold it into a
+/// [`JournalState`], applying the domain events it hands back to `state` in
+/// stream order.
+///
+/// Returns `None` when the stream could not be read to its end; the caller then
+/// treats the terminated state as unknown.
+async fn load_journal<S: Saga>(
     saga_id: &SagaId,
     state: &mut S,
     codec: &dyn ErasedCodec<S::Event>,
     store: &Arc<dyn EventStore>,
-    sequence: &mut u64,
-) -> Option<ReplayScan> {
-    let initial_seq = *sequence;
+    from_sequence: u64,
+) -> Option<JournalState> {
     let query = LoadQuery {
         stream_key: Some(saga_id.as_str().to_owned()),
-        from_stream_sequence: Some(initial_seq + 1),
+        from_stream_sequence: Some(from_sequence + 1),
         ..Default::default()
     };
     let stream = match store.load(query).await {
@@ -144,11 +122,7 @@ async fn scan_stream<S: Saga>(
     };
 
     futures_util::pin_mut!(stream);
-    let mut highest_seq = initial_seq;
-    let mut pending: HashMap<u64, PendingTell> = HashMap::new();
-    let mut failed: Vec<u64> = Vec::new();
-    let mut ended = false;
-    let mut schedules: HashMap<TimerName, ActiveSchedule> = HashMap::new();
+    let mut journal = JournalState::new(from_sequence);
     while let Some(item) = stream.next().await {
         let loaded = match item {
             Ok(ev) => ev,
@@ -157,43 +131,27 @@ async fn scan_stream<S: Saga>(
                 return None;
             }
         };
-        highest_seq = highest_seq.max(loaded.sequence);
-        dispatch_loaded::<S>(
-            loaded,
-            state,
-            codec,
-            &mut pending,
-            &mut failed,
-            &mut ended,
-            &mut schedules,
-        );
+        fold_loaded::<S>(loaded, state, codec, &mut journal);
     }
-    *sequence = highest_seq;
-    Some(ReplayScan {
-        pending,
-        failed,
-        ended,
-        schedules,
-    })
+    Some(journal)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn dispatch_loaded<S: Saga>(
+/// Classify one loaded record and fold it, applying a domain event to the
+/// saga's state.  An undecodable record is logged and skipped, so a single
+/// poisoned payload does not abort the replay.
+fn fold_loaded<S: Saga>(
     loaded: LoadedEvent,
     state: &mut S,
     codec: &dyn ErasedCodec<S::Event>,
-    pending: &mut HashMap<u64, PendingTell>,
-    failed: &mut Vec<u64>,
-    ended: &mut bool,
-    schedules: &mut HashMap<TimerName, ActiveSchedule>,
+    journal: &mut JournalState,
 ) {
+    journal.observe_sequence(loaded.sequence);
     match SagaPersisted::classify(loaded.event_type, &loaded.payload, codec) {
-        Ok(SagaPersisted::Outbox(marker)) => apply_outbox_message(marker, pending, failed, ended),
-        Ok(SagaPersisted::Schedule(marker)) => apply_schedule_marker(marker, schedules),
-        // Dead letters are not folded into saga state — they are an
-        // observability side-channel delivered to subscribers.
-        Ok(SagaPersisted::DeadLetter(_)) => {}
-        Ok(SagaPersisted::Domain(event)) => state.apply(event),
+        Ok(persisted) => {
+            if let Some(event) = journal.fold(persisted) {
+                state.apply(event);
+            }
+        }
         Err(SagaPersistedDecodeError::Outbox(e)) => {
             tracing::error!(error = %e, "saga outbox marker decode failed; skipping event");
         }
@@ -205,75 +163,6 @@ fn dispatch_loaded<S: Saga>(
         }
         Err(SagaPersistedDecodeError::Domain(e)) => {
             tracing::error!(error = %e, "saga event decode failed; skipping event");
-        }
-    }
-}
-
-/// Fold a schedule marker into the active-schedule set: a `Scheduled` inserts
-/// (or supersedes) by name; a `Cancelled` / `Fired` removes it.
-fn apply_schedule_marker(
-    marker: ScheduleEvent,
-    schedules: &mut HashMap<TimerName, ActiveSchedule>,
-) {
-    match marker {
-        ScheduleEvent::Scheduled {
-            token,
-            after,
-            payload,
-            scheduled_at_unix_millis,
-        } => {
-            schedules.insert(
-                token.name.clone(),
-                ActiveSchedule {
-                    name: token.name,
-                    after,
-                    payload,
-                    scheduled_at_unix_millis,
-                },
-            );
-        }
-        ScheduleEvent::Cancelled { token, .. } | ScheduleEvent::Fired { token, .. } => {
-            schedules.remove(&token.name);
-        }
-    }
-}
-
-fn apply_outbox_message(
-    message: OutboxEvent,
-    pending: &mut HashMap<u64, PendingTell>,
-    failed: &mut Vec<u64>,
-    ended: &mut bool,
-) {
-    match message {
-        OutboxEvent::TellRequested(m) => {
-            let target = if m.target.is_empty() {
-                None
-            } else {
-                Some(SagaId::new(&m.target))
-            };
-            pending.insert(
-                m.tell_id,
-                PendingTell {
-                    crash_restart: m.crash_restart.map(Bytes::from),
-                    target,
-                },
-            );
-        }
-        OutboxEvent::TellAcked(m) => {
-            pending.remove(&m.tell_id);
-        }
-        OutboxEvent::TellFailed(m) => {
-            pending.remove(&m.tell_id);
-            failed.push(m.tell_id);
-        }
-        OutboxEvent::Scheduled(m) => {
-            tracing::trace!(
-                at_unix_seconds = m.at_unix_seconds,
-                "saga replay: scheduled marker (no-op)"
-            );
-        }
-        OutboxEvent::Ended(_) => {
-            *ended = true;
         }
     }
 }

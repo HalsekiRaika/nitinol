@@ -17,9 +17,10 @@ use crate::dead_letter::{
 use crate::effect::TellIntent;
 use crate::error::SagaUpstreamHandlerError;
 use crate::id::SagaId;
+use crate::journal::ActiveSchedule;
 use crate::outbox::{OutboxAppender, RetryPolicy, TellOutcome};
 use crate::process::interpreter::{run_saga_effect, InterpretOutcome, InterpreterCtx};
-use crate::process::replay::{replay_and_redispatch, ActiveSchedule};
+use crate::process::replay::replay_and_redispatch;
 use crate::saga::Saga;
 use crate::scheduler::{append_schedule_marker, DispatchFn, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName};

@@ -61,6 +61,7 @@ mod dead_letter;
 mod effect;
 mod error;
 mod id;
+mod journal;
 mod outbox;
 mod persisted;
 mod process;
