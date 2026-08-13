@@ -251,7 +251,6 @@ struct TellFailureSaga {
 impl Saga for TellFailureSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = SagaLog;
-    type State = ();
     type ScheduledMessage = ();
     type Error = Infallible;
 
@@ -299,7 +298,6 @@ struct ReplayObservingSaga {
 impl Saga for ReplayObservingSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = SagaLog;
-    type State = ();
     type ScheduledMessage = ();
     type Error = Infallible;
 
@@ -346,7 +344,6 @@ struct ScheduleAfterFailureSaga {
 impl Saga for ScheduleAfterFailureSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = SagaLog;
-    type State = ();
     type ScheduledMessage = Recheck;
     type Error = Infallible;
 
@@ -410,7 +407,6 @@ struct RejectingHookSaga {
 impl Saga for RejectingHookSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = SagaLog;
-    type State = ();
     type ScheduledMessage = ();
     type Error = HookRejected;
 

@@ -148,7 +148,6 @@ struct RecordingSaga {
 impl Saga for RecordingSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = OrderProcessed;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
@@ -191,7 +190,6 @@ impl RuntimeSaga {
 impl Saga for RuntimeSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = OrderProcessed;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 

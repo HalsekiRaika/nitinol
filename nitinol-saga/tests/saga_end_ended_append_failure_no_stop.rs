@@ -69,7 +69,6 @@ struct AlwaysEndSaga {
 impl Saga for AlwaysEndSaga {
     type SubscribedEvent = OrderEvent;
     type Event = SagaEvent;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 

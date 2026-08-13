@@ -112,7 +112,6 @@ struct DrainGuardSaga {
 impl Saga for DrainGuardSaga {
     type SubscribedEvent = UpstreamDrainEvent;
     type Event = DrainSagaEvent;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 

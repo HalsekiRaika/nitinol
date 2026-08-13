@@ -95,7 +95,6 @@ struct TimerSaga {
 impl Saga for TimerSaga {
     type SubscribedEvent = Trigger;
     type Event = Recorded;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = Reminder;
 
@@ -638,7 +637,6 @@ struct OnceRescheduleSaga {
 impl Saga for OnceRescheduleSaga {
     type SubscribedEvent = Trigger;
     type Event = Recorded;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = GenerationReminder;
 

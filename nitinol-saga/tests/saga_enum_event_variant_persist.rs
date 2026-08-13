@@ -94,7 +94,6 @@ struct WorkflowSaga {
 impl Saga for WorkflowSaga {
     type SubscribedEvent = UpstreamTriggered;
     type Event = WorkflowEvent;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 

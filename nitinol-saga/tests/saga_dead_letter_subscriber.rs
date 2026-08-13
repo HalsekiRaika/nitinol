@@ -87,7 +87,6 @@ struct FailSaga;
 impl Saga for FailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = SagaBoom;
     type ScheduledMessage = ();
 

@@ -30,6 +30,22 @@ use crate::id::SagaId;
 /// `Saga` is the only trait the user implements.  The internal
 /// `SagaProcess<S: Saga>` wrapper that adapts it to `nitinol_runtime::Process`
 /// is `pub(crate)` and never appears in any signature exposed by this crate.
+///
+/// # Where the saga's state lives
+///
+/// A saga's state is the implementor itself: [`Saga::apply`] mutates `&mut
+/// self`, so fields on the implementing type are the whole of the state.  The
+/// trait carries no associated state type.
+///
+/// # Snapshotting is not part of this trait
+///
+/// A saga replays purely from its own event stream.  When snapshotting is
+/// implemented it arrives as a separate opt-in extension trait
+/// (`SagaSnapshotable`, symmetrical to
+/// [`nitinol_eventsource::Snapshotable`]) carrying an associated snapshot type
+/// plus its capture/restore pair — so a saga that does not snapshot never sees
+/// the surface, and the ability is visible in the type system rather than
+/// hidden behind a default that panics.
 #[async_trait]
 pub trait Saga: Send + Sync + 'static {
     /// The upstream domain event the saga reacts to.
@@ -40,10 +56,6 @@ pub trait Saga: Send + Sync + 'static {
     /// The saga's own internal events — used to replay state when the saga
     /// process restarts.
     type Event: Event;
-
-    /// The saga's domain state.  No constraints are imposed here; if the saga
-    /// needs an aggregated view, place fields directly on the implementor.
-    type State: Send + Sync + 'static;
 
     /// Domain-level error type produced by [`Saga::handle`].
     ///
@@ -74,32 +86,6 @@ pub trait Saga: Send + Sync + 'static {
         event: Self::SubscribedEvent,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error>;
-
-    /// Capture a snapshot of the saga's state.
-    ///
-    /// The MVP takes no snapshots, so the default returns `None`.  A future
-    /// snapshotting implementation overrides this to return a
-    /// [`SagaSnapshot`]; until then a saga replays purely from its event
-    /// stream.
-    fn snapshot(&self) -> Option<SagaSnapshot> {
-        None
-    }
-
-    /// Reconstruct the saga from a previously captured [`SagaSnapshot`].
-    ///
-    /// This is a stub: with no snapshotting in the MVP there is no way to
-    /// obtain a `SagaSnapshot`, so the default panics.  Implementors that
-    /// override [`Saga::snapshot`] must override this as its inverse.
-    fn from_snapshot(snapshot: SagaSnapshot) -> Self
-    where
-        Self: Sized,
-    {
-        let _ = snapshot;
-        unimplemented!(
-            "Saga::from_snapshot is a stub; override it together with Saga::snapshot \
-             to restore a saga from a captured snapshot"
-        )
-    }
 
     /// Timer-driven entry point invoked when a scheduled message fires.
     ///
@@ -152,12 +138,3 @@ pub trait Saga: Send + Sync + 'static {
         Ok(SagaEffect::None)
     }
 }
-
-/// Opaque handle to a captured saga snapshot.
-///
-/// Snapshotting is not implemented in this MVP; this type is the trait-level
-/// placeholder referenced by [`Saga::snapshot`] and [`Saga::from_snapshot`].
-/// It is `#[non_exhaustive]` so it cannot be constructed outside this crate —
-/// a future issue gives it real fields.
-#[non_exhaustive]
-pub struct SagaSnapshot {}

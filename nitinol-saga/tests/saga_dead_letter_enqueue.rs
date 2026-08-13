@@ -217,7 +217,6 @@ struct HandleFailSaga {
 impl Saga for HandleFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = SagaBoom;
     type ScheduledMessage = ();
 
@@ -302,7 +301,6 @@ struct ScheduleThenFailSaga;
 impl Saga for ScheduleThenFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = SagaBoom;
     type ScheduledMessage = ();
 
@@ -456,7 +454,6 @@ struct TellFailSaga {
 impl Saga for TellFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = ();
 
@@ -641,7 +638,6 @@ struct EndOnFirstSaga {
 impl Saga for EndOnFirstSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = ();
 
@@ -828,7 +824,6 @@ struct PersistFailSaga {
 impl Saga for PersistFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = ();
 
@@ -1009,7 +1004,6 @@ struct DecodeFailSaga;
 impl Saga for DecodeFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = AlwaysDecodeFails;
 
@@ -1099,7 +1093,6 @@ struct UpstreamDecodeTestSaga;
 impl Saga for UpstreamDecodeTestSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = ();
 

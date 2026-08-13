@@ -91,7 +91,6 @@ struct AlwaysFailSaga {
 impl Saga for AlwaysFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = SagaBoom;
     type ScheduledMessage = ();
 

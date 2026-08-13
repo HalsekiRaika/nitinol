@@ -206,7 +206,6 @@ struct PersistCombineTellSaga {
 impl Saga for PersistCombineTellSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
@@ -240,7 +239,6 @@ struct PersistSequencedWithTellSaga {
 impl Saga for PersistSequencedWithTellSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
@@ -276,7 +274,6 @@ struct PersistSequencedWithEmptyNestedSequenceSaga {
 impl Saga for PersistSequencedWithEmptyNestedSequenceSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
@@ -315,7 +312,6 @@ struct PersistSequencedWithNoneLeafSaga {
 impl Saga for PersistSequencedWithNoneLeafSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
@@ -348,7 +344,6 @@ struct PersistCombineTwoTellsSaga {
 impl Saga for PersistCombineTwoTellsSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
@@ -396,7 +391,6 @@ struct PersistCombineScheduleSaga {
 impl Saga for PersistCombineScheduleSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = Reminder;
     type Error = std::convert::Infallible;
 

@@ -101,7 +101,6 @@ struct ReservationSaga {
 impl Saga for ReservationSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 

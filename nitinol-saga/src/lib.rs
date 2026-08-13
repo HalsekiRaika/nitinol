@@ -49,7 +49,10 @@
 //!   settles, so a compensating [`SagaEffect`] runs without waiting for another
 //!   upstream event.  Failures recovered by replay instead reach the saga
 //!   through [`SagaContext::failed_tell_ids`].
-//! - No snapshotting.
+//! - No snapshotting: a saga replays from its own event stream, and the [`Saga`]
+//!   trait carries no snapshot surface.  Snapshot support is planned as a
+//!   separate opt-in `SagaSnapshotable` extension trait, symmetrical to
+//!   [`nitinol_eventsource::Snapshotable`].
 //! - Routing is a single closure `Fn(&SubscribedEvent) -> Option<SagaId>`.
 //!   Decode failures (where no typed event is available) can be routed with the
 //!   separate [`SagaProps::with_decode_failure_route`] closure.
@@ -77,5 +80,5 @@ pub use self::id::SagaId;
 pub use self::process::{
     CodecSet, CodecUnset, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset,
 };
-pub use self::saga::{Saga, SagaSnapshot};
+pub use self::saga::Saga;
 pub use self::scheduler::{spawn_scheduler, ScheduleToken, SchedulerProxy, TimerName};

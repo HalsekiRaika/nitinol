@@ -36,7 +36,6 @@ struct TrivialSaga;
 impl Saga for TrivialSaga {
     type SubscribedEvent = Triggered;
     type Event = Recorded;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 

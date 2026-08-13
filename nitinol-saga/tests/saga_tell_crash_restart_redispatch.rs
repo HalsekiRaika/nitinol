@@ -113,7 +113,6 @@ struct ActiveSaga {
 impl Saga for ActiveSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
@@ -135,7 +134,6 @@ impl Saga for ActiveSaga {
 impl Saga for InertSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 

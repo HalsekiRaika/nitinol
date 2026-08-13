@@ -106,7 +106,6 @@ struct MultiTellSaga {
 impl Saga for MultiTellSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
@@ -329,7 +328,6 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
     impl Saga for UserOnlySaga {
         type SubscribedEvent = OrderPlaced;
         type Event = ReservationRequested;
-        type State = ();
         type ScheduledMessage = ();
         type Error = std::convert::Infallible;
 

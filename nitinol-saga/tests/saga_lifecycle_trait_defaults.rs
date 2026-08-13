@@ -1,14 +1,9 @@
-//! Snapshot stub and `on_scheduled` stub: the `Saga` trait
-//! gains lifecycle/extension methods with working default implementations so a
-//! user can implement `Saga` without overriding any of them.
+//! Lifecycle hook defaults: the `Saga` trait carries working default
+//! implementations for its optional hooks, so a user can implement `Saga`
+//! without overriding any of them.
 //!
-//! - `snapshot(&self)` defaults to `None` (no snapshot taken).
 //! - `on_scheduled(..)` defaults to a no-op that returns `SagaEffect::None`.
 //! - `on_tell_failed(..)` defaults to a no-op that returns `SagaEffect::None`.
-//!
-//! `from_snapshot` also gains a default (`unimplemented!()`); it is
-//! intentionally not exercised here because it is a panic-by-default stub and
-//! there is no public way to construct a `SagaSnapshot` to feed it in this MVP.
 
 #[path = "common/helpers.rs"]
 mod common;
@@ -21,8 +16,8 @@ use nitinol_eventsource::Event;
 use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
 
-// A saga that overrides ONLY the required methods, leaving snapshot /
-// from_snapshot / on_scheduled at their trait defaults.
+// A saga that overrides ONLY the required methods, leaving on_scheduled and
+// on_tell_failed at their trait defaults.
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct StubEvent;
@@ -47,7 +42,6 @@ struct StubSaga;
 impl Saga for StubSaga {
     type SubscribedEvent = StubUpstream;
     type Event = StubEvent;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
@@ -60,17 +54,6 @@ impl Saga for StubSaga {
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         Ok(SagaEffect::None)
     }
-}
-
-/// The default `snapshot` implementation must return `None` — the MVP takes no
-/// snapshots, and a user who does not override it opts into that behaviour.
-#[tokio::test]
-async fn default_snapshot_returns_none() {
-    let saga = StubSaga;
-    assert!(
-        saga.snapshot().is_none(),
-        "the default Saga::snapshot implementation must return None"
-    );
 }
 
 /// The default `on_scheduled` implementation must be a no-op that yields

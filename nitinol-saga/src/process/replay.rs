@@ -389,7 +389,6 @@ mod tests {
     impl Saga for InertSaga {
         type SubscribedEvent = UpstreamEvt;
         type Event = SagaEvt;
-        type State = ();
         type ScheduledMessage = ();
         type Error = std::convert::Infallible;
 
@@ -469,7 +468,6 @@ mod tests {
     impl Saga for CountingInertSaga {
         type SubscribedEvent = UpstreamEvt;
         type Event = SagaEvt;
-        type State = ();
         type ScheduledMessage = ();
         type Error = std::convert::Infallible;
 
