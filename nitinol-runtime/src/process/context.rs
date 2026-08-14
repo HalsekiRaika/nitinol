@@ -104,7 +104,7 @@ impl<P: Process> ProcessContext<P> {
 
     /// Spawn `spawnable` as a child of this process.
     ///
-    /// The new process inherits the parent's [`ProcessRegistry`] (flat
+    /// The new process inherits the parent's `ProcessRegistry` (flat
     /// registry — no path information attached to the Pid) and the system
     /// default idle timeout used by [`crate::ProcessSystem::spawn`]. Its
     /// `ctx.parent()` returns this process's Pid. When this process stops,

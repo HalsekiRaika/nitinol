@@ -259,7 +259,7 @@ impl Receive<WheelTick> for SchedulerProcess {
     }
 }
 
-/// A cloneable handle to the resident [`SchedulerProcess`].
+/// A cloneable handle to the resident `SchedulerProcess`.
 ///
 /// Injected into a saga via [`crate::SagaProps::with_scheduler`].  The methods
 /// are the named timer operations the saga effect interpreter and lifecycle
@@ -302,7 +302,7 @@ impl SchedulerProxy {
     }
 }
 
-/// Spawn the system-wide resident [`SchedulerProcess`] and return a proxy to it.
+/// Spawn the system-wide resident `SchedulerProcess` and return a proxy to it.
 ///
 /// The process is persistent (never idle-times-out) because it must outlive
 /// individual sagas to keep their timers running.

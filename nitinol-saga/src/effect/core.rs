@@ -41,6 +41,8 @@ use crate::scheduler::TimerName;
 ///   constructed.
 /// - `CancelSchedule(TimerName)` — name-scoped timer cancellation.  Persists a
 ///   `ScheduleEvent::Cancelled` marker and cancels the pending timer.
+///
+/// [`SchedulerProxy`]: crate::SchedulerProxy
 pub enum SagaEffect<E> {
     /// No-op — the identity element of the Monoid.
     None,

@@ -13,7 +13,7 @@ pub enum EnqueueDecision {
 
 /// A user-supplied filter over saga failures.
 ///
-/// The default ([`EnqueueAll`]) enqueues every failure kind; an implementor can
+/// The default (`EnqueueAll`) enqueues every failure kind; an implementor can
 /// override [`decide`](EnqueuePolicy::decide) to suppress selected (or all)
 /// failures.  Wired via [`crate::SagaProps::with_enqueue_policy`].
 pub trait EnqueuePolicy: Send + Sync {

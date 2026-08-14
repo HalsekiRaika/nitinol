@@ -168,6 +168,9 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
     ///
     /// Without it, schedule markers are still persisted but no timer fires until
     /// a scheduler-equipped incarnation replays them.
+    ///
+    /// [`SagaEffect::schedule`]: crate::SagaEffect::schedule
+    /// [`SagaEffect::cancel_schedule`]: crate::SagaEffect::cancel_schedule
     pub fn with_scheduler(mut self, scheduler: SchedulerProxy) -> Self {
         self.scheduler = Some(scheduler);
         self
