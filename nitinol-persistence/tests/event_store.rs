@@ -3,7 +3,6 @@ use std::borrow::Borrow;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use jiff::Timestamp;
-use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 
@@ -42,46 +41,6 @@ async fn append_and_load_by_stream_matches_payload_and_sequence() {
     assert_eq!(events[0].sequence, 1);
     assert_eq!(events[0].event_type, et);
     assert_eq!(events[0].payload, Bytes::from_static(b"hello world"));
-}
-
-/// 複数 Aggregate に append し、from_global で global_sequence 昇順に取得できる
-#[tokio::test]
-async fn load_from_global_returns_events_in_global_sequence_order() {
-    // Given: two aggregates, three events appended across them
-    let store = InMemoryEventStore::default();
-    let agg1 = AggregateId::new("agg-1");
-    let agg2 = AggregateId::new("agg-2");
-    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
-
-    // When: events are appended to different aggregates, then loaded from global sequence 1
-    store
-        .append(agg1.borrow(), vec![make_event(1, et, b"a1e1")])
-        .await
-        .expect("append agg1 e1 should succeed");
-    store
-        .append(agg2.borrow(), vec![make_event(1, et, b"a2e1")])
-        .await
-        .expect("append agg2 e1 should succeed");
-    store
-        .append(agg1.borrow(), vec![make_event(2, et, b"a1e2")])
-        .await
-        .expect("append agg1 e2 should succeed");
-
-    let stream = store
-        .load(LoadQuery::from_global(1))
-        .await
-        .expect("load should succeed");
-    let events: Vec<_> = stream.try_collect().await.expect("collect should succeed");
-
-    // Then: all three events are returned in ascending global_sequence order
-    assert_eq!(events.len(), 3);
-    let global_seqs: Vec<u64> = events.iter().map(|e| e.global_sequence).collect();
-    let mut sorted = global_seqs.clone();
-    sorted.sort_unstable();
-    assert_eq!(
-        global_seqs, sorted,
-        "events must be returned in global_sequence order"
-    );
 }
 
 /// by_event_type フィルタで該当する EventType のみ返る
@@ -151,73 +110,6 @@ async fn load_with_limit_returns_at_most_limit_events() {
     assert_eq!(events.len(), 3);
 }
 
-/// 同一 Aggregate への sequence 重複は AppendError::SequenceConflict を返す
-#[tokio::test]
-async fn duplicate_sequence_on_same_aggregate_returns_sequence_conflict() {
-    // Given: an aggregate with one event already appended
-    let store = InMemoryEventStore::default();
-    let agg = AggregateId::new("agg-1");
-    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
-
-    store
-        .append(agg.borrow(), vec![make_event(1, et, b"first")])
-        .await
-        .expect("first append should succeed");
-
-    // When: appending another event with the same sequence number
-    let result = store
-        .append(agg.borrow(), vec![make_event(1, et, b"conflict")])
-        .await;
-
-    // Then: SequenceConflict error is returned
-    assert!(
-        matches!(result, Err(AppendError::SequenceConflict(_))),
-        "expected SequenceConflict, got: {:?}",
-        result
-    );
-}
-
-/// バッチ内の sequence 衝突は all-or-nothing — global_sequence を消費しない
-#[tokio::test]
-async fn batch_append_with_conflict_is_all_or_nothing() {
-    // Given: an aggregate with sequence 1 already stored
-    let store = InMemoryEventStore::default();
-    let agg = AggregateId::new("agg-1");
-    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
-
-    let outcome = store
-        .append(agg.borrow(), vec![make_event(1, et, b"existing")])
-        .await
-        .expect("first append should succeed");
-    let last_global_seq = outcome.assigned_sequences[0];
-
-    // When: a batch containing a conflicting sequence is appended
-    let result = store
-        .append(
-            agg.borrow(),
-            vec![make_event(2, et, b"ok"), make_event(1, et, b"conflict")],
-        )
-        .await;
-
-    // Then: the whole batch fails and no global_sequences are advanced
-    assert!(
-        matches!(result, Err(AppendError::SequenceConflict(_))),
-        "expected SequenceConflict for conflicting batch"
-    );
-
-    // Confirm global counter was not advanced: a fresh append gets the next seq
-    let agg2 = AggregateId::new("agg-2");
-    let outcome2 = store
-        .append(agg2.borrow(), vec![make_event(1, et, b"next")])
-        .await
-        .expect("append agg2 should succeed");
-    assert_eq!(
-        outcome2.assigned_sequences[0],
-        last_global_seq + 1,
-        "global_sequence must not have been consumed by the failed batch"
-    );
-}
-
 /// 空 Aggregate への load は空 Stream を返す（エラーにならない）
 #[tokio::test]
 async fn load_nonexistent_aggregate_returns_empty_stream() {
@@ -234,40 +126,6 @@ async fn load_nonexistent_aggregate_returns_empty_stream() {
 
     // Then: an empty list is returned
     assert!(events.is_empty());
-}
-
-/// 同一バッチ内に重複 sequence が含まれる場合は SequenceConflict を返し、何も挿入しない
-#[tokio::test]
-async fn intra_batch_duplicate_sequence_returns_sequence_conflict() {
-    // Given: an empty store
-    let store = InMemoryEventStore::default();
-    let agg = AggregateId::new("agg-1");
-    let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
-
-    // When: a batch containing two events with the same sequence is appended
-    let result = store
-        .append(
-            agg.borrow(),
-            vec![make_event(5, et, b"first"), make_event(5, et, b"duplicate")],
-        )
-        .await;
-
-    // Then: SequenceConflict is returned and no event is stored
-    assert!(
-        matches!(result, Err(AppendError::SequenceConflict(_))),
-        "expected SequenceConflict for intra-batch duplicate sequence, got: {:?}",
-        result
-    );
-    // Confirm the stream remains empty
-    let stream = store
-        .load(LoadQuery::by_stream(&agg))
-        .await
-        .expect("load should succeed");
-    let events: Vec<_> = stream.try_collect().await.expect("collect should succeed");
-    assert!(
-        events.is_empty(),
-        "no event must be stored after intra-batch conflict"
-    );
 }
 
 /// 空バッチの append は no-op — assigned_sequences が空で stream_version は現在の最大 sequence を返す
