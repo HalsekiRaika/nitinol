@@ -62,6 +62,12 @@ impl Event for ReservationRequested {
 
 // Sagas
 
+/// Correlation rule shared by both sagas in this file.  The respawn test hands
+/// one saga stream from [`EndOnFirstSaga`] to [`RecordingSaga`], so the two
+/// types must name the same instance for the second incarnation to be the same
+/// saga at all.
+const SAGA_ID: &str = "terminated-skip-saga";
+
 /// Records every `handle` call and never terminates.  Used to observe whether
 /// the upstream subscription was wired up at all.
 struct RecordingSaga {
@@ -75,6 +81,10 @@ impl Saga for RecordingSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -102,6 +112,10 @@ impl Saga for EndOnFirstSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -172,15 +186,13 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 #[allow(clippy::type_complexity)]
 async fn spawn_recording_saga(
     system: &EventSourceSystem<JsonCodec>,
-    saga_id: &SagaId,
     saga_store: &Arc<dyn EventStore>,
     upstream_store: &Arc<dyn EventStore>,
     upstream_key: &str,
     handle_count: Arc<AtomicUsize>,
     handled: Arc<Notify>,
 ) -> nitinol_saga::SagaProxy<RecordingSaga> {
-    let routed = saga_id.clone();
-    SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(saga_store), move || {
+    SagaProps::<RecordingSaga>::new(SagaId::new(SAGA_ID), Arc::clone(saga_store), move || {
         RecordingSaga {
             handle_count: Arc::clone(&handle_count),
             handled: Arc::clone(&handled),
@@ -194,7 +206,6 @@ async fn spawn_recording_saga(
             key: upstream_key.to_owned(),
             after: 0,
         },
-        move |_event: &OrderPlaced| Some(routed.clone()),
     )
     .spawn(system.process_system())
     .await
@@ -215,13 +226,11 @@ async fn non_terminated_saga_handles_routed_event() {
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("baseline-saga");
     let handle_count = Arc::new(AtomicUsize::new(0));
     let handled = Arc::new(Notify::new());
 
     let _saga_proxy = spawn_recording_saga(
         &system,
-        &saga_id,
         &saga_store,
         &upstream_store,
         order_id.as_str(),
@@ -254,7 +263,7 @@ async fn terminated_saga_skips_subscription_and_never_handles() {
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("terminated-saga");
+    let saga_id = SagaId::new(SAGA_ID);
 
     // Simulate a saga that ended in a previous incarnation.
     seed_ended_marker(&saga_store, &saga_id, 1).await;
@@ -264,7 +273,6 @@ async fn terminated_saga_skips_subscription_and_never_handles() {
 
     let _saga_proxy = spawn_recording_saga(
         &system,
-        &saga_id,
         &saga_store,
         &upstream_store,
         order_id.as_str(),
@@ -297,12 +305,11 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     append_order_placed(&upstream_store, &order_id, 1, "SKU-FIRST").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("respawn-saga");
+    let saga_id = SagaId::new(SAGA_ID);
 
     // First incarnation: handle the first event and terminate via End.
     let first_count = Arc::new(AtomicUsize::new(0));
     let first_count_clone = Arc::clone(&first_count);
-    let routed = saga_id.clone();
     let first_proxy =
         SagaProps::<EndOnFirstSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             EndOnFirstSaga {
@@ -317,7 +324,6 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            move |_event: &OrderPlaced| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;
@@ -362,7 +368,6 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     let second_handled = Arc::new(Notify::new());
     let _second_proxy = spawn_recording_saga(
         &system,
-        &saga_id,
         &saga_store,
         &upstream_store,
         order_id.as_str(),

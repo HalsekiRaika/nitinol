@@ -53,9 +53,14 @@
 //!   trait carries no snapshot surface.  Snapshot support is planned as a
 //!   separate opt-in `SagaSnapshotable` extension trait, symmetrical to
 //!   [`nitinol_eventsource::Snapshotable`].
-//! - Routing is a single closure `Fn(&SubscribedEvent) -> Option<SagaId>`.
-//!   Decode failures (where no typed event is available) can be routed with the
-//!   separate [`SagaProps::with_decode_failure_route`] closure.
+//! - Correlation and routing are separate, and live in different places.
+//!   [`Saga::correlate`] is domain knowledge — it derives a process instance's
+//!   [`SagaId`] from a typed upstream event, so it belongs to the saga type and
+//!   never appears in spawn wiring.  A subscribed event reaches [`Saga::handle`]
+//!   only when that answer equals the instance's own id; anything else is
+//!   ignored silently.  Decode failures carry no typed event to correlate on, so
+//!   attributing them is routing and stays an instance-level setting:
+//!   [`SagaProps::with_decode_failure_route`].
 //! - Side-effect failures and persistence failures are enqueued to the DLQ
 //!   after staged retry, not silently logged and discarded.
 

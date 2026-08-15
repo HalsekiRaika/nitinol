@@ -66,6 +66,10 @@ impl Event for ReservationRequested {
     );
 }
 
+/// Correlation rule of [`RecordingSaga`]: every `OrderPlaced` belongs to the
+/// one recording instance each test in this file spawns against its own store.
+const RECORDING_SAGA_ID: &str = "direct-store-saga-1";
+
 struct RecordingSaga {
     captured: Arc<Mutex<Vec<SagaId>>>,
     done: Arc<Notify>,
@@ -77,6 +81,10 @@ impl Saga for RecordingSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(RECORDING_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -137,15 +145,12 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
         .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&store))
         .await;
 
-    let saga_id = SagaId::new("direct-store-saga-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<SagaId>>> = Arc::new(Mutex::new(Vec::new()));
     let done = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let done_for_producer = Arc::clone(&done);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
@@ -162,7 +167,6 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -212,7 +216,7 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
         .lock()
         .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0].as_str(), "direct-store-saga-1");
+    assert_eq!(captured[0].as_str(), RECORDING_SAGA_ID);
 }
 
 /// Regression test: dropping all `SagaProxy` handles must NOT stop the
@@ -231,15 +235,12 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
         .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&store))
         .await;
 
-    let saga_id = SagaId::new("drop-proxy-saga-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<SagaId>>> = Arc::new(Mutex::new(Vec::new()));
     let done = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let done_for_producer = Arc::clone(&done);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let saga_proxy =
         SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
@@ -256,7 +257,6 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -301,14 +301,12 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
         .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&store))
         .await;
 
-    let saga_id = SagaId::new("saga-replay-direct");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<SagaId>>> = Arc::new(Mutex::new(Vec::new()));
     let done = Arc::new(Notify::new());
 
     let captured_first = Arc::clone(&captured);
     let done_first = Arc::clone(&done);
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let saga_proxy =
         SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
@@ -325,7 +323,6 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn.clone(),
         )
         .spawn(system.process_system())
         .await;
@@ -363,7 +360,6 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;

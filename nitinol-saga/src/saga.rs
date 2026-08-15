@@ -73,14 +73,46 @@ pub trait Saga: Send + Sync + 'static {
     /// `type ScheduledMessage = ();`.
     type ScheduledMessage: serde::Serialize + serde::de::DeserializeOwned + Send + 'static;
 
+    /// Derive the identity of the business process instance an upstream event
+    /// belongs to — "how do I get found?".
+    ///
+    /// # Why this is an associated function
+    ///
+    /// The runtime has to decide whom an event belongs to *before* it has a
+    /// saga to ask, so correlation cannot depend on instance state.  Taking no
+    /// receiver states that in the type system: the answer is derived from the
+    /// event alone, and the call site is `<S as Saga>::correlate(&event)`.
+    ///
+    /// # Why correlation, and not routing
+    ///
+    /// Correlation is the domain knowledge that maps an event to a process
+    /// instance; routing is the runtime responsibility of carrying a message to
+    /// wherever that instance lives.  This trait declares the former, so it
+    /// travels with the saga type instead of leaking into every spawn site.
+    /// The latter stays with the runtime — see
+    /// [`SagaProps::with_decode_failure_route`](crate::SagaProps::with_decode_failure_route)
+    /// for the one case that has no typed event to correlate on.
+    ///
+    /// # How the answer is used
+    ///
+    /// A subscribed event reaches [`Saga::handle`] only when the returned
+    /// [`SagaId`] equals the id this instance was spawned with.  `None`, or a
+    /// `Some` naming a different instance, means the event belongs to somebody
+    /// else and is ignored silently — it is not a failure and records no dead
+    /// letter.
+    ///
+    /// There is deliberately no default: correlation has no universal rule, and
+    /// a defaulted `None` would silently discard every upstream event.
+    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId>;
+
     /// Apply one of the saga's own events to the in-memory state.
     ///
     /// Called during replay (`on_start`) for every event in the saga's event
     /// stream, and again after each [`SagaEffect::Persist`] event is appended.
     fn apply(&mut self, event: Self::Event);
 
-    /// Reactive entry point.  Invoked for every subscribed event whose
-    /// routing function maps to this saga instance.
+    /// Reactive entry point.  Invoked for every subscribed event that
+    /// [`Saga::correlate`] maps to this saga instance.
     async fn handle(
         &mut self,
         event: Self::SubscribedEvent,

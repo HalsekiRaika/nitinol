@@ -18,7 +18,7 @@ use async_trait::async_trait;
 
 use nitinol_eventsource::Event;
 use nitinol_persistence::{EventType, Family, TypeName};
-use nitinol_saga::{Saga, SagaContext, SagaEffect};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
 
 const PROBE_CAPTURE: &str = "probe-capture";
 const PROBE_RESTORE: &str = "probe-restore";
@@ -43,6 +43,10 @@ impl Event for Upstream {
     );
 }
 
+/// Correlation rule of [`ProbedSaga`]: the single process instance every
+/// upstream event in this file belongs to.
+const PROBED_SAGA_ID: &str = "saga-trait-snapshot-methods-removed";
+
 #[derive(Default)]
 struct ProbedSaga {
     restored_from: &'static str,
@@ -54,6 +58,10 @@ impl Saga for ProbedSaga {
     type Event = Probed;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(PROBED_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 

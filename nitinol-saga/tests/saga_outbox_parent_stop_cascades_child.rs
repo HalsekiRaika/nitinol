@@ -176,6 +176,10 @@ impl Decider<Reserve> for Inventory {
     }
 }
 
+/// Correlation rule of [`CascadeSaga`]: one order process owns every
+/// `OrderPlaced` this test publishes.
+const CASCADE_SAGA_ID: &str = "cascade-saga-1";
+
 struct CascadeSaga {
     target: GatedFailingTarget<Inventory>,
     handled: Arc<Notify>,
@@ -187,6 +191,10 @@ impl Saga for CascadeSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(CASCADE_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -266,15 +274,12 @@ async fn parent_stop_cascades_to_in_flight_outbox_executor_child() {
     append_order_placed(&upstream_store, &order_id, 1, "CASCADE-SKU").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("cascade-saga-1");
+    let saga_id = SagaId::new(CASCADE_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let target = GatedFailingTarget::<Inventory>::new();
     let target_for_saga = target.clone();
     let handled_for_saga = Arc::clone(&handled);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let saga_proxy =
         SagaProps::<CascadeSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -291,7 +296,6 @@ async fn parent_stop_cascades_to_in_flight_outbox_executor_child() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;

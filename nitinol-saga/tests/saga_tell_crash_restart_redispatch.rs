@@ -99,11 +99,19 @@ impl Decider<Reserve> for Inventory {
 
 // Inert saga — only the on_start replay path is exercised.
 
+/// Correlation rule of [`InertSaga`]: the single crash-restart process instance
+/// each phase spawns against its own freshly seeded store.
+const INERT_SAGA_ID: &str = "tell-crash-restart-saga-1";
+
 #[derive(Default)]
 struct InertSaga;
 
 // Active saga — calls SagaEffect::tell in handle so the full builder path
 // (helper.rs) is exercised.  Used by the payload-format regression test.
+
+/// Correlation rule of [`ActiveSaga`]: the single process instance every
+/// `OrderPlaced` on the payload-format upstream belongs to.
+const ACTIVE_SAGA_ID: &str = "tell-payload-format-saga-1";
 
 struct ActiveSaga {
     inventory: MockAggregateProxy<Inventory>,
@@ -115,6 +123,10 @@ impl Saga for ActiveSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(ACTIVE_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -136,6 +148,10 @@ impl Saga for InertSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(INERT_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -231,7 +247,7 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("tell-crash-restart-saga-1");
+    let saga_id = SagaId::new(INERT_SAGA_ID);
 
     // Seed a TellRequested with tell_id = 1 and JSON crash-restart bytes that
     // match the output of `SagaEffect::tell(target, Reserve { sku: "SKU-CR-1" })`.
@@ -244,9 +260,6 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
     append_raw(&saga_store, saga_id.as_str(), 1, OUTBOX_MARKER, payload).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     // Factory: deserialize the JSON bytes back into a `Reserve` command and
     // reconstruct the `TellIntent` with the mock target.  This mirrors what
@@ -271,7 +284,6 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
                     key: "no-such-stream".to_owned(),
                     after: 0,
                 },
-                route_fn,
             )
             .with_crash_restart_factory(factory)
             .spawn(system.process_system())
@@ -353,14 +365,11 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let saga_store_p1: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id_p1 = SagaId::new("tell-payload-format-saga-1");
+    let saga_id_p1 = SagaId::new(ACTIVE_SAGA_ID);
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = "tell-payload-format-upstream";
     append_order_placed(&upstream_store, upstream_key, 1, "SKU-PAYLOAD-CHECK").await;
-
-    let routed_p1 = saga_id_p1.clone();
-    let route_fn_p1 = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed_p1.clone()) };
 
     let mock_for_saga = mock_p1.clone();
     let _saga_proxy_p1 =
@@ -377,7 +386,6 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
                 key: upstream_key.to_owned(),
                 after: 0,
             },
-            route_fn_p1,
         )
         .spawn(system.process_system())
         .await;
@@ -442,7 +450,7 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     // Phase 2 — crash-restart redispatch using the real SagaEffect::tell bytes
     let mock_p2 = MockAggregateProxy::<Inventory>::new();
     let saga_store_p2: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id_p2 = SagaId::new("tell-payload-format-saga-2");
+    let saga_id_p2 = SagaId::new(INERT_SAGA_ID);
 
     // Seed a fresh saga store with the exact payload that SagaEffect::tell produced.
     // This simulates a crash (in-memory PendingIntents are gone) while the
@@ -455,9 +463,6 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
         raw_payload.clone(),
     )
     .await;
-
-    let routed_p2 = saga_id_p2.clone();
-    let route_fn_p2 = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed_p2.clone()) };
 
     // Factory: receives the JSON bytes (payload[8..]) and reconstructs Reserve.
     let mock_for_factory = mock_p2.clone();
@@ -483,7 +488,6 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
             key: "no-such-upstream-p2".to_owned(),
             after: 0,
         },
-        route_fn_p2,
     )
     .with_crash_restart_factory(factory)
     .spawn(system.process_system())

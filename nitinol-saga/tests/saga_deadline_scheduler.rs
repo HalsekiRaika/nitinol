@@ -87,6 +87,11 @@ struct Reminder {
     note: String,
 }
 
+/// Correlation rule of [`TimerSaga`]: every test below drives a single timer
+/// process against its own stores, so one id names the instance a `Trigger`
+/// belongs to.
+const TIMER_SAGA_ID: &str = "deadline-fires-1";
+
 struct TimerSaga {
     fired: Arc<Mutex<Vec<String>>>,
 }
@@ -97,6 +102,10 @@ impl Saga for TimerSaga {
     type Event = Recorded;
     type Error = std::convert::Infallible;
     type ScheduledMessage = Reminder;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(TIMER_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Recorded) {}
 
@@ -219,11 +228,10 @@ async fn schedule_fires_and_delivers_typed_message() {
     .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("deadline-fires-1");
+    let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let fired_producer = Arc::clone(&fired);
-    let routed = saga_id.clone();
     let _proxy = SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
         TimerSaga {
             fired: Arc::clone(&fired_producer),
@@ -237,7 +245,6 @@ async fn schedule_fires_and_delivers_typed_message() {
             key: "deadline-upstream-1".to_owned(),
             after: 0,
         },
-        move |_event: &Trigger| Some(routed.clone()),
     )
     .with_scheduler(scheduler.clone())
     .spawn(system.process_system())
@@ -285,11 +292,10 @@ async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
     .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("deadline-markers-1");
+    let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let fired_producer = Arc::clone(&fired);
-    let routed = saga_id.clone();
     let _proxy = SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
         TimerSaga {
             fired: Arc::clone(&fired_producer),
@@ -303,7 +309,6 @@ async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
             key: "deadline-upstream-2".to_owned(),
             after: 0,
         },
-        move |_event: &Trigger| Some(routed.clone()),
     )
     .with_scheduler(scheduler.clone())
     .spawn(system.process_system())
@@ -372,11 +377,10 @@ async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
     .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("deadline-reschedule-1");
+    let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let fired_producer = Arc::clone(&fired);
-    let routed = saga_id.clone();
     let _proxy = SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
         TimerSaga {
             fired: Arc::clone(&fired_producer),
@@ -390,7 +394,6 @@ async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
             key: "deadline-upstream-3".to_owned(),
             after: 0,
         },
-        move |_event: &Trigger| Some(routed.clone()),
     )
     .with_scheduler(scheduler.clone())
     .spawn(system.process_system())
@@ -448,11 +451,10 @@ async fn cancel_schedule_prevents_the_timer_from_firing() {
     .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("deadline-cancel-1");
+    let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let fired_producer = Arc::clone(&fired);
-    let routed = saga_id.clone();
     let _proxy = SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
         TimerSaga {
             fired: Arc::clone(&fired_producer),
@@ -466,7 +468,6 @@ async fn cancel_schedule_prevents_the_timer_from_firing() {
             key: "deadline-upstream-4".to_owned(),
             after: 0,
         },
-        move |_event: &Trigger| Some(routed.clone()),
     )
     .with_scheduler(scheduler.clone())
     .spawn(system.process_system())
@@ -504,7 +505,7 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("deadline-replay-1");
+    let saga_id = SagaId::new(TIMER_SAGA_ID);
 
     // Incarnation #1 receives the trigger and persists a `scheduled` marker with
     // a delay long enough that it has not yet fired when #2 starts.
@@ -523,7 +524,6 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
 
     let fired_1 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fired_1_producer = Arc::clone(&fired_1);
-    let routed_1 = saga_id.clone();
     let _proxy_1 =
         SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             TimerSaga {
@@ -538,7 +538,6 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
                 key: "deadline-upstream-5a".to_owned(),
                 after: 0,
             },
-            move |_event: &Trigger| Some(routed_1.clone()),
         )
         .with_scheduler(scheduler.clone())
         .spawn(system.process_system())
@@ -566,7 +565,6 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
     let upstream_b: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let fired_2 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fired_2_producer = Arc::clone(&fired_2);
-    let routed_2 = saga_id.clone();
     let _proxy_2 =
         SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             TimerSaga {
@@ -581,7 +579,6 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
                 key: "deadline-upstream-5b-empty".to_owned(),
                 after: 0,
             },
-            move |_event: &Trigger| Some(routed_2.clone()),
         )
         .with_scheduler(scheduler.clone())
         .spawn(system.process_system())
@@ -633,12 +630,20 @@ struct OnceRescheduleSaga {
     fires: Arc<Mutex<Vec<String>>>,
 }
 
+/// Correlation rule of [`OnceRescheduleSaga`]: both incarnations of the
+/// regression below are the same process instance, so they answer alike.
+const ONCE_RESCHEDULE_SAGA_ID: &str = "deadline-arch004-1";
+
 #[async_trait]
 impl Saga for OnceRescheduleSaga {
     type SubscribedEvent = Trigger;
     type Event = Recorded;
     type Error = std::convert::Infallible;
     type ScheduledMessage = GenerationReminder;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(ONCE_RESCHEDULE_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Recorded) {}
 
@@ -714,12 +719,11 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
     .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("deadline-arch004-1");
+    let saga_id = SagaId::new(ONCE_RESCHEDULE_SAGA_ID);
 
     // Incarnation #1: receives trigger, fires first timer, re-schedules.
     let fires_1 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_1_producer = Arc::clone(&fires_1);
-    let routed_1 = saga_id.clone();
     let _proxy_1 =
         SagaProps::<OnceRescheduleSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             OnceRescheduleSaga {
@@ -734,7 +738,6 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
                 key: "deadline-upstream-arch004".to_owned(),
                 after: 0,
             },
-            move |_event: &Trigger| Some(routed_1.clone()),
         )
         .with_scheduler(scheduler.clone())
         .spawn(system.process_system())
@@ -801,7 +804,6 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
     let upstream_empty: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let fires_2 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_2_producer = Arc::clone(&fires_2);
-    let routed_2 = saga_id.clone();
     let _proxy_2 =
         SagaProps::<OnceRescheduleSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             OnceRescheduleSaga {
@@ -816,7 +818,6 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
                 key: "deadline-upstream-arch004-empty".to_owned(),
                 after: 0,
             },
-            move |_event: &Trigger| Some(routed_2.clone()),
         )
         .with_scheduler(scheduler.clone())
         .spawn(system.process_system())

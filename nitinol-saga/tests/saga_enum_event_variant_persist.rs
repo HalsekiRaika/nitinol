@@ -86,6 +86,10 @@ impl Event for WorkflowEvent {
 
 // Saga: emits WorkflowEvent::Started on each upstream trigger
 
+/// Correlation rule of [`WorkflowSaga`]: one workflow instance watches the
+/// single upstream aggregate, so every trigger belongs to it.
+const WORKFLOW_SAGA_ID: &str = "variant-workflow-saga";
+
 struct WorkflowSaga {
     done: Arc<Notify>,
 }
@@ -96,6 +100,10 @@ impl Saga for WorkflowSaga {
     type Event = WorkflowEvent;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(WORKFLOW_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -144,12 +152,9 @@ async fn saga_persist_stores_enum_event_variant_in_loaded_event() {
         .spawn_aggregate::<UpstreamAggregate>(upstream_id.clone(), Arc::clone(&store))
         .await;
 
-    let saga_id = SagaId::new("variant-workflow-saga");
+    let saga_id = SagaId::new(WORKFLOW_SAGA_ID);
     let done = Arc::new(Notify::new());
     let done_for_saga = Arc::clone(&done);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &UpstreamTriggered| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<WorkflowSaga>::new(saga_id.clone(), Arc::clone(&store), move || WorkflowSaga {
@@ -163,7 +168,6 @@ async fn saga_persist_stores_enum_event_variant_in_loaded_event() {
                 key: upstream_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;

@@ -69,6 +69,10 @@ impl Decider<TargetCmd> for TargetAgg {
     }
 }
 
+/// Correlation rule of [`TwoTellsThenEndSaga`]: each scenario runs one instance
+/// against its own stores, so every `UpstreamTrigger` names that instance.
+const TWO_TELLS_THEN_END_SAGA_ID: &str = "multi-tell-gapfree-saga";
+
 struct TwoTellsThenEndSaga {
     target: AggregateProxy<TargetAgg>,
     handle_count: Arc<AtomicUsize>,
@@ -80,6 +84,10 @@ impl Saga for TwoTellsThenEndSaga {
     type Event = SagaMarker;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(TWO_TELLS_THEN_END_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: SagaMarker) {}
 
@@ -187,12 +195,11 @@ async fn spawn_two_tells_then_end_saga(
         .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(format!("{saga_label}-saga"));
+    let saga_id = SagaId::new(TWO_TELLS_THEN_END_SAGA_ID);
     let handle_count = Arc::new(AtomicUsize::new(0));
 
     let handle_count_clone = Arc::clone(&handle_count);
     let target_proxy_clone = target_proxy.clone();
-    let routed = saga_id.clone();
 
     let saga_proxy = SagaProps::<TwoTellsThenEndSaga>::new(
         saga_id.clone(),
@@ -210,7 +217,6 @@ async fn spawn_two_tells_then_end_saga(
             key: agg_id.as_str().to_owned(),
             after: 0,
         },
-        move |_: &UpstreamTrigger| Some(routed.clone()),
     )
     .spawn(system.process_system())
     .await;

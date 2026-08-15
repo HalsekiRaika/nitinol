@@ -382,6 +382,17 @@ mod tests {
             EventType::new(Family::new("replay_unit_test"), TypeName::new("SagaEvent"));
     }
 
+    /// Correlation rule of [`InertSaga`].  Its tests subscribe to an upstream
+    /// stream that is deliberately empty — replay, not delivery, is what they
+    /// exercise — so this answer is never consulted.
+    const INERT_SAGA_OWNER: &str = "replay-unit-inert-saga";
+
+    /// Correlation rule of [`CountingInertSaga`], and the id its tests spawn it
+    /// with.  Those tests seed a matching upstream event and assert `handle` is
+    /// never reached, so the two must agree: a correlate answer that named some
+    /// other instance would make the assertion pass for the wrong reason.
+    const COUNTING_INERT_SAGA_OWNER: &str = "replay-unit-counting-inert-saga";
+
     #[derive(Default)]
     struct InertSaga;
 
@@ -391,6 +402,10 @@ mod tests {
         type Event = SagaEvt;
         type ScheduledMessage = ();
         type Error = std::convert::Infallible;
+
+        fn correlate(_event: &UpstreamEvt) -> Option<SagaId> {
+            Some(SagaId::new(INERT_SAGA_OWNER))
+        }
 
         fn apply(&mut self, _event: SagaEvt) {}
 
@@ -471,6 +486,10 @@ mod tests {
         type ScheduledMessage = ();
         type Error = std::convert::Infallible;
 
+        fn correlate(_event: &UpstreamEvt) -> Option<SagaId> {
+            Some(SagaId::new(COUNTING_INERT_SAGA_OWNER))
+        }
+
         fn apply(&mut self, _event: SagaEvt) {}
 
         async fn handle(
@@ -544,9 +563,6 @@ mod tests {
         initial_tell_states.insert(1u64, TellState::Pending(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&inner_store) as Arc<dyn EventStore>,
@@ -561,7 +577,6 @@ mod tests {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -619,9 +634,6 @@ mod tests {
         initial_tell_states.insert(1u64, TellState::Pending(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&fail_store),
@@ -636,7 +648,6 @@ mod tests {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -677,9 +688,6 @@ mod tests {
         initial_tell_states.insert(1u64, TellState::AppendFailed(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         let _saga_proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&store) as Arc<dyn EventStore>,
@@ -694,7 +702,6 @@ mod tests {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -757,9 +764,6 @@ mod tests {
         initial_tell_states.insert(1u64, TellState::Pending(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&inner_store) as Arc<dyn EventStore>,
@@ -774,7 +778,6 @@ mod tests {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -860,7 +863,7 @@ mod tests {
         let ps = ProcessSystem::new().await;
 
         let inner_store = Arc::new(InMemoryEventStore::default());
-        let saga_id = SagaId::new("replay-dlq-fail-regression-1");
+        let saga_id = SagaId::new(COUNTING_INERT_SAGA_OWNER);
 
         // Seed a TellRequested with a non-empty target so the synthetic TellFailed
         // path reaches the DLQ enqueue.  (Empty target → legacy path, no DLQ.)
@@ -899,9 +902,6 @@ mod tests {
             .expect("upstream append must succeed");
 
         let handle_count_clone = Arc::clone(&handle_count);
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         let _proxy = SagaProps::<CountingInertSaga>::new(
             saga_id.clone(),
             Arc::clone(&fail_second),
@@ -917,7 +917,6 @@ mod tests {
                 key: "replay-dlq-fail-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -945,14 +944,11 @@ mod tests {
     async fn saga_stops_and_skips_subscription_when_event_store_load_fails() {
         let ps = ProcessSystem::new().await;
 
-        let saga_id = SagaId::new("air-004-load-fail-regression-1");
+        let saga_id = SagaId::new(COUNTING_INERT_SAGA_OWNER);
         let handle_count = Arc::new(AtomicUsize::new(0));
 
         let handle_count_clone = Arc::clone(&handle_count);
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         // Pre-seed an upstream event so the subscription would deliver it if
         // the saga were (incorrectly) to subscribe despite the load failure.
         let upstream_ev = nitinol_persistence::AppendingEvent {
@@ -984,7 +980,6 @@ mod tests {
                 key: "air-004-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;

@@ -47,6 +47,22 @@ impl Event for UnrelatedEvent {
         EventType::new(Family::new("saga.upstream"), TypeName::new("Unrelated"));
 }
 
+/// Correlation rule of [`RecordingSaga`]: every `OrderPlaced` belongs to the one
+/// reservation process this file's catchup tests spawn.
+const RECORDING_SAGA_ID: &str = "saga-upstream-catchup-recording";
+
+/// Correlation rule of [`MatchOnlySaga`]: only orders whose SKU carries the
+/// `MATCH-` prefix belong to it.
+const MATCH_ONLY_SAGA_ID: &str = "saga-upstream-route-match";
+
+fn record(captured: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>, sku: String) {
+    captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+        .push(sku);
+    notify.notify_one();
+}
+
 struct RecordingSaga {
     captured: Arc<Mutex<Vec<String>>>,
     notify: Arc<Notify>,
@@ -59,6 +75,10 @@ impl Saga for RecordingSaga {
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(RECORDING_SAGA_ID))
+    }
+
     fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
@@ -66,11 +86,42 @@ impl Saga for RecordingSaga {
         event: Self::SubscribedEvent,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        self.captured
-            .lock()
-            .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
-            .push(event.sku.clone());
-        self.notify.notify_one();
+        record(&self.captured, &self.notify, event.sku);
+        Ok(SagaEffect::None)
+    }
+}
+
+/// A saga whose correlation declines part of the stream.  It is a separate type
+/// from [`RecordingSaga`] because correlation now belongs to the type: the other
+/// tests in this file stream SKUs that carry no `MATCH-` prefix, so folding this
+/// rule into `RecordingSaga` would leave them with nothing delivered.
+struct MatchOnlySaga {
+    captured: Arc<Mutex<Vec<String>>>,
+    notify: Arc<Notify>,
+}
+
+#[async_trait]
+impl Saga for MatchOnlySaga {
+    type SubscribedEvent = OrderPlaced;
+    type Event = ReservationRequested;
+    type ScheduledMessage = ();
+    type Error = std::convert::Infallible;
+
+    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
+        event
+            .sku
+            .starts_with("MATCH-")
+            .then(|| SagaId::new(MATCH_ONLY_SAGA_ID))
+    }
+
+    fn apply(&mut self, _event: Self::Event) {}
+
+    async fn handle(
+        &mut self,
+        event: Self::SubscribedEvent,
+        _ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        record(&self.captured, &self.notify, event.sku);
         Ok(SagaEffect::None)
     }
 }
@@ -161,15 +212,12 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
     append_order_placed(&upstream_store, &order_id, 3, "SKU-C").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-upstream-catchup-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<RecordingSaga>::new(saga_id.clone(), saga_store, move || RecordingSaga {
@@ -184,7 +232,6 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -203,7 +250,7 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
 }
 
 #[tokio::test]
-async fn saga_catchup_respects_route_fn_filtering() {
+async fn saga_catchup_declines_events_that_correlate_elsewhere() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -215,26 +262,18 @@ async fn saga_catchup_respects_route_fn_filtering() {
     append_order_placed(&upstream_store, &order_id, 4, "MATCH-2").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let matched_id = SagaId::new("saga-upstream-route-match");
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let matched_for_route = matched_id.clone();
-    let route_fn = move |event: &OrderPlaced| -> Option<SagaId> {
-        if event.sku.starts_with("MATCH-") {
-            Some(matched_for_route.clone())
-        } else {
-            None
-        }
-    };
-
     let _saga_proxy =
-        SagaProps::<RecordingSaga>::new(matched_id, saga_store, move || RecordingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        SagaProps::<MatchOnlySaga>::new(SagaId::new(MATCH_ONLY_SAGA_ID), saga_store, move || {
+            MatchOnlySaga {
+                captured: Arc::clone(&captured_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
         .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
@@ -244,7 +283,6 @@ async fn saga_catchup_respects_route_fn_filtering() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -259,7 +297,8 @@ async fn saga_catchup_respects_route_fn_filtering() {
     assert_eq!(
         seen,
         vec!["MATCH-1".to_owned(), "MATCH-2".to_owned()],
-        "the route_fn must filter catchup events; the SKIP events must never reach handle()"
+        "`correlate` must filter catchup events; the SKIP events correlate to \
+         nobody and must never reach handle()"
     );
 }
 
@@ -275,15 +314,12 @@ async fn saga_catchup_resumes_from_cursor_after_value() {
     }
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-upstream-resume-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy = SagaProps::<RecordingSaga>::new(saga_id, saga_store, move || RecordingSaga {
         captured: Arc::clone(&captured_for_producer),
@@ -297,7 +333,6 @@ async fn saga_catchup_resumes_from_cursor_after_value() {
             key: order_id.as_str().to_owned(),
             after: 2,
         },
-        route_fn,
     )
     .spawn(system.process_system())
     .await;
@@ -326,15 +361,12 @@ async fn saga_receives_live_events_after_catchup_via_durable_stream() {
     append_order_placed(&upstream_store, &order_id, 1, "CATCHUP").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-upstream-live-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy = SagaProps::<RecordingSaga>::new(saga_id, saga_store, move || RecordingSaga {
         captured: Arc::clone(&captured_for_producer),
@@ -348,7 +380,6 @@ async fn saga_receives_live_events_after_catchup_via_durable_stream() {
             key: order_id.as_str().to_owned(),
             after: 0,
         },
-        route_fn,
     )
     .spawn(system.process_system())
     .await;
@@ -380,15 +411,12 @@ async fn saga_catchup_ignores_events_of_other_types() {
     append_order_placed(&upstream_store, &order_id, 3, "ORDER-2").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-upstream-mixed-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy = SagaProps::<RecordingSaga>::new(saga_id, saga_store, move || RecordingSaga {
         captured: Arc::clone(&captured_for_producer),
@@ -402,7 +430,6 @@ async fn saga_catchup_ignores_events_of_other_types() {
             key: order_id.as_str().to_owned(),
             after: 0,
         },
-        route_fn,
     )
     .spawn(system.process_system())
     .await;
@@ -436,15 +463,12 @@ async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
     append_order_placed(&upstream_store, &agg_b, 2, "B2").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-upstream-global-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy = SagaProps::<RecordingSaga>::new(saga_id, saga_store, move || RecordingSaga {
         captured: Arc::clone(&captured_for_producer),
@@ -455,7 +479,6 @@ async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
         Arc::clone(&upstream_store),
         system.codec::<OrderPlaced>(),
         SequenceCursor::Global { after: 0 },
-        route_fn,
     )
     .spawn(system.process_system())
     .await;

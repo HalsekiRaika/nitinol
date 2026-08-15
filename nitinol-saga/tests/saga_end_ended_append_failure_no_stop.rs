@@ -65,12 +65,20 @@ struct AlwaysEndSaga {
     handled: Arc<Notify>,
 }
 
+/// Correlation rule of [`AlwaysEndSaga`]: both seeded upstream events name the
+/// same process instance, so both must reach `handle`.
+const ALWAYS_END_SAGA_ID: &str = "ended-fail-saga";
+
 #[async_trait]
 impl Saga for AlwaysEndSaga {
     type SubscribedEvent = OrderEvent;
     type Event = SagaEvent;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(ALWAYS_END_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: SagaEvent) {}
 
@@ -148,14 +156,13 @@ async fn saga_stays_alive_when_ended_append_fails() {
     append_order(&upstream_store, &order_id, 2, "second").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(AlwaysFailOnAppendStore);
-    let saga_id = SagaId::new("ended-fail-saga");
+    let saga_id = SagaId::new(ALWAYS_END_SAGA_ID);
 
     let handle_count = Arc::new(AtomicUsize::new(0));
     let handled = Arc::new(Notify::new());
 
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_clone = Arc::clone(&handled);
-    let routed = saga_id.clone();
 
     let _saga_proxy =
         SagaProps::<AlwaysEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -172,7 +179,6 @@ async fn saga_stays_alive_when_ended_append_fails() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            move |_event: &OrderEvent| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;

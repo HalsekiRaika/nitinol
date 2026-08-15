@@ -139,26 +139,29 @@ struct CapturedContext {
     sequence: u64,
 }
 
-struct ReservationSaga {
+/// Correlation rule of [`ReservationSaga`]: the one reservation process the
+/// end-to-end test spawns owns every order it sees.
+const RESERVATION_SAGA_ID: &str = "saga-e2e-reservation-1";
+
+/// Correlation rule of [`MatchOnlyReservationSaga`]: only orders whose SKU
+/// carries the `MATCH-` prefix belong to it.
+const MATCH_ONLY_SAGA_ID: &str = "saga-route-match";
+
+/// The reaction both sagas below perform.  Only their correlation rules differ,
+/// and correlation is now a property of the type, so the shared behaviour lives
+/// here rather than being written twice.
+struct ReservationWork {
     inventory: AggregateProxy<Inventory>,
     captured: Arc<Mutex<Vec<CapturedContext>>>,
     handle_count: Arc<Mutex<u64>>,
 }
 
-#[async_trait]
-impl Saga for ReservationSaga {
-    type SubscribedEvent = OrderPlaced;
-    type Event = ReservationRequested;
-    type ScheduledMessage = ();
-    type Error = std::convert::Infallible;
-
-    fn apply(&mut self, _event: Self::Event) {}
-
-    async fn handle(
+impl ReservationWork {
+    fn reserve(
         &mut self,
-        event: Self::SubscribedEvent,
+        event: OrderPlaced,
         ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+    ) -> SagaEffect<ReservationRequested> {
         self.captured
             .lock()
             .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
@@ -174,7 +177,62 @@ impl Saga for ReservationSaga {
             sku: event.sku.clone(),
         });
         let tell_inventory = SagaEffect::tell(self.inventory.clone(), Reserve { sku: event.sku });
-        Ok(persist_own_event.combine(tell_inventory))
+        persist_own_event.combine(tell_inventory)
+    }
+}
+
+struct ReservationSaga(ReservationWork);
+
+#[async_trait]
+impl Saga for ReservationSaga {
+    type SubscribedEvent = OrderPlaced;
+    type Event = ReservationRequested;
+    type ScheduledMessage = ();
+    type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(RESERVATION_SAGA_ID))
+    }
+
+    fn apply(&mut self, _event: Self::Event) {}
+
+    async fn handle(
+        &mut self,
+        event: Self::SubscribedEvent,
+        ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        Ok(self.0.reserve(event, ctx))
+    }
+}
+
+/// A saga whose correlation declines part of the upstream stream.  It is a
+/// distinct type from [`ReservationSaga`] because correlation belongs to the
+/// type: folding this rule into `ReservationSaga` would starve the end-to-end
+/// test, whose SKUs carry no `MATCH-` prefix.
+struct MatchOnlyReservationSaga(ReservationWork);
+
+#[async_trait]
+impl Saga for MatchOnlyReservationSaga {
+    type SubscribedEvent = OrderPlaced;
+    type Event = ReservationRequested;
+    type ScheduledMessage = ();
+    type Error = std::convert::Infallible;
+
+    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
+        event
+            .sku
+            .starts_with("MATCH-")
+            .then(|| SagaId::new(MATCH_ONLY_SAGA_ID))
+    }
+
+    fn apply(&mut self, _event: Self::Event) {}
+
+    async fn handle(
+        &mut self,
+        event: Self::SubscribedEvent,
+        ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        Ok(self.0.reserve(event, ctx))
     }
 }
 
@@ -231,35 +289,32 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_store_for_assert = Arc::clone(&saga_store);
 
-    let saga_id = SagaId::new("saga-e2e-reservation-1");
+    let saga_id = SagaId::new(RESERVATION_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
     let handle_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-
-    let route_target = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(route_target.clone()) };
 
     let inventory_for_producer = inventory_proxy.clone();
     let captured_for_producer = Arc::clone(&captured);
     let handle_count_for_producer = Arc::clone(&handle_count);
 
-    let _saga_proxy =
-        SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || ReservationSaga {
+    let _saga_proxy = SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || {
+        ReservationSaga(ReservationWork {
             inventory: inventory_for_producer.clone(),
             captured: Arc::clone(&captured_for_producer),
             handle_count: Arc::clone(&handle_count_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&order_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-            route_fn,
-        )
-        .spawn(system.process_system())
-        .await;
+    })
+    .with_codec(system.codec::<ReservationRequested>())
+    .with_subscription(
+        Arc::clone(&order_store),
+        system.codec::<OrderPlaced>(),
+        SequenceCursor::Stream {
+            key: order_id.as_str().to_owned(),
+            after: 0,
+        },
+    )
+    .spawn(system.process_system())
+    .await;
 
     order_proxy
         .ask(PlaceOrder {
@@ -354,7 +409,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
 }
 
 #[tokio::test]
-async fn saga_skips_events_not_routed_to_its_instance() {
+async fn saga_skips_events_that_correlate_to_no_instance() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
@@ -370,43 +425,35 @@ async fn saga_skips_events_not_routed_to_its_instance() {
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let matched_id = SagaId::new("saga-route-match");
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
     let handle_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-
-    let matched_for_route = matched_id.clone();
-    let route_fn = move |event: &OrderPlaced| -> Option<SagaId> {
-        if event.sku.starts_with("MATCH-") {
-            Some(matched_for_route.clone())
-        } else {
-            None
-        }
-    };
 
     let inventory_for_producer = inventory_proxy.clone();
     let captured_for_producer = Arc::clone(&captured);
     let handle_count_for_producer = Arc::clone(&handle_count);
 
-    let _saga_proxy =
-        SagaProps::<ReservationSaga>::new(matched_id.clone(), saga_store, move || {
-            ReservationSaga {
+    let _saga_proxy = SagaProps::<MatchOnlyReservationSaga>::new(
+        SagaId::new(MATCH_ONLY_SAGA_ID),
+        saga_store,
+        move || {
+            MatchOnlyReservationSaga(ReservationWork {
                 inventory: inventory_for_producer.clone(),
                 captured: Arc::clone(&captured_for_producer),
                 handle_count: Arc::clone(&handle_count_for_producer),
-            }
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: publisher_id.as_str().to_owned(),
-                after: 0,
-            },
-            route_fn,
-        )
-        .spawn(system.process_system())
-        .await;
+            })
+        },
+    )
+    .with_codec(system.codec::<ReservationRequested>())
+    .with_subscription(
+        Arc::clone(&upstream_store),
+        system.codec::<OrderPlaced>(),
+        SequenceCursor::Stream {
+            key: publisher_id.as_str().to_owned(),
+            after: 0,
+        },
+    )
+    .spawn(system.process_system())
+    .await;
 
     // Poll until Inventory has processed the Reserve command for the MATCH event.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -431,7 +478,8 @@ async fn saga_skips_events_not_routed_to_its_instance() {
         .expect("handle_count mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         final_count, 1,
-        "Saga::handle must run exactly once — only the routed event must reach it"
+        "Saga::handle must run exactly once — only the event this saga \
+         correlates to must reach it"
     );
 
     let captured = captured

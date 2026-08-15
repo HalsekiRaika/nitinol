@@ -108,12 +108,20 @@ struct DrainGuardSaga {
     handle_count: Arc<AtomicUsize>,
 }
 
+/// Correlation rule of [`DrainGuardSaga`]: both upstream events name the same
+/// process instance — the guard, not correlation, is what must drop the second.
+const DRAIN_GUARD_SAGA_ID: &str = "drain-guard-saga";
+
 #[async_trait]
 impl Saga for DrainGuardSaga {
     type SubscribedEvent = UpstreamDrainEvent;
     type Event = DrainSagaEvent;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(DRAIN_GUARD_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: DrainSagaEvent) {}
 
@@ -217,12 +225,11 @@ async fn draining_saga_ignores_upstream_event_before_tell_settles() {
         .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("drain-guard-saga");
+    let saga_id = SagaId::new(DRAIN_GUARD_SAGA_ID);
     let handle_count = Arc::new(AtomicUsize::new(0));
 
     let handle_count_clone = Arc::clone(&handle_count);
     let target_proxy_clone = target_proxy.clone();
-    let routed = saga_id.clone();
 
     let _saga_proxy =
         SagaProps::<DrainGuardSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -239,7 +246,6 @@ async fn draining_saga_ignores_upstream_event_before_tell_settles() {
                 key: agg_id.as_str().to_owned(),
                 after: 0,
             },
-            move |_: &UpstreamDrainEvent| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;

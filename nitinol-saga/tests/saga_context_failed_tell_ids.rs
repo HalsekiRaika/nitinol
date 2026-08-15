@@ -144,12 +144,20 @@ struct RecordingSaga {
     captured: Captured,
 }
 
+/// Correlation rule of [`RecordingSaga`]: the one order process every
+/// `OrderPlaced` published by the replay-path tests belongs to.
+const RECORDING_SAGA_ID: &str = "failed-tell-replay-saga-1";
+
 #[async_trait]
 impl Saga for RecordingSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = OrderProcessed;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(RECORDING_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: OrderProcessed) {}
 
@@ -186,12 +194,20 @@ impl RuntimeSaga {
     }
 }
 
+/// Correlation rule of [`RuntimeSaga`]: the one order process every
+/// `OrderPlaced` published by the runtime-path test belongs to.
+const RUNTIME_SAGA_ID: &str = "failed-tell-runtime-saga-1";
+
 #[async_trait]
 impl Saga for RuntimeSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = OrderProcessed;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(RUNTIME_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: OrderProcessed) {}
 
@@ -276,7 +292,7 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let saga_id = SagaId::new("failed-tell-replay-saga-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
 
     // Pre-seed: TellRequested(tell_id=1) + TellFailed(tell_id=1).
     // This simulates a saga that had a tell fail in a previous run.
@@ -300,9 +316,6 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let captured_for_saga = Arc::clone(&captured);
 
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
-
     let _saga_proxy =
         SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             RecordingSaga {
@@ -317,7 +330,6 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
                 key: "upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -377,7 +389,7 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let saga_id = SagaId::new("failed-tell-synthetic-replay-saga-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
 
     // Seed only a TellRequested — no TellAcked/TellFailed yet, no crash-restart
     // bytes (prost TellRequested with field 2 absent).  Simulates a crash between
@@ -396,9 +408,6 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let captured_for_saga = Arc::clone(&captured);
 
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
-
     // Spawn without crash-restart factory and without pre-populated PendingIntents.
     // The replay path must append synthetic TellFailed(tell_id=5) AND push tell_id
     // to the shared accumulator.
@@ -416,7 +425,6 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
                 key: "upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -478,12 +486,9 @@ async fn runtime_tell_failed_is_not_repeated_to_the_next_handle_via_context() {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let saga_id = SagaId::new("failed-tell-runtime-saga-1");
+    let saga_id = SagaId::new(RUNTIME_SAGA_ID);
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let captured_for_saga = Arc::clone(&captured);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<RuntimeSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -497,7 +502,6 @@ async fn runtime_tell_failed_is_not_repeated_to_the_next_handle_via_context() {
                 key: "upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;

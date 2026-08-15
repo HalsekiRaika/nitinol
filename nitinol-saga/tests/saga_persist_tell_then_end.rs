@@ -93,6 +93,10 @@ impl Decider<TriggerCmd> for TargetAggregate {
 
 // Saga: on the first upstream event issue a tell then stop via End
 
+/// Correlation rule of [`TellThenEndSaga`]: the single process instance every
+/// `UpstreamEvent` in this test belongs to.
+const TELL_THEN_END_SAGA_ID: &str = "persist-tell-end-saga";
+
 struct TellThenEndSaga {
     target: AggregateProxy<TargetAggregate>,
     handled: Arc<Mutex<bool>>,
@@ -104,6 +108,10 @@ impl Saga for TellThenEndSaga {
     type Event = SagaDomainEvent;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(TELL_THEN_END_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: SagaDomainEvent) {}
 
@@ -182,12 +190,11 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
         .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("persist-tell-end-saga");
+    let saga_id = SagaId::new(TELL_THEN_END_SAGA_ID);
     let handled = Arc::new(Mutex::new(false));
 
     let handled_clone = Arc::clone(&handled);
     let target_proxy_clone = target_proxy.clone();
-    let routed = saga_id.clone();
 
     let _saga_proxy =
         SagaProps::<TellThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -204,7 +211,6 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
                 key: agg_id.as_str().to_owned(),
                 after: 0,
             },
-            move |_: &UpstreamEvent| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;

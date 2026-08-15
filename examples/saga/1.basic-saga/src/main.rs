@@ -8,7 +8,7 @@ use nitinol_eventsource::SequenceCursor;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaId, SagaProps};
+use nitinol_saga::SagaProps;
 
 use saga_basic_saga::codec::JsonCodec;
 use saga_basic_saga::inventory::{GetReservedCount, Inventory};
@@ -43,14 +43,14 @@ async fn main() {
         .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("example-reservation-saga");
 
     let inventory_for_producer = inventory_proxy.clone();
-    let route_target = saga_id.clone();
 
     let _saga_proxy =
-        SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || ReservationSaga {
-            inventory: inventory_for_producer.clone(),
+        SagaProps::<ReservationSaga>::new(ReservationSaga::instance_id(), saga_store, move || {
+            ReservationSaga {
+                inventory: inventory_for_producer.clone(),
+            }
         })
         .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
@@ -60,7 +60,6 @@ async fn main() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            move |_event: &OrderPlaced| Some(route_target.clone()),
         )
         .spawn(system.process_system())
         .await;

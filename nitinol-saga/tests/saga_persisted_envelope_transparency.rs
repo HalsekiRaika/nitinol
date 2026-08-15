@@ -64,6 +64,10 @@ impl Event for DomainEvt {
         EventType::new(Family::new("e2e.envelope"), TypeName::new("DomainEvt"));
 }
 
+/// Correlation rule of [`EnvelopeSaga`]: one instance owns the upstream stream
+/// each test in this file wires it to.
+const ENVELOPE_SAGA_ID: &str = "envelope-transparency-saga";
+
 struct EnvelopeSaga {
     applied: Arc<Mutex<Vec<DomainEvt>>>,
     persisted: Arc<Notify>,
@@ -76,6 +80,10 @@ impl Saga for EnvelopeSaga {
     type Event = DomainEvt;
     type ScheduledMessage = ();
     type Error = Infallible;
+
+    fn correlate(_event: &Triggered) -> Option<SagaId> {
+        Some(SagaId::new(ENVELOPE_SAGA_ID))
+    }
 
     fn apply(&mut self, event: DomainEvt) {
         self.applied
@@ -107,10 +115,6 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-fn inert_route(_event: &Triggered) -> Option<SagaId> {
-    None
-}
-
 #[tokio::test]
 async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope() {
     let ps = ProcessSystem::new().await;
@@ -122,13 +126,12 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
         .spawn_aggregate::<UpstreamAggregate>(upstream_id.clone(), Arc::clone(&store))
         .await;
 
-    let saga_id = SagaId::new("envelope-encode-saga");
+    let saga_id = SagaId::new(ENVELOPE_SAGA_ID);
     let applied = Arc::new(Mutex::new(Vec::<DomainEvt>::new()));
     let persisted = Arc::new(Notify::new());
 
     let applied_for_saga = Arc::clone(&applied);
     let persisted_for_saga = Arc::clone(&persisted);
-    let routed = saga_id.clone();
 
     let _saga_proxy =
         SagaProps::<EnvelopeSaga>::new(saga_id.clone(), Arc::clone(&store), move || EnvelopeSaga {
@@ -144,7 +147,6 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
                 key: upstream_id.as_str().to_owned(),
                 after: 0,
             },
-            move |_event: &Triggered| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;
@@ -212,7 +214,7 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let saga_id = SagaId::new("envelope-replay-saga");
+    let saga_id = SagaId::new(ENVELOPE_SAGA_ID);
 
     let domain_payload = serde_json::to_vec(&DomainEvt {
         note: "seeded-domain".to_owned(),
@@ -263,7 +265,6 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
             },
-            inert_route,
         )
         .spawn(system.process_system())
         .await;

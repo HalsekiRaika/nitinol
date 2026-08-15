@@ -247,12 +247,21 @@ struct TellFailureSaga {
     terminate_after_tell: bool,
 }
 
+/// Correlation rule of [`TellFailureSaga`]: every scenario below runs one
+/// instance against stores of its own, so a single id names the order process
+/// each `OrderPlaced` belongs to.
+const TELL_FAILURE_SAGA_ID: &str = "on-tell-failed-running-target";
+
 #[async_trait]
 impl Saga for TellFailureSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = SagaLog;
     type ScheduledMessage = ();
     type Error = Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(TELL_FAILURE_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: SagaLog) {}
 
@@ -294,12 +303,21 @@ struct ReplayObservingSaga {
     recorder: SharedRecorder,
 }
 
+/// Correlation rule of [`ReplayObservingSaga`]: the single instance whose
+/// seeded stream is replayed, and which the scenario's one `OrderPlaced` is
+/// about.
+const REPLAY_OBSERVING_SAGA_ID: &str = "on-tell-failed-replay";
+
 #[async_trait]
 impl Saga for ReplayObservingSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = SagaLog;
     type ScheduledMessage = ();
     type Error = Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(REPLAY_OBSERVING_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: SagaLog) {}
 
@@ -340,12 +358,20 @@ struct ScheduleAfterFailureSaga {
     recorder: SharedRecorder,
 }
 
+/// Correlation rule of [`ScheduleAfterFailureSaga`]: the one instance its
+/// scenario spawns.
+const SCHEDULE_AFTER_FAILURE_SAGA_ID: &str = "on-tell-failed-timer-drain";
+
 #[async_trait]
 impl Saga for ScheduleAfterFailureSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = SagaLog;
     type ScheduledMessage = Recheck;
     type Error = Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(SCHEDULE_AFTER_FAILURE_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: SagaLog) {}
 
@@ -403,12 +429,20 @@ struct RejectingHookSaga {
     target: FailingTellTarget<Inventory>,
 }
 
+/// Correlation rule of [`RejectingHookSaga`]: the one instance its scenario
+/// spawns.
+const REJECTING_HOOK_SAGA_ID: &str = "on-tell-failed-hook-rejects";
+
 #[async_trait]
 impl Saga for RejectingHookSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = SagaLog;
     type ScheduledMessage = ();
     type Error = HookRejected;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(REJECTING_HOOK_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: SagaLog) {}
 
@@ -596,11 +630,10 @@ async fn run_tell_failure_scenario(saga_key: &str, terminate_after_tell: bool) -
     append_order_placed(&upstream_store, &upstream_key, 1).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(saga_key);
+    let saga_id = SagaId::new(TELL_FAILURE_SAGA_ID);
     let recorder: SharedRecorder = Arc::new(Recorder::default());
 
     let recorder_for_saga = Arc::clone(&recorder);
-    let routed = saga_id.clone();
     let _saga_proxy =
         SagaProps::<TellFailureSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             TellFailureSaga {
@@ -617,7 +650,6 @@ async fn run_tell_failure_scenario(saga_key: &str, terminate_after_tell: bool) -
                 key: upstream_key.clone(),
                 after: 0,
             },
-            move |_event: &OrderPlaced| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;
@@ -699,11 +731,10 @@ async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
     append_order_placed(&upstream_store, &upstream_key, 1).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(RejectTellFailedDeadLetterStore::default());
-    let saga_id = SagaId::new(saga_key);
+    let saga_id = SagaId::new(TELL_FAILURE_SAGA_ID);
     let recorder: SharedRecorder = Arc::new(Recorder::default());
 
     let recorder_for_saga = Arc::clone(&recorder);
-    let routed = saga_id.clone();
     let _saga_proxy =
         SagaProps::<TellFailureSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             TellFailureSaga {
@@ -720,7 +751,6 @@ async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
                 key: upstream_key.clone(),
                 after: 0,
             },
-            move |_event: &OrderPlaced| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;
@@ -757,7 +787,7 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(saga_key);
+    let saga_id = SagaId::new(REPLAY_OBSERVING_SAGA_ID);
 
     append_raw(
         &saga_store,
@@ -778,7 +808,6 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
 
     let recorder: SharedRecorder = Arc::new(Recorder::default());
     let recorder_for_saga = Arc::clone(&recorder);
-    let routed = saga_id.clone();
     let _saga_proxy = SagaProps::<ReplayObservingSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
@@ -794,7 +823,6 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
             key: upstream_key.clone(),
             after: 0,
         },
-        move |_event: &OrderPlaced| Some(routed.clone()),
     )
     .spawn(system.process_system())
     .await;
@@ -832,11 +860,10 @@ async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
     append_order_placed(&upstream_store, &upstream_key, 1).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(saga_key);
+    let saga_id = SagaId::new(SCHEDULE_AFTER_FAILURE_SAGA_ID);
     let recorder: SharedRecorder = Arc::new(Recorder::default());
 
     let recorder_for_saga = Arc::clone(&recorder);
-    let routed = saga_id.clone();
     let _saga_proxy = SagaProps::<ScheduleAfterFailureSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
@@ -853,7 +880,6 @@ async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
             key: upstream_key.clone(),
             after: 0,
         },
-        move |_event: &OrderPlaced| Some(routed.clone()),
     )
     .with_scheduler(scheduler)
     .spawn(system.process_system())
@@ -885,9 +911,8 @@ async fn run_rejecting_hook_scenario(saga_key: &str) -> Vec<LoadedEvent> {
     append_order_placed(&upstream_store, &upstream_key, 1).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(saga_key);
+    let saga_id = SagaId::new(REJECTING_HOOK_SAGA_ID);
 
-    let routed = saga_id.clone();
     let _saga_proxy =
         SagaProps::<RejectingHookSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             RejectingHookSaga {
@@ -902,7 +927,6 @@ async fn run_rejecting_hook_scenario(saga_key: &str) -> Vec<LoadedEvent> {
                 key: upstream_key.clone(),
                 after: 0,
             },
-            move |_event: &OrderPlaced| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;

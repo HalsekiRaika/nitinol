@@ -29,8 +29,8 @@ use crate::scheduler::{ScheduleToken, TimerName};
 ///
 /// Either the successfully decoded event (carrying both typed and raw bytes for
 /// the draining dead-letter path) or a decode failure that the transform could
-/// not recover — both are forwarded to `SagaProcess` so the process can record
-/// a `SagaFailure::DecodeFailed` dead letter immediately.
+/// not recover — both are forwarded to `SagaProcess`, which decides what each
+/// one means for this instance.
 pub(crate) enum UpstreamMessage<E> {
     /// Upstream event decoded successfully.
     Decoded {
@@ -41,9 +41,12 @@ pub(crate) enum UpstreamMessage<E> {
         /// the transform so the dead letter carries the actual payload.
         raw_payload: Bytes,
     },
-    /// The upstream codec failed to decode the event payload.  Routing is
-    /// impossible without a typed event, so the failure is always delivered to
-    /// this saga for DLQ recording.
+    /// The upstream codec failed to decode the event payload.  Correlation is
+    /// impossible without a typed event to hand to [`Saga::correlate`], so the
+    /// failure is delivered to every subscribed saga; whether it becomes a
+    /// `SagaFailure::DecodeFailed` dead letter here is decided by
+    /// [`DecodeFailureRouteFn`], or by the record-always legacy behaviour when
+    /// no route is configured.
     DecodeFailed {
         aggregate_id: AggregateId,
         sequence: u64,
@@ -73,15 +76,18 @@ pub(crate) fn in_flight_count(tell_states: &HashMap<u64, TellState>) -> usize {
 
 pub(crate) type CrashRestartFactory = Arc<dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync>;
 
-pub(crate) type RouteFn<E> = Arc<dyn Fn(&E) -> Option<SagaId> + Send + Sync>;
-
 /// Optional decode-failure routing function.
 ///
 /// When two sagas subscribe to the same upstream stream and a corrupt event
 /// arrives, the transform delivers `UpstreamMessage::DecodeFailed` to every
-/// subscribed saga because the typed event needed for `route_fn` cannot be
+/// subscribed saga because the typed event [`Saga::correlate`] needs cannot be
 /// produced.  Providing this function lets a saga opt out of recording a DLQ
 /// entry when the decode failure belongs to a different saga instance.
+///
+/// This is routing, not correlation: it answers "which subscriber owns this
+/// corrupt wire record?" from the stream key and sequence alone, so it stays an
+/// instance-level setting on `SagaProps` rather than moving to the `Saga` trait
+/// alongside `correlate`.
 ///
 /// Return `Some(saga_id)` to accept the failure (records DLQ only when
 /// `saga_id == self.saga_id`).  Return `None` to decline (no DLQ).
@@ -95,7 +101,6 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) saga_id: SagaId,
     pub(crate) store: Arc<dyn EventStore>,
     pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
-    pub(crate) route_fn: RouteFn<S::SubscribedEvent>,
     pub(crate) decode_failure_route_fn: Option<DecodeFailureRouteFn>,
     pub(crate) sequence: u64,
     pub(crate) retry_policy: RetryPolicy,
@@ -496,12 +501,13 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
         msg: UpstreamMessage<S::SubscribedEvent>,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), SagaUpstreamHandlerError> {
-        // The upstream codec could not decode the event.  The failure is
-        // recorded immediately: without a typed event routing is impossible,
-        // so it is delivered to this saga for DLQ recording unless a
-        // `decode_failure_route_fn` is configured that routes it elsewhere,
-        // which prevents every subscribed saga from recording a duplicate DLQ
-        // entry for the same corrupt upstream event.
+        // The upstream codec could not decode the event.  Correlation is
+        // impossible without a typed event to hand to `Saga::correlate`, so
+        // the failure is delivered to this saga for DLQ recording unless a
+        // `decode_failure_route_fn` is configured — its routing decides which
+        // subscriber owns the corrupt record, preventing every subscribed
+        // saga from recording a duplicate DLQ entry for the same corrupt
+        // upstream event.
         let (aggregate_id, sequence, event, raw_payload) = match msg {
             UpstreamMessage::DecodeFailed {
                 aggregate_id,
@@ -549,7 +555,10 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             } => (aggregate_id, sequence, event, raw_payload),
         };
 
-        let Some(target_id) = (self.route_fn)(&event) else {
+        // Correlation is decided before the lifecycle is consulted: an event
+        // belonging to another instance is none of this saga's business even
+        // while it drains, so it must not become a dead letter here.
+        let Some(target_id) = S::correlate(&event) else {
             return Ok(());
         };
         if target_id != self.saga_id {

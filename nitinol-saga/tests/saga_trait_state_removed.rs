@@ -15,7 +15,7 @@ use async_trait::async_trait;
 
 use nitinol_eventsource::Event;
 use nitinol_persistence::{EventType, Family, TypeName};
-use nitinol_saga::{Saga, SagaContext, SagaEffect};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
 
 #[derive(Clone)]
 struct Counted;
@@ -37,6 +37,10 @@ impl Event for Upstream {
     );
 }
 
+/// Correlation rule of [`MinimalSaga`]: the single process instance every
+/// upstream event in this file belongs to.
+const MINIMAL_SAGA_ID: &str = "saga-trait-state-removed";
+
 /// A saga that implements exactly the required trait items.  Its state is the
 /// `applied` field — no associated type participates in holding it.
 #[derive(Default)]
@@ -50,6 +54,10 @@ impl Saga for MinimalSaga {
     type Event = Counted;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(MINIMAL_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {
         self.applied += 1;

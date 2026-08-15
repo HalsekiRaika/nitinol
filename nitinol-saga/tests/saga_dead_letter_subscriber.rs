@@ -83,12 +83,80 @@ impl std::error::Error for SagaBoom {}
 
 struct FailSaga;
 
+/// Correlation rule of [`FailSaga`]: the one process every `Ping` belongs to.
+const FAIL_SAGA_ID: &str = "dlq-sub-saga";
+
 #[async_trait]
 impl Saga for FailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
     type Error = SagaBoom;
     type ScheduledMessage = ();
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(FAIL_SAGA_ID))
+    }
+
+    fn apply(&mut self, _event: SagaLog) {}
+
+    async fn handle(
+        &mut self,
+        _event: Ping,
+        _ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        Err(SagaBoom)
+    }
+}
+
+/// Correlation is now a property of the saga *type*, so the two sagas that
+/// `same_subscriber_registered_for_two_sagas_receives_both_dead_letters` runs
+/// side by side cannot both be `FailSaga`: that test exists to prove the two
+/// instances stay independent, which requires two distinct ids, and one type
+/// can only name one.  `MultiSagaA` and `MultiSagaB` are therefore separate
+/// types with identical behaviour and distinct correlation rules.
+struct MultiSagaA;
+
+/// Correlation rule of [`MultiSagaA`]: the first of the two side-by-side sagas.
+const MULTI_SAGA_A_ID: &str = "dlq-multi-saga-a";
+
+#[async_trait]
+impl Saga for MultiSagaA {
+    type SubscribedEvent = Ping;
+    type Event = SagaLog;
+    type Error = SagaBoom;
+    type ScheduledMessage = ();
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(MULTI_SAGA_A_ID))
+    }
+
+    fn apply(&mut self, _event: SagaLog) {}
+
+    async fn handle(
+        &mut self,
+        _event: Ping,
+        _ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        Err(SagaBoom)
+    }
+}
+
+/// The second of the two side-by-side sagas — see [`MultiSagaA`].
+struct MultiSagaB;
+
+/// Correlation rule of [`MultiSagaB`]: the second of the two side-by-side sagas.
+const MULTI_SAGA_B_ID: &str = "dlq-multi-saga-b";
+
+#[async_trait]
+impl Saga for MultiSagaB {
+    type SubscribedEvent = Ping;
+    type Event = SagaLog;
+    type Error = SagaBoom;
+    type ScheduledMessage = ();
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(MULTI_SAGA_B_ID))
+    }
 
     fn apply(&mut self, _event: SagaLog) {}
 
@@ -167,9 +235,8 @@ async fn dead_letter_subscriber_receives_the_enqueued_event() {
     append_ping(&upstream_store, "dlq-sub-upstream", 1).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("dlq-sub-saga");
+    let saga_id = SagaId::new(FAIL_SAGA_ID);
 
-    let routed = saga_id.clone();
     let _saga_proxy =
         SagaProps::<FailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || FailSaga)
             .with_codec(system.codec::<SagaLog>())
@@ -181,7 +248,6 @@ async fn dead_letter_subscriber_receives_the_enqueued_event() {
                     key: "dlq-sub-upstream".to_owned(),
                     after: 0,
                 },
-                move |_event: &Ping| Some(routed.clone()),
             )
             .spawn(system.process_system())
             .await;
@@ -215,7 +281,7 @@ async fn dead_letter_subscriber_catchup_delivers_pre_existing_dead_letters() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
-    let saga_id = SagaId::new("dlq-sub-catchup-saga");
+    let saga_id = SagaId::new(FAIL_SAGA_ID);
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     // Pre-append a DeadLetterEvent at sequence 1 — simulating a dead letter that
@@ -249,7 +315,6 @@ async fn dead_letter_subscriber_catchup_delivers_pre_existing_dead_letters() {
     // it just needs to be alive so the DLQ subscriber wiring runs.
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let routed = saga_id.clone();
     let _saga_proxy =
         SagaProps::<FailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || FailSaga)
             .with_codec(system.codec::<SagaLog>())
@@ -261,7 +326,6 @@ async fn dead_letter_subscriber_catchup_delivers_pre_existing_dead_letters() {
                     key: "dlq-sub-catchup-upstream".to_owned(),
                     after: 0,
                 },
-                move |_event: &Ping| Some(routed.clone()),
             )
             .spawn(system.process_system())
             .await;
@@ -303,7 +367,7 @@ async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
-    let saga_id = SagaId::new("dlq-sub-respawn-saga");
+    let saga_id = SagaId::new(FAIL_SAGA_ID);
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     // Pre-append a DeadLetterEvent at sequence 1 — simulating a dead letter that
@@ -335,7 +399,6 @@ async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
         }))
         .await;
 
-    let routed = saga_id.clone();
     let saga_proxy_first =
         SagaProps::<FailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || FailSaga)
             .with_codec(system.codec::<SagaLog>())
@@ -347,7 +410,6 @@ async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
                     key: "dlq-sub-respawn-upstream".to_owned(),
                     after: 0,
                 },
-                move |_event: &Ping| Some(routed.clone()),
             )
             .spawn(system.process_system())
             .await;
@@ -386,7 +448,6 @@ async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
         }))
         .await;
 
-    let routed2 = saga_id.clone();
     let _saga_proxy_second =
         SagaProps::<FailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || FailSaga)
             .with_codec(system.codec::<SagaLog>())
@@ -398,7 +459,6 @@ async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
                     key: "dlq-sub-respawn-upstream".to_owned(),
                     after: 0,
                 },
-                move |_event: &Ping| Some(routed2.clone()),
             )
             .spawn(system.process_system())
             .await;
@@ -443,7 +503,7 @@ async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     // --- Pre-populate saga A stream ---
-    let saga_id_a = SagaId::new("dlq-multi-saga-a");
+    let saga_id_a = SagaId::new(MULTI_SAGA_A_ID);
     let saga_store_a: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let pre_a = DeadLetterEvent {
         seq: 1,
@@ -463,7 +523,7 @@ async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
         .expect("pre-append to saga A must succeed");
 
     // --- Pre-populate saga B stream ---
-    let saga_id_b = SagaId::new("dlq-multi-saga-b");
+    let saga_id_b = SagaId::new(MULTI_SAGA_B_ID);
     let saga_store_b: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let pre_b = DeadLetterEvent {
         seq: 1,
@@ -495,9 +555,8 @@ async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     // --- Wire subscriber to saga A (first) ---
-    let routed_a = saga_id_a.clone();
     let _saga_a =
-        SagaProps::<FailSaga>::new(saga_id_a.clone(), Arc::clone(&saga_store_a), || FailSaga)
+        SagaProps::<MultiSagaA>::new(saga_id_a.clone(), Arc::clone(&saga_store_a), || MultiSagaA)
             .with_codec(system.codec::<SagaLog>())
             .with_dead_letter_subscriber(subscriber_proxy.clone())
             .with_subscription(
@@ -507,7 +566,6 @@ async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
                     key: "dlq-multi-upstream-a".to_owned(),
                     after: 0,
                 },
-                move |_event: &Ping| Some(routed_a.clone()),
             )
             .spawn(system.process_system())
             .await;
@@ -515,9 +573,8 @@ async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
     // --- Wire SAME subscriber to saga B (second) ---
     // Previously, wiring for B would stop the A-poller because both shared the
     // same process name derived from subscriber_pid alone.
-    let routed_b = saga_id_b.clone();
     let _saga_b =
-        SagaProps::<FailSaga>::new(saga_id_b.clone(), Arc::clone(&saga_store_b), || FailSaga)
+        SagaProps::<MultiSagaB>::new(saga_id_b.clone(), Arc::clone(&saga_store_b), || MultiSagaB)
             .with_codec(system.codec::<SagaLog>())
             .with_dead_letter_subscriber(subscriber_proxy.clone())
             .with_subscription(
@@ -527,7 +584,6 @@ async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
                     key: "dlq-multi-upstream-b".to_owned(),
                     after: 0,
                 },
-                move |_event: &Ping| Some(routed_b.clone()),
             )
             .spawn(system.process_system())
             .await;
@@ -578,7 +634,7 @@ async fn dlq_poller_is_stopped_when_saga_stops_while_subscriber_stays_alive() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
-    let saga_id = SagaId::new("dlq-lifecycle-saga");
+    let saga_id = SagaId::new(FAIL_SAGA_ID);
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
@@ -593,7 +649,6 @@ async fn dlq_poller_is_stopped_when_saga_stops_while_subscriber_stays_alive() {
         .await;
     let subscriber_pid = subscriber_proxy.pid();
 
-    let routed = saga_id.clone();
     let saga_proxy =
         SagaProps::<FailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || FailSaga)
             .with_codec(system.codec::<SagaLog>())
@@ -605,7 +660,6 @@ async fn dlq_poller_is_stopped_when_saga_stops_while_subscriber_stays_alive() {
                     key: "dlq-lifecycle-upstream".to_owned(),
                     after: 0,
                 },
-                move |_event: &Ping| Some(routed.clone()),
             )
             .spawn(system.process_system())
             .await;

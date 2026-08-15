@@ -92,6 +92,10 @@ impl Decider<Reserve> for Inventory {
     }
 }
 
+/// Correlation rule of [`ReservationSaga`]: the single reservation process
+/// instance every `OrderPlaced` in this test belongs to.
+const RESERVATION_SAGA_ID: &str = "saga-tell-mock-1";
+
 struct ReservationSaga {
     inventory: MockAggregateProxy<Inventory>,
     done_notify: Arc<Notify>,
@@ -103,6 +107,10 @@ impl Saga for ReservationSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(RESERVATION_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -184,15 +192,12 @@ async fn saga_tell_to_mock_dispatches_command_observable_via_drain_captured() {
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let saga_id = SagaId::new("saga-tell-mock-1");
+    let saga_id = SagaId::new(RESERVATION_SAGA_ID);
     let done = Arc::new(Notify::new());
 
     let mock = MockAggregateProxy::<Inventory>::new();
     let mock_for_saga = mock.clone();
     let done_for_saga = Arc::clone(&done);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || ReservationSaga {
@@ -207,7 +212,6 @@ async fn saga_tell_to_mock_dispatches_command_observable_via_drain_captured() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;

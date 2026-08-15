@@ -88,6 +88,10 @@ impl Decider<Reserve> for Inventory {
     }
 }
 
+/// Correlation rule of [`MultiTellSaga`]: one order process owns every
+/// `OrderPlaced` published in this file's atomic-batch test.
+const MULTI_TELL_SAGA_ID: &str = "atomic-saga-1";
+
 /// A saga that emits `Persist { events, tells, schedules }` where:
 /// - events: one ReservationRequested
 /// - tells: two Reserve commands (different SKUs)
@@ -108,6 +112,10 @@ impl Saga for MultiTellSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(MULTI_TELL_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -204,7 +212,7 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
     append_order_placed(&upstream_store, &order_id, 1, "SKU-A").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("atomic-saga-1");
+    let saga_id = SagaId::new(MULTI_TELL_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let mock_a = MockAggregateProxy::<Inventory>::new();
@@ -212,9 +220,6 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
     let mock_a_clone = mock_a.clone();
     let mock_b_clone = mock_b.clone();
     let handled_clone = Arc::clone(&handled);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<MultiTellSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -232,7 +237,6 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -319,6 +323,11 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
     // Baseline check: a Persist branch with no tells and no schedules must
     // produce *only* the user events in the saga stream — outbox markers must
     // only appear when there is something to mark.
+
+    /// Correlation rule of `UserOnlySaga`: one process owns the single
+    /// `OrderPlaced` this test publishes.
+    const USER_ONLY_SAGA_ID: &str = "user-only-saga-1";
+
     struct UserOnlySaga {
         notify: Arc<Notify>,
         captured: Arc<Mutex<Vec<String>>>,
@@ -330,6 +339,10 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
         type Event = ReservationRequested;
         type ScheduledMessage = ();
         type Error = std::convert::Infallible;
+
+        fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+            Some(SagaId::new(USER_ONLY_SAGA_ID))
+        }
 
         fn apply(&mut self, _event: Self::Event) {}
 
@@ -358,15 +371,12 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
     append_order_placed(&upstream_store, &order_id, 1, "USR-ONLY-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("user-only-saga-1");
+    let saga_id = SagaId::new(USER_ONLY_SAGA_ID);
     let notify = Arc::new(Notify::new());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     let notify_clone = Arc::clone(&notify);
     let captured_clone = Arc::clone(&captured);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<UserOnlySaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -383,7 +393,6 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;

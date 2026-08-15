@@ -29,6 +29,10 @@ impl Event for Recorded {
         EventType::new(Family::new("saga.direct"), TypeName::new("Recorded"));
 }
 
+/// Correlation rule of [`TrivialSaga`]: the single process instance every
+/// `Triggered` belongs to.
+const TRIVIAL_SAGA_ID: &str = "saga-props-direct";
+
 #[derive(Default)]
 struct TrivialSaga;
 
@@ -38,6 +42,10 @@ impl Saga for TrivialSaga {
     type Event = Recorded;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(TRIVIAL_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -57,9 +65,7 @@ async fn saga_props_spawns_with_arc_dyn_event_store() {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let saga_id = SagaId::new("saga-props-direct");
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &Triggered| -> Option<SagaId> { Some(routed.clone()) };
+    let saga_id = SagaId::new(TRIVIAL_SAGA_ID);
 
     let _proxy = SagaProps::<TrivialSaga>::new(saga_id, saga_store, TrivialSaga::default)
         .with_codec(system.codec::<Recorded>())
@@ -67,7 +73,6 @@ async fn saga_props_spawns_with_arc_dyn_event_store() {
             upstream_store,
             system.codec::<Triggered>(),
             SequenceCursor::Global { after: 0 },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;

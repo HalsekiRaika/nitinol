@@ -96,12 +96,21 @@ impl Decider<Reserve> for Inventory {
 #[derive(Default)]
 struct InertSaga;
 
+/// Correlation rule of [`InertSaga`]: the one reservation process this test
+/// spawns.  No upstream event is ever delivered here, but correlation has no
+/// default, so the rule still has to be stated.
+const INERT_SAGA_ID: &str = "crash-restart-saga-1";
+
 #[async_trait]
 impl Saga for InertSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(INERT_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -163,7 +172,7 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("crash-restart-saga-1");
+    let saga_id = SagaId::new(INERT_SAGA_ID);
 
     // Seed a TellRequested with tell_id = 1 and crash-restart bytes = b"Reserve".
     // The factory below identifies "Reserve" intents by these bytes.
@@ -171,9 +180,6 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
     append_raw(&saga_store, saga_id.as_str(), 1, OUTBOX_MARKER, payload).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     // Crash-restart factory: ignore the bytes (Reserve is unit struct), always
     // return a fresh TellIntent that tells Inventory to Reserve.
@@ -197,7 +203,6 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
                     key: "no-such-stream".to_owned(),
                     after: 0,
                 },
-                route_fn,
             )
             .with_crash_restart_factory(factory)
             .spawn(system.process_system())

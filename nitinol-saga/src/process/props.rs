@@ -15,8 +15,7 @@ use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
 use crate::process::proxy::SagaProxy;
 use crate::process::saga_process::{
-    CrashRestartFactory, DecodeFailureRouteFn, Lifecycle, RouteFn, SagaProcess, TellState,
-    UpstreamMessage,
+    CrashRestartFactory, DecodeFailureRouteFn, Lifecycle, SagaProcess, TellState, UpstreamMessage,
 };
 use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
@@ -38,7 +37,6 @@ pub struct SubscriptionSet<S: Saga> {
     pub(crate) upstream_store: Arc<dyn EventStore>,
     pub(crate) upstream_codec: Arc<dyn ErasedCodec<S::SubscribedEvent>>,
     pub(crate) cursor: SequenceCursor,
-    pub(crate) route_fn: RouteFn<S::SubscribedEvent>,
 }
 
 /// Builder for a saga spawn.
@@ -119,17 +117,16 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
     /// At spawn time the saga starts a runtime child `DirectPollerProcess`
     /// (catchup + live, at-least-once).  The poller is cascade-stopped when
     /// the saga stops.
-    pub fn with_subscription<F>(
+    ///
+    /// Which of the delivered events belong to this instance is decided by
+    /// [`Saga::correlate`], not here — correlation is domain knowledge carried
+    /// by the saga type.
+    pub fn with_subscription(
         self,
         upstream_store: Arc<dyn EventStore>,
         upstream_codec: Arc<dyn ErasedCodec<S::SubscribedEvent>>,
         cursor: SequenceCursor,
-        route_fn: F,
-    ) -> SagaProps<S, C, SubscriptionSet<S>>
-    where
-        F: Fn(&S::SubscribedEvent) -> Option<SagaId> + Send + Sync + 'static,
-    {
-        let route_fn: RouteFn<S::SubscribedEvent> = Arc::new(route_fn);
+    ) -> SagaProps<S, C, SubscriptionSet<S>> {
         SagaProps {
             saga_id: self.saga_id,
             store: self.store,
@@ -139,7 +136,6 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
                 upstream_store,
                 upstream_codec,
                 cursor,
-                route_fn,
             },
             crash_restart_factory: self.crash_restart_factory,
             scheduler: self.scheduler,
@@ -215,6 +211,17 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
     ///
     /// Without this call the legacy behaviour applies: every `DecodeFailed` is
     /// recorded against this saga regardless of other subscribers.
+    ///
+    /// # Why this stays on the builder while correlation lives on `Saga`
+    ///
+    /// [`Saga::correlate`] derives a process instance's identity from a typed
+    /// domain event.  A decode failure has no typed event — this function is
+    /// handed only the upstream stream key and sequence, so it decides *which
+    /// subscriber owns a corrupt wire record*, which is routing rather than
+    /// correlation.  Keeping it here also keeps the setting per-instance: two
+    /// instances of the same saga type subscribed to one upstream stream can
+    /// attribute the same corrupt record differently, which a static associated
+    /// function on the type could not express.
     pub fn with_decode_failure_route<F>(mut self, route: F) -> Self
     where
         F: Fn(&AggregateId, u64) -> Option<SagaId> + Send + Sync + 'static,
@@ -245,7 +252,6 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let enqueue_policy: Arc<dyn EnqueuePolicy> =
             self.enqueue_policy.unwrap_or_else(|| Arc::new(EnqueueAll));
         let dead_letter_subscriber = self.dead_letter_subscriber;
-        let route_fn = self.subscription.route_fn;
         let upstream_store = self.subscription.upstream_store;
         let upstream_codec = self.subscription.upstream_codec;
         let cursor = self.subscription.cursor;
@@ -270,13 +276,14 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
                     raw_payload,
                 }),
                 Err(e) => {
-                    // Decode failures are forwarded to SagaProcess as
-                    // `UpstreamMessage::DecodeFailed` so the saga can record a
-                    // `DeadLetterEvent` immediately, with no retry.
+                    // Decoding is not retried: the failure is forwarded to
+                    // SagaProcess as `UpstreamMessage::DecodeFailed`, and
+                    // whether it is recorded as a `DeadLetterEvent` is decided
+                    // there by `decode_failure_route_fn`.
                     tracing::warn!(
                         error = %e,
                         event_type = ?loaded.event_type,
-                        "saga upstream decode failed; delivering as DecodeFailed dead letter",
+                        "saga upstream decode failed; forwarding as DecodeFailed",
                     );
                     Some(UpstreamMessage::DecodeFailed {
                         aggregate_id,
@@ -295,7 +302,6 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let saga_id_for_props = saga_id.clone();
         let store_for_props = Arc::clone(&store);
         let codec_for_props = Arc::clone(&codec);
-        let route_fn_for_props = Arc::clone(&route_fn);
         let producer_for_props = Arc::clone(&producer);
         let crash_restart_factory_for_props = self.crash_restart_factory;
         let scheduler_for_props = self.scheduler;
@@ -317,7 +323,6 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
                 saga_id: saga_id_for_props.clone(),
                 store: Arc::clone(&store_for_props),
                 codec: Arc::clone(&codec_for_props),
-                route_fn: Arc::clone(&route_fn_for_props),
                 decode_failure_route_fn: decode_failure_route_fn_for_props.clone(),
                 sequence: 0,
                 retry_policy: RetryPolicy::default(),

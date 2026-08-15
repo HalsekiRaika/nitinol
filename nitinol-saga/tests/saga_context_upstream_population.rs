@@ -55,12 +55,20 @@ struct CapturingSaga {
     notify: Arc<Notify>,
 }
 
+/// Correlation rule of [`CapturingSaga`]: the single order process every
+/// `OrderPlaced` seeded by these tests belongs to.
+const CAPTURING_SAGA_ID: &str = "saga-ctx-upstream-1";
+
 #[async_trait]
 impl Saga for CapturingSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(CAPTURING_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -154,15 +162,12 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-ctx-upstream-1");
+    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
@@ -177,7 +182,6 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -206,15 +210,12 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
     append_order_placed(&upstream_store, &order_id, 3, "S-3").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-ctx-upstream-seq-1");
+    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
@@ -229,7 +230,6 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -259,15 +259,12 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
     append_order_placed(&upstream_store, &order_id, 1, "NOW-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-ctx-now-1");
+    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
@@ -282,7 +279,6 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -317,15 +313,12 @@ async fn saga_context_existing_accessors_remain_saga_scoped() {
     append_order_placed(&upstream_store, &order_id, 7, "SCOPE-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-ctx-saga-scope-1");
+    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
@@ -340,7 +333,6 @@ async fn saga_context_existing_accessors_remain_saga_scoped() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;

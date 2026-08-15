@@ -139,6 +139,10 @@ impl Decider<Reserve> for Inventory {
     }
 }
 
+/// Correlation rule of [`FailingSaga`]: the single retry process instance every
+/// `OrderPlaced` in this test belongs to.
+const FAILING_SAGA_ID: &str = "retry-saga-1";
+
 struct FailingSaga {
     target: FailingTellTarget<Inventory>,
     handled: Arc<Notify>,
@@ -150,6 +154,10 @@ impl Saga for FailingSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(FAILING_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -243,15 +251,12 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
     append_order_placed(&upstream_store, &order_id, 1, "RETRY-SKU").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("retry-saga-1");
+    let saga_id = SagaId::new(FAILING_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let target = FailingTellTarget::<Inventory>::new();
     let target_for_saga = target.clone();
     let handled_for_saga = Arc::clone(&handled);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<FailingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -268,7 +273,6 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;

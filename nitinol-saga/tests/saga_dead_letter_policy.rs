@@ -87,12 +87,20 @@ struct AlwaysFailSaga {
     handle_count: Arc<AtomicUsize>,
 }
 
+/// Correlation rule of [`AlwaysFailSaga`]: the single process every `Ping` in
+/// this file belongs to.
+const ALWAYS_FAIL_SAGA_ID: &str = "dlq-default-saga";
+
 #[async_trait]
 impl Saga for AlwaysFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
     type Error = SagaBoom;
     type ScheduledMessage = ();
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(ALWAYS_FAIL_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: SagaLog) {}
 
@@ -201,13 +209,12 @@ async fn default_policy_enqueues_the_failure() {
     append_ping(&upstream_store, "dlq-default-upstream", 1).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("dlq-default-saga");
+    let saga_id = SagaId::new(ALWAYS_FAIL_SAGA_ID);
     let handled = Arc::new(Notify::new());
     let handle_count = Arc::new(AtomicUsize::new(0));
 
     let handled_for_saga = Arc::clone(&handled);
     let handle_count_for_saga = Arc::clone(&handle_count);
-    let routed = saga_id.clone();
     let _proxy =
         SagaProps::<AlwaysFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             AlwaysFailSaga {
@@ -223,7 +230,6 @@ async fn default_policy_enqueues_the_failure() {
                 key: "dlq-default-upstream".to_owned(),
                 after: 0,
             },
-            move |_event: &Ping| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;
@@ -262,13 +268,12 @@ async fn ignore_all_policy_suppresses_enqueue() {
     append_ping(&upstream_store, "dlq-ignore-upstream", 1).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("dlq-ignore-saga");
+    let saga_id = SagaId::new(ALWAYS_FAIL_SAGA_ID);
     let handled = Arc::new(Notify::new());
     let handle_count = Arc::new(AtomicUsize::new(0));
 
     let handled_for_saga = Arc::clone(&handled);
     let handle_count_for_saga = Arc::clone(&handle_count);
-    let routed = saga_id.clone();
     let _proxy =
         SagaProps::<AlwaysFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             AlwaysFailSaga {
@@ -285,7 +290,6 @@ async fn ignore_all_policy_suppresses_enqueue() {
                 key: "dlq-ignore-upstream".to_owned(),
                 after: 0,
             },
-            move |_event: &Ping| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;

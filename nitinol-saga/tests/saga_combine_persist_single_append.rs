@@ -195,6 +195,10 @@ fn describe(batches: &[Vec<RecordedEvent>]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// Correlation rule of [`PersistCombineTellSaga`]: the single reservation
+/// process every `OrderPlaced` in this test belongs to.
+const PERSIST_COMBINE_TELL_SAGA_ID: &str = "combine-single-saga";
+
 /// Mirrors `examples/saga/1.basic-saga/src/saga.rs` verbatim in shape:
 /// `persist(..).combine(tell(..))`.
 struct PersistCombineTellSaga {
@@ -208,6 +212,10 @@ impl Saga for PersistCombineTellSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(PERSIST_COMBINE_TELL_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -235,12 +243,20 @@ struct PersistSequencedWithTellSaga {
     handled: Arc<Notify>,
 }
 
+/// Correlation rule of [`PersistSequencedWithTellSaga`]: the single reservation
+/// process every `OrderPlaced` in this test belongs to.
+const PERSIST_SEQUENCED_WITH_TELL_SAGA_ID: &str = "sequence-single-saga";
+
 #[async_trait]
 impl Saga for PersistSequencedWithTellSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(PERSIST_SEQUENCED_WITH_TELL_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -270,12 +286,22 @@ struct PersistSequencedWithEmptyNestedSequenceSaga {
     handled: Arc<Notify>,
 }
 
+/// Correlation rule of [`PersistSequencedWithEmptyNestedSequenceSaga`]: the
+/// single reservation process every `OrderPlaced` in this test belongs to.
+const PERSIST_SEQUENCED_WITH_EMPTY_NESTED_SEQUENCE_SAGA_ID: &str = "sequence-empty-nested-saga";
+
 #[async_trait]
 impl Saga for PersistSequencedWithEmptyNestedSequenceSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(
+            PERSIST_SEQUENCED_WITH_EMPTY_NESTED_SEQUENCE_SAGA_ID,
+        ))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -308,12 +334,20 @@ struct PersistSequencedWithNoneLeafSaga {
     handled: Arc<Notify>,
 }
 
+/// Correlation rule of [`PersistSequencedWithNoneLeafSaga`]: the single
+/// reservation process every `OrderPlaced` in this test belongs to.
+const PERSIST_SEQUENCED_WITH_NONE_LEAF_SAGA_ID: &str = "sequence-none-leaf-saga";
+
 #[async_trait]
 impl Saga for PersistSequencedWithNoneLeafSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(PERSIST_SEQUENCED_WITH_NONE_LEAF_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -340,12 +374,20 @@ struct PersistCombineTwoTellsSaga {
     handled: Arc<Notify>,
 }
 
+/// Correlation rule of [`PersistCombineTwoTellsSaga`]: the single reservation
+/// process every `OrderPlaced` in this test belongs to.
+const PERSIST_COMBINE_TWO_TELLS_SAGA_ID: &str = "combine-order-saga";
+
 #[async_trait]
 impl Saga for PersistCombineTwoTellsSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(PERSIST_COMBINE_TWO_TELLS_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -387,12 +429,20 @@ struct PersistCombineScheduleSaga {
     handled: Arc<Notify>,
 }
 
+/// Correlation rule of [`PersistCombineScheduleSaga`]: the single reservation
+/// process every `OrderPlaced` in this test belongs to.
+const PERSIST_COMBINE_SCHEDULE_SAGA_ID: &str = "combine-schedule-saga";
+
 #[async_trait]
 impl Saga for PersistCombineScheduleSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
     type ScheduledMessage = Reminder;
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(PERSIST_COMBINE_SCHEDULE_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -498,12 +548,11 @@ async fn persist_combined_with_tell_is_written_in_one_append_batch() {
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
     let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore::new(Arc::clone(&batches)));
-    let saga_id = SagaId::new("combine-single-saga");
+    let saga_id = SagaId::new(PERSIST_COMBINE_TELL_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let inventory_clone = inventory.clone();
     let handled_clone = Arc::clone(&handled);
-    let routed = saga_id.clone();
 
     let _saga_proxy = SagaProps::<PersistCombineTellSaga>::new(
         saga_id.clone(),
@@ -521,7 +570,6 @@ async fn persist_combined_with_tell_is_written_in_one_append_batch() {
             key: order_id.as_str().to_owned(),
             after: 0,
         },
-        move |_: &OrderPlaced| Some(routed.clone()),
     )
     .spawn(system.process_system())
     .await;
@@ -605,12 +653,11 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
     let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore::new(Arc::clone(&batches)));
-    let saga_id = SagaId::new("sequence-single-saga");
+    let saga_id = SagaId::new(PERSIST_SEQUENCED_WITH_TELL_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let inventory_clone = inventory.clone();
     let handled_clone = Arc::clone(&handled);
-    let routed = saga_id.clone();
 
     let _saga_proxy = SagaProps::<PersistSequencedWithTellSaga>::new(
         saga_id.clone(),
@@ -628,7 +675,6 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
             key: order_id.as_str().to_owned(),
             after: 0,
         },
-        move |_: &OrderPlaced| Some(routed.clone()),
     )
     .spawn(system.process_system())
     .await;
@@ -713,12 +759,11 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
     let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore::new(Arc::clone(&batches)));
-    let saga_id = SagaId::new("sequence-empty-nested-saga");
+    let saga_id = SagaId::new(PERSIST_SEQUENCED_WITH_EMPTY_NESTED_SEQUENCE_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let inventory_clone = inventory.clone();
     let handled_clone = Arc::clone(&handled);
-    let routed = saga_id.clone();
 
     let _saga_proxy = SagaProps::<PersistSequencedWithEmptyNestedSequenceSaga>::new(
         saga_id.clone(),
@@ -736,7 +781,6 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
             key: order_id.as_str().to_owned(),
             after: 0,
         },
-        move |_: &OrderPlaced| Some(routed.clone()),
     )
     .spawn(system.process_system())
     .await;
@@ -822,12 +866,11 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
     let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore::new(Arc::clone(&batches)));
-    let saga_id = SagaId::new("sequence-none-leaf-saga");
+    let saga_id = SagaId::new(PERSIST_SEQUENCED_WITH_NONE_LEAF_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let inventory_clone = inventory.clone();
     let handled_clone = Arc::clone(&handled);
-    let routed = saga_id.clone();
 
     let _saga_proxy = SagaProps::<PersistSequencedWithNoneLeafSaga>::new(
         saga_id.clone(),
@@ -845,7 +888,6 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
             key: order_id.as_str().to_owned(),
             after: 0,
         },
-        move |_: &OrderPlaced| Some(routed.clone()),
     )
     .spawn(system.process_system())
     .await;
@@ -927,13 +969,12 @@ async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
     let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore::new(Arc::clone(&batches)));
-    let saga_id = SagaId::new("combine-order-saga");
+    let saga_id = SagaId::new(PERSIST_COMBINE_TWO_TELLS_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let first_clone = first.clone();
     let second_clone = second.clone();
     let handled_clone = Arc::clone(&handled);
-    let routed = saga_id.clone();
 
     let _saga_proxy = SagaProps::<PersistCombineTwoTellsSaga>::new(
         saga_id.clone(),
@@ -952,7 +993,6 @@ async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
             key: order_id.as_str().to_owned(),
             after: 0,
         },
-        move |_: &OrderPlaced| Some(routed.clone()),
     )
     .spawn(system.process_system())
     .await;
@@ -1016,11 +1056,10 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
     let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore::new(Arc::clone(&batches)));
-    let saga_id = SagaId::new("combine-schedule-saga");
+    let saga_id = SagaId::new(PERSIST_COMBINE_SCHEDULE_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let handled_clone = Arc::clone(&handled);
-    let routed = saga_id.clone();
 
     let _saga_proxy = SagaProps::<PersistCombineScheduleSaga>::new(
         saga_id.clone(),
@@ -1037,7 +1076,6 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
             key: order_id.as_str().to_owned(),
             after: 0,
         },
-        move |_: &OrderPlaced| Some(routed.clone()),
     )
     .spawn(system.process_system())
     .await;

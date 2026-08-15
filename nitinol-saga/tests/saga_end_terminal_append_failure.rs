@@ -103,12 +103,21 @@ struct TellThenEndSaga {
     handled_first: Arc<Notify>,
 }
 
+/// Correlation rule of [`TellThenEndSaga`]: both upstream events name this
+/// instance, so the second one being dropped can only be the stop taking
+/// effect — never a correlation mismatch.
+const TELL_THEN_END_SAGA_ID: &str = "term-fail-saga";
+
 #[async_trait]
 impl Saga for TellThenEndSaga {
     type SubscribedEvent = UpstreamTrigger;
     type Event = SagaMarker;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(TELL_THEN_END_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: SagaMarker) {}
 
@@ -213,7 +222,7 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
         .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(TwoSuccessStore::new());
-    let saga_id = SagaId::new("term-fail-saga");
+    let saga_id = SagaId::new(TELL_THEN_END_SAGA_ID);
 
     let handle_count: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let handled_first = Arc::new(Notify::new());
@@ -221,7 +230,6 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_first_clone = Arc::clone(&handled_first);
     let target_proxy_clone = target_proxy.clone();
-    let routed = saga_id.clone();
 
     let _saga_proxy =
         SagaProps::<TellThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -239,7 +247,6 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
                 key: agg_id.as_str().to_owned(),
                 after: 0,
             },
-            move |_: &UpstreamTrigger| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;

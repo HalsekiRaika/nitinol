@@ -47,6 +47,10 @@ impl Event for ReservationRequested {
         EventType::new(Family::new("end"), TypeName::new("ReservationRequested"));
 }
 
+/// Correlation rule of [`PersistThenEndSaga`]: this file drives one order
+/// process, so every `OrderPlaced` names that single instance.
+const PERSIST_THEN_END_SAGA_ID: &str = "end-saga-1";
+
 /// A saga that emits `Persist.combine(End)` so we can verify both:
 /// 1. The user event is persisted before End is interpreted
 /// 2. Effects after End in the same handle call must not be interpreted
@@ -61,6 +65,10 @@ impl Saga for PersistThenEndSaga {
     type Event = ReservationRequested;
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(PERSIST_THEN_END_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -134,15 +142,12 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     append_order_placed(&upstream_store, &order_id, 1, "FIRST").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("end-saga-1");
+    let saga_id = SagaId::new(PERSIST_THEN_END_SAGA_ID);
     let handle_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let handled_first = Arc::new(Notify::new());
 
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_first_clone = Arc::clone(&handled_first);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -159,7 +164,6 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
