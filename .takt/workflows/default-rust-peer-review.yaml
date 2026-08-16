@@ -1,5 +1,5 @@
 name: default-rust-peer-review
-description: Rust Phase 2。architecture + AI antipattern + Rust coding reviewの並列レビュー ⇄ 修正後、BuiltIn merge-readiness final gateを実行。
+description: Rust Phase 2。architecture + AI antipattern + Rust coding reviewを並列実行し、0.58のreview adjudicationで指摘を裁定してからfinal gateへ進む。
 subworkflow:
   callable: true
   visibility: internal
@@ -11,11 +11,13 @@ workflow_config:
       network_access: true
     opencode:
       network_access: true
+max_steps: 50
 initial_step: reviewers
+
 loop_monitors:
-  # 通常のレビュー差し戻し経路: reviewers -> fix -> reviewers
   - cycle:
       - reviewers
+      - review-adjudication
       - fix
     threshold: 3
     judge:
@@ -26,20 +28,22 @@ loop_monitors:
           next: reviewers
         - condition: 非生産的（同じ指摘が繰り返される）
           next: ABORT
-  # 最終ゲート差し戻し経路: final-gate -> fix -> reviewers -> final-gate
+
   - cycle:
+      - reviewers
+      - review-adjudication
       - final-gate
       - fix
-      - reviewers
     threshold: 3
     judge:
       persona: supervisor
       instruction: loop-monitor-reviewers-fix
       rules:
         - condition: 健全（指摘数が減少、修正が反映されている）
-          next: final-gate
+          next: reviewers
         - condition: 非生産的（同じ指摘が繰り返される）
           next: ABORT
+
 steps:
   - name: reviewers
     tags:
@@ -69,6 +73,7 @@ steps:
           report:
             - name: architect-review.md
               format: architecture-review
+
       - name: ai-antipattern-review-2nd
         tags:
           - review
@@ -92,6 +97,7 @@ steps:
           report:
             - name: ai-antipattern-review-final.md
               format: ai-antipattern-review
+
       - name: coding-review
         tags:
           - review
@@ -117,26 +123,54 @@ steps:
           report:
             - name: coding-review.md
               format: coding-review
+
+    # 0.58ではreview結果を必ず裁定し、review-resolution.mdを生成してから
+    # final gate / fixへ進める。
     rules:
       - condition: all("approved", "AI特有の問題なし", "approved")
-        next: final-gate
+        next: review-adjudication
       - condition: any("needs_fix", "AI特有の問題あり", "needs_fix")
-        next: fix
-  - name: final-gate
-    kind: workflow_call
-    call: merge-readiness-final-gate
-    args:
-      supervise_knowledge:
+        next: review-adjudication
+
+  - name: review-adjudication
+    uses: peer-review-adjudication
+    with:
+      review_policy_additions:
+        - rust-review
+        - report-phase-boundary
+      review_knowledge_additions:
         - architecture
     rules:
-      - condition: COMPLETE
-        next: COMPLETE
-      - condition: needs_fix
+      - condition: 修正対象あり
         next: fix
-      - condition: need_replan
+      - condition: 修正対象なし
+        next: final-gate
+      - condition: タスク全体の再計画が必要
         return: need_replan
-      - condition: ABORT
+
+  # 0.58のpeer-review final gateを同一report namespaceで使う。
+  # review-adjudicationが直前にreview-resolution.mdを生成するため、
+  # supervise-merge-readinessのreport依存を満たす。
+  - name: final-gate
+    uses: peer-review-final-gate
+    with:
+      merge_readiness_policy:
+        - review
+        - rust-review
+        - report-phase-boundary
+      review_knowledge:
+        - architecture
+      final_gate_instruction: supervise-merge-readiness
+    rules:
+      - condition: マージ可能
+        next: COMPLETE
+      - condition: 修正が必要
+        next: fix
+      - condition: タスク全体の再計画が必要
+        return: need_replan
+      - condition: 実行環境により判定不能
         next: ABORT
+
   - name: fix
     tags:
       - coding
