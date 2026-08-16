@@ -15,6 +15,8 @@
 //! | Effect ADT | [`SagaEffect`] |
 //! | Identifier | [`SagaId`] |
 //! | Spawn builder | [`SagaProps`] |
+//! | System-bound spawn builder | [`SagaSpawn`] (from [`SagaSystemExt::spawn_saga`]) |
+//! | Upstream subscription value | [`Subscription`] |
 //! | Handle | [`SagaProxy`] |
 //! | Instance-manager spawn builder | [`SagaManagerProps`] |
 //! | Instance-manager handle | [`SagaManagerProxy`] |
@@ -28,6 +30,13 @@
 //!   via a runtime child `DirectPollerProcess` (catchup + live, at-least-once delivery).
 //!   The poller's lifetime is bound to the saga process; when the saga stops the runtime
 //!   cascade-stops the child poller automatically.
+//! - Symmetric spawn: [`SagaSystemExt`] extends
+//!   [`nitinol_eventsource::system::EventSourceSystem`] with
+//!   [`spawn_saga`](SagaSystemExt::spawn_saga), the counterpart of
+//!   `EventSourceSystem::spawn_aggregate` — both event codecs and the
+//!   `ProcessSystem` come from the system, and store plus start position arrive
+//!   as one [`Subscription`].  [`SagaProps`] stays the entry point for the
+//!   settings that builder does not take.
 //! - Instance management: [`SagaManagerProps`] spawns one manager that holds a
 //!   *single* upstream subscription for every instance of a saga type, so an
 //!   upstream record is decoded once no matter how far the correlation fans
@@ -100,6 +109,7 @@ mod persisted;
 mod process;
 mod saga;
 mod scheduler;
+mod system_ext;
 
 pub use self::context::SagaContext;
 pub use self::dead_letter::{
@@ -113,3 +123,4 @@ pub use self::process::{
 };
 pub use self::saga::Saga;
 pub use self::scheduler::{spawn_scheduler, ScheduleToken, SchedulerProxy, TimerName};
+pub use self::system_ext::{SagaSpawn, SagaSystemExt, Subscription};

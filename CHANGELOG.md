@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-saga`): `SagaSystemExt` / `Subscription` — spawning a saga from an
+  `EventSourceSystem`, symmetrically to `EventSourceSystem::spawn_aggregate`.
+  An aggregate spawn already resolved its codec from the system, while a saga
+  spawn went straight to `ProcessSystem` and had the caller hand over
+  `system.codec::<E>()` twice plus a hand-built `SequenceCursor`.
+  `system.spawn_saga(saga_id, store, producer).subscribed_to(subscription)`
+  takes those from the system instead: the codec for the saga's own events, the
+  codec for the events it subscribes to, and the `ProcessSystem` to spawn into.
+  `Subscription::stream(&store, &key)` folds the upstream store and its start
+  position into one value and defaults to the beginning of the stream, so a
+  saga catches up on what was written before it was spawned;
+  `Subscription::with_after(n)` resumes past a position already processed.
+
+  The trait is declared in `nitinol-saga` rather than as an inherent method on
+  `EventSourceSystem`, because `nitinol-saga` depends on `nitinol-eventsource`
+  and an inherent method would make that crate depend back on this one. The
+  subscription requirement stays enforced at compile time: `spawn()` exists only
+  after `subscribed_to()`.
+
+  `SagaProps` is unchanged and remains the entry point for a saga that needs
+  `with_scheduler`, `with_enqueue_policy`, `with_dead_letter_subscriber`,
+  `with_crash_restart_factory` or `with_decode_failure_route`.
+
 - (`nitinol-saga`): `SagaManagerProps` / `SagaManagerProxy` — a saga instance
   manager. Previously one `SagaProps` spawn meant one saga bound to one fixed
   `SagaId`, so running a process-manager instance per correlation id required

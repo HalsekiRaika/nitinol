@@ -4,16 +4,15 @@ use std::time::Duration;
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::SequenceCursor;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaProps;
+use nitinol_saga::{SagaSystemExt, Subscription};
 
 use saga_basic_saga::codec::JsonCodec;
 use saga_basic_saga::inventory::{GetReservedCount, Inventory};
-use saga_basic_saga::order::{Order, OrderPlaced, PlaceOrder};
-use saga_basic_saga::saga::{ReservationRequested, ReservationSaga};
+use saga_basic_saga::order::{Order, PlaceOrder};
+use saga_basic_saga::saga::ReservationSaga;
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -46,22 +45,14 @@ async fn main() {
 
     let inventory_for_producer = inventory_proxy.clone();
 
-    let _saga_proxy =
-        SagaProps::<ReservationSaga>::new(ReservationSaga::instance_id(), saga_store, move || {
+    let _saga_proxy = system
+        .spawn_saga(ReservationSaga::instance_id(), saga_store, move || {
             ReservationSaga {
                 inventory: inventory_for_producer.clone(),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&order_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
+        .subscribed_to(Subscription::stream(&order_store, &order_id))
+        .spawn()
         .await;
 
     order_proxy
