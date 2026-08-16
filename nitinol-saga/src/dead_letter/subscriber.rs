@@ -1,7 +1,9 @@
 //! DLQ subscriber wiring via [`DurableSubscription`].
 //!
-//! `SagaProps::with_dead_letter_subscriber(proxy)` registers a subscriber
-//! process `P: Receive<DeadLetterEvent>`.  At spawn time the saga starts a
+//! `SagaProps::with_dead_letter_subscriber(proxy)` — or
+//! `SagaManagerProps::with_dead_letter_subscriber(proxy)` for every instance a
+//! manager spawns — registers a subscriber process
+//! `P: Receive<DeadLetterEvent>`.  At spawn time the saga starts a
 //! [`DurableSubscription`] direct poller for the subscriber over the saga's
 //! **own** EventStore stream, decoding only dead-letter events.  The subscriber
 //! catches up from the saga stream even if it was down when the dead letter

@@ -261,7 +261,9 @@ impl Receive<WheelTick> for SchedulerProcess {
 
 /// A cloneable handle to the resident `SchedulerProcess`.
 ///
-/// Injected into a saga via [`crate::SagaProps::with_scheduler`].  The methods
+/// Injected into a saga via [`crate::SagaProps::with_scheduler`], or into every
+/// instance a manager spawns via
+/// [`crate::SagaManagerProps::with_scheduler`].  The methods
 /// are the named timer operations the saga effect interpreter and lifecycle
 /// hooks drive.
 #[derive(Clone)]

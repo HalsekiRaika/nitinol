@@ -1,21 +1,24 @@
+#[cfg(test)]
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use nitinol_eventsource::codec::ErasedCodec;
-use nitinol_eventsource::{DurableSubscription, SequenceCursor};
+use nitinol_eventsource::SequenceCursor;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::{ProcessSystem, Props};
+use nitinol_runtime::ProcessSystem;
 
 use crate::dead_letter::{
-    make_dlq_child_spawn, DeadLetterEvent, DlqChildSpawn, EnqueueAll, EnqueuePolicy,
+    default_enqueue_policy, make_dlq_child_spawn, DeadLetterEvent, DlqChildSpawn, EnqueuePolicy,
 };
 use crate::effect::TellIntent;
 use crate::id::SagaId;
-use crate::outbox::RetryPolicy;
+use crate::process::instance::SagaInstanceSpec;
 use crate::process::proxy::SagaProxy;
+#[cfg(test)]
+use crate::process::saga_process::TellState;
 use crate::process::saga_process::{
-    CrashRestartFactory, DecodeFailureRouteFn, Lifecycle, SagaProcess, TellState, UpstreamMessage,
+    upstream_subscription, CrashRestartFactory, DecodeFailureRouteFn, OwnedUpstream, SagaProcess,
 };
 use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
@@ -245,100 +248,27 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
     /// channel is created.  The poller's lifetime is bound to the saga
     /// process; when the saga stops the runtime cascade-stops the poller.
     pub async fn spawn(self, system: &ProcessSystem) -> SagaProxy<S> {
-        let saga_id = self.saga_id;
-        let store = self.store;
-        let producer = self.producer;
-        let codec = self.codec.codec;
-        let enqueue_policy: Arc<dyn EnqueuePolicy> =
-            self.enqueue_policy.unwrap_or_else(|| Arc::new(EnqueueAll));
-        let dead_letter_subscriber = self.dead_letter_subscriber;
-        let upstream_store = self.subscription.upstream_store;
-        let upstream_codec = self.subscription.upstream_codec;
-        let cursor = self.subscription.cursor;
-
-        let codec_for_transform = Arc::clone(&upstream_codec);
-        let transform = move |loaded: nitinol_persistence::LoadedEvent| {
-            if loaded.event_type.type_key()
-                != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE.type_key()
-            {
-                return None;
-            }
-            // Capture the raw payload before decoding so the draining branch can
-            // preserve it in `SagaFailure::EndedSagaReceivedMessage`.
-            let raw_payload = loaded.payload.clone();
-            let aggregate_id = AggregateId::new(loaded.stream_key);
-            let sequence = loaded.sequence;
-            match codec_for_transform.decode(&loaded.payload) {
-                Ok(event) => Some(UpstreamMessage::Decoded {
-                    aggregate_id,
-                    sequence,
-                    event,
-                    raw_payload,
-                }),
-                Err(e) => {
-                    // Decoding is not retried: the failure is forwarded to
-                    // SagaProcess as `UpstreamMessage::DecodeFailed`, and
-                    // whether it is recorded as a `DeadLetterEvent` is decided
-                    // there by `decode_failure_route_fn`.
-                    tracing::warn!(
-                        error = %e,
-                        event_type = ?loaded.event_type,
-                        "saga upstream decode failed; forwarding as DecodeFailed",
-                    );
-                    Some(UpstreamMessage::DecodeFailed {
-                        aggregate_id,
-                        sequence,
-                        error: e.to_string(),
-                    })
-                }
-            }
+        let spec = SagaInstanceSpec::<S> {
+            saga_id: self.saga_id,
+            store: self.store,
+            producer: self.producer,
+            codec: self.codec.codec,
+            enqueue_policy: self.enqueue_policy.unwrap_or_else(default_enqueue_policy),
+            upstream: Some(OwnedUpstream {
+                config: upstream_subscription::<S>(
+                    self.subscription.upstream_store,
+                    self.subscription.upstream_codec,
+                ),
+                cursor: self.subscription.cursor,
+            }),
+            crash_restart_factory: self.crash_restart_factory,
+            scheduler: self.scheduler,
+            decode_failure_route_fn: self.decode_failure_route_fn,
+            dlq_child_spawn: self.dead_letter_subscriber,
+            #[cfg(test)]
+            initial_tell_states: self.initial_tell_states,
         };
 
-        let upstream_config = DurableSubscription::<UpstreamMessage<S::SubscribedEvent>>::new(
-            upstream_store,
-            transform,
-        );
-
-        let saga_id_for_props = saga_id.clone();
-        let store_for_props = Arc::clone(&store);
-        let codec_for_props = Arc::clone(&codec);
-        let producer_for_props = Arc::clone(&producer);
-        let crash_restart_factory_for_props = self.crash_restart_factory;
-        let scheduler_for_props = self.scheduler;
-        let enqueue_policy_for_props = Arc::clone(&enqueue_policy);
-        let decode_failure_route_fn_for_props = self.decode_failure_route_fn;
-        let dlq_child_spawn_for_props = dead_letter_subscriber;
-        #[cfg(test)]
-        let initial_tell_states_for_props = self.initial_tell_states;
-        let upstream_config_for_props = upstream_config;
-        let cursor_for_props = cursor;
-
-        let props = Props::new(move || {
-            #[cfg(not(test))]
-            let tell_states: HashMap<u64, TellState> = HashMap::new();
-            #[cfg(test)]
-            let tell_states: HashMap<u64, TellState> = initial_tell_states_for_props.clone();
-            SagaProcess::<S> {
-                state: producer_for_props(),
-                saga_id: saga_id_for_props.clone(),
-                store: Arc::clone(&store_for_props),
-                codec: Arc::clone(&codec_for_props),
-                decode_failure_route_fn: decode_failure_route_fn_for_props.clone(),
-                sequence: 0,
-                retry_policy: RetryPolicy::default(),
-                tell_states,
-                crash_restart_factory: crash_restart_factory_for_props.clone(),
-                lifecycle: Lifecycle::Running,
-                upstream_config: upstream_config_for_props.clone(),
-                upstream_cursor: cursor_for_props.clone(),
-                scheduler: scheduler_for_props.clone(),
-                enqueue_policy: Arc::clone(&enqueue_policy_for_props),
-                // DLQ child spawner is passed via Arc so it can be cloned into
-                // each restart incarnation (Props::new is Fn, not FnOnce).
-                dlq_child_spawn: dlq_child_spawn_for_props.clone(),
-            }
-        });
-
-        system.spawn(props).await.into()
+        system.spawn(spec.into_props()).await.into()
     }
 }

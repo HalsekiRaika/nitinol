@@ -7,7 +7,7 @@ use futures_core::future::BoxFuture;
 use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::{DurableSubscription, SequenceCursor};
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::AggregateId;
+use nitinol_persistence::{AggregateId, LoadedEvent};
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
 
 use crate::context::SagaContext;
@@ -52,6 +52,72 @@ pub(crate) enum UpstreamMessage<E> {
         sequence: u64,
         error: String,
     },
+}
+
+/// Build the subscription that turns each raw upstream record into the
+/// [`UpstreamMessage`] a saga understands.
+///
+/// Owned here rather than at either spawn boundary so a standalone saga and a
+/// manager-fronted one classify the same record — wrong type, decodable,
+/// corrupt — identically.
+pub(crate) fn upstream_subscription<S: Saga>(
+    store: Arc<dyn EventStore>,
+    codec: Arc<dyn ErasedCodec<S::SubscribedEvent>>,
+) -> DurableSubscription<UpstreamMessage<S::SubscribedEvent>> {
+    DurableSubscription::new(store, move |loaded: LoadedEvent| {
+        if loaded.event_type.type_key()
+            != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE.type_key()
+        {
+            return None;
+        }
+        // Capture the raw payload before decoding so the draining branch can
+        // preserve it in `SagaFailure::EndedSagaReceivedMessage`.
+        let raw_payload = loaded.payload.clone();
+        let aggregate_id = AggregateId::new(loaded.stream_key);
+        let sequence = loaded.sequence;
+        match codec.decode(&loaded.payload) {
+            Ok(event) => Some(UpstreamMessage::Decoded {
+                aggregate_id,
+                sequence,
+                event,
+                raw_payload,
+            }),
+            Err(e) => {
+                // Decoding is not retried: the failure is forwarded as
+                // `UpstreamMessage::DecodeFailed`, and what it means is decided
+                // by whoever receives it.
+                tracing::warn!(
+                    error = %e,
+                    event_type = ?loaded.event_type,
+                    "saga upstream decode failed; forwarding as DecodeFailed",
+                );
+                Some(UpstreamMessage::DecodeFailed {
+                    aggregate_id,
+                    sequence,
+                    error: e.to_string(),
+                })
+            }
+        }
+    })
+}
+
+/// The upstream subscription a saga instance owns and cascade-stops with.
+///
+/// Absent on an instance spawned by a `SagaManagerProps`: the manager holds the
+/// single shared subscription, so an instance that opened its own would decode
+/// every upstream record a second time.
+pub(crate) struct OwnedUpstream<E> {
+    pub(crate) config: DurableSubscription<UpstreamMessage<E>>,
+    pub(crate) cursor: SequenceCursor,
+}
+
+impl<E> Clone for OwnedUpstream<E> {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            cursor: self.cursor.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,8 +173,9 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) tell_states: HashMap<u64, TellState>,
     pub(crate) crash_restart_factory: Option<CrashRestartFactory>,
     pub(crate) lifecycle: Lifecycle,
-    pub(crate) upstream_config: DurableSubscription<UpstreamMessage<S::SubscribedEvent>>,
-    pub(crate) upstream_cursor: SequenceCursor,
+    /// `None` when a `SagaManagerProps` manager owns the subscription and
+    /// delivers this instance's correlated events itself.
+    pub(crate) upstream: Option<OwnedUpstream<S::SubscribedEvent>>,
     pub(crate) scheduler: Option<SchedulerProxy>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
     /// DLQ child poller spawner.
@@ -443,30 +510,40 @@ impl<S: Saga> Process for SagaProcess<S> {
             self.tell_states.insert(tell_id, TellState::Failed);
         }
 
-        // A saga whose stream carries a durable `Ended` marker terminated
-        // in a previous incarnation.  Refuse to wire up the upstream
-        // subscription — so `Saga::handle` can never run again — and stop the
-        // inert process to release its resources.
+        // A saga whose stream carries a durable `Ended` marker terminated in a
+        // previous incarnation, so this one starts in the same drained
+        // lifecycle an in-process `End` leaves behind: `Saga::handle` can never
+        // run again, and anything still routed here becomes a dead letter.
         if outcome.ended {
+            self.lifecycle = Lifecycle::Draining;
             tracing::info!(
                 saga_id = self.saga_id.as_str(),
                 "saga already terminated (Ended marker present); skipping subscription"
             );
-            if let Err(e) = ctx.stop_self().await {
-                tracing::warn!(error = %e, "terminated saga stop_self failed");
+            // Owning the subscription and declining to wire it means nothing
+            // can reach this process again, so the inert incarnation releases
+            // its resources by stopping.  Under a manager the shared
+            // subscription keeps delivering here and each arrival must be
+            // recorded on this saga's own stream, so the instance instead stays
+            // resident until the manager passivates it — and its dead letters
+            // still need the poller spawned below to reach the subscriber.
+            if self.upstream.is_some() {
+                if let Err(e) = ctx.stop_self().await {
+                    tracing::warn!(error = %e, "terminated saga stop_self failed");
+                }
+                return;
             }
-            return;
+        } else {
+            // Re-register timers that were still pending at the previous
+            // incarnation's stop: unfired, uncancelled schedules found on the
+            // saga's own stream.
+            self.reregister_active_schedules(outcome.active_schedules, ctx)
+                .await;
+
+            if let Some(upstream) = self.upstream.clone() {
+                upstream.config.spawn_child(ctx, upstream.cursor).await;
+            }
         }
-
-        // Re-register timers that were still pending at the previous
-        // incarnation's stop: unfired, uncancelled schedules found on the
-        // saga's own stream.
-        self.reregister_active_schedules(outcome.active_schedules, ctx)
-            .await;
-
-        self.upstream_config
-            .spawn_child(ctx, self.upstream_cursor.clone())
-            .await;
 
         // Spawn the DLQ direct-poller as a child of
         // this saga process so that when the saga stops the runtime

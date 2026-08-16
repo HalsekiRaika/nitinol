@@ -26,7 +26,7 @@ pub use self::event::{DeadLetterEvent, SagaFailure, SourceContext};
 pub use self::policy::{EnqueueDecision, EnqueuePolicy};
 
 pub(crate) use self::event::is_dead_letter_event_type;
-pub(crate) use self::policy::EnqueueAll;
+pub(crate) use self::policy::default_enqueue_policy;
 pub(crate) use self::subscriber::{make_dlq_child_spawn, DlqChildSpawn};
 
 use self::event::{append_dead_letter, DeadLetterEvent as Event};

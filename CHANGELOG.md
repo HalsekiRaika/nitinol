@@ -7,7 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- (`nitinol-saga`): `SagaManagerProps` / `SagaManagerProxy` — a saga instance
+  manager. Previously one `SagaProps` spawn meant one saga bound to one fixed
+  `SagaId`, so running a process-manager instance per correlation id required
+  pre-spawning every id, and each instance ran its own `DirectPollerProcess`
+  over the shared upstream stream — `M` upstream records across `N` instances
+  cost `M × N` decodes. The manager holds a *single* upstream subscription and
+  interprets `Saga::correlate` at runtime: an id with no resident instance is
+  spawned as a child and replays its own stream before the event that caused
+  the spawn is delivered; an id already resident is handed the event directly.
+  `SagaManagerProps::with_instance_passivation(after)` stops an instance that
+  has been idle for `after`, and a later event for the same id spawns it again
+  with its state restored by replay. Every instance-level setting `SagaProps`
+  accepts has a counterpart on the manager, which hands it to each instance it
+  spawns: `with_scheduler`, `with_enqueue_policy`,
+  `with_dead_letter_subscriber`, `with_crash_restart_factory` and
+  `with_decode_failure_route`. Without them a manager whose `Saga::correlate` is
+  constant (the degenerate single-instance case below) would not reproduce what
+  `SagaProps` gives a resident saga: no timer would fire for
+  `SagaEffect::schedule`, the dead letters its instances write would have no
+  subscriber, the configured DLQ filter would be ignored, a tell left in flight
+  across a passivation could not be reconstructed, and a corrupt upstream record
+  no `Saga::correlate` can claim would have no owner to be attributed to.
+
+  The manager process itself is spawned as persistent: idleness is a
+  per-instance signal that `with_instance_passivation` acts on, whereas a
+  system-wide default idle timeout reaching the manager — the sole owner of the
+  subscription and the registry, with nothing left to revive it — would silently
+  stop the whole fan-out during a quiet upstream.
+
+  Collapsing `N` subscriptions into one moves the cursor decision to the
+  manager: it withholds the shared cursor when the addressed instance could not
+  settle a record (so the record is redelivered), and advances past a record
+  that correlates to no instance, so one unclaimed record cannot starve every
+  instance behind it. A record addressed to an instance whose stream already
+  carries the durable `Ended` marker is recorded as
+  `SagaFailure::EndedSagaReceivedMessage` on that instance's own stream and the
+  cursor moves on.
+
+  `SagaProps` is unchanged and remains the way to spawn a saga that owns its
+  subscription. A `Saga::correlate` that always answers the same `SagaId`
+  reduces the manager to exactly one instance, which is the migration path from
+  the resident single-saga wiring.
+
 ### Changed
+
+- (`nitinol-saga`): a saga whose stream carries the durable `Ended` marker now
+  records what is still routed to it instead of always stopping outright. It
+  starts in the drained lifecycle either way, so `Saga::handle` is never
+  invoked again; a saga that owns its subscription still stops (nothing can
+  reach it once the subscription is declined), while an instance behind a
+  `SagaManagerProps` manager stays resident so the manager's deliveries land as
+  dead letters on its own stream, and is reaped by passivation. A resident
+  instance also starts its DLQ direct poller, so those dead letters reach a
+  subscriber registered with `with_dead_letter_subscriber` like any other
+  instance's do.
 
 - **BREAKING** (`nitinol-saga`): correlation moved from the spawn wiring to the
   `Saga` trait. `SagaProps::with_subscription` no longer takes a
