@@ -16,6 +16,8 @@
 //! | Identifier | [`SagaId`] |
 //! | Spawn builder | [`SagaProps`] |
 //! | Handle | [`SagaProxy`] |
+//! | Instance-manager spawn builder | [`SagaManagerProps`] |
+//! | Instance-manager handle | [`SagaManagerProxy`] |
 //!
 //! The runtime `Process` trait is intentionally hidden — the user only
 //! implements [`Saga`].
@@ -26,10 +28,26 @@
 //!   via a runtime child `DirectPollerProcess` (catchup + live, at-least-once delivery).
 //!   The poller's lifetime is bound to the saga process; when the saga stops the runtime
 //!   cascade-stops the child poller automatically.
+//! - Instance management: [`SagaManagerProps`] spawns one manager that holds a
+//!   *single* upstream subscription for every instance of a saga type, so an
+//!   upstream record is decoded once no matter how far the correlation fans
+//!   out.  It interprets [`Saga::correlate`] at runtime: a correlation id with
+//!   no resident instance is spawned and replayed on arrival, an id already
+//!   resident is handed the event directly, and
+//!   [`SagaManagerProps::with_instance_passivation`] stops instances that fall
+//!   idle — a later event revives them from their own stream.  Owning the one
+//!   cursor makes it the manager's decision whether a record is settled: it
+//!   holds the cursor when the addressed instance could not settle the record,
+//!   and advances past a record no instance claims so one unclaimed record
+//!   cannot stall the rest.  A [`Saga::correlate`] that always answers the same
+//!   id reduces the manager to the single resident saga [`SagaProps`] spawns.
 //! - Deadline scheduling: call [`spawn_scheduler`] once at startup to obtain a
-//!   [`SchedulerProxy`], then pass it to [`SagaProps::with_scheduler`].  The saga
-//!   can then emit [`SagaEffect::schedule`] / [`SagaEffect::CancelSchedule`] effects
-//!   and override [`crate::Saga::on_scheduled`] to handle fired timers.  Timers are
+//!   [`SchedulerProxy`], then pass it to [`SagaProps::with_scheduler`] for a
+//!   standalone saga, or to
+//!   [`SagaManagerProps::with_scheduler`] so every instance the manager spawns
+//!   gets the same wiring.  The saga can then emit [`SagaEffect::schedule`] /
+//!   [`SagaEffect::CancelSchedule`] effects and override
+//!   [`crate::Saga::on_scheduled`] to handle fired timers.  Timers are
 //!   persisted in the saga's own event stream (`SagaPersisted::Schedule`) and
 //!   re-registered on restart (at-least-once delivery; handlers must be idempotent).
 //! - Dead-letter queue (DLQ): each saga failure kind is persisted as a
@@ -39,11 +57,15 @@
 //!   `HandleFailed`, `DecodeFailed`, `EndedSagaReceivedMessage`,
 //!   `ScheduledFailed`, and `TellFailedHookFailed` are enqueued immediately.
 //!   A subscriber catches up via
-//!   [`SagaProps::with_dead_letter_subscriber`] (DurableStream-based
-//!   catchup).  The [`EnqueuePolicy`] returned by
-//!   [`SagaProps::with_enqueue_policy`] controls which failure kinds reach the
-//!   DLQ; the default enqueues every kind.  Pull API (list /
-//!   mark_processed / evict) is **not implemented** in this crate.
+//!   [`SagaProps::with_dead_letter_subscriber`] for a standalone saga, or
+//!   [`SagaManagerProps::with_dead_letter_subscriber`] to receive the dead
+//!   letters of every instance a manager spawns (DurableStream-based catchup
+//!   either way).  The [`EnqueuePolicy`] passed to
+//!   [`SagaProps::with_enqueue_policy`] — or to
+//!   [`SagaManagerProps::with_enqueue_policy`] for every instance of a manager
+//!   — controls which failure kinds reach the DLQ; the default enqueues every
+//!   kind.  Pull API (list / mark_processed / evict) is **not implemented** in
+//!   this crate.
 //! - Tell-failure compensation: when a tell exhausts its retry budget the saga
 //!   is notified through [`Saga::on_tell_failed`] as soon as the failure
 //!   settles, so a compensating [`SagaEffect`] runs without waiting for another
@@ -59,8 +81,11 @@
 //!   never appears in spawn wiring.  A subscribed event reaches [`Saga::handle`]
 //!   only when that answer equals the instance's own id; anything else is
 //!   ignored silently.  Decode failures carry no typed event to correlate on, so
-//!   attributing them is routing and stays an instance-level setting:
-//!   [`SagaProps::with_decode_failure_route`].
+//!   attributing them is routing and stays a setting on the spawn builder:
+//!   [`SagaProps::with_decode_failure_route`] for a standalone saga, and
+//!   [`SagaManagerProps::with_decode_failure_route`] for a manager, where the
+//!   route function additionally decides *which* resident instance owns the
+//!   corrupt record.
 //! - Side-effect failures and persistence failures are enqueued to the DLQ
 //!   after staged retry, not silently logged and discarded.
 
@@ -83,7 +108,8 @@ pub use self::dead_letter::{
 pub use self::effect::{SagaEffect, ScheduleSpec, TellIntent};
 pub use self::id::SagaId;
 pub use self::process::{
-    CodecSet, CodecUnset, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset,
+    CodecSet, CodecUnset, SagaManagerProps, SagaManagerProxy, SagaProps, SagaProxy,
+    SubscriptionSet, SubscriptionUnset,
 };
 pub use self::saga::Saga;
 pub use self::scheduler::{spawn_scheduler, ScheduleToken, SchedulerProxy, TimerName};

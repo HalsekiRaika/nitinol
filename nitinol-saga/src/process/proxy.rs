@@ -1,12 +1,14 @@
-//! User-facing handle to a running saga process.
+//! User-facing handles to the running saga processes.
 //!
-//! The runtime `ProcessProxy<SagaProcess<S>>` is wrapped so the user never
-//! sees the `Process` trait or the internal `SagaProcess` type.  MVP exposes
-//! only the saga's `pid()` and `stop()` for ad-hoc control.
+//! The runtime `ProcessProxy<_>` is wrapped so the user never sees the
+//! `Process` trait or the internal process types.  Both handles expose only
+//! `pid()` and `stop()` for ad-hoc control — sagas are reactive and are driven
+//! by their subscription, not by direct calls from application code.
 
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::ProcessProxy;
 
+use crate::process::manager::SagaManagerProcess;
 use crate::process::saga_process::SagaProcess;
 use crate::saga::Saga;
 
@@ -50,6 +52,43 @@ impl<S: Saga> SagaProxy<S> {
 
 impl<S: Saga> From<ProcessProxy<SagaProcess<S>>> for SagaProxy<S> {
     fn from(inner: ProcessProxy<SagaProcess<S>>) -> Self {
+        Self { inner }
+    }
+}
+
+/// A typed handle to a running saga instance manager.
+///
+/// The manager's upstream poller and every instance it spawned are runtime
+/// children of the manager process, so its lifetime bounds the whole fan-out.
+/// Dropping every copy of this handle does not affect them — only stopping the
+/// manager (e.g. via [`Self::stop`] or supervision) does.
+pub struct SagaManagerProxy<S: Saga> {
+    inner: ProcessProxy<SagaManagerProcess<S>>,
+}
+
+impl<S: Saga> Clone for SagaManagerProxy<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<S: Saga> SagaManagerProxy<S> {
+    /// Returns the runtime pid of the underlying manager process.
+    pub fn pid(&self) -> Pid {
+        self.inner.pid()
+    }
+
+    /// Stops the manager, cascade-stopping its upstream poller and every saga
+    /// instance it currently holds.
+    pub async fn stop(&self) -> Result<(), nitinol_runtime::error::SendError> {
+        self.inner.stop().await
+    }
+}
+
+impl<S: Saga> From<ProcessProxy<SagaManagerProcess<S>>> for SagaManagerProxy<S> {
+    fn from(inner: ProcessProxy<SagaManagerProcess<S>>) -> Self {
         Self { inner }
     }
 }

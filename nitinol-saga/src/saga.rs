@@ -91,6 +91,8 @@ pub trait Saga: Send + Sync + 'static {
     /// travels with the saga type instead of leaking into every spawn site.
     /// The latter stays with the runtime — see
     /// [`SagaProps::with_decode_failure_route`](crate::SagaProps::with_decode_failure_route)
+    /// and
+    /// [`SagaManagerProps::with_decode_failure_route`](crate::SagaManagerProps::with_decode_failure_route)
     /// for the one case that has no typed event to correlate on.
     ///
     /// # How the answer is used
