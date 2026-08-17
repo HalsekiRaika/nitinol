@@ -677,7 +677,7 @@ impl Saga for EndOnFirstSaga {
         // receive and drop the second upstream event).
         let intent = TellIntent::new(self.target.clone(), DrainCmd);
         Ok(SagaEffect::persist(SagaLog { note: event.tag })
-            .with_tells(vec![intent])
+            .combine(SagaEffect::tell_intent(intent))
             .then_end())
     }
 }

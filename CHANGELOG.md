@@ -77,6 +77,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (`nitinol-saga`): `SagaEffect::with_tells` and
+  `SagaEffect::with_schedules` are replaced by `SagaEffect::tell_intent(intent)`
+  and `SagaEffect::schedule_spec(spec)`. The two setters were only defined on
+  the `Persist` branch and panicked on every other receiver, so whether a call
+  was legal depended on the runtime variant the caller happened to hold. Once
+  `combine` folds an adjacent `Persist × Persist` junction into one `Persist`,
+  attaching a tell or a schedule is composition, and composition is `combine`'s
+  job: the new constructors each build their own single-element `Persist`, so
+  there is no receiver left whose variant could make an attachment illegal and
+  no builder call that panics because of one. They keep the capability the
+  setters carried and the typed `tell` / `schedule` builders cannot express — a
+  `TellIntent::new` intent with no crash-restart payload, and a `ScheduleSpec`
+  whose `payload` bytes are given verbatim rather than serialized from a typed
+  message. Callers rewrite `persist(e).with_tells(vec![a, b])` as
+  `persist(e).combine(SagaEffect::tell_intent(a)).combine(SagaEffect::tell_intent(b))`,
+  and `with_schedules` likewise. Note the semantic change this carries:
+  `with_*` *set* the list, so a second call dropped what the first attached,
+  whereas `combine` concatenates and keeps both.
+
+- (`nitinol-saga`): the `SagaEffect::persist_all` documentation now states what
+  the interpreter does with an empty batch. It claimed an empty vector kept the
+  "intent to persist zero events" visible to the interpreter, while a `Persist`
+  whose `events`, `tells` and `schedules` are all empty has always taken the
+  same no-op path as `SagaEffect::None`. Behaviour is unchanged; what an empty
+  vector still buys is structural — the value stays a `Persist` that `combine`
+  can fold tells and schedules into. Emptiness of `events` alone was never the
+  condition, and is now documented as such: a branch carrying a tell or a
+  schedule but no user event is what `SagaEffect::tell` and
+  `SagaEffect::schedule` build, and it is always interpreted.
+
 - (`nitinol-saga`): a saga whose stream carries the durable `Ended` marker now
   records what is still routed to it instead of always stopping outright. It
   starts in the drained lifecycle either way, so `Saga::handle` is never

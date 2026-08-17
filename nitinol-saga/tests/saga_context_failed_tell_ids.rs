@@ -230,7 +230,7 @@ impl Saga for RuntimeSaga {
             Ok(SagaEffect::persist(OrderProcessed {
                 order_id: "runtime-1".to_owned(),
             })
-            .with_tells(vec![intent]))
+            .combine(SagaEffect::tell_intent(intent)))
         } else {
             Ok(SagaEffect::None)
         }

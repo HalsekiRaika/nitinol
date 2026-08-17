@@ -33,9 +33,17 @@ impl<E> SagaEffect<E> {
     /// Persist multiple events to the saga's event store and apply them in
     /// order.
     ///
-    /// An empty vector still produces a `Persist` variant — semantically
-    /// distinct from `None` so that "intent to persist zero events" remains
-    /// visible to the interpreter.
+    /// An empty vector still produces a `Persist` variant, so the value remains
+    /// a receiver that [`SagaEffect::combine`] folds tells and schedules into.
+    /// The interpreter, however, does not see an "intent to persist zero
+    /// events": a `Persist` whose `events`, `tells` **and** `schedules` are all
+    /// empty takes the same no-op path as [`SagaEffect::None`] and writes
+    /// nothing.
+    ///
+    /// Emptiness of `events` alone is not enough to make a branch a no-op — a
+    /// `Persist` carrying a tell or a schedule but no user event is exactly what
+    /// [`SagaEffect::tell`] and [`SagaEffect::schedule`] build, and it is always
+    /// interpreted.
     pub fn persist_all(events: Vec<E>) -> Self {
         Self::Persist {
             events,
@@ -85,54 +93,40 @@ impl<E> SagaEffect<E> {
         }
     }
 
-    /// Set (not merge) the list of `TellIntent`s attached to a `Persist`
-    /// branch.  Calling it twice keeps only the final list.
+    /// Put a pre-built [`TellIntent`] on a `Persist` branch of its own.
     ///
-    /// # Panics
+    /// Builds the same `Persist { events: [], tells: [intent], schedules: [] }`
+    /// shape [`SagaEffect::tell`] does, so the tell takes the same Outbox-atomic
+    /// path — but without the `serde_json` step, which is what makes an intent
+    /// built through [`TellIntent::new`] (no crash-restart payload) expressible.
     ///
-    /// Panics if `self` is not a `Persist` variant.  Calling `with_tells` on
-    /// `None` / `End` / `Sequence` / `CancelSchedule` is a Builder contract
-    /// violation; silent identity / silent Persist-wrapping would obscure the
-    /// misuse.  Note that chaining two `Persist` branches through
-    /// [`SagaEffect::combine`] yields a `Persist`, not a `Sequence`, so it stays
-    /// a valid receiver.
-    pub fn with_tells(self, tells: Vec<TellIntent>) -> Self {
-        match self {
-            Self::Persist {
-                events, schedules, ..
-            } => Self::Persist {
-                events,
-                tells,
-                schedules,
-            },
-            _ => panic!(
-                "SagaEffect::with_tells may only be called on a Persist branch; \
-                 call SagaEffect::persist(...) or SagaEffect::persist_all(...) first"
-            ),
+    /// Attach it to another effect with [`SagaEffect::combine`], which folds an
+    /// adjacent `Persist × Persist` junction into one `Persist`: the tell's
+    /// `TellRequested` marker then shares the events' atomic batch.  Combining
+    /// several intents concatenates them — each attachment is kept.
+    pub fn tell_intent(intent: TellIntent) -> Self {
+        Self::Persist {
+            events: Vec::new(),
+            tells: vec![intent],
+            schedules: Vec::new(),
         }
     }
 
-    /// Set (not merge) the list of [`ScheduleSpec`]s attached to a `Persist`
-    /// branch.  Calling it twice keeps only the final list.
+    /// Put a pre-built [`ScheduleSpec`] on a `Persist` branch of its own.
     ///
-    /// # Panics
+    /// Builds the same `Persist { events: [], tells: [], schedules: [spec] }`
+    /// shape [`SagaEffect::schedule`] does, but takes its `payload` bytes
+    /// verbatim instead of serializing a typed message into them.
     ///
-    /// Panics if `self` is not a `Persist` variant.  Calling `with_schedules`
-    /// on `None` / `End` / `Sequence` / `CancelSchedule` is a Builder contract
-    /// violation.  Note that chaining two `Persist` branches through
-    /// [`SagaEffect::combine`] yields a `Persist`, not a `Sequence`, so it stays
-    /// a valid receiver.
-    pub fn with_schedules(self, schedules: Vec<ScheduleSpec>) -> Self {
-        match self {
-            Self::Persist { events, tells, .. } => Self::Persist {
-                events,
-                tells,
-                schedules,
-            },
-            _ => panic!(
-                "SagaEffect::with_schedules may only be called on a Persist branch; \
-                 call SagaEffect::persist(...) or SagaEffect::persist_all(...) first"
-            ),
+    /// Attach it to another effect with [`SagaEffect::combine`], which folds an
+    /// adjacent `Persist × Persist` junction into one `Persist`: the schedule's
+    /// `Scheduled` marker then shares the events' atomic batch.  Combining
+    /// several specs concatenates them in left-to-right order.
+    pub fn schedule_spec(spec: ScheduleSpec) -> Self {
+        Self::Persist {
+            events: Vec::new(),
+            tells: Vec::new(),
+            schedules: vec![spec],
         }
     }
 

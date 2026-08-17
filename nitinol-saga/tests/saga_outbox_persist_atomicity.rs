@@ -139,7 +139,8 @@ impl Saga for MultiTellSaga {
         let effect = SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
         })
-        .with_tells(vec![intent_a, intent_b]);
+        .combine(SagaEffect::tell_intent(intent_a))
+        .combine(SagaEffect::tell_intent(intent_b));
 
         self.handled.notify_one();
         Ok(effect)

@@ -287,11 +287,11 @@ async fn combine_concatenates_events_tells_and_schedules_left_to_right() {
     let right_intent = common::make_tell_intent().await;
 
     let left = SagaEffect::persist_all(vec![1u32, 2])
-        .with_tells(vec![left_intent])
-        .with_schedules(vec![left_spec.clone()]);
+        .combine(SagaEffect::tell_intent(left_intent))
+        .combine(SagaEffect::schedule_spec(left_spec.clone()));
     let right = SagaEffect::persist(3u32)
-        .with_tells(vec![right_intent])
-        .with_schedules(vec![right_spec.clone()]);
+        .combine(SagaEffect::tell_intent(right_intent))
+        .combine(SagaEffect::schedule_spec(right_spec.clone()));
 
     assert_eq!(
         shape_of(&left.combine(right)),

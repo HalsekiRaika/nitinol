@@ -29,6 +29,8 @@ use crate::scheduler::TimerName;
 ///   batch** on the saga's own event store.  After the append succeeds, each
 ///   tell is dispatched via the retry executor and each schedule is registered
 ///   with the resident `SchedulerProcess` via the injected [`SchedulerProxy`].
+///   A branch whose `events`, `tells` and `schedules` are all empty carries
+///   nothing to append and is interpreted exactly like `None`.
 /// - `End` — single-responsibility termination marker.  Stops the saga
 ///   process and tears down its upstream subscription.  Effects placed after
 ///   `End` inside a `Sequence` are not interpreted.
@@ -196,8 +198,9 @@ impl TellIntent {
 /// resident scheduler.  The delay is relative (`after: Duration`), not an
 /// absolute instant, so it survives replay via a persisted wall-clock anchor.
 /// `payload` is the serialized `Saga::ScheduledMessage`.  The fields are `pub`
-/// so a saga can build a spec directly or through
-/// [`crate::SagaEffect::schedule`].
+/// so a saga can build a spec directly and put it on an effect through
+/// [`crate::SagaEffect::schedule_spec`], or let
+/// [`crate::SagaEffect::schedule`] build both from a typed message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleSpec {
     pub name: TimerName,

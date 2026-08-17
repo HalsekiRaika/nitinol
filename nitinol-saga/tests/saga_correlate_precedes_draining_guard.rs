@@ -172,7 +172,7 @@ impl Saga for EndOnFirstCorrelatedSaga {
         // than stopping outright, and stays there until the tell settles.
         let intent = TellIntent::new(self.target.clone(), DrainCmd);
         Ok(SagaEffect::persist(SagaLog { note: event.tag })
-            .with_tells(vec![intent])
+            .combine(SagaEffect::tell_intent(intent))
             .then_end())
     }
 }

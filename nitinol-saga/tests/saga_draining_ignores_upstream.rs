@@ -141,7 +141,7 @@ impl Saga for DrainGuardSaga {
 
         // persist + one in-flight tell + end → enters Draining (not immediate stop)
         Ok(SagaEffect::persist(DrainSagaEvent { key: event.key })
-            .with_tells(vec![intent])
+            .combine(SagaEffect::tell_intent(intent))
             .then_end())
     }
 }

@@ -88,8 +88,8 @@ pub async fn make_tell_effect<E>() -> SagaEffect<E> {
 }
 
 /// Build a single [`TellIntent`] over a freshly spawned no-op aggregate
-/// target so tests can feed it into `SagaEffect::persist(...).with_tells(...)`
-/// without going through the `SagaEffect::tell` convenience helper.
+/// target so tests can feed it into `SagaEffect::tell_intent(...)` without
+/// going through the `SagaEffect::tell` convenience helper.
 pub async fn make_tell_intent() -> TellIntent {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();

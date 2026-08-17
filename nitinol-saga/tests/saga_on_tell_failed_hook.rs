@@ -276,7 +276,7 @@ impl Saga for TellFailureSaga {
         let effect = SagaEffect::persist(SagaLog {
             note: STARTED_NOTE.to_owned(),
         })
-        .with_tells(vec![intent]);
+        .combine(SagaEffect::tell_intent(intent));
 
         Ok(if self.terminate_after_tell {
             effect.then_end()
@@ -386,7 +386,7 @@ impl Saga for ScheduleAfterFailureSaga {
         Ok(SagaEffect::persist(SagaLog {
             note: STARTED_NOTE.to_owned(),
         })
-        .with_tells(vec![intent]))
+        .combine(SagaEffect::tell_intent(intent)))
     }
 
     async fn on_tell_failed(
@@ -455,7 +455,7 @@ impl Saga for RejectingHookSaga {
         Ok(SagaEffect::persist(SagaLog {
             note: STARTED_NOTE.to_owned(),
         })
-        .with_tells(vec![intent]))
+        .combine(SagaEffect::tell_intent(intent)))
     }
 
     async fn on_tell_failed(
