@@ -1289,6 +1289,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "saga-fanout-pattern"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "nitinol-eventsource",
+ "nitinol-persistence",
+ "nitinol-runtime",
+ "nitinol-saga",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
