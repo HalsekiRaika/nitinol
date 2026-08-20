@@ -1,6 +1,6 @@
 //! Runnable demonstration of the pattern this crate exists to show:
-//! `DecomposeBatch` -> one fact event -> saga manager delivery -> 32
-//! idempotent child creations.
+//! `ApprovePayrollRun` -> one fact event -> saga manager delivery -> 32
+//! idempotent payslip issues.
 //!
 //! The wiring mirrors what `tests/common/helpers.rs` builds for the
 //! integration tests; this binary demonstrates it end to end with a
@@ -17,18 +17,18 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaManagerProps;
 
-use saga_fanout_pattern::batch::{Batch, BatchDecomposed, DecomposeBatch};
 use saga_fanout_pattern::codec::JsonCodec;
-use saga_fanout_pattern::item::IsCreated;
-use saga_fanout_pattern::router::ItemRegistry;
+use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun, PayrollRunApproved};
+use saga_fanout_pattern::payslip::{IsIssued, Payslip};
+use saga_fanout_pattern::router::PayslipRegistry;
 use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 
-/// Fan-out width the pattern is built around: one fact event names 32 children.
-const ITEM_COUNT: usize = 32;
+/// Fan-out width the pattern is built around: one approval covers 32 employees.
+const EMPLOYEE_COUNT: usize = 32;
 
-fn item_ids(batch: &str) -> Vec<String> {
-    (0..ITEM_COUNT)
-        .map(|index| format!("{batch}-item-{index:02}"))
+fn employee_ids() -> Vec<String> {
+    (0..EMPLOYEE_COUNT)
+        .map(|index| format!("employee-{index:02}"))
         .collect()
 }
 
@@ -37,37 +37,39 @@ async fn main() {
     let ps = ProcessSystem::new().await;
     let system = Arc::new(EventSourceSystem::new(ps).with_codec::<JsonCodec>().build());
 
-    let batch_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let item_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // One store for the whole example.  `EventStore` is stream-keyed, so the
+    // payroll run's stream, the 32 payslip streams and the saga's journal are
+    // tenants of this one instance; the manager's `SequenceCursor::Stream`
+    // below is what narrows its subscription back down to the run's stream.
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let batch_id = AggregateId::new("example-batch");
-    let ids = item_ids(batch_id.as_str());
+    let run_id = AggregateId::new("payroll-run-april");
+    let employees = employee_ids();
 
-    let registry = Arc::new(ItemRegistry::new(
+    let registry = Arc::new(PayslipRegistry::new(
         Arc::clone(&system),
-        Arc::clone(&item_store),
+        Arc::clone(&store),
     ));
 
-    let batch = system
-        .spawn_aggregate::<Batch>(batch_id.clone(), Arc::clone(&batch_store))
+    let payroll_run = system
+        .spawn_aggregate::<PayrollRun>(run_id.clone(), Arc::clone(&store))
         .await;
 
     let registry_for_producer = Arc::clone(&registry);
     let registry_for_factory = Arc::clone(&registry);
 
-    // The manager, not `spawn_saga`, is what fans a single fact event out to
-    // many correlated instances — see `Instance management` in this crate's
-    // top-level docs.
-    let _manager = SagaManagerProps::<FanOutSaga>::new(saga_store, move || {
+    // The manager, not `spawn_saga`, is what turns a subscription into one saga
+    // instance per correlation key, spawning it on the first event that
+    // correlates to it.
+    let _manager = SagaManagerProps::<FanOutSaga>::new(Arc::clone(&store), move || {
         FanOutSaga::new(Arc::clone(&registry_for_producer))
     })
     .with_codec(system.codec::<FanOutStarted>())
     .with_subscription(
-        Arc::clone(&batch_store),
-        system.codec::<BatchDecomposed>(),
+        Arc::clone(&store),
+        system.codec::<PayrollRunApproved>(),
         SequenceCursor::Stream {
-            key: batch_id.as_str().to_owned(),
+            key: run_id.as_str().to_owned(),
             after: 0,
         },
     )
@@ -77,40 +79,47 @@ async fn main() {
     .spawn(system.process_system())
     .await;
 
-    batch
-        .ask(DecomposeBatch { items: ids.clone() })
+    payroll_run
+        .ask(ApprovePayrollRun {
+            employee_ids: employees.clone(),
+        })
         .await
-        .expect("ask(DecomposeBatch) must succeed");
+        .expect("ask(ApprovePayrollRun) must succeed");
 
-    // Poll until every child reports itself created. A child's own stream is
-    // the only place its creation becomes observable, so this polls that
-    // fact directly rather than sleeping for a guessed duration.
+    let payslips: Vec<String> = employees
+        .iter()
+        .map(|employee| Payslip::stream_key(run_id.as_str(), employee))
+        .collect();
+
+    // Poll until every payslip reports itself issued. A payslip's own stream is
+    // the only place its issue becomes observable, so this polls that fact
+    // directly rather than sleeping for a guessed duration.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    let created_count = loop {
+    let issued_count = loop {
         let mut count = 0;
-        for id in &ids {
-            let proxy = registry.resolve(id).await;
+        for key in &payslips {
+            let proxy = registry.resolve(key).await;
             if proxy
-                .exec(IsCreated)
+                .exec(IsIssued)
                 .await
-                .expect("exec(IsCreated) must succeed")
+                .expect("exec(IsIssued) must succeed")
             {
                 count += 1;
             }
         }
-        if count == ITEM_COUNT {
+        if count == EMPLOYEE_COUNT {
             break count;
         }
         if std::time::Instant::now() >= deadline {
-            panic!("fan-out must create {ITEM_COUNT} children within 20 seconds (had {count})");
+            panic!("fan-out must issue {EMPLOYEE_COUNT} payslips within 20 seconds (had {count})");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
 
     assert_eq!(
-        created_count, ITEM_COUNT,
-        "every child named by the fact event must have been created"
+        issued_count, EMPLOYEE_COUNT,
+        "every employee named by the fact event must have been issued a payslip"
     );
 
-    println!("fan-out example finished: {created_count} children created from one fact event");
+    println!("fan-out example finished: {issued_count} payslips issued from one fact event");
 }

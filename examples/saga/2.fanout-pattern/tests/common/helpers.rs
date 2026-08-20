@@ -21,29 +21,43 @@ use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery,
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaManagerProps, SagaManagerProxy};
 
-use saga_fanout_pattern::batch::{Batch, BatchDecomposed};
 use saga_fanout_pattern::codec::JsonCodec;
-use saga_fanout_pattern::item::{IsCreated, Item};
-use saga_fanout_pattern::router::ItemRegistry;
+use saga_fanout_pattern::payroll_run::{PayrollRun, PayrollRunApproved};
+use saga_fanout_pattern::payslip::{IsIssued, Payslip};
+use saga_fanout_pattern::router::PayslipRegistry;
 use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 
-/// Fan-out width the example is built around: one fact event carries 32 child
-/// creations. Every assertion that counts child streams is anchored to it, so a
-/// decomposition that silently narrows the fan-out fails.
-pub const ITEM_COUNT: usize = 32;
+/// Fan-out width the example is built around: one approval covers 32 employees.
+/// Every assertion that counts payslip streams is anchored to it, so an
+/// approval that silently narrows the fan-out fails.
+pub const EMPLOYEE_COUNT: usize = 32;
 
 /// Number of records the saga's own stream must hold for one decision: the
 /// decision event plus one outbox marker per dispatched tell.
-pub const DECISION_BLOCK_LEN: usize = 1 + ITEM_COUNT;
+pub const DECISION_BLOCK_LEN: usize = 1 + EMPLOYEE_COUNT;
 
-/// The child stream keys a decomposition of `batch` is expected to name.
+/// The employees an approved payroll run is expected to cover.
 ///
 /// The test owns this derivation rather than the example: the ids travel to the
 /// saga inside the fact event, and a test that re-derived them from the saga's
-/// output could not detect a fan-out that dropped children.
-pub fn item_ids(batch: &str) -> Vec<String> {
-    (0..ITEM_COUNT)
-        .map(|index| format!("{batch}-item-{index:02}"))
+/// output could not detect a fan-out that dropped employees.
+pub fn employee_ids() -> Vec<String> {
+    (0..EMPLOYEE_COUNT)
+        .map(|index| format!("employee-{index:02}"))
+        .collect()
+}
+
+/// The payslip stream keys a run of `payroll_run` covering `employees` writes.
+///
+/// The key derivation belongs to the example ([`Payslip::stream_key`]), and the
+/// test reads it from there: a second definition of the format would let the
+/// two drift apart while both kept passing.  What the test does own is the
+/// employee list, which is what still makes a fan-out that dropped an employee
+/// observable as a missing stream.
+pub fn payslip_keys(payroll_run: &str, employees: &[String]) -> Vec<String> {
+    employees
+        .iter()
+        .map(|employee| Payslip::stream_key(payroll_run, employee))
         .collect()
 }
 
@@ -53,38 +67,44 @@ pub fn item_ids(batch: &str) -> Vec<String> {
 /// manager run on; dropping it early would take the incarnation down.
 pub struct FanOutWorld {
     pub system: Arc<EventSourceSystem<JsonCodec>>,
-    pub registry: Arc<ItemRegistry>,
-    pub batch: AggregateProxy<Batch>,
+    pub registry: Arc<PayslipRegistry>,
+    pub payroll_run: AggregateProxy<PayrollRun>,
     pub manager: SagaManagerProxy<FanOutSaga>,
 }
 
-/// Spawn a complete incarnation: a fresh `ProcessSystem`, the batch aggregate,
-/// the child registry, and the saga manager subscribed to the batch stream.
+/// Spawn a complete incarnation: a fresh `ProcessSystem`, the payroll run
+/// aggregate, the payslip registry, and the saga manager subscribed to the run's
+/// stream.
 ///
-/// The three stores are parameters because the crash/replay test hands the same
-/// batch and saga stores to two successive incarnations while swapping the item
-/// store, which is what makes a partially completed fan-out reproducible.
-pub async fn spawn_world(
-    batch_id: &AggregateId,
-    batch_store: Arc<dyn EventStore>,
-    item_store: Arc<dyn EventStore>,
-    saga_store: Arc<dyn EventStore>,
-) -> FanOutWorld {
+/// One store serves all four wiring points — the run aggregate, the payslip
+/// registry, the saga's journal and the manager's subscription.  `EventStore` is
+/// stream-keyed, so the run stream, the 32 payslip streams and the saga's own
+/// stream are tenants of the same instance and each owner still reads only its
+/// own key.
+///
+/// The store is a parameter because the crash/replay test hands the same durable
+/// state to two successive incarnations, wrapping the first one's in a
+/// fault-injecting decorator — which is what makes a partially completed fan-out
+/// reproducible.
+pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> FanOutWorld {
     let ps = ProcessSystem::new().await;
     let system = Arc::new(EventSourceSystem::new(ps).with_codec::<JsonCodec>().build());
 
-    let registry = Arc::new(ItemRegistry::new(Arc::clone(&system), item_store));
+    let registry = Arc::new(PayslipRegistry::new(
+        Arc::clone(&system),
+        Arc::clone(&store),
+    ));
 
-    let batch = system
-        .spawn_aggregate::<Batch>(batch_id.clone(), Arc::clone(&batch_store))
+    let payroll_run = system
+        .spawn_aggregate::<PayrollRun>(run_id.clone(), Arc::clone(&store))
         .await;
 
-    let manager = spawn_manager(&system, &registry, batch_id, batch_store, saga_store).await;
+    let manager = spawn_manager(&system, &registry, run_id, store).await;
 
     FanOutWorld {
         system,
         registry,
-        batch,
+        payroll_run,
         manager,
     }
 }
@@ -92,27 +112,30 @@ pub async fn spawn_world(
 /// Spawn (or re-spawn) the saga manager over an existing system and registry.
 ///
 /// The cursor starts at `after: 0` and lives in memory, so a manager spawned a
-/// second time over the same batch store replays the fact event — the
-/// at-least-once redelivery the pattern has to absorb.
+/// second time over the same store replays the fact event — the at-least-once
+/// redelivery the pattern has to absorb.
+///
+/// `SequenceCursor::Stream` is also what keeps the subscription pointed at the
+/// run's own stream while the payslip streams and the saga's journal share the
+/// same store.
 pub async fn spawn_manager(
     system: &Arc<EventSourceSystem<JsonCodec>>,
-    registry: &Arc<ItemRegistry>,
-    batch_id: &AggregateId,
-    batch_store: Arc<dyn EventStore>,
-    saga_store: Arc<dyn EventStore>,
+    registry: &Arc<PayslipRegistry>,
+    run_id: &AggregateId,
+    store: Arc<dyn EventStore>,
 ) -> SagaManagerProxy<FanOutSaga> {
     let registry_for_producer = Arc::clone(registry);
     let registry_for_factory = Arc::clone(registry);
 
-    SagaManagerProps::<FanOutSaga>::new(saga_store, move || {
+    SagaManagerProps::<FanOutSaga>::new(Arc::clone(&store), move || {
         FanOutSaga::new(Arc::clone(&registry_for_producer))
     })
     .with_codec(system.codec::<FanOutStarted>())
     .with_subscription(
-        batch_store,
-        system.codec::<BatchDecomposed>(),
+        store,
+        system.codec::<PayrollRunApproved>(),
         SequenceCursor::Stream {
-            key: batch_id.as_str().to_owned(),
+            key: run_id.as_str().to_owned(),
             after: 0,
         },
     )
@@ -166,7 +189,7 @@ pub async fn fingerprints(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<S
 }
 
 /// The subset of `keys` whose stream already holds at least one record.
-pub async fn created(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<String> {
+pub async fn issued(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for key in keys {
         if !load_stream(store, key).await.is_empty() {
@@ -176,12 +199,12 @@ pub async fn created(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<String
     out
 }
 
-/// Poll the item store until exactly `expected` of `keys` exist.
+/// Poll the store until exactly `expected` of `keys` exist.
 ///
-/// The store is the only place a child creation becomes observable, so polling
-/// it — rather than sleeping for a guessed duration — is what makes the
+/// A payslip's own stream is the only place its issue becomes observable, so
+/// polling it — rather than sleeping for a guessed duration — is what makes the
 /// positive half of both tests deterministic.
-pub async fn wait_for_created(
+pub async fn wait_for_issued(
     store: &Arc<dyn EventStore>,
     keys: &[String],
     expected: usize,
@@ -189,13 +212,13 @@ pub async fn wait_for_created(
 ) -> Vec<String> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let found = created(store, keys).await;
+        let found = issued(store, keys).await;
         if found.len() >= expected {
             return found;
         }
         if std::time::Instant::now() >= deadline {
             panic!(
-                "timed out waiting for {expected} created item streams (had {}: {:?})",
+                "timed out waiting for {expected} issued payslip streams (had {}: {:?})",
                 found.len(),
                 found
             );
@@ -207,14 +230,14 @@ pub async fn wait_for_created(
 /// Poll the saga's own stream until it holds at least `expected` records of
 /// `FanOutStarted` — one per decision the saga committed.
 pub async fn wait_for_decisions(
-    saga_store: &Arc<dyn EventStore>,
+    store: &Arc<dyn EventStore>,
     saga_key: &str,
     expected: usize,
     timeout: Duration,
 ) -> Vec<LoadedEvent> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let events = load_stream(saga_store, saga_key).await;
+        let events = load_stream(store, saga_key).await;
         let decisions = events
             .iter()
             .filter(|event| event.event_type == FanOutStarted::EVENT_TYPE)
@@ -233,21 +256,21 @@ pub async fn wait_for_decisions(
     }
 }
 
-/// Round-trip a query through every child process's mailbox.
+/// Round-trip a query through every payslip process's mailbox.
 ///
 /// `AggregateProxy::tell` returns once the command is queued, so a later `exec`
 /// on the same proxy cannot be served before that command has been handled.
 /// Draining the mailbox this way is what stops "no duplicate was written" from
 /// passing merely because the redelivered command had not been processed yet.
-pub async fn drain_children(registry: &Arc<ItemRegistry>, keys: &[String]) -> Vec<bool> {
+pub async fn drain_payslips(registry: &Arc<PayslipRegistry>, keys: &[String]) -> Vec<bool> {
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
-        let proxy: AggregateProxy<Item> = registry.resolve(key).await;
+        let proxy: AggregateProxy<Payslip> = registry.resolve(key).await;
         out.push(
             proxy
-                .exec(IsCreated)
+                .exec(IsIssued)
                 .await
-                .expect("exec(IsCreated) must succeed"),
+                .expect("exec(IsIssued) must succeed"),
         );
     }
     out
@@ -255,23 +278,28 @@ pub async fn drain_children(registry: &Arc<ItemRegistry>, keys: &[String]) -> Ve
 
 // Fault injection
 
-/// `EventStore` decorator that refuses `append` for every stream outside
-/// `allowed`, so a fan-out can be stopped part-way with no timing dependency.
+/// `EventStore` decorator that refuses `append` for the streams named in
+/// `refuses`, so a fan-out can be stopped part-way with no timing dependency.
 ///
-/// `load` always delegates: a child whose creation was refused must still be
-/// able to replay (and find itself empty) in a later incarnation.
-pub struct PartialFailureItemStore {
+/// Refusing by name rather than allowing by name is what lets one store back the
+/// whole incarnation: the run's own stream and the saga's journal keep working,
+/// so the decision that drives the fan-out is still recorded, and only the
+/// payslips named here go missing.
+///
+/// `load` always delegates: a payslip whose issue was refused must still be able
+/// to replay (and find itself empty) in a later incarnation.
+pub struct PartialFailurePayslipStore {
     inner: Arc<dyn EventStore>,
-    allowed: HashSet<String>,
+    refuses: HashSet<String>,
     refused: Mutex<HashSet<String>>,
     refused_changed: Notify,
 }
 
-impl PartialFailureItemStore {
-    pub fn new(inner: Arc<dyn EventStore>, allowed: HashSet<String>) -> Arc<Self> {
+impl PartialFailurePayslipStore {
+    pub fn new(inner: Arc<dyn EventStore>, refuses: HashSet<String>) -> Arc<Self> {
         Arc::new(Self {
             inner,
-            allowed,
+            refuses,
             refused: Mutex::new(HashSet::new()),
             refused_changed: Notify::new(),
         })
@@ -287,8 +315,8 @@ impl PartialFailureItemStore {
     /// Wait until `expected` distinct streams have had an append refused.
     ///
     /// Distinct streams, not attempts: the caller wants "the fan-out reached
-    /// every child it was going to fail on", and counting attempts would also
-    /// count a retry of the same child.
+    /// every payslip it was going to fail on", and counting attempts would also
+    /// count a retry of the same payslip.
     pub async fn wait_until_refused(&self, expected: usize, timeout: Duration) -> HashSet<String> {
         tokio::time::timeout(timeout, async {
             loop {
@@ -303,7 +331,7 @@ impl PartialFailureItemStore {
         .await
         .unwrap_or_else(|_| {
             panic!(
-                "timed out waiting for {expected} refused child appends (had {:?})",
+                "timed out waiting for {expected} refused payslip appends (had {:?})",
                 self.refused()
             )
         })
@@ -311,13 +339,13 @@ impl PartialFailureItemStore {
 }
 
 #[async_trait]
-impl EventStore for PartialFailureItemStore {
+impl EventStore for PartialFailurePayslipStore {
     async fn append(
         &self,
         key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        if self.allowed.contains(key) {
+        if !self.refuses.contains(key) {
             return self.inner.append(key, events).await;
         }
         self.refused
@@ -326,7 +354,7 @@ impl EventStore for PartialFailureItemStore {
             .insert(key.to_owned());
         self.refused_changed.notify_one();
         Err(AppendError::Backend(Box::new(std::io::Error::other(
-            format!("fan-out interrupted before {key} was created"),
+            format!("fan-out interrupted before {key} was issued"),
         ))))
     }
 

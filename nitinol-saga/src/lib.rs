@@ -97,49 +97,6 @@
 //!   corrupt record.
 //! - Side-effect failures and persistence failures are enqueued to the DLQ
 //!   after staged retry, not silently logged and discarded.
-//!
-//! # The fan-out pattern: one fact event, manager delivery, idempotent creation
-//!
-//! nitinol's only unit of atomicity is one `append` to one stream — that is
-//! `OCC-3` in [`nitinol_persistence::store::EventStore::append`], which also
-//! states why there is no atomic append spanning multiple streams; the
-//! decision record for why is the ADR at
-//! <https://github.com/HalsekiRaika/nitinol/issues/74>.  When one decision
-//! must be felt by several aggregates, cross-aggregate consistency is
-//! expressed instead with a fact event, at-least-once [`SagaManagerProps`]
-//! delivery, and idempotent creation on each child — never a wider atomic
-//! write.  A worked example lives at `examples/saga/2.fanout-pattern` in this
-//! repository.
-//!
-//! **Choosing the stream that owns the decision.**  The owner is the stream
-//! whose invariant the decision belongs to — the one that would be wrong if
-//! the decision were recorded twice or not at all.  Ask which single stream
-//! must reject a contradictory second decision: that stream owns it.  If the
-//! honest answer is "several streams together", the boundary is drawn in the
-//! wrong place, because an aggregate is the consistency boundary the whole
-//! framework is built on.
-//!
-//! **Modelling the state in between.**  Between the fact event and the last
-//! child there is a real intermediate state, and the pattern's answer is to
-//! not store it a second time.  Each child's own stream already says whether
-//! it exists, so how far a fan-out has progressed is a query over those
-//! streams, not a counter kept by the saga — a counter would be a second
-//! owner of the same fact, and a crash between the two writes could leave
-//! them disagreeing with no way to tell which is right.  What the saga's own
-//! stream holds instead is its decision and one outbox marker per dispatched
-//! command, committed in the same append: durable *intent*, not duplicated
-//! state, and what lets a restarted incarnation finish a dispatch it never
-//! got to.
-//!
-//! **Make the trigger event self-sufficient.**  [`Saga::correlate`] and
-//! [`Saga::handle`] are handed the decoded event and nothing else — not the
-//! stream key it was read from, not its sequence.  An event that omits what
-//! its consumers need forces every consumer to reach back to where it came
-//! from, and a consumer that cannot (a projection replaying an archive, a
-//! second saga on a different subscription) simply cannot act on it.  A fact
-//! event should therefore carry its own stream key and everything a
-//! child-creation command needs, so both the saga and its crash-restart path
-//! can reconstruct their targets from the record alone.
 
 mod context;
 mod dead_letter;
