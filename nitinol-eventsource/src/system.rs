@@ -7,6 +7,7 @@ use nitinol_runtime::ProcessSystem;
 
 use crate::aggregate::Aggregate;
 use crate::codec::{Codec, ErasedCodec};
+use crate::process::resolve::{AggregateRegistry, ResolveHandle};
 use crate::{AggregateProps, AggregateProxy};
 
 /// Marker type indicating no codec has been configured yet.
@@ -113,7 +114,8 @@ impl<C, St> EventSourceSystemBuilder<C, St> {
     /// Finalize construction and return the configured [`EventSourceSystem`].
     pub fn build(self) -> EventSourceSystem<C, St> {
         EventSourceSystem {
-            ps: self.ps,
+            ps: Arc::new(self.ps),
+            registry: AggregateRegistry::new(),
             store: self.store,
             _codec: PhantomData,
         }
@@ -134,9 +136,41 @@ impl<C, St> EventSourceSystemBuilder<C, St> {
 /// | State | Spawn entry points |
 /// |---|---|
 /// | [`StoreUnset`] (the default) | [`spawn_aggregate(id, store)`][Self::spawn_aggregate] / [`aggregate_props(id, store)`][Self::aggregate_props] — the store is named per spawn |
-/// | [`StoreSet`] | [`spawn_aggregate(id)`][Self::spawn_aggregate] / [`aggregate_props(id)`][Self::aggregate_props] take the default; [`spawn_aggregate_with_store`][Self::spawn_aggregate_with_store] / [`aggregate_props_with_store`][Self::aggregate_props_with_store] override it |
+/// | [`StoreSet`] | [`spawn_aggregate(id)`][Self::spawn_aggregate] / [`aggregate_props(id)`][Self::aggregate_props] / [`aggregate_proxy(id)`][Self::aggregate_proxy] take the default; [`spawn_aggregate_with_store`][Self::spawn_aggregate_with_store] / [`aggregate_props_with_store`][Self::aggregate_props_with_store] override it |
+///
+/// # Resolving, not spawning
+///
+/// Every aggregate entry point below **resolves**: an identifier is mapped to a
+/// reference, and the aggregate is activated only if this node has no activation
+/// for it yet.  Concurrent resolves of one identifier cause at most one
+/// activation and all receive the same reference (R-1), and nothing observable
+/// says which call did the activating (R-3).
+///
+/// Two things follow that code written against this system must respect.
+///
+/// * **Duplicate activations are possible and normal.**  The at-most-one
+///   guarantee is per node.  Across a cluster, one aggregate may be activated
+///   more than once at the same time — that is a placement goal and a
+///   convergence property, not a safety contract (R-2).  Safety belongs to the
+///   event store: an append derived from a state the stream has moved past is
+///   rejected, and the activation that made it stops (C-1).  Never write code
+///   whose correctness needs single activation.
+/// * **Store-external side effects are not at-most-once.**
+///   [`Effect::Side`](crate::Effect::Side) and a bare
+///   [`tell`](crate::AggregateProxy::tell) leave the store's arbitration, so a
+///   duplicate activation can perform them a second time and nothing detects it.
+///   A side effect that must be cluster-safe is expressed as a persisted record
+///   — `Effect::persist`, or a saga outbox — so that some stream's own OCC
+///   decides whether it happened at all.
+///
+/// Starting a lifecycle explicitly, rather than resolving one, is
+/// [`AggregateProps::spawn`] on props built directly (R-4).
 pub struct EventSourceSystem<C, St = StoreUnset> {
-    ps: ProcessSystem,
+    /// Shared rather than owned outright: a reference re-resolves its aggregate
+    /// long after the entry point that produced it returned, and needs a system
+    /// to activate on.
+    ps: Arc<ProcessSystem>,
+    registry: Arc<AggregateRegistry>,
     store: St,
     _codec: PhantomData<C>,
 }
@@ -155,6 +189,11 @@ impl<C, St> EventSourceSystem<C, St> {
     /// Returns a reference to the underlying [`ProcessSystem`].
     pub fn process_system(&self) -> &ProcessSystem {
         &self.ps
+    }
+
+    /// What a reference needs to resolve, and re-resolve, its aggregate here.
+    fn resolve_handle(&self) -> ResolveHandle {
+        ResolveHandle::new(Arc::clone(&self.registry), Arc::clone(&self.ps))
     }
 }
 
@@ -200,34 +239,10 @@ where
     {
         AggregateProps::<A>::new(id, store).with_codec(self.codec::<A::Event>())
     }
-}
 
-impl<C> EventSourceSystem<C, StoreUnset>
-where
-    C: Default + Send + Sync + 'static,
-{
-    /// Spawn an aggregate process on `store`, pre-wired with the system event codec.
-    ///
-    /// This system holds no default store, so the store is named here.  Binding
-    /// one with [`EventSourceSystemBuilder::with_event_store`] makes the argument
-    /// unnecessary — see [`EventSourceSystem<C, StoreSet>`][EventSourceSystem].
-    pub async fn spawn_aggregate<A>(
-        &self,
-        id: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> AggregateProxy<A>
-    where
-        A: Aggregate,
-        C: Codec<A::Event>,
-    {
-        self.props_on::<A>(id, store).spawn(&self.ps).await
-    }
-
-    /// Return an [`AggregateProps`] on `store`, pre-wired with the system event codec.
-    ///
-    /// Use this when additional configuration (e.g., snapshot persistor) is needed
-    /// before spawning.
-    pub fn aggregate_props<A>(
+    /// The same props, wired to resolve through this system's registry rather
+    /// than to activate per call.
+    fn resolving_props_on<A>(
         &self,
         id: AggregateId,
         store: Arc<dyn EventStore>,
@@ -237,6 +252,64 @@ where
         C: Codec<A::Event>,
     {
         self.props_on::<A>(id, store)
+            .with_resolve(self.resolve_handle())
+    }
+
+    /// A reference to the aggregate `id` on `store`, resolved at dispatch time.
+    fn reference_on<A>(&self, id: AggregateId, store: Arc<dyn EventStore>) -> AggregateProxy<A>
+    where
+        A: Aggregate,
+        C: Codec<A::Event>,
+    {
+        self.props_on::<A>(id, store)
+            .into_reference(self.resolve_handle())
+    }
+}
+
+impl<C> EventSourceSystem<C, StoreUnset>
+where
+    C: Default + Send + Sync + 'static,
+{
+    /// Resolve the aggregate `id` on `store`, activating it if this node has no
+    /// activation for it, and return a reference to it.
+    ///
+    /// This system holds no default store, so the store is named here.  Binding
+    /// one with [`EventSourceSystemBuilder::with_event_store`] makes the argument
+    /// unnecessary — see [`EventSourceSystem<C, StoreSet>`][EventSourceSystem].
+    ///
+    /// `store` configures the activation this call may start.  Resolving an
+    /// identifier that is already activated joins that activation, whatever store
+    /// it was given — two activations of one stream is the state resolve exists
+    /// to prevent (R-1), so identity wins over per-call wiring.
+    pub async fn spawn_aggregate<A>(
+        &self,
+        id: AggregateId,
+        store: Arc<dyn EventStore>,
+    ) -> AggregateProxy<A>
+    where
+        A: Aggregate,
+        C: Codec<A::Event>,
+    {
+        self.resolving_props_on::<A>(id, store)
+            .spawn(&self.ps)
+            .await
+    }
+
+    /// Return an [`AggregateProps`] on `store`, pre-wired with the system event codec.
+    ///
+    /// Use this when additional configuration (e.g., snapshot persistor) is needed
+    /// before spawning.  Its `spawn` resolves exactly as
+    /// [`spawn_aggregate`][Self::spawn_aggregate] does.
+    pub fn aggregate_props<A>(
+        &self,
+        id: AggregateId,
+        store: Arc<dyn EventStore>,
+    ) -> AggregateProps<A, crate::CodecSet<A::Event>>
+    where
+        A: Aggregate,
+        C: Codec<A::Event>,
+    {
+        self.resolving_props_on::<A>(id, store)
     }
 }
 
@@ -376,10 +449,33 @@ where
         self.aggregate_props_with_store::<A>(id, Arc::clone(self.event_store()))
     }
 
-    /// Spawn an aggregate process onto `store`, overriding the system default.
+    /// A reference to the aggregate `id`, built without awaiting and without
+    /// activating anything.
     ///
-    /// The default receives nothing for this aggregate: `store` is the only place
-    /// its stream is written and replayed.
+    /// The aggregate is resolved on the reference's first dispatch, and resolved
+    /// again after the activation it reached dies — the same reference the
+    /// awaited entry points hand back, obtained where awaiting is not possible: a
+    /// `fold` over a decision, a crash-restart factory rebuilding a target from a
+    /// stored marker.
+    ///
+    /// Deferring the activation is what makes that sound.  A reference names the
+    /// aggregate, not a process, so building one commits to nothing that could
+    /// have become stale by the time it is used.
+    pub fn aggregate_proxy<A>(&self, id: AggregateId) -> AggregateProxy<A>
+    where
+        A: Aggregate,
+        C: Codec<A::Event>,
+    {
+        self.reference_on::<A>(id, Arc::clone(self.event_store()))
+    }
+
+    /// Resolve the aggregate `id` on `store` instead of on the system default.
+    ///
+    /// The default receives nothing for this aggregate: `store` is where the
+    /// activation this call may start writes and replays.  Resolving an
+    /// identifier that already has an activation joins it and leaves `store`
+    /// unused — identity decides which aggregate, and only the first resolve of
+    /// an identity decides its wiring.
     pub async fn spawn_aggregate_with_store<A>(
         &self,
         id: AggregateId,
@@ -389,13 +485,15 @@ where
         A: Aggregate,
         C: Codec<A::Event>,
     {
-        self.props_on::<A>(id, store).spawn(&self.ps).await
+        self.resolving_props_on::<A>(id, store)
+            .spawn(&self.ps)
+            .await
     }
 
     /// Return an [`AggregateProps`] on `store`, overriding the system default.
     ///
-    /// The default receives nothing for this aggregate: `store` is the only place
-    /// its stream is written and replayed.
+    /// The same override, and the same resolve semantics, as
+    /// [`spawn_aggregate_with_store`][Self::spawn_aggregate_with_store].
     pub fn aggregate_props_with_store<A>(
         &self,
         id: AggregateId,
@@ -405,6 +503,6 @@ where
         A: Aggregate,
         C: Codec<A::Event>,
     {
-        self.props_on::<A>(id, store)
+        self.resolving_props_on::<A>(id, store)
     }
 }

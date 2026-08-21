@@ -19,7 +19,6 @@ use nitinol_saga::SagaDefaultStoreExt;
 use saga_fanout_pattern::codec::JsonCodec;
 use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
-use saga_fanout_pattern::router::PayslipRegistry;
 use saga_fanout_pattern::saga::FanOutSaga;
 
 /// Fan-out width the pattern is built around: one approval covers 32 employees.
@@ -50,22 +49,20 @@ async fn main() {
     let run_id = AggregateId::new("payroll-run-april");
     let employees = employee_ids();
 
-    let registry = Arc::new(PayslipRegistry::new(Arc::clone(&system)));
-
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
-    let registry_for_producer = Arc::clone(&registry);
-    let registry_for_factory = Arc::clone(&registry);
+    let system_for_producer = Arc::clone(&system);
+    let system_for_factory = Arc::clone(&system);
 
     // The manager, not `spawn_saga`, is what turns a subscription into one saga
     // instance per correlation key, spawning it on the first event that
     // correlates to it.
     let _manager = system
         .saga_manager_props(system.subscription(&run_id), move || {
-            FanOutSaga::new(Arc::clone(&registry_for_producer))
+            FanOutSaga::new(Arc::clone(&system_for_producer))
         })
         .with_crash_restart_factory(move |payload: &[u8]| {
-            FanOutSaga::crash_restart_intent(&registry_for_factory, payload)
+            FanOutSaga::crash_restart_intent(&system_for_factory, payload)
         })
         .spawn(system.process_system())
         .await;
@@ -89,7 +86,7 @@ async fn main() {
     let issued_count = loop {
         let mut count = 0;
         for key in &payslips {
-            let proxy = registry.resolve(key).await;
+            let proxy = system.aggregate_proxy::<Payslip>(AggregateId::new(key));
             if proxy
                 .exec(IsIssued)
                 .await

@@ -33,9 +33,20 @@
 //! `append(key, events)` and `load(LoadQuery)` both name the stream they act
 //! on — so a single instance holds the payroll run's stream, the 32 payslip
 //! streams and the saga's own journal side by side, each owner reading only its
-//! own key.  This crate wires exactly one store and hands the same
-//! `Arc<dyn EventStore>` to every spawn: the run aggregate, the payslip
-//! registry, the saga journal, and the manager's subscription.
+//! own key.  This crate binds exactly one store to its `EventSourceSystem`, and
+//! every wiring point takes it from there: the run aggregate, the payslips, the
+//! saga journal, and the manager's subscription.
+//!
+//! # Routing without a router
+//!
+//! A fan-out addresses children that may not be running, so it needs "given a
+//! stream key, name the aggregate that owns it".  That is what
+//! [`nitinol_eventsource::AggregateProxy`] is — a reference to an aggregate by
+//! identity, resolved when a command is dispatched rather than when the
+//! reference is built — so this crate keeps no registry of live children.  One
+//! consequence is worth stating: a reference stays valid across the death of the
+//! activation it reached, which is what lets the saga's crash-restart factory
+//! rebuild a target from an outbox marker written by an incarnation that is gone.
 //!
 //! A subscription does not need a store of its own either.  The manager is
 //! given a [`nitinol_eventsource::SequenceCursor`], and
@@ -114,5 +125,4 @@
 pub mod codec;
 pub mod payroll_run;
 pub mod payslip;
-pub mod router;
 pub mod saga;

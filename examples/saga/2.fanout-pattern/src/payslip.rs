@@ -28,9 +28,10 @@ impl Event for PayslipIssued {
 ///
 /// `payslip` is the target's stream key.  It is not read by [`Decider::decide`]
 /// — the aggregate already knows which stream it is — but it is what makes the
-/// command routable on its own: [`crate::router::PayslipTarget`] resolves the
-/// child process from it, and after a full process crash the saga's
-/// crash-restart factory rebuilds that target out of these very bytes (see
+/// command routable on its own: a reference to the target is built from it with
+/// [`EventSourceSystem::aggregate_proxy`](nitinol_eventsource::system::EventSourceSystem::aggregate_proxy),
+/// and after a full process crash the saga's crash-restart factory rebuilds that
+/// reference out of these very bytes (see
 /// [`crate::saga::FanOutSaga::crash_restart_intent`]).
 ///
 /// `Clone + Serialize + Deserialize` are required by

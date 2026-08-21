@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
+use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
@@ -42,6 +43,24 @@ pub(crate) struct ExecMsg<M>(pub(crate) M);
 // AggregateProcess
 
 /// The runtime `Process` that hosts an aggregate and handles commands / queries.
+///
+/// # The only writer, optimistically
+///
+/// An activation numbers its appends from the sequence it replayed to, which is
+/// correct exactly while it is the only thing writing that stream.  It assumes
+/// that rather than enforcing it: nothing here, and nothing in the resolve layer
+/// above, prevents a second activation of the same aggregate from existing
+/// elsewhere (R-2).
+///
+/// The assumption is checked where it matters.  The store rejects an append at a
+/// sequence that is already taken, and that rejection *is* the detection: this
+/// activation has been overtaken and everything it would decide from here is
+/// derived from a state the stream has moved past.  It cannot repair that, so it
+/// stops (C-1).  References to the aggregate outlive that stop and resolve it
+/// again (R-5).
+///
+/// The one conflict that is not an overtake is a conflict on the stream's
+/// genesis sequence, which means the aggregate already exists (C-2).
 pub struct AggregateProcess<A: Aggregate> {
     pub(crate) state: A,
     pub(crate) aggregate_id: AggregateId,
@@ -56,7 +75,7 @@ pub struct AggregateProcess<A: Aggregate> {
 }
 
 impl<A: Aggregate> Process for AggregateProcess<A> {
-    async fn on_start(&mut self, _ctx: &mut ProcessContext<Self>) {
+    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         if let (Some(restore_fn), Some(snapshot_proxy)) =
             (self.snapshot_restore.clone(), self.snapshot_ref.clone())
         {
@@ -83,10 +102,22 @@ impl<A: Aggregate> Process for AggregateProcess<A> {
             ..Default::default()
         };
 
+        // A failed replay (load or stream error) leaves `self.sequence` at
+        // whatever it was before this call — 0 for a fresh activation. Falling
+        // through to the message loop with an unreplayed state would let C-2
+        // (`*sequence == 0` on a genesis conflict means "already created") treat
+        // this activation's own missing history as a redelivered creation and
+        // answer a command as success even though it never replayed far enough
+        // to know that.  Stopping here, the same way C-1 stops on an overtaken
+        // append, ensures no command is ever decided from state this activation
+        // never actually reached.
         let stream = match self.store.load(query).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(error = ?e, "event store load failed during replay");
+                if let Err(e) = ctx.stop_self().await {
+                    tracing::error!(error = %e, "stop-on-replay-failure could not be signalled");
+                }
                 return;
             }
         };
@@ -97,6 +128,9 @@ impl<A: Aggregate> Process for AggregateProcess<A> {
                 Ok(ev) => ev,
                 Err(e) => {
                     tracing::error!(error = ?e, "event store stream error during replay");
+                    if let Err(e) = ctx.stop_self().await {
+                        tracing::error!(error = %e, "stop-on-replay-failure could not be signalled");
+                    }
                     return;
                 }
             };
@@ -127,7 +161,7 @@ where
     async fn recv(
         &mut self,
         msg: AskCmd<C>,
-        _ctx: &mut ProcessContext<Self>,
+        process_ctx: &mut ProcessContext<Self>,
     ) -> Result<Self::Response, Self::Error> {
         let mut ctx = Context::new(self.aggregate_id.clone(), self.sequence);
         let effect = self
@@ -136,7 +170,7 @@ where
             .await
             .map_err(AskHandlerError::Rejection)?;
 
-        run_effect(
+        let outcome = run_effect(
             effect,
             &mut self.state,
             &self.aggregate_id,
@@ -144,8 +178,23 @@ where
             self.store.as_ref(),
             self.codec.as_ref(),
         )
-        .await
-        .map_err(AskHandlerError::Effect)
+        .await;
+
+        // C-1. A conflict that reaches here is not a creation — `run_effect`
+        // answers those as "already created" (C-2) — so the stream has been
+        // written by someone else since this activation replayed it.  Stopping is
+        // the whole response: reloading and retrying would only re-enter the race
+        // this activation has already lost.
+        if let Err(EffectExecutionError::Append(AppendError::SequenceConflict(_))) = &outcome {
+            // Signalled explicitly rather than left to the supervision strategy,
+            // because stopping is a property of the conflict: no strategy may
+            // resume or restart this activation into writing the stream again.
+            if let Err(e) = process_ctx.stop_self().await {
+                tracing::error!(error = %e, "stop-on-conflict could not be signalled");
+            }
+        }
+
+        outcome.map_err(AskHandlerError::Effect)
     }
 }
 
@@ -205,10 +254,18 @@ where
                         occurred_at: jiff::Timestamp::now(),
                     });
                 }
-                store
-                    .append(aggregate_id.borrow(), appending)
-                    .await
-                    .map_err(EffectExecutionError::Append)?;
+                match store.append(aggregate_id.borrow(), appending).await {
+                    Ok(_) => {}
+                    // C-2 / OCC-2. Appending from sequence zero is a creation, so
+                    // a conflict there says the aggregate already exists — the
+                    // expected answer to a creation command redelivered under
+                    // at-least-once, not a failure.  Nothing was written, so
+                    // nothing is applied and the counter does not move: a later
+                    // command must address the genesis sequence again rather than
+                    // write into a stream this activation never replayed.
+                    Err(AppendError::SequenceConflict(_)) if *sequence == 0 => return Ok(vec![]),
+                    Err(e) => return Err(EffectExecutionError::Append(e)),
+                }
                 // Commit the sequence counter only after a successful append.
                 *sequence = next_sequence;
                 let returned = events.clone();

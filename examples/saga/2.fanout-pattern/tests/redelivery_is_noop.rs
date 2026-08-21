@@ -190,13 +190,13 @@ async fn redelivered_fact_event_writes_no_second_payslip() {
         .await
         .expect("stopping the manager must succeed");
 
-    let _second_manager = spawn_manager(&world.system, &world.registry, &run_id).await;
+    let _second_manager = spawn_manager(&world.system, &run_id).await;
 
     let saga_key = FanOutSaga::instance_id(run_id.as_str());
     wait_for_decisions(&store, saga_key.as_str(), 2, FANOUT_TIMEOUT).await;
     tokio::time::sleep(REDELIVERY_SETTLE).await;
 
-    let states = drain_payslips(&world.registry, &payslips).await;
+    let states = drain_payslips(&world.system, &payslips).await;
     assert_eq!(
         states,
         vec![true; EMPLOYEE_COUNT],

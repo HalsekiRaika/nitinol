@@ -1,3 +1,5 @@
+use nitinol_persistence::error::AppendError;
+
 use crate::SideEffectError;
 
 /// Error produced when decoding a [`crate::SystemEvent`] payload fails.
@@ -36,6 +38,26 @@ pub enum EffectExecutionError {
     Append(nitinol_persistence::error::AppendError),
 }
 
+/// Whether re-issuing a failed dispatch can plausibly reach a different outcome.
+///
+/// A reference outlives the activation it was pointing at, so a caller has to be
+/// able to tell "this command was refused" from "this command never reached an
+/// aggregate that could judge it" — and to tell them apart from the type rather
+/// than from an error message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retryability {
+    /// The failure describes the circumstances of the dispatch, not the command.
+    ///
+    /// Nothing was decided about the command itself, so re-issuing it — against
+    /// whichever activation the reference resolves next — may well succeed.
+    Transient,
+    /// The failure is a verdict on this command against this state.
+    ///
+    /// Re-issuing it reproduces the verdict; only a different command, or a
+    /// state that has since moved, changes the answer.
+    Permanent,
+}
+
 /// Error returned by `AggregateProxy::ask`.
 #[derive(Debug, thiserror::Error)]
 pub enum AskError<R: std::error::Error + Send + Sync + 'static> {
@@ -45,6 +67,40 @@ pub enum AskError<R: std::error::Error + Send + Sync + 'static> {
     Effect(EffectExecutionError),
     #[error("process send error: {0}")]
     Send(nitinol_runtime::error::SendError),
+}
+
+impl<R: std::error::Error + Send + Sync + 'static> AskError<R> {
+    /// Whether re-issuing the command is worth attempting.
+    pub fn retryability(&self) -> Retryability {
+        match self {
+            // The decider looked at the command and refused it.
+            AskError::Rejection(_) => Retryability::Permanent,
+            // The command never reached an activation, or reached one that was
+            // stopping — including one stopped by a conflict of its own.
+            AskError::Send(_) => Retryability::Transient,
+            AskError::Effect(e) => e.retryability(),
+        }
+    }
+}
+
+impl EffectExecutionError {
+    /// Whether the failure was about the environment the effect ran in, rather
+    /// than about the effect itself.
+    fn retryability(&self) -> Retryability {
+        match self {
+            // Losing the sequence means another writer took it; a re-resolved
+            // activation replays past it and can carry the command.
+            Self::Append(AppendError::SequenceConflict(_)) => Retryability::Transient,
+            // The store failed to answer.  Nothing was committed, and the fault
+            // is the store's rather than the command's.
+            Self::Append(AppendError::Backend(_)) => Retryability::Transient,
+            // A side effect's own failure says nothing about the command that
+            // scheduled it.
+            Self::Side(_) => Retryability::Transient,
+            // Encoding this event is deterministic: it fails again, identically.
+            Self::Codec(_) => Retryability::Permanent,
+        }
+    }
 }
 
 /// Error returned by `AggregateProxy::tell`.

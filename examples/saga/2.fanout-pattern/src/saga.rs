@@ -5,13 +5,30 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::Event;
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
+use nitinol_eventsource::{AggregateProxy, Event};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, TellIntent};
 
+use crate::codec::JsonCodec;
 use crate::payroll_run::PayrollRunApproved;
 use crate::payslip::{IssuePayslip, Payslip};
-use crate::router::PayslipRegistry;
+
+/// The system every payslip in this example lives on.
+type PayrollSystem = Arc<EventSourceSystem<JsonCodec, StoreSet>>;
+
+/// A reference to the payslip that owns the stream `key`.
+///
+/// A fan-out addresses children that may not be running: the first delivery
+/// creates them, and a replay after a crash addresses a set that is partly
+/// resident and partly gone.  Routing is therefore "given a stream key, name the
+/// aggregate" — which is what an
+/// [`AggregateProxy`] already is, so this example holds no registry of its own.
+/// The reference is built without awaiting, which is what lets the `fold` below
+/// and the crash-restart factory produce one at all.
+fn payslip_ref(system: &PayrollSystem, key: &str) -> AggregateProxy<Payslip> {
+    system.aggregate_proxy::<Payslip>(AggregateId::new(key))
+}
 
 /// The saga's own decision event: "this fan-out was started for this run".
 ///
@@ -37,12 +54,12 @@ impl Event for FanOutStarted {
 
 /// Delivers one issue command per payslip named by a [`PayrollRunApproved`].
 pub struct FanOutSaga {
-    registry: Arc<PayslipRegistry>,
+    system: PayrollSystem,
 }
 
 impl FanOutSaga {
-    pub fn new(registry: Arc<PayslipRegistry>) -> Self {
-        Self { registry }
+    pub fn new(system: PayrollSystem) -> Self {
+        Self { system }
     }
 
     /// One fan-out process per payroll run.
@@ -65,11 +82,11 @@ impl FanOutSaga {
     /// reconstructed; replay then records a `TellFailed` for it instead of
     /// dropping it unnoticed.
     pub fn crash_restart_intent(
-        registry: &Arc<PayslipRegistry>,
+        system: &PayrollSystem,
         crash_restart_payload: &[u8],
     ) -> Option<TellIntent> {
         let cmd: IssuePayslip = serde_json::from_slice(crash_restart_payload).ok()?;
-        let target = registry.target(&cmd.payslip);
+        let target = payslip_ref(system, &cmd.payslip);
         Some(TellIntent::new::<Payslip, IssuePayslip, _>(target, cmd))
     }
 }
@@ -120,7 +137,7 @@ impl Saga for FanOutSaga {
         // partial write could otherwise leave the saga believing it had fanned
         // out to payslips it never enqueued.
         Ok(payslips.into_iter().fold(decision, |effect, payslip| {
-            let target = self.registry.target(&payslip);
+            let target = payslip_ref(&self.system, &payslip);
             effect.combine(SagaEffect::tell::<Payslip, IssuePayslip, _>(
                 target,
                 IssuePayslip { payslip },

@@ -57,6 +57,7 @@ pub mod eventsource {
         pub use nitinol_eventsource::error::CodecError;
         pub use nitinol_eventsource::error::EffectExecutionError;
         pub use nitinol_eventsource::error::ExecError;
+        pub use nitinol_eventsource::error::Retryability;
         pub use nitinol_eventsource::error::TellError;
     }
 
@@ -78,7 +79,7 @@ pub mod eventsource {
     pub use nitinol_eventsource::{
         AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset,
     };
-    pub use nitinol_eventsource::{AskError, ExecError, TellError};
+    pub use nitinol_eventsource::{AskError, ExecError, Retryability, TellError};
     pub use nitinol_eventsource::{
         CursorSet, CursorUnset, DurableStream, DurableStreamProxy, DurableSubscription,
         SequenceCursor,
