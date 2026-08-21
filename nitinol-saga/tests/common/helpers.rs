@@ -79,10 +79,13 @@ impl Decider<NoopCmd> for TestTarget {
 /// triggering any real side effect.
 pub async fn make_tell_effect<E>() -> SagaEffect<E> {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::new(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(store)
+        .build();
     let proxy = system
-        .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-target"), store)
+        .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-target"))
         .await;
     SagaEffect::tell(proxy, NoopCmd)
 }
@@ -92,10 +95,13 @@ pub async fn make_tell_effect<E>() -> SagaEffect<E> {
 /// going through the `SagaEffect::tell` convenience helper.
 pub async fn make_tell_intent() -> TellIntent {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::new(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(store)
+        .build();
     let proxy = system
-        .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-intent-target"), store)
+        .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-intent-target"))
         .await;
     TellIntent::new(proxy, NoopCmd)
 }

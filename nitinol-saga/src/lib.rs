@@ -15,7 +15,7 @@
 //! | Effect ADT | [`SagaEffect`] |
 //! | Identifier | [`SagaId`] |
 //! | Spawn builder | [`SagaProps`] |
-//! | System-bound spawn builder | [`SagaSpawn`] (from [`SagaSystemExt::spawn_saga`]) |
+//! | System-bound spawn builder | [`SagaSpawn`] (from [`SagaSystemExt::spawn_saga`] / [`SagaDefaultStoreExt::spawn_saga`]) |
 //! | Upstream subscription value | [`Subscription`] |
 //! | Handle | [`SagaProxy`] |
 //! | Instance-manager spawn builder | [`SagaManagerProps`] |
@@ -37,6 +37,19 @@
 //!   `ProcessSystem` come from the system, and store plus start position arrive
 //!   as one [`Subscription`].  [`SagaProps`] stays the entry point for the
 //!   settings that builder does not take.
+//! - Default store: a system built with
+//!   [`with_event_store`](nitinol_eventsource::system::EventSourceSystemBuilder::with_event_store)
+//!   carries the store as well, and [`SagaDefaultStoreExt`] is the store-less
+//!   spawn surface it unlocks — [`spawn_saga`](SagaDefaultStoreExt::spawn_saga)
+//!   for a standalone saga's journal,
+//!   [`subscription`](SagaDefaultStoreExt::subscription) for the upstream it
+//!   polls, and [`saga_manager_props`](SagaDefaultStoreExt::saga_manager_props)
+//!   for both at once on a manager.  `EventStore` is stream-keyed, so that one
+//!   store holds the upstream stream and every instance's own stream side by
+//!   side.  Each direction keeps its override —
+//!   [`spawn_saga_with_store`](SagaDefaultStoreExt::spawn_saga_with_store),
+//!   [`Subscription::stream`], [`SagaManagerProps::new`] — which takes
+//!   precedence over the default.
 //! - Instance management: [`SagaManagerProps`] spawns one manager that holds a
 //!   *single* upstream subscription for every instance of a saga type, so an
 //!   upstream record is decoded once no matter how far the correlation fans
@@ -123,4 +136,4 @@ pub use self::process::{
 };
 pub use self::saga::Saga;
 pub use self::scheduler::{spawn_scheduler, ScheduleToken, SchedulerProxy, TimerName};
-pub use self::system_ext::{SagaSpawn, SagaSystemExt, Subscription};
+pub use self::system_ext::{SagaDefaultStoreExt, SagaSpawn, SagaSystemExt, Subscription};

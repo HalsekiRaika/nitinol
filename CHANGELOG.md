@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-eventsource`, `nitinol-saga`): a system-held default `EventStore`.
+  `EventSourceSystemBuilder::with_event_store(store)` binds one store to the
+  system, and every spawn entry point then resolves it instead of having each
+  call site carry the `Arc`: `spawn_aggregate::<A>(id)` /
+  `aggregate_props::<A>(id)` on the aggregate side, and — through the new
+  `SagaDefaultStoreExt` — `spawn_saga(saga_id, producer)` for a saga's own
+  journal, `system.subscription(&key)` for the upstream it polls, and
+  `system.saga_manager_props(subscription, producer)` for both at once on a
+  manager. `EventStore` is stream-keyed (`append(key, ..)`,
+  `LoadQuery::by_stream`), so one instance holds every aggregate's stream and
+  every saga's journal side by side under their own keys, which is what makes a
+  single default sufficient rather than a registry of named stores.
+
+  Every default keeps a per-spawn override that takes precedence, so splitting
+  streams across store instances stays expressible:
+  `spawn_aggregate_with_store` / `aggregate_props_with_store`,
+  `spawn_saga_with_store`, `Subscription::stream(&store, &key)` and
+  `SagaManagerProps::new(store, producer)`.
+
+  Whether a default exists is a typestate on the system
+  (`EventSourceSystem<C, StoreUnset>` / `EventSourceSystem<C, StoreSet>`), in
+  the same style as the codec marker: the store-less forms exist only on a
+  system that was given one, so relying on a store that was never configured is
+  a compile error rather than a failure at the first spawn. The parameter
+  defaults to `StoreUnset`, and a system built without `with_event_store` keeps
+  exactly the previous surface — `spawn_aggregate(id, store)`,
+  `aggregate_props(id, store)` and `SagaSystemExt::spawn_saga(saga_id, store,
+  producer)` — so existing wiring compiles unchanged.
+
 - (`nitinol-saga`): `SagaSystemExt` / `Subscription` — spawning a saga from an
   `EventSourceSystem`, symmetrically to `EventSourceSystem::spawn_aggregate`.
   An aggregate spawn already resolved its codec from the system, while a saga

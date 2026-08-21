@@ -7,7 +7,7 @@ use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaSystemExt, Subscription};
+use nitinol_saga::SagaDefaultStoreExt;
 
 use saga_basic_saga::codec::JsonCodec;
 use saga_basic_saga::inventory::{GetReservedCount, Inventory};
@@ -28,30 +28,31 @@ async fn main() {
     init_tracing();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
-    let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // One store for the whole example.  `EventStore` is stream-keyed, so the
+    // order's stream, the inventory's stream and the saga's own journal are
+    // tenants of this one instance, each under its own key — which is what lets
+    // the system hand it to every spawn below.
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::new(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(store)
+        .build();
+
     let order_id = AggregateId::new("example-order");
-    let order_proxy = system
-        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&order_store))
-        .await;
+    let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
-    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory_proxy = system
-        .spawn_aggregate::<Inventory>(AggregateId::new("example-inventory"), inventory_store)
+        .spawn_aggregate::<Inventory>(AggregateId::new("example-inventory"))
         .await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let inventory_for_producer = inventory_proxy.clone();
 
     let _saga_proxy = system
-        .spawn_saga(ReservationSaga::instance_id(), saga_store, move || {
-            ReservationSaga {
-                inventory: inventory_for_producer.clone(),
-            }
+        .spawn_saga(ReservationSaga::instance_id(), move || ReservationSaga {
+            inventory: inventory_for_producer.clone(),
         })
-        .subscribed_to(Subscription::stream(&order_store, &order_id))
+        .subscribed_to(system.subscription(&order_id))
         .spawn()
         .await;
 

@@ -13,16 +13,16 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{AggregateProxy, Event, SequenceCursor};
+use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
+use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream};
 use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaManagerProps, SagaManagerProxy};
+use nitinol_saga::{SagaDefaultStoreExt, SagaManagerProxy};
 
 use saga_fanout_pattern::codec::JsonCodec;
-use saga_fanout_pattern::payroll_run::{PayrollRun, PayrollRunApproved};
+use saga_fanout_pattern::payroll_run::PayrollRun;
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
 use saga_fanout_pattern::router::PayslipRegistry;
 use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
@@ -66,7 +66,7 @@ pub fn payslip_keys(payroll_run: &str, employees: &[String]) -> Vec<String> {
 /// `system` is kept because it owns the `ProcessSystem` the aggregates and the
 /// manager run on; dropping it early would take the incarnation down.
 pub struct FanOutWorld {
-    pub system: Arc<EventSourceSystem<JsonCodec>>,
+    pub system: Arc<EventSourceSystem<JsonCodec, StoreSet>>,
     pub registry: Arc<PayslipRegistry>,
     pub payroll_run: AggregateProxy<PayrollRun>,
     pub manager: SagaManagerProxy<FanOutSaga>,
@@ -88,18 +88,18 @@ pub struct FanOutWorld {
 /// reproducible.
 pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> FanOutWorld {
     let ps = ProcessSystem::new().await;
-    let system = Arc::new(EventSourceSystem::new(ps).with_codec::<JsonCodec>().build());
+    let system = Arc::new(
+        EventSourceSystem::new(ps)
+            .with_codec::<JsonCodec>()
+            .with_event_store(store)
+            .build(),
+    );
 
-    let registry = Arc::new(PayslipRegistry::new(
-        Arc::clone(&system),
-        Arc::clone(&store),
-    ));
+    let registry = Arc::new(PayslipRegistry::new(Arc::clone(&system)));
 
-    let payroll_run = system
-        .spawn_aggregate::<PayrollRun>(run_id.clone(), Arc::clone(&store))
-        .await;
+    let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
-    let manager = spawn_manager(&system, &registry, run_id, store).await;
+    let manager = spawn_manager(&system, &registry, run_id).await;
 
     FanOutWorld {
         system,
@@ -115,35 +115,26 @@ pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> Fa
 /// second time over the same store replays the fact event — the at-least-once
 /// redelivery the pattern has to absorb.
 ///
-/// `SequenceCursor::Stream` is also what keeps the subscription pointed at the
-/// run's own stream while the payslip streams and the saga's journal share the
-/// same store.
+/// Subscribing by the run's stream key is also what keeps the manager pointed at
+/// the run's own stream while the payslip streams and the saga's journal share
+/// the same store.
 pub async fn spawn_manager(
-    system: &Arc<EventSourceSystem<JsonCodec>>,
+    system: &Arc<EventSourceSystem<JsonCodec, StoreSet>>,
     registry: &Arc<PayslipRegistry>,
     run_id: &AggregateId,
-    store: Arc<dyn EventStore>,
 ) -> SagaManagerProxy<FanOutSaga> {
     let registry_for_producer = Arc::clone(registry);
     let registry_for_factory = Arc::clone(registry);
 
-    SagaManagerProps::<FanOutSaga>::new(Arc::clone(&store), move || {
-        FanOutSaga::new(Arc::clone(&registry_for_producer))
-    })
-    .with_codec(system.codec::<FanOutStarted>())
-    .with_subscription(
-        store,
-        system.codec::<PayrollRunApproved>(),
-        SequenceCursor::Stream {
-            key: run_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
-    .with_crash_restart_factory(move |payload: &[u8]| {
-        FanOutSaga::crash_restart_intent(&registry_for_factory, payload)
-    })
-    .spawn(system.process_system())
-    .await
+    system
+        .saga_manager_props(system.subscription(run_id), move || {
+            FanOutSaga::new(Arc::clone(&registry_for_producer))
+        })
+        .with_crash_restart_factory(move |payload: &[u8]| {
+            FanOutSaga::crash_restart_intent(&registry_for_factory, payload)
+        })
+        .spawn(system.process_system())
+        .await
 }
 
 // Store observation

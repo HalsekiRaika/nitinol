@@ -36,25 +36,26 @@ fn init_tracing() {
         .init();
 }
 
-async fn spawn_counter(
-    system: &EventSourceSystem<JsonCodec>,
-    id: &str,
-) -> nitinol_eventsource::AggregateProxy<Counter> {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    system
-        .spawn_aggregate::<Counter>(AggregateId::new(id), store)
-        .await
-}
-
 #[tokio::main]
 async fn main() {
     init_tracing();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
-    let proxy_a = spawn_counter(&system, "comm-a").await;
-    let proxy_b = spawn_counter(&system, "comm-b").await;
+    // `EventStore` is stream-keyed, so both counters below are tenants of this
+    // one store, each under its own aggregate id.
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::new(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(store)
+        .build();
+
+    let proxy_a = system
+        .spawn_aggregate::<Counter>(AggregateId::new("comm-a"))
+        .await;
+    let proxy_b = system
+        .spawn_aggregate::<Counter>(AggregateId::new("comm-b"))
+        .await;
 
     let done = Arc::new(Notify::new());
 

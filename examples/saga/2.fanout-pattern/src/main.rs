@@ -11,17 +11,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::SequenceCursor;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaManagerProps;
+use nitinol_saga::SagaDefaultStoreExt;
 
 use saga_fanout_pattern::codec::JsonCodec;
-use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun, PayrollRunApproved};
+use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
 use saga_fanout_pattern::router::PayslipRegistry;
-use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
+use saga_fanout_pattern::saga::FanOutSaga;
 
 /// Fan-out width the pattern is built around: one approval covers 32 employees.
 const EMPLOYEE_COUNT: usize = 32;
@@ -35,25 +34,25 @@ fn employee_ids() -> Vec<String> {
 #[tokio::main]
 async fn main() {
     let ps = ProcessSystem::new().await;
-    let system = Arc::new(EventSourceSystem::new(ps).with_codec::<JsonCodec>().build());
 
     // One store for the whole example.  `EventStore` is stream-keyed, so the
     // payroll run's stream, the 32 payslip streams and the saga's journal are
-    // tenants of this one instance; the manager's `SequenceCursor::Stream`
-    // below is what narrows its subscription back down to the run's stream.
+    // tenants of this one instance; the manager's subscription below is what
+    // narrows it back down to the run's stream.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = Arc::new(
+        EventSourceSystem::new(ps)
+            .with_codec::<JsonCodec>()
+            .with_event_store(store)
+            .build(),
+    );
 
     let run_id = AggregateId::new("payroll-run-april");
     let employees = employee_ids();
 
-    let registry = Arc::new(PayslipRegistry::new(
-        Arc::clone(&system),
-        Arc::clone(&store),
-    ));
+    let registry = Arc::new(PayslipRegistry::new(Arc::clone(&system)));
 
-    let payroll_run = system
-        .spawn_aggregate::<PayrollRun>(run_id.clone(), Arc::clone(&store))
-        .await;
+    let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
     let registry_for_producer = Arc::clone(&registry);
     let registry_for_factory = Arc::clone(&registry);
@@ -61,23 +60,15 @@ async fn main() {
     // The manager, not `spawn_saga`, is what turns a subscription into one saga
     // instance per correlation key, spawning it on the first event that
     // correlates to it.
-    let _manager = SagaManagerProps::<FanOutSaga>::new(Arc::clone(&store), move || {
-        FanOutSaga::new(Arc::clone(&registry_for_producer))
-    })
-    .with_codec(system.codec::<FanOutStarted>())
-    .with_subscription(
-        Arc::clone(&store),
-        system.codec::<PayrollRunApproved>(),
-        SequenceCursor::Stream {
-            key: run_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
-    .with_crash_restart_factory(move |payload: &[u8]| {
-        FanOutSaga::crash_restart_intent(&registry_for_factory, payload)
-    })
-    .spawn(system.process_system())
-    .await;
+    let _manager = system
+        .saga_manager_props(system.subscription(&run_id), move || {
+            FanOutSaga::new(Arc::clone(&registry_for_producer))
+        })
+        .with_crash_restart_factory(move |payload: &[u8]| {
+            FanOutSaga::crash_restart_intent(&registry_for_factory, payload)
+        })
+        .spawn(system.process_system())
+        .await;
 
     payroll_run
         .ask(ApprovePayrollRun {

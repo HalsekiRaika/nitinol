@@ -13,9 +13,8 @@ use std::sync::Arc;
 use futures_core::future::BoxFuture;
 use tokio::sync::Mutex;
 
-use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
 use nitinol_eventsource::{AggregateProxy, AggregateTellTarget, Decider, TellError};
-use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 
 use crate::codec::JsonCodec;
@@ -29,22 +28,20 @@ use crate::payslip::Payslip;
 /// append would conflict and take that payslip down.  Resolving through one
 /// registry is what prevents that.
 ///
-/// The `store` handed in here is the same instance the payroll run and the saga
-/// journal use: [`EventStore`] is keyed by stream, so every payslip is a tenant
-/// of it under its own key.
+/// The payslips live in the system's default `EventStore` — the same instance
+/// the payroll run and the saga journal use: it is keyed by stream, so every
+/// payslip is a tenant of it under its own key.
 pub struct PayslipRegistry {
-    system: Arc<EventSourceSystem<JsonCodec>>,
-    store: Arc<dyn EventStore>,
+    system: Arc<EventSourceSystem<JsonCodec, StoreSet>>,
     /// Held across the spawn `await` so two concurrent resolutions of the same
     /// key cannot both observe it as absent.
     resident: Mutex<HashMap<String, AggregateProxy<Payslip>>>,
 }
 
 impl PayslipRegistry {
-    pub fn new(system: Arc<EventSourceSystem<JsonCodec>>, store: Arc<dyn EventStore>) -> Self {
+    pub fn new(system: Arc<EventSourceSystem<JsonCodec, StoreSet>>) -> Self {
         Self {
             system,
-            store,
             resident: Mutex::new(HashMap::new()),
         }
     }
@@ -58,7 +55,7 @@ impl PayslipRegistry {
         }
         let proxy = self
             .system
-            .spawn_aggregate::<Payslip>(AggregateId::new(payslip), Arc::clone(&self.store))
+            .spawn_aggregate::<Payslip>(AggregateId::new(payslip))
             .await;
         resident.insert(payslip.to_owned(), proxy.clone());
         proxy
