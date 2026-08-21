@@ -45,7 +45,7 @@ async fn main() {
     // `EventStore` is stream-keyed, so both counters below are tenants of this
     // one store, each under its own aggregate id.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();

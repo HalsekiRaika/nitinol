@@ -245,7 +245,9 @@ async fn spawn_counter(system: &EventSourceSystem<JsonCodec>, id: &str) -> Aggre
 async fn e2e_tell_side_effect_from_decide_reaches_target_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let proxy_a = spawn_counter(&system, "e2e-comm-tell-a").await;
     let proxy_b = spawn_counter(&system, "e2e-comm-tell-b").await;
     let done = Arc::new(Notify::new());
@@ -289,7 +291,9 @@ async fn e2e_tell_side_effect_from_decide_reaches_target_aggregate() {
 async fn e2e_side_effect_failure_not_propagated_to_ask_caller() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let proxy_a = spawn_counter(&system, "e2e-comm-fail").await;
 
     // When
@@ -318,7 +322,9 @@ async fn e2e_side_effect_failure_not_propagated_to_ask_caller() {
 async fn e2e_publish_side_effect_from_decide_reaches_stream_subscriber() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let proxy_a = spawn_counter(&system, "e2e-comm-pub").await;
 
     // Spawn the BoxedMessage stream

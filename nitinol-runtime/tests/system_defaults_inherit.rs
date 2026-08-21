@@ -6,20 +6,26 @@
 //! configurable:
 //!
 //! ```text
-//! ProcessSystem::new().await
+//! ProcessSystem::builder()
 //!     .with_default_mailbox_capacity(MailboxCapacity::bounded(64)?)
 //!     .with_default_stash_capacity(StashCapacity::Bounded(NonZeroUsize::new(64).unwrap()))
 //!     .with_default_pipe_capacity(PipeCapacity::Bounded(NonZeroUsize::new(64).unwrap()))
-//!     .with_default_idle_timeout(Duration::from_secs(60));
+//!     .with_default_idle_timeout(Duration::from_secs(60))
+//!     .build()
+//!     .await;
 //! ```
+//!
+//! The defaults are fixed on the builder and settled by `build()`: a built
+//! `ProcessSystem` carries them and offers no way to change them.
 //!
 //! Under the "Inherit" decay rule, a `Props` field set to `Inherit` reads the
 //! System default at spawn time; any explicit `Bounded(n)` on the `Props`
 //! overrides the System default.
 //!
 //! These tests pin down:
-//! - All three `with_default_*_capacity` setters consume `self` and return
-//!   `Self`, allowing a single fluent expression after `ProcessSystem::new()`.
+//! - All three `with_default_*_capacity` setters consume `self` and return the
+//!   builder, allowing a single fluent expression from `ProcessSystem::builder()`
+//!   through to `build()`.
 //! - Setting a system mailbox default of `bounded(1)` causes a `Props with
 //!   mailbox=Inherit` to inherit that 1-slot bound — observed via `tell`
 //!   blocking when the mailbox is full.
@@ -40,41 +46,47 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
-use nitinol_runtime::{MailboxCapacity, PipeCapacity, ProcessSystem, Props, StashCapacity};
+use nitinol_runtime::{
+    MailboxCapacity, PipeCapacity, ProcessSystem, ProcessSystemBuilder, Props, StashCapacity,
+};
 
-// Type-level: each `with_default_*_capacity` is a consuming builder.
+// Type-level: each `with_default_*_capacity` is a consuming builder method, and
+// it lives on the builder rather than on a built system.
 //
-// If any of these regresses to `&mut Self`, the rebinding to `ProcessSystem`
-// below stops compiling.
+// If any of these regresses to `&mut Self`, the rebinding to
+// `ProcessSystemBuilder` below stops compiling; if any moved back onto
+// `ProcessSystem`, the receiver would no longer resolve.
 
 #[allow(dead_code)]
-async fn _with_default_mailbox_capacity_is_consuming_builder() {
-    let system = ProcessSystem::new().await;
-    let _: ProcessSystem = system.with_default_mailbox_capacity(MailboxCapacity::Inherit);
+fn _with_default_mailbox_capacity_is_consuming_builder() {
+    let builder = ProcessSystem::builder();
+    let _: ProcessSystemBuilder = builder.with_default_mailbox_capacity(MailboxCapacity::Inherit);
 }
 
 #[allow(dead_code)]
-async fn _with_default_stash_capacity_is_consuming_builder() {
-    let system = ProcessSystem::new().await;
-    let _: ProcessSystem = system.with_default_stash_capacity(StashCapacity::Inherit);
+fn _with_default_stash_capacity_is_consuming_builder() {
+    let builder = ProcessSystem::builder();
+    let _: ProcessSystemBuilder = builder.with_default_stash_capacity(StashCapacity::Inherit);
 }
 
 #[allow(dead_code)]
-async fn _with_default_pipe_capacity_is_consuming_builder() {
-    let system = ProcessSystem::new().await;
-    let _: ProcessSystem = system.with_default_pipe_capacity(PipeCapacity::Inherit);
+fn _with_default_pipe_capacity_is_consuming_builder() {
+    let builder = ProcessSystem::builder();
+    let _: ProcessSystemBuilder = builder.with_default_pipe_capacity(PipeCapacity::Inherit);
 }
 
-/// All four default-axis setters chain into a single expression.
+/// All four default-axis setters chain into a single expression, which
+/// `build()` closes by producing the system they configured.
 #[allow(dead_code)]
 async fn _full_system_default_chain_compiles_as_single_expression() {
     let n = NonZeroUsize::new(64).expect("64 is non-zero");
-    let _: ProcessSystem = ProcessSystem::new()
-        .await
+    let _: ProcessSystem = ProcessSystem::builder()
         .with_default_mailbox_capacity(MailboxCapacity::Bounded(n))
         .with_default_stash_capacity(StashCapacity::Bounded(n))
         .with_default_pipe_capacity(PipeCapacity::Bounded(n))
-        .with_default_idle_timeout(Duration::from_secs(60));
+        .with_default_idle_timeout(Duration::from_secs(60))
+        .build()
+        .await;
 }
 
 // Mailbox Inherit decay — observed via send back-pressure.
@@ -132,9 +144,10 @@ fn blocking_props(rx: oneshot::Receiver<()>) -> Props<BlockingProcess> {
 #[tokio::test]
 async fn mailbox_inherit_decays_to_system_default_bounded_capacity() {
     let cap = MailboxCapacity::bounded(1).expect("bounded(1) must succeed");
-    let system = ProcessSystem::new()
-        .await
-        .with_default_mailbox_capacity(cap);
+    let system = ProcessSystem::builder()
+        .with_default_mailbox_capacity(cap)
+        .build()
+        .await;
 
     let (release_tx, release_rx) = oneshot::channel();
     let proxy = system.spawn(blocking_props(release_rx)).await;
@@ -177,9 +190,10 @@ async fn mailbox_inherit_decays_to_system_default_bounded_capacity() {
 #[tokio::test]
 async fn mailbox_explicit_bounded_overrides_system_default() {
     let system_cap = MailboxCapacity::bounded(1).expect("bounded(1) must succeed");
-    let system = ProcessSystem::new()
-        .await
-        .with_default_mailbox_capacity(system_cap);
+    let system = ProcessSystem::builder()
+        .with_default_mailbox_capacity(system_cap)
+        .build()
+        .await;
 
     let (release_tx, release_rx) = oneshot::channel();
     let larger = MailboxCapacity::bounded(8).expect("bounded(8) must succeed");
@@ -306,7 +320,10 @@ fn pipe_count_props(delivered: Arc<AtomicU32>) -> Props<PipeCountProcess> {
 #[tokio::test]
 async fn pipe_inherit_decays_to_system_default_and_drops_at_capacity() {
     let cap = PipeCapacity::bounded(2).expect("bounded(2) must succeed");
-    let system = ProcessSystem::new().await.with_default_pipe_capacity(cap);
+    let system = ProcessSystem::builder()
+        .with_default_pipe_capacity(cap)
+        .build()
+        .await;
 
     let delivered = Arc::new(AtomicU32::new(0));
     let proxy = system.spawn(pipe_count_props(delivered.clone())).await;

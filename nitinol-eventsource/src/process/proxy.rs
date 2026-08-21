@@ -1,11 +1,14 @@
 use std::sync::{Arc, Mutex};
 
+use nitinol_persistence::error::AppendError;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::error::AskError as RuntimeAskError;
 
 use crate::aggregate::Aggregate;
 use crate::decider::Decider;
-use crate::error::{AskError, AskHandlerError, ExecError, ExecHandlerError, TellError};
+use crate::error::{
+    AskError, AskHandlerError, EffectExecutionError, ExecError, ExecHandlerError, TellError,
+};
 use crate::process::aggregate_process::{AskCmd, ExecMsg};
 use crate::process::resolve::{AggregateResolver, Incarnation};
 use crate::receive::Receive as EvtReceive;
@@ -129,7 +132,7 @@ impl<A: Aggregate> AggregateProxy<A> {
     {
         let incarnation = self.incarnation().await;
         let outcome = incarnation.ask(AskCmd(cmd)).await.map_err(map_ask_error);
-        if matches!(outcome, Err(AskError::Send(_))) {
+        if signals_stopped_activation(&outcome) {
             self.invalidate(&incarnation);
         }
         outcome
@@ -190,10 +193,13 @@ impl<A: Aggregate> AggregateProxy<A> {
 
     /// Treat `dead` as gone, so the next dispatch resolves a live activation.
     ///
-    /// A send that does not reach its destination is the invalidation signal
-    /// (R-5): the reference cannot ask a stopped activation whether it stopped.
-    /// Nothing is retried here — the caller learns the dispatch failed, and
-    /// [`AskError::retryability`] tells it that retrying is worthwhile.
+    /// Two things count as the invalidation signal (R-5): a send that does not
+    /// reach its destination, and a non-genesis `SequenceConflict` — C-1 stops
+    /// the activation the instant it loses the race, before this call returns,
+    /// so waiting for a *later* send to fail against it would cost the very
+    /// next dispatch a doomed round-trip. Nothing is retried here — the caller
+    /// learns the dispatch failed, and [`AskError::retryability`] tells it that
+    /// retrying is worthwhile.
     fn invalidate(&self, dead: &Incarnation<A>) {
         let Binding::Resolved { resolver, cached } = &*self.binding else {
             return;
@@ -213,6 +219,30 @@ impl<A: Aggregate> AggregateProxy<A> {
 /// Why the incarnation cache lock cannot be poisoned: it guards a `clone` and an
 /// assignment, and is never held across an await.
 const CACHE_LOCK: &str = "the incarnation cache is never held across an await, so no holder panics";
+
+/// Whether `outcome` means the activation `ask` dispatched to can no longer be
+/// reached.
+///
+/// A `Send` failure is the reactive case: the destination was already gone
+/// when the runtime tried to deliver to it. A non-genesis `SequenceConflict`
+/// is the proactive case: `AggregateProcess` answers it only after calling
+/// `stop_self` (C-1), so an `Append(SequenceConflict)` reaching here always
+/// names an activation that is on its way out, whether or not its mailbox has
+/// closed yet. Every other `Effect` error (backend failure, a side effect's
+/// own error, a codec error) says nothing about whether the activation is
+/// still alive, so it must not evict a cache entry that may still be good.
+fn signals_stopped_activation<T, R>(outcome: &Result<T, AskError<R>>) -> bool
+where
+    R: std::error::Error + Send + Sync + 'static,
+{
+    matches!(
+        outcome,
+        Err(AskError::Send(_))
+            | Err(AskError::Effect(EffectExecutionError::Append(
+                AppendError::SequenceConflict(_)
+            )))
+    )
+}
 
 // Error mappers
 

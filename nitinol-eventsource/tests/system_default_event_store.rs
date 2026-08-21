@@ -106,7 +106,7 @@ async fn store_less_spawn_aggregate_persists_onto_the_system_default_store() {
     // Given: a system carrying one default store
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
@@ -134,7 +134,7 @@ async fn store_less_aggregate_props_persists_onto_the_system_default_store() {
     // Given
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
@@ -165,7 +165,7 @@ async fn spawn_aggregate_with_store_overrides_the_system_default_store() {
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
@@ -199,7 +199,7 @@ async fn aggregate_props_with_store_overrides_the_system_default_store() {
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();

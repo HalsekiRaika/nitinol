@@ -136,7 +136,9 @@ async fn wait_for_saga_event_count(
 #[tokio::test]
 async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
@@ -226,7 +228,9 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
 #[tokio::test]
 async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
@@ -293,7 +297,9 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
 #[tokio::test]
 async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let order_id = AggregateId::new("replay-order");

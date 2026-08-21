@@ -155,7 +155,9 @@ async fn wait_for_decode_failed(store: &Arc<dyn EventStore>, saga_id: &SagaId) {
 #[tokio::test]
 async fn decode_failure_route_returning_none_records_no_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_corrupt_ping(&upstream_store, 1).await;

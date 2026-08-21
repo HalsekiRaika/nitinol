@@ -235,7 +235,9 @@ async fn spawn_two_tells_then_end_saga(
 #[tokio::test]
 async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let (saga_store, saga_id, upstream_store, agg_id, _handle_count, _saga_proxy) =
         spawn_two_tells_then_end_saga(&system, "multi-tell-gapfree").await;
@@ -301,7 +303,9 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
 #[tokio::test]
 async fn multi_tell_then_end_stops_saga_after_last_executor_settles() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let (saga_store, saga_id, upstream_store, agg_id, handle_count, _saga_proxy) =
         spawn_two_tells_then_end_saga(&system, "multi-tell-stops").await;

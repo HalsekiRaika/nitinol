@@ -144,7 +144,9 @@ async fn load_saga_events(
 #[tokio::test]
 async fn saga_persist_stores_enum_event_variant_in_loaded_event() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let upstream_id = AggregateId::new("variant-upstream-agg");

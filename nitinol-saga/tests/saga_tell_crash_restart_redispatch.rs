@@ -244,7 +244,9 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
     let mock = MockAggregateProxy::<Inventory>::new();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(INERT_SAGA_ID);
@@ -362,7 +364,9 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     let mock_p1 = MockAggregateProxy::<Inventory>::new();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store_p1: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id_p1 = SagaId::new(ACTIVE_SAGA_ID);

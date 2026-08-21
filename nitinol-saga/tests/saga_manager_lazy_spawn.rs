@@ -191,7 +191,9 @@ async fn wait_for_trace_len(
 #[tokio::test]
 async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-lazy-spawn-orders");
@@ -242,7 +244,9 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
 #[tokio::test]
 async fn known_correlation_id_reuses_the_running_instance() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-lazy-reuse-orders");

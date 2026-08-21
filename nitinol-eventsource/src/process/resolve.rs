@@ -224,12 +224,14 @@ impl Drop for Activating {
 pub(crate) struct ResolveHandle {
     registry: Arc<AggregateRegistry>,
     /// Held because activation happens at dispatch time, long after the entry
-    /// point that produced the reference has returned.
-    system: Arc<ProcessSystem>,
+    /// point that produced the reference has returned.  A [`ProcessSystem`] is
+    /// itself a handle to one instance, so holding it here shares the caller's
+    /// system rather than duplicating it.
+    system: ProcessSystem,
 }
 
 impl ResolveHandle {
-    pub(crate) fn new(registry: Arc<AggregateRegistry>, system: Arc<ProcessSystem>) -> Self {
+    pub(crate) fn new(registry: Arc<AggregateRegistry>, system: ProcessSystem) -> Self {
         Self { registry, system }
     }
 }

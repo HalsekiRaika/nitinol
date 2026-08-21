@@ -1,7 +1,7 @@
 // Integration tests for EventSourceSystem.
 //
 // Tests verify:
-// - Builder pattern: EventSourceSystem::new(ps).with_codec::<C>().build()
+// - Builder pattern: EventSourceSystem::builder(ps).with_codec::<C>().build()
 // - spawn_aggregate creates a working AggregateProxy
 // - A second spawn_aggregate with the same id addresses the aggregate the first
 //   call resolved, rather than a second activation of it
@@ -198,7 +198,7 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 
 // Test: EventSourceSystem builder creates a system
 
-/// EventSourceSystem::new(ps).with_codec::<C>().build() compiles and produces
+/// EventSourceSystem::builder(ps).with_codec::<C>().build() compiles and produces
 /// an EventSourceSystem that exposes process_system().
 #[tokio::test]
 async fn event_source_system_builder_produces_system() {
@@ -206,7 +206,9 @@ async fn event_source_system_builder_produces_system() {
     let ps = ProcessSystem::new().await;
 
     // When
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     // Then: process_system() is accessible (type-level proof)
     let _ = system.process_system();
@@ -219,7 +221,9 @@ async fn event_source_system_builder_produces_system() {
 async fn spawn_aggregate_creates_working_aggregate_proxy() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("sys-spawn-basic");
 
@@ -248,7 +252,9 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
 async fn spawn_aggregate_second_call_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("sys-replay-state");
 
@@ -299,7 +305,9 @@ async fn spawn_aggregate_second_call_addresses_the_same_aggregate() {
 async fn spawn_aggregate_sequential_increments_accumulate_state() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let proxy = system
         .spawn_aggregate::<Counter>(AggregateId::new("sys-seq"), store)
@@ -323,7 +331,9 @@ async fn spawn_aggregate_sequential_increments_accumulate_state() {
 async fn system_codec_returns_usable_erased_codec() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     // When
     let codec: Arc<dyn ErasedCodec<Incremented>> = system.codec::<Incremented>();
@@ -345,7 +355,9 @@ async fn system_codec_returns_usable_erased_codec() {
 async fn system_codec_integrates_with_projector_props() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
@@ -405,7 +417,9 @@ async fn system_codec_integrates_with_projector_props() {
 async fn snapshot_roundtrip_via_event_source_system() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_store = Arc::new(InMemorySnapshotStore::default());

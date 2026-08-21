@@ -182,7 +182,9 @@ async fn wait_for_persisted(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Ve
 #[tokio::test]
 async fn spawn_saga_wires_both_codecs_and_the_process_system_from_the_event_source_system() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-system-ext-order");
@@ -226,7 +228,9 @@ async fn spawn_saga_wires_both_codecs_and_the_process_system_from_the_event_sour
 #[tokio::test]
 async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-system-ext-catchup-order");
@@ -261,7 +265,9 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
 #[tokio::test]
 async fn stream_subscription_after_override_skips_records_up_to_that_position() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-system-ext-resume-order");

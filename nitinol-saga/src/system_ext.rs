@@ -143,7 +143,7 @@ pub trait SagaSystemExt {
     /// # }
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// # let system = EventSourceSystem::new(ps).with_codec::<DocCodec>().build();
+    /// # let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
     /// # let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     /// # let order_id = AggregateId::new("order");
     /// # let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -263,7 +263,7 @@ pub trait SagaDefaultStoreExt {
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    /// let system = EventSourceSystem::new(ps)
+    /// let system = EventSourceSystem::builder(ps)
     ///     .with_codec::<DocCodec>()
     ///     .with_event_store(store)
     ///     .build();
@@ -320,7 +320,7 @@ pub trait SagaDefaultStoreExt {
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// // no `with_event_store` — there is no default journal to spawn onto
-    /// let system = EventSourceSystem::new(ps).with_codec::<DocCodec>().build();
+    /// let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
     /// system.spawn_saga(SagaId::new("reservation"), || ReservationSaga);
     /// # }
     /// ```
@@ -382,7 +382,7 @@ pub trait SagaDefaultStoreExt {
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// // no `with_event_store` — there is no default store to poll
-    /// let system = EventSourceSystem::new(ps).with_codec::<DocCodec>().build();
+    /// let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
     /// system.subscription(&AggregateId::new("order"));
     /// # }
     /// ```
@@ -451,7 +451,7 @@ pub trait SagaDefaultStoreExt {
     /// # let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     /// # let order_id = AggregateId::new("order");
     /// // no `with_event_store` — the instances have no default journal
-    /// let system = EventSourceSystem::new(ps).with_codec::<DocCodec>().build();
+    /// let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
     /// system.saga_manager_props(Subscription::stream(&upstream, &order_id), || ReservationSaga);
     /// # }
     /// ```
@@ -633,7 +633,7 @@ impl<C, S: Saga> SagaSpawn<'_, C, S, SubscriptionSet<S>> {
     /// # }
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// # let system = EventSourceSystem::new(ps).with_codec::<DocCodec>().build();
+    /// # let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
     /// # let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     /// system
     ///     .spawn_saga(SagaId::new("reservation"), saga_store, || ReservationSaga)

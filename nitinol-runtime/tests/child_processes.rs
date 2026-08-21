@@ -1133,9 +1133,10 @@ async fn spawn_child_with_driver_propagates_parent_pid_and_stops_with_parent() {
 #[tokio::test]
 async fn spawn_child_with_inherit_idle_timeout_uses_system_default() {
     // Given: a system with a short default idle timeout
-    let system = ProcessSystem::new()
-        .await
-        .with_default_idle_timeout(Duration::from_millis(50));
+    let system = ProcessSystem::builder()
+        .with_default_idle_timeout(Duration::from_millis(50))
+        .build()
+        .await;
 
     // And: a parent that spawns one child whose Props leaves idle_timeout
     // at the default (Inherit). The child uses no driver opt-out, so the

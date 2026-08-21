@@ -238,7 +238,9 @@ async fn wait_until_outbox_acked(
 #[tokio::test]
 async fn single_constant_correlation_reproduces_the_resident_saga() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("mgr-degenerate-order");

@@ -34,7 +34,7 @@ async fn main() {
     // tenants of this one instance, each under its own key — which is what lets
     // the system hand it to every spawn below.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();

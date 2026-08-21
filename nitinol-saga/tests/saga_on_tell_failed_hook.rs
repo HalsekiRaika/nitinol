@@ -623,7 +623,9 @@ struct Observations {
 /// later upstream delivery.
 async fn run_tell_failure_scenario(saga_key: &str, terminate_after_tell: bool) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -724,7 +726,9 @@ fn assert_reported_while_draining(events: &[LoadedEvent]) {
 /// shows the tell has settled.
 async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -781,7 +785,9 @@ async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
 /// replay, never through an outcome report.
 async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -852,7 +858,9 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
 /// the timer its hook registered has fired.
 async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = spawn_scheduler(system.process_system()).await;
 
     let upstream_key = format!("{saga_key}-upstream");
@@ -904,7 +912,9 @@ async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
 /// stream once the rejected hook has been accounted for (or the wait expires).
 async fn run_rejecting_hook_scenario(saga_key: &str) -> Vec<LoadedEvent> {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

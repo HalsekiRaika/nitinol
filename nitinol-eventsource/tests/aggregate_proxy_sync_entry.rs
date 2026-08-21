@@ -111,7 +111,7 @@ async fn synchronously_built_reference_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();

@@ -201,7 +201,7 @@ async fn store_less_spawn_saga_journals_onto_the_system_default_store() {
     // Given: a system holding one default store, and an unrelated upstream
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
@@ -247,7 +247,7 @@ async fn system_subscription_polls_the_system_default_store() {
     // reachable through the subscription under test
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
@@ -293,7 +293,7 @@ async fn spawn_saga_with_store_overrides_the_default_journal_store() {
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
@@ -346,7 +346,7 @@ async fn explicit_subscription_store_overrides_the_default_upstream_store() {
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();

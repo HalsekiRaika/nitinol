@@ -39,27 +39,28 @@ async fn main() {
     // tenants of this one instance; the manager's subscription below is what
     // narrows it back down to the run's stream.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = Arc::new(
-        EventSourceSystem::new(ps)
-            .with_codec::<JsonCodec>()
-            .with_event_store(store)
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(store)
+        .build();
 
     let run_id = AggregateId::new("payroll-run-april");
     let employees = employee_ids();
 
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
-    let system_for_producer = Arc::clone(&system);
-    let system_for_factory = Arc::clone(&system);
+    // The system is itself the shared handle, so the producer and the
+    // crash-restart factory each take a clone of it rather than a shared
+    // wrapper around it.
+    let system_for_producer = system.clone();
+    let system_for_factory = system.clone();
 
     // The manager, not `spawn_saga`, is what turns a subscription into one saga
     // instance per correlation key, spawning it on the first event that
     // correlates to it.
     let _manager = system
         .saga_manager_props(system.subscription(&run_id), move || {
-            FanOutSaga::new(Arc::clone(&system_for_producer))
+            FanOutSaga::new(system_for_producer.clone())
         })
         .with_crash_restart_factory(move |payload: &[u8]| {
             FanOutSaga::crash_restart_intent(&system_for_factory, payload)

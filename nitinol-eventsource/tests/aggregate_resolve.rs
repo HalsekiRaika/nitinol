@@ -174,28 +174,6 @@ async fn pin_replayed_state(proxy: &AggregateProxy<Counter>, expected: u64) {
     );
 }
 
-/// Dispatch through `proxy` until it reaches a live activation, and return the
-/// events that dispatch produced.
-///
-/// The stop that contract C-1 triggers is carried out by the activation's own
-/// loop, so a dispatch issued in the window between the conflict and that stop
-/// is still handed to the dying activation and comes back as a send failure.
-/// Those are the only errors tolerated here — a reference that stays pinned to
-/// the dead activation never leaves the loop and fails on the timeout.
-async fn dispatch_until_healed(proxy: &AggregateProxy<Counter>) -> Vec<Incremented> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match proxy.ask(Increment).await {
-                Ok(events) => return events,
-                Err(AskError::Send(_)) => tokio::task::yield_now().await,
-                Err(e) => panic!("dispatch after the stop must not fail this way: {e:?}"),
-            }
-        }
-    })
-    .await
-    .expect("the reference must re-resolve to a live activation")
-}
-
 // R-1: concurrent resolve of one key
 
 /// The number of callers that race for the same key.  Any value above one
@@ -210,24 +188,28 @@ const CONCURRENT_RESOLVERS: usize = 16;
 /// writers all parked on the genesis sequence, and the store would reject all
 /// but one of their appends.  A single-flight registry leaves one writer, which
 /// numbers the appends 1..=CONCURRENT_RESOLVERS.
+///
+/// Each task races from its own clone of the system rather than from a shared
+/// reference, so this pins single-flight *across handles* as well: cloning names
+/// the same instance, and a clone that carried an aggregate registry of its own
+/// would put one activation per task on the stream — precisely the state the
+/// paragraph above describes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_resolve_produces_a_single_writer() {
     // Given
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = Arc::new(
-        EventSourceSystem::new(ps)
-            .with_codec::<JsonCodec>()
-            .with_event_store(Arc::clone(&store))
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(Arc::clone(&store))
+        .build();
     let id = AggregateId::new("resolve-single-flight");
     let barrier = Arc::new(Barrier::new(CONCURRENT_RESOLVERS));
 
     // When: all callers resolve, then all callers dispatch
     let mut resolvers = Vec::with_capacity(CONCURRENT_RESOLVERS);
     for _ in 0..CONCURRENT_RESOLVERS {
-        let system = Arc::clone(&system);
+        let system = system.clone();
         let id = id.clone();
         let barrier = Arc::clone(&barrier);
         resolvers.push(tokio::spawn(async move {
@@ -289,7 +271,7 @@ async fn second_spawn_aggregate_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
@@ -331,7 +313,7 @@ async fn aggregate_props_spawn_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
@@ -370,7 +352,7 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
     // Given
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
@@ -418,14 +400,16 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
 /// A rival writer is spawned through the raw `AggregateProps` path, which keeps
 /// activating per call, so it can take the stream away from the resolved
 /// reference's activation.  The resolved activation then loses an append on a
-/// non-genesis sequence, stops (C-1), and the same reference must go on to
-/// reach a re-activated aggregate that replayed everything the rival wrote.
+/// non-genesis sequence, stops (C-1), and the *very next* dispatch through the
+/// same reference — no retry loop — must reach a re-activated aggregate that
+/// replayed everything the rival wrote: the proxy evicts the dying activation
+/// as soon as it sees the conflict, not only after a later send fails against it.
 #[tokio::test]
 async fn reference_survives_the_death_of_its_activation() {
     // Given
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
@@ -464,8 +448,12 @@ async fn reference_survives_the_death_of_its_activation() {
         "the store's OCC rejection must reach the caller unchanged, got {err:?}"
     );
 
-    // When: the same reference is used again
-    let events = dispatch_until_healed(&resolved).await;
+    // When: the very next dispatch through the same reference — a single call,
+    // no retry loop — must reach the re-activated aggregate.
+    let events = tokio::time::timeout(Duration::from_secs(5), resolved.ask(Increment))
+        .await
+        .expect("the single next dispatch must not hang")
+        .expect("the next dispatch must reach the re-activated aggregate, not the dying one");
 
     // Then
     assert_eq!(

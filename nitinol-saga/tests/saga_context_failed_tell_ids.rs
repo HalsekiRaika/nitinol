@@ -287,7 +287,9 @@ async fn publish_order_placed(upstream_store: &Arc<dyn EventStore>, order_id: &s
 #[tokio::test]
 async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -384,7 +386,9 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
 #[tokio::test]
 async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -481,7 +485,9 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
 #[tokio::test]
 async fn runtime_tell_failed_is_not_repeated_to_the_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

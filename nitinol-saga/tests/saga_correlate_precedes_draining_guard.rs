@@ -253,7 +253,9 @@ async fn wait_for_ended_saga_dead_letter(
 #[tokio::test]
 async fn draining_saga_dead_letters_only_events_it_correlates_to() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     // Pre-load all three events: the direct poller reads the batch in one
     // `store.load()` and delivers them sequentially, so SKIP-1 is always

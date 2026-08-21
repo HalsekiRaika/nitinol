@@ -211,7 +211,9 @@ async fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
 #[tokio::test]
 async fn schedule_fires_and_delivers_typed_message() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -275,7 +277,9 @@ async fn schedule_fires_and_delivers_typed_message() {
 #[tokio::test]
 async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -347,7 +351,9 @@ async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
 #[tokio::test]
 async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -423,7 +429,9 @@ async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
 #[tokio::test]
 async fn cancel_schedule_prevents_the_timer_from_firing() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -501,7 +509,9 @@ async fn cancel_schedule_prevents_the_timer_from_firing() {
 #[tokio::test]
 async fn replay_reregisters_unfired_schedule_and_fires_it() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -701,7 +711,9 @@ impl Saga for OnceRescheduleSaga {
 #[tokio::test]
 async fn on_scheduled_reschedule_same_name_survives_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

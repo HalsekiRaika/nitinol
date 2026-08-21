@@ -203,7 +203,9 @@ async fn wait_for_handle_failed(
 #[tokio::test]
 async fn default_policy_enqueues_the_failure() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-default-upstream", 1).await;
@@ -262,7 +264,9 @@ async fn default_policy_enqueues_the_failure() {
 #[tokio::test]
 async fn ignore_all_policy_suppresses_enqueue() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-ignore-upstream", 1).await;

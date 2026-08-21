@@ -176,7 +176,9 @@ async fn wait_for_handled(
 #[tokio::test]
 async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-single-orders");

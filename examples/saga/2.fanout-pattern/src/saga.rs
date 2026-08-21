@@ -1,7 +1,5 @@
 //! The process manager that turns one approval into many payslips.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +13,7 @@ use crate::payroll_run::PayrollRunApproved;
 use crate::payslip::{IssuePayslip, Payslip};
 
 /// The system every payslip in this example lives on.
-type PayrollSystem = Arc<EventSourceSystem<JsonCodec, StoreSet>>;
+type PayrollSystem = EventSourceSystem<JsonCodec, StoreSet>;
 
 /// A reference to the payslip that owns the stream `key`.
 ///

@@ -13,14 +13,15 @@ use crate::{AggregateProps, AggregateProxy};
 /// Marker type indicating no codec has been configured yet.
 ///
 /// `EventSourceSystem<Unset>` has no useful methods — use
-/// [`EventSourceSystem::new`] followed by [`EventSourceSystemBuilder::with_codec`]
-/// to produce a configured system.
+/// [`EventSourceSystem::builder`] followed by
+/// [`EventSourceSystemBuilder::with_codec`] to produce a configured system.
 pub struct Unset;
 
 /// Marker type indicating the system holds no default [`EventStore`].
 ///
 /// Every spawn against a system in this state names its own store, exactly as
 /// before [`EventSourceSystemBuilder::with_event_store`] existed.
+#[derive(Clone)]
 pub struct StoreUnset;
 
 /// Marker type indicating the system holds the default [`EventStore`] it was
@@ -29,20 +30,22 @@ pub struct StoreUnset;
 /// This is the state in which the store-less
 /// [`spawn_aggregate`][EventSourceSystem::spawn_aggregate] exists: a spawn that
 /// names no store is served from here.
+#[derive(Clone)]
 pub struct StoreSet {
     store: Arc<dyn EventStore>,
 }
 
 /// Builder for [`EventSourceSystem`].
 ///
-/// Obtained from [`EventSourceSystem::new`]. Call [`with_codec`][Self::with_codec]
-/// to bind a codec type, optionally [`with_event_store`][Self::with_event_store]
-/// to bind a default store, then [`build`][EventSourceSystemBuilder::build] to
-/// produce an [`EventSourceSystem`].
+/// Obtained from [`EventSourceSystem::builder`]. Call
+/// [`with_codec`][Self::with_codec] to bind a codec type, optionally
+/// [`with_event_store`][Self::with_event_store] to bind a default store, then
+/// [`build`][EventSourceSystemBuilder::build] to produce an
+/// [`EventSourceSystem`].
 ///
 /// # Builder
 /// ```ignore
-/// let system = EventSourceSystem::new(ps)
+/// let system = EventSourceSystem::builder(ps)
 ///     .with_codec::<JsonCodec>()
 ///     .with_event_store(store)
 ///     .build();
@@ -114,7 +117,7 @@ impl<C, St> EventSourceSystemBuilder<C, St> {
     /// Finalize construction and return the configured [`EventSourceSystem`].
     pub fn build(self) -> EventSourceSystem<C, St> {
         EventSourceSystem {
-            ps: Arc::new(self.ps),
+            ps: self.ps,
             registry: AggregateRegistry::new(),
             store: self.store,
             _codec: PhantomData,
@@ -165,22 +168,47 @@ impl<C, St> EventSourceSystemBuilder<C, St> {
 ///
 /// Starting a lifecycle explicitly, rather than resolving one, is
 /// [`AggregateProps::spawn`] on props built directly (R-4).
+///
+/// # A handle, not an instance
+///
+/// Cloning an `EventSourceSystem` names the same instance rather than creating a
+/// second one: every clone resolves through the same aggregate registry, runs on
+/// the same [`ProcessSystem`], and carries the same default [`EventStore`].  R-1
+/// therefore holds across clones — two clones resolving one identity reach one
+/// activation — and callers share the system by cloning it rather than by
+/// wrapping it in an `Arc`.
+///
+/// The entry points stay by-reference so that whether to clone remains the
+/// caller's decision.  Configuration is fixed before any handle exists: the
+/// codec and the default store are bound on [`EventSourceSystemBuilder`], and
+/// [`build`][EventSourceSystemBuilder::build] settles them.
 pub struct EventSourceSystem<C, St = StoreUnset> {
-    /// Shared rather than owned outright: a reference re-resolves its aggregate
-    /// long after the entry point that produced it returned, and needs a system
-    /// to activate on.
-    ps: Arc<ProcessSystem>,
+    /// A handle rather than an owned instance: a reference re-resolves its
+    /// aggregate long after the entry point that produced it returned, and needs
+    /// a system to activate on.
+    ps: ProcessSystem,
     registry: Arc<AggregateRegistry>,
     store: St,
     _codec: PhantomData<C>,
 }
 
+/// Written out rather than derived: `C` is carried as [`PhantomData`] alone, so
+/// a derived impl's `C: Clone` bound would lock out every codec that is not
+/// itself `Clone` for nothing.
+impl<C, St: Clone> Clone for EventSourceSystem<C, St> {
+    fn clone(&self) -> Self {
+        Self {
+            ps: self.ps.clone(),
+            registry: Arc::clone(&self.registry),
+            store: self.store.clone(),
+            _codec: PhantomData,
+        }
+    }
+}
+
 impl EventSourceSystem<Unset> {
     /// Begin building an [`EventSourceSystem`] backed by the given [`ProcessSystem`].
-    ///
-    /// Returns an [`EventSourceSystemBuilder`] — intentional factory method.
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(ps: ProcessSystem) -> EventSourceSystemBuilder<Unset, StoreUnset> {
+    pub fn builder(ps: ProcessSystem) -> EventSourceSystemBuilder<Unset, StoreUnset> {
         EventSourceSystemBuilder::new(ps)
     }
 }
@@ -193,7 +221,7 @@ impl<C, St> EventSourceSystem<C, St> {
 
     /// What a reference needs to resolve, and re-resolve, its aggregate here.
     fn resolve_handle(&self) -> ResolveHandle {
-        ResolveHandle::new(Arc::clone(&self.registry), Arc::clone(&self.ps))
+        ResolveHandle::new(Arc::clone(&self.registry), self.ps.clone())
     }
 }
 
@@ -355,7 +383,7 @@ where
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// // no `with_event_store` — there is no default store to spawn onto
-    /// let system = EventSourceSystem::new(ps).with_codec::<DocCodec>().build();
+    /// let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
     /// system.spawn_aggregate::<Counter>(AggregateId::new("counter")).await;
     /// # }
     /// ```
@@ -384,7 +412,7 @@ where
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    /// let system = EventSourceSystem::new(ps)
+    /// let system = EventSourceSystem::builder(ps)
     ///     .with_codec::<DocCodec>()
     ///     .with_event_store(store)
     ///     .build();
@@ -434,7 +462,7 @@ where
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// // no `with_event_store` — there is no default store to build props on
-    /// let system = EventSourceSystem::new(ps).with_codec::<DocCodec>().build();
+    /// let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
     /// system.aggregate_props::<Counter>(AggregateId::new("counter"));
     /// # }
     /// ```

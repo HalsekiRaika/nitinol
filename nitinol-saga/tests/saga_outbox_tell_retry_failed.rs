@@ -244,7 +244,9 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
     const EXPECTED_ATTEMPTS: usize = 3;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("retry-order");

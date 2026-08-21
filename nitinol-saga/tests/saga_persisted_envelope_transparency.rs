@@ -118,7 +118,9 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 #[tokio::test]
 async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let upstream_id = AggregateId::new("envelope-encode-upstream");
@@ -211,7 +213,9 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
 #[tokio::test]
 async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let saga_id = SagaId::new(ENVELOPE_SAGA_ID);

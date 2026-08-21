@@ -62,10 +62,11 @@ pub fn payslip_keys(payroll_run: &str, employees: &[String]) -> Vec<String> {
 
 /// Everything one incarnation of the example owns.
 ///
-/// `system` is kept because it owns the `ProcessSystem` the aggregates and the
-/// manager run on; dropping it early would take the incarnation down.
+/// `system` is kept because it is the handle to the `ProcessSystem` the
+/// aggregates and the manager run on; dropping the last handle early would take
+/// the incarnation down.
 pub struct FanOutWorld {
-    pub system: Arc<EventSourceSystem<JsonCodec, StoreSet>>,
+    pub system: EventSourceSystem<JsonCodec, StoreSet>,
     pub payroll_run: AggregateProxy<PayrollRun>,
     pub manager: SagaManagerProxy<FanOutSaga>,
 }
@@ -85,12 +86,10 @@ pub struct FanOutWorld {
 /// reproducible.
 pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> FanOutWorld {
     let ps = ProcessSystem::new().await;
-    let system = Arc::new(
-        EventSourceSystem::new(ps)
-            .with_codec::<JsonCodec>()
-            .with_event_store(store)
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(store)
+        .build();
 
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
@@ -113,15 +112,15 @@ pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> Fa
 /// the run's own stream while the payslip streams and the saga's journal share
 /// the same store.
 pub async fn spawn_manager(
-    system: &Arc<EventSourceSystem<JsonCodec, StoreSet>>,
+    system: &EventSourceSystem<JsonCodec, StoreSet>,
     run_id: &AggregateId,
 ) -> SagaManagerProxy<FanOutSaga> {
-    let system_for_producer = Arc::clone(system);
-    let system_for_factory = Arc::clone(system);
+    let system_for_producer = system.clone();
+    let system_for_factory = system.clone();
 
     system
         .saga_manager_props(system.subscription(run_id), move || {
-            FanOutSaga::new(Arc::clone(&system_for_producer))
+            FanOutSaga::new(system_for_producer.clone())
         })
         .with_crash_restart_factory(move |payload: &[u8]| {
             FanOutSaga::crash_restart_intent(&system_for_factory, payload)
@@ -248,7 +247,7 @@ pub async fn wait_for_decisions(
 /// Draining the mailbox this way is what stops "no duplicate was written" from
 /// passing merely because the redelivered command had not been processed yet.
 pub async fn drain_payslips(
-    system: &Arc<EventSourceSystem<JsonCodec, StoreSet>>,
+    system: &EventSourceSystem<JsonCodec, StoreSet>,
     keys: &[String],
 ) -> Vec<bool> {
     let mut out = Vec::with_capacity(keys.len());

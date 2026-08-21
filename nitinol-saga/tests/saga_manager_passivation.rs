@@ -164,7 +164,9 @@ async fn wait_for_observed(
 #[tokio::test]
 async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-passivation-pings");
@@ -248,10 +250,13 @@ async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
 /// the registry with it and leaving nothing to revive the fan-out.
 #[tokio::test]
 async fn manager_outlives_a_system_default_idle_timeout_during_a_quiet_upstream() {
-    let ps = ProcessSystem::new()
-        .await
-        .with_default_idle_timeout(SYSTEM_IDLE_DEFAULT);
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let ps = ProcessSystem::builder()
+        .with_default_idle_timeout(SYSTEM_IDLE_DEFAULT)
+        .build()
+        .await;
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-quiet-upstream-pings");

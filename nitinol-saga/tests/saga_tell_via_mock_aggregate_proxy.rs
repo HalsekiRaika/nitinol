@@ -184,7 +184,9 @@ fn saga_effect_tell_constructor_returns_persist_with_single_tell_intent() {
 #[tokio::test]
 async fn saga_tell_to_mock_dispatches_command_observable_via_drain_captured() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-tell-mock-order");

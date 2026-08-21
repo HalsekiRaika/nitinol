@@ -146,7 +146,9 @@ async fn append_order(store: &Arc<dyn EventStore>, agg_id: &AggregateId, sequenc
 #[tokio::test]
 async fn saga_stays_alive_when_ended_append_fails() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("ended-fail-order");
