@@ -12,7 +12,7 @@
 //! | [`Snapshotable`] | Opt-in snapshot support for faster replay |
 //! | [`Context`] | Runtime identity and sequence number |
 //! | [`Effect`] | Algebraic effect ADT returned by `Decider::decide` |
-//! | [`AggregateProxy`] | Handle for sending commands to a running aggregate |
+//! | [`AggregateProxy`] | Identity-based reference to an aggregate; resolves a dispatch to an activation and re-resolves after one dies |
 //!
 //! # Getting started
 //!
@@ -55,7 +55,7 @@ pub use self::error::SystemEventDecodeError;
 #[doc(hidden)]
 pub use self::system_event::{appending_system_event, SystemEvent};
 
-pub use self::error::{AskError, ExecError, TellError};
+pub use self::error::{AskError, ExecError, Retryability, TellError};
 pub use self::process::{
     AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset,
 };

@@ -29,11 +29,10 @@ impl Default for EventStoreState {
 /// In-memory reference implementation of [`EventStore`].
 ///
 /// This type is the reference implementation of the optimistic-concurrency-control
-/// contract every backend must reproduce: `OCC-1` unique `(stream, sequence)`,
-/// `OCC-2` a genesis conflict meaning "already created", `OCC-3`
-/// `global_sequence` monotonicity with commit-unit atomic visibility, and
-/// `OCC-4` no internal retry.  [`EventStore::append`] carries the contract
-/// text.
+/// contract every backend must reproduce: unique `(stream, sequence)`, a genesis
+/// conflict meaning "already created", `global_sequence` monotonicity with
+/// commit-unit atomic visibility, and no internal retry.  The clauses, their
+/// labels and their exact wording live on [`EventStore::append`].
 ///
 /// The contract itself is fixed by the tests in
 /// `nitinol-persistence/tests/event_store_occ.rs`, which run against this

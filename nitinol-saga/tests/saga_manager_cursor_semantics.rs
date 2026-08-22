@@ -302,7 +302,9 @@ fn count_ended_saga_dead_letters(events: &[LoadedEvent]) -> usize {
 #[tokio::test]
 async fn instance_handler_error_holds_the_shared_cursor() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-hold-orders");
@@ -354,7 +356,9 @@ async fn instance_handler_error_holds_the_shared_cursor() {
 #[tokio::test]
 async fn uncorrelated_event_advances_the_cursor() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-selective-orders");
@@ -404,7 +408,9 @@ async fn uncorrelated_event_advances_the_cursor() {
 #[tokio::test]
 async fn ended_instance_does_not_stall_the_shared_subscription() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-fanout-orders");

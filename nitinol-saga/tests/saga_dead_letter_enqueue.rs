@@ -260,7 +260,9 @@ impl Saga for HandleFailSaga {
 #[tokio::test]
 async fn handle_error_enqueues_a_handle_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-handle-upstream", 1, "boom").await;
@@ -355,7 +357,9 @@ impl Saga for ScheduleThenFailSaga {
 #[tokio::test]
 async fn on_scheduled_error_enqueues_a_scheduled_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -509,7 +513,9 @@ async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_ret
     use nitinol_saga::SagaFailure;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-tell-upstream", 1, "order").await;
@@ -693,7 +699,9 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
     use nitinol_saga::{DeadLetterEvent, SagaFailure};
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     // Pre-load BOTH events.  The DirectPoller (via `poll_direct_once`) reads the
     // entire batch in one `store.load()` call and delivers event-1 then event-2
@@ -873,7 +881,9 @@ impl Saga for PersistFailSaga {
 #[tokio::test]
 async fn persist_retry_recovers_domain_event_without_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(
@@ -938,7 +948,9 @@ async fn persist_retry_recovers_domain_event_without_dead_letter() {
 #[tokio::test]
 async fn persist_failure_enqueues_a_persist_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-persist-upstream", 1, "persist-test").await;
@@ -1064,7 +1076,9 @@ impl Saga for DecodeFailSaga {
 #[tokio::test]
 async fn decode_failure_in_scheduled_payload_enqueues_a_decode_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -1142,7 +1156,9 @@ impl Saga for UpstreamDecodeTestSaga {
 #[tokio::test]
 async fn upstream_message_decode_failure_enqueues_a_decode_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     // Append a corrupt payload that carries Ping's EVENT_TYPE but is not valid
@@ -1198,7 +1214,9 @@ async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_le
     use nitinol_persistence::AggregateId;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     // Single corrupt event on a shared upstream stream.

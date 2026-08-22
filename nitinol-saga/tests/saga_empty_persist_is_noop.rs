@@ -353,7 +353,9 @@ async fn append_order_placed(
 #[tokio::test]
 async fn all_empty_persist_writes_nothing_to_the_store() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("empty-persist-order");
@@ -423,7 +425,9 @@ async fn all_empty_persist_writes_nothing_to_the_store() {
 #[tokio::test]
 async fn persist_with_no_events_but_a_tell_is_not_a_noop() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("tell-only-order");

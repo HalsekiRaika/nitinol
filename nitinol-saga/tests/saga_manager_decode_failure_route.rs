@@ -186,7 +186,9 @@ async fn wait_for_seen(seen: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>, exp
 #[tokio::test]
 async fn decode_failure_route_names_an_owner_records_the_dead_letter_and_advances_the_cursor() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_corrupt_ping(&upstream_store, 1).await;
@@ -259,7 +261,9 @@ async fn decode_failure_route_names_an_owner_records_the_dead_letter_and_advance
 #[tokio::test]
 async fn decode_failure_without_a_route_skips_and_advances_the_cursor() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_corrupt_ping(&upstream_store, 1).await;

@@ -259,7 +259,9 @@ async fn load_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<Loade
 #[tokio::test]
 async fn manager_with_dead_letter_subscriber_delivers_the_instances_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let received = Arc::new(Mutex::new(Vec::<DeadLetterEvent>::new()));
     let received_for_proc = Arc::clone(&received);
@@ -335,7 +337,9 @@ async fn manager_with_dead_letter_subscriber_delivers_the_instances_dead_letter(
 #[tokio::test]
 async fn manager_with_enqueue_policy_suppresses_the_instances_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "mgr-dlq-policy-upstream", 1).await;
@@ -437,7 +441,9 @@ impl Saga for InertSaga {
 #[tokio::test]
 async fn manager_with_crash_restart_factory_redispatches_the_instances_pending_tell() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let mock = MockAggregateProxy::<Inventory>::new();
 
@@ -530,7 +536,9 @@ async fn manager_with_crash_restart_factory_redispatches_the_instances_pending_t
 #[tokio::test]
 async fn manager_dead_letter_subscriber_receives_an_ended_instances_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let received = Arc::new(Mutex::new(Vec::<DeadLetterEvent>::new()));
     let received_for_proc = Arc::clone(&received);

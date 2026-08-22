@@ -211,7 +211,9 @@ async fn append_upstream(store: &Arc<dyn EventStore>, agg_id: &AggregateId, seq:
 #[tokio::test]
 async fn saga_stops_after_end_even_when_terminal_append_fails() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("term-fail-agg");

@@ -80,7 +80,7 @@ impl Decider<NoopCmd> for TestTarget {
 pub async fn make_tell_effect<E>() -> SagaEffect<E> {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();
@@ -96,7 +96,7 @@ pub async fn make_tell_effect<E>() -> SagaEffect<E> {
 pub async fn make_tell_intent() -> TellIntent {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();

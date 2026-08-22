@@ -249,7 +249,9 @@ async fn spawn_correlation_saga(
 #[tokio::test]
 async fn only_events_correlating_to_this_saga_reach_handle() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("correlate-routing-order");
@@ -290,7 +292,9 @@ async fn only_events_correlating_to_this_saga_reach_handle() {
 #[tokio::test]
 async fn correlation_mismatch_is_silent_and_writes_no_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("correlate-routing-silent-order");

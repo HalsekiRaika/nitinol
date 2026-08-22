@@ -8,4 +8,4 @@ pub use self::process::{
     PipeCapacity, Props, RestartConfig, StashCapacity, Stream, StreamProps, Subscriber,
     SupervisionStrategy, SuppressDeadLetterLog, Terminated, TerminatedReason,
 };
-pub use self::system::{DeadLetterStream, ProcessSystem};
+pub use self::system::{DeadLetterStream, ProcessSystem, ProcessSystemBuilder};

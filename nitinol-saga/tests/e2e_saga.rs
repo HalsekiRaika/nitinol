@@ -273,7 +273,9 @@ async fn wait_until_outbox_acked(
 #[tokio::test]
 async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-e2e-order");
@@ -411,7 +413,9 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
 #[tokio::test]
 async fn saga_skips_events_that_correlate_to_no_instance() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory_proxy = system

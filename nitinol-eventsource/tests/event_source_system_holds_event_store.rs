@@ -72,7 +72,7 @@ impl Decider<Bump> for Counter {
 async fn spawn_aggregate_accepts_arc_dyn_event_store() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<EventSourceSystemCodec>()
         .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -95,7 +95,7 @@ async fn spawn_aggregate_accepts_arc_dyn_event_store() {
 async fn aggregate_props_helper_accepts_arc_dyn_event_store() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<EventSourceSystemCodec>()
         .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

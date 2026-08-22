@@ -201,7 +201,7 @@ async fn store_less_manager_props_uses_the_system_default_store_for_upstream_and
     // Given: one default store, holding the upstream stream
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
@@ -252,7 +252,7 @@ async fn explicit_subscription_store_overrides_the_default_upstream_for_the_mana
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();

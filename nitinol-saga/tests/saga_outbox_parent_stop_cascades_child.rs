@@ -267,7 +267,9 @@ async fn parent_stop_cascades_to_in_flight_outbox_executor_child() {
     const MAX_ATTEMPTS: usize = 3; // RetryPolicy::default(): 1 initial + 2 retries.
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("cascade-order");

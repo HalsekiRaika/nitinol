@@ -47,7 +47,7 @@ async fn main() {
     // 3. Wire codec and default store into the event-source system.  Every
     //    aggregate spawned below persists onto that store unless it names
     //    another one.
-    let system = EventSourceSystem::new(ps)
+    let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();

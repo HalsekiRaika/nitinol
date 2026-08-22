@@ -205,7 +205,9 @@ async fn wait_for_ended_marker(store: &Arc<dyn EventStore>, saga_id: &SagaId) ->
 #[tokio::test]
 async fn draining_saga_ignores_upstream_event_before_tell_settles() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("drain-guard-agg");

@@ -140,7 +140,9 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
     // before replay, no extra outbox event must be appended.
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(INERT_SAGA_ID);
@@ -206,7 +208,9 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
 #[tokio::test]
 async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     // Each test owns its EventStore, so sharing the correlation id with the
@@ -314,7 +318,9 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
 #[tokio::test]
 async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(INERT_SAGA_ID);
@@ -397,7 +403,9 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
 #[tokio::test]
 async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(INERT_SAGA_ID);

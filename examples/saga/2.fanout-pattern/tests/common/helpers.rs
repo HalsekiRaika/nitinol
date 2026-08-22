@@ -24,7 +24,6 @@ use nitinol_saga::{SagaDefaultStoreExt, SagaManagerProxy};
 use saga_fanout_pattern::codec::JsonCodec;
 use saga_fanout_pattern::payroll_run::PayrollRun;
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
-use saga_fanout_pattern::router::PayslipRegistry;
 use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 
 /// Fan-out width the example is built around: one approval covers 32 employees.
@@ -63,21 +62,20 @@ pub fn payslip_keys(payroll_run: &str, employees: &[String]) -> Vec<String> {
 
 /// Everything one incarnation of the example owns.
 ///
-/// `system` is kept because it owns the `ProcessSystem` the aggregates and the
-/// manager run on; dropping it early would take the incarnation down.
+/// `system` is kept because it is the handle to the `ProcessSystem` the
+/// aggregates and the manager run on; dropping the last handle early would take
+/// the incarnation down.
 pub struct FanOutWorld {
-    pub system: Arc<EventSourceSystem<JsonCodec, StoreSet>>,
-    pub registry: Arc<PayslipRegistry>,
+    pub system: EventSourceSystem<JsonCodec, StoreSet>,
     pub payroll_run: AggregateProxy<PayrollRun>,
     pub manager: SagaManagerProxy<FanOutSaga>,
 }
 
 /// Spawn a complete incarnation: a fresh `ProcessSystem`, the payroll run
-/// aggregate, the payslip registry, and the saga manager subscribed to the run's
-/// stream.
+/// aggregate, and the saga manager subscribed to the run's stream.
 ///
-/// One store serves all four wiring points — the run aggregate, the payslip
-/// registry, the saga's journal and the manager's subscription.  `EventStore` is
+/// One store serves every wiring point — the run aggregate, the payslips, the
+/// saga's journal and the manager's subscription.  `EventStore` is
 /// stream-keyed, so the run stream, the 32 payslip streams and the saga's own
 /// stream are tenants of the same instance and each owner still reads only its
 /// own key.
@@ -88,28 +86,23 @@ pub struct FanOutWorld {
 /// reproducible.
 pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> FanOutWorld {
     let ps = ProcessSystem::new().await;
-    let system = Arc::new(
-        EventSourceSystem::new(ps)
-            .with_codec::<JsonCodec>()
-            .with_event_store(store)
-            .build(),
-    );
-
-    let registry = Arc::new(PayslipRegistry::new(Arc::clone(&system)));
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(store)
+        .build();
 
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
-    let manager = spawn_manager(&system, &registry, run_id).await;
+    let manager = spawn_manager(&system, run_id).await;
 
     FanOutWorld {
         system,
-        registry,
         payroll_run,
         manager,
     }
 }
 
-/// Spawn (or re-spawn) the saga manager over an existing system and registry.
+/// Spawn (or re-spawn) the saga manager over an existing system.
 ///
 /// The cursor starts at `after: 0` and lives in memory, so a manager spawned a
 /// second time over the same store replays the fact event — the at-least-once
@@ -119,19 +112,18 @@ pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> Fa
 /// the run's own stream while the payslip streams and the saga's journal share
 /// the same store.
 pub async fn spawn_manager(
-    system: &Arc<EventSourceSystem<JsonCodec, StoreSet>>,
-    registry: &Arc<PayslipRegistry>,
+    system: &EventSourceSystem<JsonCodec, StoreSet>,
     run_id: &AggregateId,
 ) -> SagaManagerProxy<FanOutSaga> {
-    let registry_for_producer = Arc::clone(registry);
-    let registry_for_factory = Arc::clone(registry);
+    let system_for_producer = system.clone();
+    let system_for_factory = system.clone();
 
     system
         .saga_manager_props(system.subscription(run_id), move || {
-            FanOutSaga::new(Arc::clone(&registry_for_producer))
+            FanOutSaga::new(system_for_producer.clone())
         })
         .with_crash_restart_factory(move |payload: &[u8]| {
-            FanOutSaga::crash_restart_intent(&registry_for_factory, payload)
+            FanOutSaga::crash_restart_intent(&system_for_factory, payload)
         })
         .spawn(system.process_system())
         .await
@@ -250,13 +242,18 @@ pub async fn wait_for_decisions(
 /// Round-trip a query through every payslip process's mailbox.
 ///
 /// `AggregateProxy::tell` returns once the command is queued, so a later `exec`
-/// on the same proxy cannot be served before that command has been handled.
+/// through a reference to the same aggregate cannot be served before that
+/// command has been handled — both dispatches resolve to the one activation.
 /// Draining the mailbox this way is what stops "no duplicate was written" from
 /// passing merely because the redelivered command had not been processed yet.
-pub async fn drain_payslips(registry: &Arc<PayslipRegistry>, keys: &[String]) -> Vec<bool> {
+pub async fn drain_payslips(
+    system: &EventSourceSystem<JsonCodec, StoreSet>,
+    keys: &[String],
+) -> Vec<bool> {
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
-        let proxy: AggregateProxy<Payslip> = registry.resolve(key).await;
+        let proxy: AggregateProxy<Payslip> =
+            system.aggregate_proxy::<Payslip>(AggregateId::new(key));
         out.push(
             proxy
                 .exec(IsIssued)
