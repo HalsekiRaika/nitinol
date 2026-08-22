@@ -130,8 +130,8 @@ async fn e2e_ask_persists_event_and_returns_it() {
 ///
 /// The caller cannot tell whether that reference activated the aggregate and
 /// replayed the stream, or joined a live activation — resolve is deliberately
-/// silent about which happened (R-3), and either way the state a caller sees is
-/// the same.
+/// silent about which happened, and either way the state a caller sees is the
+/// same.
 #[tokio::test]
 async fn e2e_persisted_state_is_visible_through_a_later_reference() {
     // Given

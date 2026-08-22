@@ -48,19 +48,66 @@ pub(crate) struct ExecMsg<M>(pub(crate) M);
 ///
 /// An activation numbers its appends from the sequence it replayed to, which is
 /// correct exactly while it is the only thing writing that stream.  It assumes
-/// that rather than enforcing it: nothing here, and nothing in the resolve layer
-/// above, prevents a second activation of the same aggregate from existing
-/// elsewhere (R-2).
+/// that rather than enforcing it: neither this process nor the resolve layer
+/// above it prevents a second activation of the same aggregate from existing
+/// elsewhere in a cluster.  The assumption is checked by the store, which
+/// rejects an append at a sequence that is already taken.
 ///
-/// The assumption is checked where it matters.  The store rejects an append at a
-/// sequence that is already taken, and that rejection *is* the detection: this
-/// activation has been overtaken and everything it would decide from here is
-/// derived from a state the stream has moved past.  It cannot repair that, so it
-/// stops (C-1).  References to the aggregate outlive that stop and resolve it
-/// again (R-5).
+/// # The conflict contract
+///
+/// How this process answers such a rejection is the contract below.  Each clause
+/// carries a stable label (`C-1`, `C-2`) shared with the executable record named
+/// beneath it.  The labels are local to this module and to that record; code
+/// elsewhere states what it needs in its own words.
+///
+/// # C-1: an overtaken writer stops
+///
+/// A [`SequenceConflict`](AppendError::SequenceConflict) on a **non-genesis**
+/// sequence is the detection that this activation is no longer the only writer
+/// of its stream.  Everything it would decide from here is derived from a state
+/// the stream has already moved past, and it cannot repair that: reloading and
+/// retrying would only re-enter the race it has already lost.
+///
+/// So it stops, immediately and unconditionally.  Stopping is signalled here
+/// rather than left to a supervision strategy, because it is a property of the
+/// conflict itself — no strategy may resume or restart this activation back into
+/// writing the stream.
+///
+/// The same reasoning covers a failed replay.  An activation that could not read
+/// its own history has not reached the state it would decide from, so it stops
+/// on that too rather than continuing from an unreplayed state.
+///
+/// References to the aggregate outlive the stop and resolve it again, so a
+/// caller sees a transient failure rather than a dead reference.
+///
+/// Fixed by `non_genesis_conflict_stops_the_losing_writer` and
+/// `replay_failure_does_not_masquerade_as_a_genesis_conflict` in
+/// `nitinol-eventsource/tests/aggregate_conflict.rs`.
+///
+/// # C-2: a genesis conflict means the aggregate already exists
 ///
 /// The one conflict that is not an overtake is a conflict on the stream's
-/// genesis sequence, which means the aggregate already exists (C-2).
+/// **genesis** sequence — an append made from sequence zero, which is a
+/// creation.  A conflict there says the aggregate has already been created,
+/// which is the expected answer to a creation command redelivered under
+/// at-least-once semantics, not a failure.  The activation reports success and
+/// lives on; C-1 does not apply.
+///
+/// Nothing was written, so nothing is applied and the sequence counter does not
+/// move.  A later command must address the genesis sequence again rather than
+/// write into a stream this activation never replayed.
+///
+/// This reading depends on the activation having replayed far enough to know
+/// its own sequence is zero, which is why C-1 stops a failed replay instead of
+/// letting an unread history masquerade as a redelivered creation.
+///
+/// Fixed by `genesis_conflict_is_answered_as_already_created`,
+/// `genesis_conflict_leaves_the_writer_alive_and_unchanged` and
+/// `genesis_conflict_does_not_advance_the_writer_sequence` in
+/// `nitinol-eventsource/tests/aggregate_conflict.rs`.  The store-side half —
+/// that the conflict is returned at all, and that the first write survives it —
+/// belongs to
+/// [`EventStore::append`](nitinol_persistence::store::EventStore::append).
 pub struct AggregateProcess<A: Aggregate> {
     pub(crate) state: A,
     pub(crate) aggregate_id: AggregateId,
@@ -256,8 +303,8 @@ where
                 }
                 match store.append(aggregate_id.borrow(), appending).await {
                     Ok(_) => {}
-                    // C-2 / OCC-2. Appending from sequence zero is a creation, so
-                    // a conflict there says the aggregate already exists — the
+                    // C-2. Appending from sequence zero is a creation, so a
+                    // conflict there says the aggregate already exists — the
                     // expected answer to a creation command redelivered under
                     // at-least-once, not a failure.  Nothing was written, so
                     // nothing is applied and the counter does not move: a later

@@ -3,11 +3,11 @@
 // C-1: a conflict on a non-genesis sequence means this activation is no longer
 //      the stream's only writer, so it stops.
 // C-2: a conflict on the genesis sequence means the aggregate has already been
-//      created (OCC-2).  That is a normal response, and the activation lives on.
+//      created.  That is a normal response, and the activation lives on.
 //
 // Both cases are produced without a test double.  The raw `AggregateProps` path
 // activates per call, so two writers can be put on one stream and the in-memory
-// store rejects whichever one falls behind (OCC-1).  Which of the two branches
+// store rejects whichever one falls behind.  Which of the two branches
 // a writer takes is decided by when it was activated: a writer spawned before
 // anything was stored still addresses the genesis sequence, one spawned after
 // replays past it.
@@ -221,8 +221,8 @@ async fn non_genesis_conflict_stops_the_losing_writer() {
 
 // C-2: genesis conflict
 
-/// C-2: a conflict on the genesis sequence is the "already created" answer of
-/// OCC-2, so the dispatch succeeds and reports that nothing new was written.
+/// C-2: a conflict on the genesis sequence is the store's "already created"
+/// answer, so the dispatch succeeds and reports that nothing new was written.
 #[tokio::test]
 async fn genesis_conflict_is_answered_as_already_created() {
     // Given: both writers exist before anything is stored, so both address the

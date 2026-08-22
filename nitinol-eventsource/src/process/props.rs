@@ -100,11 +100,11 @@ impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
     ///
     /// Props built through an [`EventSourceSystem`](crate::system::EventSourceSystem)
     /// **resolve**: the aggregate is activated only if it is not already, and the
-    /// reference returned survives that activation's death (R-1 / R-5).  Props
-    /// built directly **start a lifecycle**: every call is another activation,
-    /// and the reference stays with the one it started (R-4).  Two activations of
-    /// one stream both believe they are its only writer, so all but one of them
-    /// will lose an append and stop.
+    /// reference returned survives that activation's death, resolving the
+    /// aggregate again on its next dispatch.  Props built directly **start a
+    /// lifecycle**: every call is another activation, and the reference stays
+    /// with the one it started.  Two activations of one stream both believe they
+    /// are its only writer, so all but one of them will lose an append and stop.
     pub async fn spawn(self, system: &ProcessSystem) -> AggregateProxy<A> {
         match self.resolve.clone() {
             Some(handle) => {
@@ -113,7 +113,7 @@ impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
                 // start and the one that replaces it must be identical.
                 let reference = self.into_reference(handle);
                 // "Resolve *and activate*" — the caller is promised a running
-                // aggregate, whether or not this call is what started it (R-3).
+                // aggregate, whether or not this call is what started it.
                 reference.activate().await;
                 reference
             }

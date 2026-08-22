@@ -242,8 +242,7 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
 
 // Test: second spawn_aggregate addresses the same aggregate
 
-/// Resolving the same id twice yields two references to one aggregate
-/// (R-1 / R-3).
+/// Resolving the same id twice yields two references to one aggregate.
 ///
 /// The third dispatch is the discriminator: two activations would each carry
 /// their own sequence counter, so `proxy1` would still be at sequence 1 after

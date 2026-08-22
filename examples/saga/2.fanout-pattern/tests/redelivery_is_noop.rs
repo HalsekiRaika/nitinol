@@ -7,10 +7,10 @@
 //! second delivery changes nothing observable in the payslip streams — the
 //! idempotence lives in the payslips, not in a short-circuit inside the saga.
 //!
-//! The store-side half of that claim (`OCC-2`: a conflict on a stream's genesis
-//! sequence means "already created", and the first write stays intact) is fixed
-//! by `nitinol-persistence`.  What is fixed here is the caller-side half the
-//! `EventStore::append` contract leaves to convention: a redelivered issue
+//! The store-side half of that claim — a conflict on a stream's genesis sequence
+//! means "already created", and the first write stays intact — is stated and
+//! fixed by `nitinol-persistence`.  What is fixed here is the caller-side half
+//! the `EventStore::append` contract leaves to convention: a redelivered issue
 //! writes nothing new and destroys nothing old.
 //!
 //! Every stream these tests observe — the payroll run's, the 32 payslips' and
@@ -230,7 +230,7 @@ async fn redelivered_fact_event_writes_no_second_payslip() {
     );
 }
 
-/// The caller-side reading of `OCC-2`.
+/// The caller-side reading of a genesis conflict.
 ///
 /// An issue redelivered all the way down to the store conflicts on the
 /// payslip's genesis sequence.  For an issue-only fan-out that conflict is the
@@ -262,7 +262,7 @@ async fn duplicate_genesis_append_conflicts_and_preserves_the_first_write() {
     let genesis = &original[0];
     assert_eq!(
         genesis.sequence, 1,
-        "a payslip's issue is its genesis record, so OCC-2 applies to it"
+        "a payslip's issue is its genesis record, so the genesis-conflict reading applies to it"
     );
     assert_eq!(
         genesis.event_type,

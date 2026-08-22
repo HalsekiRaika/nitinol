@@ -26,7 +26,7 @@ use crate::receive::Receive as EvtReceive;
 /// # Resolution is silent about what it did
 ///
 /// No return value, error variant or observable timing tells a caller whether a
-/// dispatch activated the aggregate or joined a live activation (R-3).  The
+/// dispatch activated the aggregate or joined a live activation.  The
 /// distinction stops being expressible once activations may be remote, so code
 /// must not be written against it.
 ///
@@ -38,14 +38,15 @@ use crate::receive::Receive as EvtReceive;
 ///
 /// | Origin | Behaviour |
 /// |---|---|
-/// | [`EventSourceSystem`](crate::system::EventSourceSystem) — `spawn_aggregate`, `aggregate_props(..).spawn(..)`, `aggregate_proxy` | Resolves through the node's registry: at most one activation per key (R-1), re-resolved after an activation dies (R-5) |
-/// | [`AggregateProps::spawn`](crate::AggregateProps::spawn) built directly | Pinned to the activation that call started — an explicit lifecycle, not a resolve (R-4) |
+/// | [`EventSourceSystem`](crate::system::EventSourceSystem) — `spawn_aggregate`, `aggregate_props(..).spawn(..)`, `aggregate_proxy` | Resolves through the node's registry: at most one activation per key on this node, re-resolved after an activation dies |
+/// | [`AggregateProps::spawn`](crate::AggregateProps::spawn) built directly | Pinned to the activation that call started — an explicit lifecycle, not a resolve |
 ///
 /// # Duplicate activations are normal
 ///
-/// Cluster-wide, one aggregate may have more than one activation at a time
-/// (R-2); only the event store's OCC decides which writes count.  See the
-/// [resolve layer](crate::system) for what that means for side effects.
+/// The at-most-one guarantee is per node.  Cluster-wide, one aggregate may have
+/// more than one activation at a time; only the event store's OCC decides which
+/// writes count.  See [`EventSourceSystem`](crate::system::EventSourceSystem)
+/// for what that means for side effects.
 pub struct AggregateProxy<A: Aggregate> {
     /// The aggregate's stream key — kept here so
     /// [`AggregateTellTarget::aggregate_id_str`](crate::AggregateTellTarget::aggregate_id_str)
@@ -58,8 +59,8 @@ pub struct AggregateProxy<A: Aggregate> {
 enum Binding<A: Aggregate> {
     /// The one activation an explicit `AggregateProps::spawn` started.
     ///
-    /// That call starts a lifecycle rather than resolving an identity (R-4), so
-    /// its reference stays with what it started and does not replace it.
+    /// That call starts a lifecycle rather than resolving an identity, so its
+    /// reference stays with what it started and does not replace it.
     Pinned(Incarnation<A>),
     /// An identity, resolved on demand.
     ///
@@ -183,7 +184,7 @@ impl<A: Aggregate> AggregateProxy<A> {
                     return incarnation;
                 }
                 // Two dispatches racing here both resolve, and the registry's
-                // single flight hands them the same activation (R-1).
+                // single flight hands them the same activation.
                 let incarnation = resolver.resolve().await;
                 *cached.lock().expect(CACHE_LOCK) = Some(incarnation.clone());
                 incarnation
@@ -193,11 +194,11 @@ impl<A: Aggregate> AggregateProxy<A> {
 
     /// Treat `dead` as gone, so the next dispatch resolves a live activation.
     ///
-    /// Two things count as the invalidation signal (R-5): a send that does not
-    /// reach its destination, and a non-genesis `SequenceConflict` — C-1 stops
-    /// the activation the instant it loses the race, before this call returns,
-    /// so waiting for a *later* send to fail against it would cost the very
-    /// next dispatch a doomed round-trip. Nothing is retried here — the caller
+    /// Two things count as the invalidation signal: a send that does not reach
+    /// its destination, and a non-genesis `SequenceConflict` — an overtaken
+    /// writer stops the instant it loses the race, before this call returns, so
+    /// waiting for a *later* send to fail against it would cost the very next
+    /// dispatch a doomed round-trip. Nothing is retried here — the caller
     /// learns the dispatch failed, and [`AskError::retryability`] tells it that
     /// retrying is worthwhile.
     fn invalidate(&self, dead: &Incarnation<A>) {
@@ -226,7 +227,7 @@ const CACHE_LOCK: &str = "the incarnation cache is never held across an await, s
 /// A `Send` failure is the reactive case: the destination was already gone
 /// when the runtime tried to deliver to it. A non-genesis `SequenceConflict`
 /// is the proactive case: `AggregateProcess` answers it only after calling
-/// `stop_self` (C-1), so an `Append(SequenceConflict)` reaching here always
+/// `stop_self`, so an `Append(SequenceConflict)` reaching here always
 /// names an activation that is on its way out, whether or not its mailbox has
 /// closed yet. Every other `Effect` error (backend failure, a side effect's
 /// own error, a codec error) says nothing about whether the activation is

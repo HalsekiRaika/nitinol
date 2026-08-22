@@ -8,7 +8,7 @@
 //
 // The store's OCC rule is what makes a second activation observable at all: two
 // activations of one stream each carry their own sequence counter, so the one
-// that fell behind has its append rejected (OCC-1).  A test that ends with every
+// that fell behind has its append rejected.  A test that ends with every
 // dispatch accepted and a gap-free sequence has therefore seen exactly one
 // writer.
 
@@ -400,7 +400,7 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
 /// A rival writer is spawned through the raw `AggregateProps` path, which keeps
 /// activating per call, so it can take the stream away from the resolved
 /// reference's activation.  The resolved activation then loses an append on a
-/// non-genesis sequence, stops (C-1), and the *very next* dispatch through the
+/// non-genesis sequence, stops because of it, and the *very next* dispatch through the
 /// same reference — no retry loop — must reach a re-activated aggregate that
 /// replayed everything the rival wrote: the proxy evicts the dying activation
 /// as soon as it sees the conflict, not only after a later send fails against it.

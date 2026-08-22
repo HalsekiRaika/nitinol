@@ -12,7 +12,7 @@
 //! test that ends with every dispatch accepted and a gap-free sequence has
 //! therefore seen exactly one writer, whichever clone reached it.
 //!
-//! Single-flight across clones under concurrency (R-1) is pinned by
+//! Single-flight across clones under concurrency is pinned by
 //! `aggregate_resolve.rs::concurrent_resolve_produces_a_single_writer`, which
 //! races its resolvers from separate clones.  The tests here are the sequential
 //! statement of the same sharing, plus the type-level part that has no runtime

@@ -146,18 +146,18 @@ impl<C, St> EventSourceSystemBuilder<C, St> {
 /// Every aggregate entry point below **resolves**: an identifier is mapped to a
 /// reference, and the aggregate is activated only if this node has no activation
 /// for it yet.  Concurrent resolves of one identifier cause at most one
-/// activation and all receive the same reference (R-1), and nothing observable
-/// says which call did the activating (R-3).
+/// activation and all receive the same reference, and nothing observable says
+/// which call did the activating.
 ///
 /// Two things follow that code written against this system must respect.
 ///
 /// * **Duplicate activations are possible and normal.**  The at-most-one
 ///   guarantee is per node.  Across a cluster, one aggregate may be activated
 ///   more than once at the same time — that is a placement goal and a
-///   convergence property, not a safety contract (R-2).  Safety belongs to the
-///   event store: an append derived from a state the stream has moved past is
-///   rejected, and the activation that made it stops (C-1).  Never write code
-///   whose correctness needs single activation.
+///   convergence property, not a safety contract.  Safety belongs to the event
+///   store: an append derived from a state the stream has moved past is
+///   rejected, and the activation that made it stops.  Never write code whose
+///   correctness needs single activation.
 /// * **Store-external side effects are not at-most-once.**
 ///   [`Effect::Side`](crate::Effect::Side) and a bare
 ///   [`tell`](crate::AggregateProxy::tell) leave the store's arbitration, so a
@@ -167,16 +167,16 @@ impl<C, St> EventSourceSystemBuilder<C, St> {
 ///   decides whether it happened at all.
 ///
 /// Starting a lifecycle explicitly, rather than resolving one, is
-/// [`AggregateProps::spawn`] on props built directly (R-4).
+/// [`AggregateProps::spawn`] on props built directly.
 ///
 /// # A handle, not an instance
 ///
 /// Cloning an `EventSourceSystem` names the same instance rather than creating a
 /// second one: every clone resolves through the same aggregate registry, runs on
-/// the same [`ProcessSystem`], and carries the same default [`EventStore`].  R-1
-/// therefore holds across clones — two clones resolving one identity reach one
-/// activation — and callers share the system by cloning it rather than by
-/// wrapping it in an `Arc`.
+/// the same [`ProcessSystem`], and carries the same default [`EventStore`].  The
+/// per-node at-most-one guarantee therefore holds across clones — two clones
+/// resolving one identity reach one activation — and callers share the system by
+/// cloning it rather than by wrapping it in an `Arc`.
 ///
 /// The entry points stay by-reference so that whether to clone remains the
 /// caller's decision.  Configuration is fixed before any handle exists: the
@@ -307,8 +307,8 @@ where
     ///
     /// `store` configures the activation this call may start.  Resolving an
     /// identifier that is already activated joins that activation, whatever store
-    /// it was given — two activations of one stream is the state resolve exists
-    /// to prevent (R-1), so identity wins over per-call wiring.
+    /// it was given — two activations of one stream on one node is the state
+    /// resolve exists to prevent, so identity wins over per-call wiring.
     pub async fn spawn_aggregate<A>(
         &self,
         id: AggregateId,

@@ -2,8 +2,8 @@
 //! creation.
 //!
 //! nitinol has exactly one unit of atomicity — one `append` to one stream — and
-//! deliberately offers no atomic append spanning several streams.  The
-//! contract-level statement of that rule is `OCC-3` in
+//! deliberately offers no atomic append spanning several streams.  That rule is
+//! stated at contract level on
 //! [`nitinol_persistence::store::EventStore::append`]; the decision record for
 //! *why* — prior art surveyed, and the conditions under which it could be
 //! revisited — is the ADR at

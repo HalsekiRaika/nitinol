@@ -1,15 +1,44 @@
 //! Resolving an aggregate identifier to a live activation.
 //!
-//! # What resolve guarantees, and what it does not
+//! # The resolve contract
 //!
-//! Within one node, a key has at most one activation: concurrent resolves of
-//! the same key cause at most one spawn and every caller receives the same
-//! reference (**R-1**).  Across a cluster there is **no such guarantee**.
-//! Single activation cluster-wide is a placement goal and a convergence
-//! property, not a safety contract (**R-2**) — duplicate activations of one
-//! aggregate are a normal occurrence, and correctness rests entirely on the
-//! event store's optimistic concurrency contract, which rejects any append
-//! derived from a state the stream has already moved past.
+//! The clauses below are the contract of this layer — what a caller may rely on,
+//! as opposed to the incidental behaviour of the registry underneath.  Each
+//! clause carries a stable label (`R-1` … `R-5`) shared with the executable
+//! record named beneath it.
+//!
+//! The labels are local to this module and to the records it names.  Code
+//! elsewhere states what it needs in its own words, or links here, so that
+//! changing a clause does not leave stale restatements of it scattered across
+//! the crate.
+//!
+//! # R-1: at most one activation per key, per node
+//!
+//! Within one node, concurrent resolves of the same key cause at most one spawn,
+//! and every caller receives the same reference.  Two activations of one stream
+//! is a violation of this clause, not a race the layer tolerates.
+//!
+//! The table's lock is held only to read or replace a slot, never across the
+//! spawn — which replays the aggregate's stream and is unbounded in time.  A
+//! spawn abandoned before it completes must therefore release its waiters and
+//! free the key: a placeholder nobody is left to fulfil would park every later
+//! resolve of that aggregate for good, which is a worse failure than the
+//! abandoned spawn that caused it.
+//!
+//! Fixed by `concurrent_resolve_produces_a_single_writer` in
+//! `nitinol-eventsource/tests/aggregate_resolve.rs`.  The cleanup half is fixed
+//! by `an_abandoned_activation_releases_its_waiters_and_frees_the_key` and
+//! `withdrawing_leaves_a_later_activation_of_the_same_key_alone` in this
+//! module's own `tests`.
+//!
+//! # R-2: single activation cluster-wide is not a contract
+//!
+//! Across a cluster there is **no** at-most-one guarantee.  Single activation
+//! cluster-wide is a placement goal and a convergence property, not a safety
+//! contract — duplicate activations of one aggregate are a normal occurrence.
+//! Safety rests entirely on the event store's optimistic concurrency contract,
+//! which rejects any append derived from a state the stream has already moved
+//! past; see [`EventStore::append`](nitinol_persistence::store::EventStore::append).
 //!
 //! Two consequences for code written against this layer:
 //!
@@ -22,13 +51,63 @@
 //!   cluster-safe belongs behind a persisted record — `Effect::persist` or a
 //!   saga outbox — whose own stream OCC decides whether it happened at all.
 //!
-//! # Resolve does not report which happened
+//! Not fixed by a test: this clause is the *absence* of a guarantee, and a node
+//! cannot exhibit the cluster-wide behaviour it declines to promise.  What is
+//! fixed is the store-side arbitration it defers to, in
+//! `nitinol-persistence/tests/event_store_occ.rs`.
 //!
-//! Nothing a caller can observe distinguishes "this call activated the
-//! aggregate" from "this call joined a live activation" (**R-3**): resolve is an
-//! idempotent map from identifier to reference.  The distinction is meaningless
-//! the moment an activation may be remote, so no return value or error variant
-//! exposes it.
+//! # R-3: resolve does not report which happened
+//!
+//! Nothing a caller can observe — return value, error variant or timing —
+//! distinguishes "this call activated the aggregate" from "this call joined a
+//! live activation".  Resolve is an idempotent map from identifier to reference.
+//! The distinction stops being expressible the moment an activation may be
+//! remote, so no part of the surface exposes it.
+//!
+//! Fixed by `second_spawn_aggregate_addresses_the_same_aggregate`,
+//! `aggregate_props_spawn_addresses_the_same_aggregate` and
+//! `aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate` in
+//! `nitinol-eventsource/tests/aggregate_resolve.rs`, and by
+//! `synchronously_built_reference_addresses_the_same_aggregate` in
+//! `nitinol-eventsource/tests/aggregate_proxy_sync_entry.rs`.
+//!
+//! # R-4: spawning and resolving are different layers
+//!
+//! Get-or-activate lives here, in `nitinol-eventsource`.  It is not folded into
+//! [`ProcessSystem::spawn`](nitinol_runtime::ProcessSystem::spawn), which stays
+//! an explicit lifecycle call: two spawns of one declaration are two processes,
+//! and naming one that is already taken does not turn the second spawn into a
+//! lookup of the first — it still starts its own independent process, and the
+//! name's alias silently comes to point at the newer one.  Mixing get-or-activate
+//! into `spawn` would make starting a lifecycle indistinguishable from resolving
+//! an identity and would silently change what every existing `spawn` caller gets.
+//!
+//! The same split shows on the reference: props built through an
+//! [`EventSourceSystem`](crate::system::EventSourceSystem) resolve, while props
+//! built directly start a lifecycle and stay pinned to what they started.
+//!
+//! Fixed by `spawn_starts_a_new_process_for_every_call` and
+//! `spawn_under_a_taken_name_still_starts_a_new_process` in
+//! `nitinol-runtime/tests/spawn_identity.rs`.
+//!
+//! # R-5: a reference outlives the activation it reached
+//!
+//! A reference may cache the activation it resolved, but it treats that
+//! activation's death as an invalidation signal and resolves again on the next
+//! dispatch — including when the death was a writer stopping after losing its
+//! stream.  A reference is therefore valid for as long as the aggregate is
+//! meaningful, not for as long as one process lives.
+//!
+//! The error handed to the caller distinguishes retry-worthiness by type: losing
+//! a stream or dispatching to an activation on its way out is transient, while a
+//! decider's refusal of a command is permanent and will refuse again.
+//!
+//! Fixed by `reference_survives_the_death_of_its_activation` in
+//! `nitinol-eventsource/tests/aggregate_resolve.rs`, and — for the transient /
+//! permanent split — by `sequence_conflict_is_transient`,
+//! `dispatch_to_a_stopped_activation_is_transient` and
+//! `decider_rejection_is_permanent` in
+//! `nitinol-eventsource/tests/aggregate_error_retryability.rs`.
 
 use std::any::{Any, TypeId};
 use std::collections::hash_map::Entry;
