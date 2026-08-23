@@ -118,7 +118,7 @@
 //! stream — and offers no atomic append spanning several streams; that rule,
 //! and what expresses cross-stream consistency in its place, is stated as
 //! OCC-3 on [`nitinol_persistence::store::EventStore::append`].  The pattern
-//! below is that replacement written out; `examples/saga/2.fanout-pattern`
+//! below is that replacement written out; [the fan-out pattern example](https://github.com/HalsekiRaika/nitinol/tree/master/examples/saga/2.fanout-pattern)
 //! works it through end to end on a payroll run that owes 32 employees a
 //! payslip.
 //!
@@ -146,7 +146,7 @@
 //!    (OCC-2 on [`nitinol_persistence::store::EventStore::append`]).
 //!
 //! Two further steps belong to the pattern.  This crate carries no surface for
-//! either, and `examples/saga/2.fanout-pattern` implements neither:
+//! either, and [the fan-out pattern example](https://github.com/HalsekiRaika/nitinol/tree/master/examples/saga/2.fanout-pattern) implements neither:
 //!
 //! - **Genesis by reference.**  If a child's initial state is derivable from
 //!   the fact event, the child's stream need not be written at fan-out time at
@@ -190,9 +190,6 @@
 //!   addressed by, and each dispatched command should carry its target's stream
 //!   key — which is also what makes the command reconstructible from its outbox
 //!   marker after a crash.
-//!
-//! A `SagaTestKit` — the Akka TestKit counterpart, for driving a saga through
-//! these steps under test — is not provided today and may be added later.
 
 mod context;
 mod dead_letter;
