@@ -1,11 +1,5 @@
 name: default-rust-docs
 description: Rust docs-only workflow（計画 → 文書化 → docs review ⇄ fix → COMPLETE）
-workflow_config:
-  provider_options:
-    codex:
-      network_access: true
-    opencode:
-      network_access: true
 max_steps: 30
 initial_step: plan
 loop_monitors:
@@ -27,26 +21,16 @@ steps:
       - plan
       - docs
       - rust
+      - route-provider-network
+      - route-claude-opus-high-read
     edit: false
     persona: planner
-    provider: claude
-    model: opus
     session_key: rust-docs-plan
     session: refresh
     policy:
       - rust-design
       - report-phase-boundary
     knowledge: architecture
-    provider_options:
-      claude:
-        effort: high
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Bash
-          - WebSearch
-          - WebFetch
     rules:
       - condition: 要件が明確でdocs-onlyとして実施可能
         next: write-docs
@@ -66,28 +50,16 @@ steps:
       - coding
       - docs
       - rust
+      - route-provider-network
+      - route-claude-opus-high-edit
     edit: true
     persona: coder
-    provider: claude
-    model: opus
     session_key: rust-docs-write
     session: refresh
     policy:
       - coding
       - rust-docs
       - report-phase-boundary
-    provider_options:
-      claude:
-        effort: high
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     required_permission_mode: edit
     instruction: rust-docs-write
     quality_gates:
@@ -122,10 +94,10 @@ steps:
       - review
       - docs
       - rust
+      - route-provider-network
+      - route-codex-gpt55
     edit: false
     persona: coding-reviewer
-    provider: codex
-    model: gpt-5.5
     session_key: rust-docs-review
     session: refresh
     policy:
@@ -149,31 +121,16 @@ steps:
       - fix
       - docs
       - rust
+      - route-provider-network
+      - route-claude-sonnet-high-edit
     edit: true
     persona: coder
-    provider: claude
-    model: sonnet
-    promotion:
-      - at: 3
-        model: opus
     session_key: rust-docs-fix
     session: refresh
     policy:
       - coding
       - rust-docs
       - report-phase-boundary
-    provider_options:
-      claude:
-        effort: high
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     required_permission_mode: edit
     instruction: rust-docs-fix
     quality_gates:

@@ -10,12 +10,6 @@ subworkflow:
       type: facet_ref
       facet_kind: instruction
       default: implement
-workflow_config:
-  provider_options:
-    codex:
-      network_access: true
-    opencode:
-      network_access: true
 initial_step: implement
 loop_monitors:
   - cycle:
@@ -34,6 +28,8 @@ steps:
   - name: implement
     tags:
       - coding
+      - route-provider-network
+      - route-claude-tools-edit
     edit: true
     persona: coder
     policy:
@@ -43,17 +39,6 @@ steps:
     session: refresh
     knowledge:
       - architecture
-    provider_options:
-      claude:
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     required_permission_mode: edit
     instruction:
       $param: impl_instruction
@@ -77,20 +62,14 @@ steps:
   - name: ai-antipattern-review-1st
     tags:
       - review
+      - route-provider-network
+      - route-claude-tools-read
     edit: false
     persona: ai-antipattern-reviewer
     policy:
       - review
       - ai-antipattern
       - report-phase-boundary
-    provider_options:
-      claude:
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - WebSearch
-          - WebFetch
     instruction: ai-antipattern-review
     rules:
       - condition: AI特有の問題なし
@@ -104,6 +83,8 @@ steps:
   - name: ai-antipattern-fix
     tags:
       - coding
+      - route-provider-network
+      - route-claude-tools-edit
     edit: true
     persona: coder
     policy:
@@ -113,17 +94,6 @@ steps:
     session: refresh
     knowledge:
       - architecture
-    provider_options:
-      claude:
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     required_permission_mode: edit
     instruction: ai-antipattern-fix
     pass_previous_response: false

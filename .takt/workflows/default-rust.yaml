@@ -1,11 +1,5 @@
 name: default-rust
 description: TAKT v0.57.0対応のRustテスト先行ワークフロー（計画 → テスト → Rust draft → Rust peer review → COMPLETE）
-workflow_config:
-  provider_options:
-    codex:
-      network_access: true
-    opencode:
-      network_access: true
 max_steps: 60
 initial_step: plan
 steps:
@@ -13,26 +7,16 @@ steps:
     tags:
       - plan
       - rust
+      - route-provider-network
+      - route-claude-opus-high-read
     edit: false
     persona: planner
-    provider: claude
-    model: opus
     session_key: rust-plan
     session: refresh
     policy:
       - rust-design
       - report-phase-boundary
     knowledge: architecture
-    provider_options:
-      claude:
-        effort: high
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Bash
-          - WebSearch
-          - WebFetch
     rules:
       - condition: 要件が明確で実装可能
         next: write_tests
@@ -51,10 +35,10 @@ steps:
       - coding
       - test-planning
       - rust
+      - route-provider-network
+      - route-claude-opus-high-edit
     edit: true
     persona: coder
-    provider: claude
-    model: opus
     session_key: rust-tests
     session: refresh
     policy:
@@ -66,18 +50,6 @@ steps:
       - architecture
       - unit-testing
       - e2e-testing
-    provider_options:
-      claude:
-        effort: high
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     required_permission_mode: edit
     instruction: rust-write-tests-first
     rules:

@@ -26,3 +26,108 @@ provider_routing:
       provider_options:
         codex:
           reasoning_effort: medium
+    route-provider-network:
+      provider_options:
+        codex:
+          network_access: true
+        opencode:
+          network_access: true
+    route-claude-tools-read:
+      provider_options:
+        claude:
+          allowed_tools:
+            - Read
+            - Glob
+            - Grep
+            - Bash
+            - WebSearch
+            - WebFetch
+    route-claude-tools-edit:
+      provider_options:
+        claude:
+          allowed_tools:
+            - Read
+            - Glob
+            - Grep
+            - Edit
+            - Write
+            - Bash
+            - WebSearch
+            - WebFetch
+    route-claude-opus-high-read:
+      provider: claude
+      model: opus
+      provider_options:
+        claude:
+          effort: high
+          allowed_tools:
+            - Read
+            - Glob
+            - Grep
+            - Bash
+            - WebSearch
+            - WebFetch
+    route-claude-opus-high-edit:
+      provider: claude
+      model: opus
+      provider_options:
+        claude:
+          effort: high
+          allowed_tools:
+            - Read
+            - Glob
+            - Grep
+            - Edit
+            - Write
+            - Bash
+            - WebSearch
+            - WebFetch
+    route-claude-sonnet-high-edit:
+      provider: claude
+      model: sonnet
+      provider_options:
+        claude:
+          effort: high
+          allowed_tools:
+            - Read
+            - Glob
+            - Grep
+            - Edit
+            - Write
+            - Bash
+            - WebSearch
+            - WebFetch
+    route-codex-gpt55:
+      provider: codex
+      model: gpt-5.5
+    route-claude-repair-high:
+      provider_options:
+        claude:
+          effort: high
+          allowed_tools:
+            - Read
+            - Glob
+            - Grep
+            - Edit
+            - Write
+            - Bash
+            - WebSearch
+            - WebFetch
+    route-claude-repair-low:
+      provider_options:
+        claude:
+          effort: low
+          allowed_tools:
+            - Read
+            - Glob
+            - Grep
+            - Edit
+            - Write
+            - Bash
+  personas:
+    project-consistency-audit-supervisor:
+      provider: claude
+      model: sonnet
+      provider_options:
+        claude:
+          effort: medium
