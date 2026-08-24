@@ -14,6 +14,7 @@ steps:
       - rust
       - quality-recovery
       - rust-quality-test
+      - route-claude-repair-high
     edit: true
     persona: coder
     session_key: rust-quality-repair-test
@@ -27,18 +28,6 @@ steps:
     knowledge:
       - architecture
     required_permission_mode: edit
-    provider_options:
-      claude:
-        effort: high
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     instruction: rust-quality-repair-test
     quality_gates:
       - type: command

@@ -161,6 +161,12 @@ fn fold_loaded<S: Saga>(
         Err(SagaPersistedDecodeError::DeadLetter(e)) => {
             tracing::error!(error = %e, "saga dead letter decode failed; skipping event");
         }
+        Err(SagaPersistedDecodeError::DeadLetterDisposition(e)) => {
+            tracing::error!(
+                error = %e,
+                "saga dead letter disposition marker decode failed; skipping event"
+            );
+        }
         Err(SagaPersistedDecodeError::Domain(e)) => {
             tracing::error!(error = %e, "saga event decode failed; skipping event");
         }

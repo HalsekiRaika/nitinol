@@ -5,12 +5,6 @@ subworkflow:
   visibility: internal
   returns:
     - need_replan
-workflow_config:
-  provider_options:
-    codex:
-      network_access: true
-    opencode:
-      network_access: true
 initial_step: implement
 loop_monitors:
   - cycle:
@@ -31,10 +25,10 @@ steps:
       - coding
       - implementation
       - rust
+      - route-provider-network
+      - route-claude-opus-high-edit
     edit: true
     persona: coder
-    provider: claude
-    model: opus
     session_key: rust-implement
     session: refresh
     policy:
@@ -44,18 +38,6 @@ steps:
       - report-phase-boundary
     knowledge:
       - architecture
-    provider_options:
-      claude:
-        effort: high
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     required_permission_mode: edit
     instruction: rust-implement-after-tests
     quality_gates:
@@ -86,24 +68,16 @@ steps:
       - review
       - ai-antipattern
       - rust
+      - route-provider-network
+      - route-codex-gpt55
     edit: false
     persona: ai-antipattern-reviewer
-    provider: codex
-    model: gpt-5.5
     session_key: rust-ai-review-first
     session: refresh
     policy:
       - review
       - ai-antipattern
       - report-phase-boundary
-    provider_options:
-      claude:
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - WebSearch
-          - WebFetch
     instruction: ai-antipattern-review
     rules:
       - condition: AI特有の問題なし
@@ -120,13 +94,10 @@ steps:
       - fix
       - ai-antipattern
       - rust
+      - route-provider-network
+      - route-claude-sonnet-high-edit
     edit: true
     persona: coder
-    provider: claude
-    model: sonnet
-    promotion:
-      - at: 3
-        model: opus
     session_key: rust-ai-fix
     session: refresh
     policy:
@@ -136,18 +107,6 @@ steps:
       - report-phase-boundary
     knowledge:
       - architecture
-    provider_options:
-      claude:
-        effort: high
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     required_permission_mode: edit
     instruction: rust-ai-antipattern-fix
     quality_gates:

@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package nitinol.saga.dead_letter_disposition;
+
+// Marker recording that an operator settled one dead letter through the DLQ
+// pull API.  Persisted on the saga's own EventStore stream as
+// `SagaPersisted::DeadLetterDisposition(DeadLetterDispositionEvent)`.
+//
+// The reserved event type `nitinol.saga.dead_letter_disposition` is a sibling
+// of `nitinol.saga.dead_letter`, not a variant inside it, so the dead-letter
+// prefix keeps selecting exactly the records it selected before this marker
+// existed — the push subscriber goes on delivering every dead letter as the
+// observability signal it is, settled or not.
+//
+// Eviction is a logical delete: the marker drops the dead letter from
+// `DeadLetterQueue::list` and leaves the original record in the store.
+message DeadLetterDispositionMarker {
+  // Stream sequence of the dead letter this marker settles.  The dead letter's
+  // position on the saga stream is its identity, so this is the whole
+  // reference.
+  uint64 dead_letter_sequence = 1;
+  oneof disposition {
+    Processed processed = 2;
+    Evicted evicted = 3;
+  }
+}
+
+// The dead letter was handed to the downstream application and dealt with.
+// Carries no fields — presence is the whole signal.
+message Processed {}
+
+// The dead letter was retired without being dealt with.  Carries no fields —
+// presence is the whole signal.
+message Evicted {}

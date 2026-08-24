@@ -86,8 +86,26 @@
 //!   [`SagaProps::with_enqueue_policy`] — or to
 //!   [`SagaManagerProps::with_enqueue_policy`] for every instance of a manager
 //!   — controls which failure kinds reach the DLQ; the default enqueues every
-//!   kind.  Pull API (list / mark_processed / evict) is **not implemented** in
-//!   this crate.
+//!   kind.  That subscriber is the *push* path: an observability signal,
+//!   delivered whether or not anyone has acted on it.
+//! - DLQ pull API: [`DeadLetterQueue`] is the operator-facing recovery
+//!   counterpart of that push path.  [`list`](DeadLetterQueue::list) returns the
+//!   dead letters nobody has settled — ordered by their own stream sequence,
+//!   with `from_sequence` and `limit` for paging — and
+//!   [`mark_processed`](DeadLetterQueue::mark_processed) /
+//!   [`evict`](DeadLetterQueue::evict) settle one by appending a
+//!   `nitinol.saga.dead_letter_disposition` marker to the saga's own stream.
+//!   Eviction is a *logical* delete: the marker drops the dead letter from the
+//!   listing and leaves its original record in the store, which is the only
+//!   kind of delete an event log has.  The queue runs over the
+//!   [`nitinol_persistence::store::EventStore`] alone, so it serves a saga that
+//!   is not resident.  Reprocessing is deliberately not part of it: a
+//!   [`DeadLetterEntry`] carries the recovery material (the failure's raw
+//!   payload plus its [`SourceContext`] coordinates) and acting on it is the
+//!   downstream application's decision.  The marker family is a *sibling* of
+//!   `nitinol.saga.dead_letter` rather than a variant inside it, so settling a
+//!   dead letter changes what `list` returns and leaves the push path — which
+//!   selects on the dead-letter prefix — untouched.
 //! - Tell-failure compensation: when a tell exhausts its retry budget the saga
 //!   is notified through [`Saga::on_tell_failed`] as soon as the failure
 //!   settles, so a compensating [`SagaEffect`] runs without waiting for another
@@ -206,7 +224,8 @@ mod system_ext;
 
 pub use self::context::SagaContext;
 pub use self::dead_letter::{
-    DeadLetterEvent, EnqueueDecision, EnqueuePolicy, SagaFailure, SourceContext,
+    DeadLetterEntry, DeadLetterEvent, DeadLetterQuery, DeadLetterQueue, DeadLetterQueueError,
+    EnqueueDecision, EnqueuePolicy, SagaFailure, SourceContext,
 };
 pub use self::effect::{SagaEffect, ScheduleSpec, TellIntent};
 pub use self::id::SagaId;
