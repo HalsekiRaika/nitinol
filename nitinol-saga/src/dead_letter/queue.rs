@@ -5,9 +5,12 @@
 //! recovery counterpart: it lists what is still outstanding and records what an
 //! operator did about it.
 //!
-//! Everything runs over the [`EventStore`] alone, so the queue serves a saga
-//! that is not resident — which is exactly the situation an operator triaging a
-//! stopped saga is in.
+//! Listing runs over the [`EventStore`] alone.  Settling does not: the marker
+//! is appended to the saga's *own* stream, and while an instance is resident it
+//! is that instance — not this queue — that owns the stream's next sequence.  A
+//! queue obtained from [`SagaManagerProxy::dead_letter_queue`] therefore hands
+//! the write to the manager, the single arbiter of every stream in its fan-out;
+//! see [`DeadLetterQueue`] for the case where there is no arbiter.
 //!
 //! Reprocessing is deliberately absent.  A [`DeadLetterEntry`] carries the
 //! recovery material (the failure's raw payload plus its
@@ -15,6 +18,7 @@
 //! with it is the downstream application's, not the framework's.
 //!
 //! [`SagaProps::with_dead_letter_subscriber`]: crate::SagaProps::with_dead_letter_subscriber
+//! [`SagaManagerProxy::dead_letter_queue`]: crate::SagaManagerProxy::dead_letter_queue
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -29,6 +33,22 @@ use crate::id::SagaId;
 
 use super::disposition::{DeadLetterDispositionEvent, Disposition, DEAD_LETTER_DISPOSITION_MARKER};
 use super::event::{is_dead_letter_event_type, DeadLetterEvent, DEAD_LETTER_MARKER};
+use super::settle::{DispositionArbiter, SettleError};
+
+/// A settle that did not happen, told the way the operator asked the question.
+///
+/// The arbiter's own distinctions survive: a store refusal stays an append
+/// failure, a stream that could not be read stays a load failure.  Only the
+/// arbiter being out of reach is new, because only the arbitrated path has one.
+impl From<SettleError> for DeadLetterQueueError {
+    fn from(error: SettleError) -> Self {
+        match error {
+            SettleError::Append(e) => Self::Append(e),
+            SettleError::Load(e) => Self::Load(e),
+            SettleError::Unreachable(detail) => Self::ArbiterUnreachable(detail),
+        }
+    }
+}
 
 /// Filter and paging for [`DeadLetterQueue::list`].
 ///
@@ -80,6 +100,14 @@ pub enum DeadLetterQueueError {
     /// read would resurface an already-settled dead letter.
     #[error("decoding a persisted dead letter record failed: {0}")]
     Decode(Box<dyn std::error::Error + Send + Sync>),
+    /// The saga manager this queue routes its writes through did not answer, so
+    /// the disposition was not recorded.
+    ///
+    /// Nothing was written and the dead letter is still outstanding: the
+    /// operation can simply be run again once the manager — or the instance it
+    /// routed to — is available.
+    #[error("recording the disposition through the saga manager failed: {0}")]
+    ArbiterUnreachable(String),
 }
 
 /// Pull API over the dead letters on one saga's own EventStore stream.
@@ -87,31 +115,72 @@ pub enum DeadLetterQueueError {
 /// Scoped to a single [`SagaId`]: one physical store hosts every saga's stream
 /// side by side, and a queue only ever reads and writes its own.
 ///
-/// # Concurrency with a resident saga
+/// # Who writes the marker
 ///
-/// This queue is meant for a saga instance that is **not resident** — the
-/// operator-triage situation described in the module doc above. A resident
-/// `SagaProcess` owns its stream's sequence in memory and keeps appending to
-/// it, so calling [`mark_processed`](Self::mark_processed) or
-/// [`evict`](Self::evict) while that instance is running races those
-/// in-process appends for the same stream:
-/// - If this queue's append loses the race, the caller sees
-///   [`DeadLetterQueueError::Append`] and no marker is written.
-/// - If the saga process's append loses instead, its staged retry resubmits
-///   the same sequence and collides again, the `PersistFailed` dead letter it
-///   then tries to enqueue collides for the same reason, and the process
-///   stops on that spurious `persist_failed`. A supervised restart replays
-///   the stream, resynchronizes the process's sequence, and recovers.
+/// [`list`](Self::list) reads the store. [`mark_processed`](Self::mark_processed)
+/// and [`evict`](Self::evict) write to the saga's own stream, which has exactly
+/// one writer at any moment — so they do not append themselves. A queue built by
+/// [`SagaManagerProxy::dead_letter_queue`] hands the marker to that manager,
+/// which appends through the resident instance's mailbox when the saga is
+/// resident and writes it itself when the saga is not. Either way the operator
+/// waits for the outcome and no append ever contends for the stream's next
+/// sequence.
+///
+/// # Standalone use, without an arbiter
+///
+/// A queue built with [`new`](Self::new) has no arbiter: it holds a store and a
+/// saga id and nothing that knows whether that saga is running. It appends the
+/// marker after the stream tail it just read, which is correct **only while
+/// nothing else is writing that stream** — the caller is the one guaranteeing
+/// that. This covers offline triage, and also a saga spawned standalone through
+/// [`SagaProps`](crate::SagaProps), which has no manager to arbitrate for it.
+///
+/// If that guarantee does not hold, the tail read goes stale between the read
+/// and the append and the store's `unique(stream, sequence)` rule turns the
+/// overlap into a conflict — either this append fails, or the running saga's
+/// does and it stops on a `persist_failed` that describes nothing but the
+/// collision. Route through the manager whenever there is one.
+///
+/// [`SagaManagerProxy::dead_letter_queue`]: crate::SagaManagerProxy::dead_letter_queue
 pub struct DeadLetterQueue {
     store: Arc<dyn EventStore>,
     saga_id: SagaId,
+    /// The single writer of this saga's stream, when one exists.
+    ///
+    /// `None` is the standalone case documented above: no arbiter exists, and
+    /// the caller carries the guarantee an arbiter would have enforced.
+    arbiter: Option<Arc<dyn DispositionArbiter>>,
 }
 
 impl DeadLetterQueue {
     /// Open the queue for `saga_id` over `store` — the same store the saga
     /// persists its own stream to.
+    ///
+    /// The resulting queue has no arbiter; see the type doc for what the caller
+    /// is guaranteeing by using it.
     pub fn new(store: Arc<dyn EventStore>, saga_id: SagaId) -> Self {
-        Self { store, saga_id }
+        Self {
+            store,
+            saga_id,
+            arbiter: None,
+        }
+    }
+
+    /// Open the queue for `saga_id`, routing its disposition writes through
+    /// `arbiter` — the single writer of that saga's stream.
+    ///
+    /// `store` is the arbiter's own store, so what [`list`](Self::list) reads
+    /// and what the arbiter writes cannot drift apart.
+    pub(crate) fn arbitrated(
+        store: Arc<dyn EventStore>,
+        saga_id: SagaId,
+        arbiter: Arc<dyn DispositionArbiter>,
+    ) -> Self {
+        Self {
+            store,
+            saga_id,
+            arbiter: Some(arbiter),
+        }
     }
 
     /// The dead letters this saga has enqueued and nobody has settled,
@@ -202,10 +271,10 @@ impl DeadLetterQueue {
         sequence: u64,
         disposition: Disposition,
     ) -> Result<(), DeadLetterQueueError> {
-        // One pass over the stream answers both questions the append needs: is
-        // `sequence` really a dead letter, and where does the stream end.  The
-        // store offers no way to read the tail without scanning, and the guard
-        // has to see the whole stream anyway.
+        // The guard has to see the whole stream to answer "is `sequence` really
+        // a dead letter", and the store offers no way to read the tail without
+        // scanning either — so the arbiterless path's tail comes out of the
+        // same pass rather than a second one.
         let stream = self.load(LoadQuery::by_stream(&self.saga_id)).await?;
         let mut settles_a_dead_letter = false;
         let mut tail = 0;
@@ -226,22 +295,26 @@ impl DeadLetterQueue {
             dead_letter_sequence: sequence,
             disposition,
         };
-        // A resident saga writes to this same stream, so the tail read above can
-        // go stale.  The store's `unique(stream, sequence)` rule turns that race
-        // into a `SequenceConflict` (see the doc on `DeadLetterQueue` above): either
-        // this append loses and the caller sees it as `DeadLetterQueueError::Append`
-        // with no marker written, or the saga process's own append loses instead and
-        // the process stops on a spurious `persist_failed` until a restart resyncs it.
-        self.store
-            .append(
-                self.saga_id.as_str(),
-                vec![appending_system_event(
-                    tail + 1,
-                    &marker,
-                    jiff::Timestamp::now(),
-                )],
-            )
-            .await?;
+        // What to write was decided here, because deciding it needs to know what
+        // a dead letter is.  Where it goes is the arbiter's decision, because
+        // that needs to know who currently owns the stream's next sequence.
+        match &self.arbiter {
+            Some(arbiter) => arbiter.settle(&self.saga_id, marker).await?,
+            None => {
+                // No arbiter: the caller has guaranteed nothing else is writing
+                // this stream, so the tail read above is still the tail.
+                self.store
+                    .append(
+                        self.saga_id.as_str(),
+                        vec![appending_system_event(
+                            tail + 1,
+                            &marker,
+                            jiff::Timestamp::now(),
+                        )],
+                    )
+                    .await?;
+            }
+        }
         Ok(())
     }
 

@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::Event;
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
 
 // A saga that overrides ONLY the required methods, leaving on_scheduled and
@@ -95,7 +95,7 @@ async fn default_on_tell_failed_returns_none_effect() {
     let mut ctx = SagaContext::test_context(SagaId::new("on-tell-failed-default"), 0);
 
     let effect = saga
-        .on_tell_failed(SagaId::new("unreachable-target"), &mut ctx)
+        .on_tell_failed(AggregateId::new("unreachable-target"), &mut ctx)
         .await
         .expect("the default on_tell_failed must return Ok");
 

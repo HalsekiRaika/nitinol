@@ -1,0 +1,5 @@
+error: `family` is within the `nitinol` reserved namespace, which is reserved for framework events
+ --> tests/ui/fail/reserved_family.rs:9:18
+  |
+9 | #[event(family = "nitinol.saga")]
+  |                  ^^^^^^^^^^^^^^

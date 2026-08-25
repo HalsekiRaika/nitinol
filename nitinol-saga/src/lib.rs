@@ -97,15 +97,37 @@
 //!   `nitinol.saga.dead_letter_disposition` marker to the saga's own stream.
 //!   Eviction is a *logical* delete: the marker drops the dead letter from the
 //!   listing and leaves its original record in the store, which is the only
-//!   kind of delete an event log has.  The queue runs over the
-//!   [`nitinol_persistence::store::EventStore`] alone, so it serves a saga that
-//!   is not resident.  Reprocessing is deliberately not part of it: a
-//!   [`DeadLetterEntry`] carries the recovery material (the failure's raw
+//!   kind of delete an event log has.  Reprocessing is deliberately not part of
+//!   it: a [`DeadLetterEntry`] carries the recovery material (the failure's raw
 //!   payload plus its [`SourceContext`] coordinates) and acting on it is the
 //!   downstream application's decision.  The marker family is a *sibling* of
 //!   `nitinol.saga.dead_letter` rather than a variant inside it, so settling a
 //!   dead letter changes what `list` returns and leaves the push path — which
 //!   selects on the dead-letter prefix — untouched.
+//! - One writer per stream, dispositions included: a marker lands on the saga's
+//!   *own* stream, whose next sequence a resident instance holds in memory, so
+//!   an operator cannot append it beside a running saga.  Obtain the queue from
+//!   [`SagaManagerProxy::dead_letter_queue`] and the write is routed to that
+//!   manager — the single arbiter of every stream in its fan-out.  It appends
+//!   through the instance's own mailbox when the saga is resident, and writes
+//!   the marker itself when the saga is not; deciding which, and doing it,
+//!   happen together inside the manager's message handling, so a lazy spawn
+//!   cannot slip in between.  The operator waits for the outcome — a recovery
+//!   action whose result is not reported cannot be retried on purpose.
+//!   [`DeadLetterQueue::new`] still opens a queue with no arbiter, for offline
+//!   triage and for a saga spawned standalone through [`SagaProps`]; there the
+//!   caller is the one guaranteeing nothing else is writing that stream.
+//!
+//!   This is the same ownership pattern `nitinol-runtime` applies to its own
+//!   dead letters — one owner, writes arriving as messages — and nothing more.
+//!   The two mechanisms stay separate: runtime's is in-memory, best-effort and
+//!   system-wide; this one is persisted, ordered, and has a recovery API.
+//! - Reserved namespace: `nitinol` belongs to the framework, in the stream-key
+//!   space and the event-type space alike.  [`SagaId`] refuses a name inside it
+//!   the way [`nitinol_persistence::AggregateId`] does, and `#[derive(Event)]`
+//!   refuses a `family` inside it at compile time.  One law, two enforcement
+//!   points — see [`nitinol_persistence::reserved`] for the boundary rule and
+//!   for what a hand-written `impl Event` is expected to honour on its own.
 //! - Tell-failure compensation: when a tell exhausts its retry budget the saga
 //!   is notified through [`Saga::on_tell_failed`] as soon as the failure
 //!   settles, so a compensating [`SagaEffect`] runs without waiting for another

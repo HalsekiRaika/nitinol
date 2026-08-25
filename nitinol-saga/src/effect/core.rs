@@ -5,10 +5,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use nitinol_eventsource::{Aggregate, AggregateTellTarget, Decider};
+use nitinol_persistence::AggregateId;
 
 use crate::effect::tell::TypedSagaTell;
 use crate::error::SagaSideEffectError;
-use crate::id::SagaId;
 use crate::scheduler::TimerName;
 
 /// A declarative description of effects produced by a [`crate::Saga::handle`]
@@ -108,7 +108,12 @@ pub struct TellIntent {
     /// [`AggregateTellTarget::aggregate_id_str`] at construction time.  Stored
     /// so the saga can write `SagaFailure::TellFailed::target` when the tell
     /// exhausts its retry budget.
-    pub(crate) target_id: SagaId,
+    ///
+    /// It is an [`AggregateId`] because that is what it is: the key of the
+    /// *aggregate* being told.  Carrying it as a `SagaId` would launder an
+    /// aggregate's key through the saga's own identifier type, and the two
+    /// answer to different reserved-namespace enforcement points.
+    pub(crate) target_id: AggregateId,
 }
 
 impl Clone for TellIntent {
@@ -144,7 +149,7 @@ impl TellIntent {
              implement AggregateTellTarget::aggregate_id_str() to return \
              the target aggregate's stream key for TellFailed DLQ tracking"
         );
-        let target_id = SagaId::new(target_id_str);
+        let target_id = AggregateId::new(target_id_str);
         Self {
             side: Arc::new(TypedSagaTell {
                 target,
@@ -178,7 +183,7 @@ impl TellIntent {
              implement AggregateTellTarget::aggregate_id_str() to return \
              the target aggregate's stream key for TellFailed DLQ tracking"
         );
-        let target_id = SagaId::new(target_id_str);
+        let target_id = AggregateId::new(target_id_str);
         Self {
             side: Arc::new(TypedSagaTell {
                 target,

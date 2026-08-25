@@ -15,16 +15,24 @@
 //! and still delivered to subscribers, because a marker is a sibling family the
 //! push path's dead-letter prefix does not select.
 //!
+//! Listing reads the store directly.  Settling does not: the marker goes onto
+//! the saga's *own* stream, whose sequence a resident instance owns in memory,
+//! so the write is routed through that stream's single arbiter — see
+//! [`settle`] and [`SagaManagerProxy::dead_letter_queue`].
+//!
 //! This is a fresh, persisted, order-preserving implementation — distinct from
 //! the in-memory, best-effort, system-wide `DeadLetterProcess` in
-//! `nitinol-runtime`, which is neither imported nor reused here.
+//! `nitinol-runtime`.  What the two share is an ownership pattern, not a
+//! mechanism: neither type nor implementation is imported or reused here.
 //!
 //! [`DurableStream`]: nitinol_eventsource::DurableStream
+//! [`SagaManagerProxy::dead_letter_queue`]: crate::SagaManagerProxy::dead_letter_queue
 
 mod disposition;
 mod event;
 mod policy;
 mod queue;
+mod settle;
 mod subscriber;
 
 use std::sync::Arc;
@@ -46,6 +54,9 @@ pub(crate) use self::disposition::{
 pub(crate) use self::disposition::Disposition;
 pub(crate) use self::event::is_dead_letter_event_type;
 pub(crate) use self::policy::default_enqueue_policy;
+pub(crate) use self::settle::{
+    DispositionArbiter, RecordDisposition, SettleDeadLetter, SettleError,
+};
 pub(crate) use self::subscriber::{make_dlq_child_spawn, DlqChildSpawn};
 
 use self::event::{append_dead_letter, DeadLetterEvent as Event};

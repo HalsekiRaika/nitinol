@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use bytes::Bytes;
+use nitinol_persistence::AggregateId;
 
-use crate::id::SagaId;
 use crate::outbox::OutboxEvent;
 use crate::persisted::SagaPersisted;
 use crate::scheduler::{ScheduleEvent, TimerName};
@@ -32,7 +32,7 @@ pub(crate) struct PendingTell {
     pub(crate) crash_restart: Option<Bytes>,
     /// The target aggregate's stream key, if stored in the `TellRequested`
     /// (absent for events written before this field was added to the proto).
-    pub(crate) target: Option<SagaId>,
+    pub(crate) target: Option<AggregateId>,
 }
 
 /// The facts replay needs, folded out of the saga's own event stream.
@@ -100,7 +100,7 @@ impl JournalState {
                 let target = if m.target.is_empty() {
                     None
                 } else {
-                    Some(SagaId::new(&m.target))
+                    Some(AggregateId::new(&m.target))
                 };
                 self.pending_tells.insert(
                     m.tell_id,
@@ -273,7 +273,7 @@ mod tests {
             .get(&7)
             .expect("TellRequested must register a pending tell keyed by its tell_id");
         assert_eq!(
-            pending.target.as_ref().map(SagaId::as_str),
+            pending.target.as_ref().map(AggregateId::as_str),
             Some("target-stream"),
             "a non-empty target must be preserved so replay can dead-letter the tell"
         );

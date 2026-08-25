@@ -261,6 +261,9 @@ impl<S: Saga> SagaManagerProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
     /// the manager, so stopping the manager cascade-stops the whole fan-out.
     pub async fn spawn(self, system: &ProcessSystem) -> SagaManagerProxy<S> {
         let store = self.store;
+        // The proxy hands out dead letter queues over the very store the
+        // manager writes to, so it keeps its own handle to it.
+        let store_for_proxy = Arc::clone(&store);
         let producer = self.producer;
         let codec = self.codec.codec;
         let upstream = upstream_subscription::<S>(
@@ -300,6 +303,6 @@ impl<S: Saga> SagaManagerProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         // and permanently stop the whole fan-out during a quiet upstream.
         .with_idle_timeout(IdleTimeout::Persistent);
 
-        system.spawn(props).await.into()
+        SagaManagerProxy::new(system.spawn(props).await, store_for_proxy)
     }
 }

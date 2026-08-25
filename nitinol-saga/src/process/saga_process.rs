@@ -5,14 +5,16 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use nitinol_eventsource::codec::ErasedCodec;
-use nitinol_eventsource::{DurableSubscription, SequenceCursor};
+use nitinol_eventsource::{appending_system_event, DurableSubscription, SequenceCursor};
+use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, LoadedEvent};
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
 
 use crate::context::SagaContext;
 use crate::dead_letter::{
-    enqueue_dead_letter, DlqChildSpawn, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext,
+    enqueue_dead_letter, DlqChildSpawn, EnqueueOutcome, EnqueuePolicy, RecordDisposition,
+    SagaFailure, SourceContext,
 };
 use crate::effect::TellIntent;
 use crate::error::SagaUpstreamHandlerError;
@@ -414,7 +416,7 @@ impl<S: Saga> SagaProcess<S> {
     /// argument because several tells may share one target aggregate.
     async fn notify_tell_failed(
         &mut self,
-        target: SagaId,
+        target: AggregateId,
         tell_id: u64,
         ctx: &mut ProcessContext<Self>,
     ) {
@@ -951,6 +953,52 @@ impl<S: Saga> Receive<OutboxReport> for SagaProcess<S> {
             }
         }
         Ok(())
+    }
+}
+
+impl<S: Saga> Receive<RecordDisposition> for SagaProcess<S> {
+    /// The append's outcome is the *reply*, not the handler's result.
+    ///
+    /// A saga instance's default supervision strategy is `Stop`, so returning
+    /// `Err` here would let an operator's failed bookkeeping write take down a
+    /// perfectly healthy saga.  The operator asked a question; they get the
+    /// answer, and the saga carries on either way.
+    type Response = Result<(), AppendError>;
+    type Error = std::convert::Infallible;
+
+    async fn recv(
+        &mut self,
+        msg: RecordDisposition,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<Result<(), AppendError>, std::convert::Infallible> {
+        // This instance owns its stream's next sequence, and this handler runs
+        // on the same mailbox as everything else that appends to it — which is
+        // what makes the marker's position uncontended rather than guessed.
+        //
+        // No lifecycle guard: a dead letter left behind by a saga that has
+        // since ended still has to be settleable.
+        let candidate = self.sequence + 1;
+        let appending = appending_system_event(candidate, &msg.marker, jiff::Timestamp::now());
+        match self
+            .store
+            .append(self.saga_id.as_str(), vec![appending])
+            .await
+        {
+            Ok(_) => {
+                // Advance only on success, so a refused marker leaves no gap
+                // for the saga's own next append to fall into.
+                self.sequence = candidate;
+                Ok(Ok(()))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    saga_id = self.saga_id.as_str(),
+                    error = %e,
+                    "saga dead letter disposition append failed; reported to the caller"
+                );
+                Ok(Err(e))
+            }
+        }
     }
 }
 
