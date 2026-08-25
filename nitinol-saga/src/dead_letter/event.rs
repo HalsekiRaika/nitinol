@@ -45,9 +45,10 @@ struct EmptyTellTarget;
 #[derive(Clone, Debug)]
 pub enum SagaFailure {
     /// A tell that exhausted its staged retry budget.  `target` is the
-    /// target aggregate's stream key; `message` is the tell's crash-restart
-    /// payload when one was supplied, else empty.
-    TellFailed { target: SagaId, message: Bytes },
+    /// target aggregate's stream key — an [`AggregateId`], since it names the
+    /// aggregate that was told, not a saga; `message` is the tell's
+    /// crash-restart payload when one was supplied, else empty.
+    TellFailed { target: AggregateId, message: Bytes },
     /// `Saga::handle` returned `Self::Error`.
     HandleFailed { error: String },
     /// `SagaEffect::Persist` failed to write to the EventStore.
@@ -176,7 +177,7 @@ impl SystemEvent for DeadLetterEvent {
                     return Err(SystemEventDecodeError::new(EmptyTellTarget));
                 }
                 SagaFailure::TellFailed {
-                    target: SagaId::new(m.target),
+                    target: AggregateId::new(m.target),
                     message: Bytes::from(m.message),
                 }
             }
@@ -280,7 +281,7 @@ mod tests {
         let cases = [
             (
                 SagaFailure::TellFailed {
-                    target: SagaId::new("inventory-1"),
+                    target: AggregateId::new("inventory-1"),
                     message: Bytes::from_static(b"m"),
                 },
                 "tell_failed",
@@ -332,7 +333,7 @@ mod tests {
     #[test]
     fn tell_failed_round_trips_through_the_enum_codec() {
         let e = event(SagaFailure::TellFailed {
-            target: SagaId::new("inventory-42"),
+            target: AggregateId::new("inventory-42"),
             message: Bytes::from_static(b"payload"),
         });
         match DeadLetterEvent::decode(&e.encode()) {
@@ -344,7 +345,7 @@ mod tests {
                 assert_eq!(decoded.source.upstream_sequence, 7);
                 match decoded.failure {
                     SagaFailure::TellFailed { target, message } => {
-                        assert_eq!(target, SagaId::new("inventory-42"));
+                        assert_eq!(target, AggregateId::new("inventory-42"));
                         assert_eq!(message, Bytes::from_static(b"payload"));
                     }
                     _ => panic!("expected decoded TellFailed"),

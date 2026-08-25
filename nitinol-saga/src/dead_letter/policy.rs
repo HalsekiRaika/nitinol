@@ -55,7 +55,7 @@ mod tests {
                 error: "e".to_owned(),
             },
             SagaFailure::TellFailed {
-                target: crate::SagaId::new(""),
+                target: nitinol_persistence::AggregateId::new(""),
                 message: Bytes::new(),
             },
         ];

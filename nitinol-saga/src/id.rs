@@ -8,10 +8,20 @@
 
 use std::borrow::Borrow;
 
+use nitinol_persistence::reject_reserved_id;
+
 /// Identifier for a saga instance.
 ///
 /// Constructed with [`SagaId::new`], borrowed as `&str` via the standard
 /// `Borrow<str>` impl for use with `EventStore::append` / `LoadQuery::by_stream`.
+///
+/// # Invariants
+///
+/// A saga id *is* its stream key, so it obeys the framework's
+/// [reserved namespace](nitinol_persistence::reserved) law like every other
+/// identifier: `nitinol` and anything beneath it are the framework's, and
+/// naming one panics.  The law is owned by `nitinol-persistence`; this
+/// constructor is one of its enforcement points, not a second definition.
 ///
 /// `SagaId` is a distinct newtype — it is **not** interchangeable with
 /// `AggregateId`.  The following must fail to compile:
@@ -32,7 +42,9 @@ pub struct SagaId(String);
 
 impl SagaId {
     pub fn new(s: impl Into<String>) -> Self {
-        Self(s.into())
+        let id = s.into();
+        reject_reserved_id("saga id", &id);
+        Self(id)
     }
 
     pub fn as_str(&self) -> &str {

@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 
 use nitinol_eventsource::Event;
+use nitinol_persistence::AggregateId;
 
 use crate::context::SagaContext;
 use crate::effect::SagaEffect;
@@ -165,7 +166,7 @@ pub trait Saga: Send + Sync + 'static {
     /// records a dead letter instead of a compensation.
     async fn on_tell_failed(
         &mut self,
-        target: SagaId,
+        target: AggregateId,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         let _ = (target, ctx);

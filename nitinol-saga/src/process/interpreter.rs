@@ -248,7 +248,8 @@ async fn persist_batch<S: Saga>(
             SagaPersisted::Domain(event) => ictx.state.apply(event),
             SagaPersisted::Outbox(_)
             | SagaPersisted::Schedule(_)
-            | SagaPersisted::DeadLetter(_) => {
+            | SagaPersisted::DeadLetter(_)
+            | SagaPersisted::DeadLetterDisposition(_) => {
                 unreachable!("persist_batch enqueues only Domain events into the envelope")
             }
         }

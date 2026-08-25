@@ -51,7 +51,8 @@ use nitinol_eventsource::{
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
-    AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent,
+    TypeName, Variant,
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
@@ -197,7 +198,7 @@ struct Recorder {
 const POISON: &str = "recorder mutex is never poisoned: no holder panics while the guard is alive";
 
 impl Recorder {
-    fn record_hook(&self, target: &SagaId, ctx: &SagaContext) {
+    fn record_hook(&self, target: &AggregateId, ctx: &SagaContext) {
         self.hook_calls.lock().expect(POISON).push(HookCall {
             target: target.as_str().to_owned(),
             failed_tell_ids: ctx.failed_tell_ids().to_vec(),
@@ -287,7 +288,7 @@ impl Saga for TellFailureSaga {
 
     async fn on_tell_failed(
         &mut self,
-        target: SagaId,
+        target: AggregateId,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
         self.recorder.record_hook(&target, ctx);
@@ -332,7 +333,7 @@ impl Saga for ReplayObservingSaga {
 
     async fn on_tell_failed(
         &mut self,
-        target: SagaId,
+        target: AggregateId,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
         self.recorder.record_hook(&target, ctx);
@@ -391,7 +392,7 @@ impl Saga for ScheduleAfterFailureSaga {
 
     async fn on_tell_failed(
         &mut self,
-        target: SagaId,
+        target: AggregateId,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
         self.recorder.record_hook(&target, ctx);
@@ -460,7 +461,7 @@ impl Saga for RejectingHookSaga {
 
     async fn on_tell_failed(
         &mut self,
-        _target: SagaId,
+        _target: AggregateId,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
         Err(HookRejected)

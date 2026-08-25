@@ -894,6 +894,7 @@ name = "nitinol-macros"
 version = "0.1.0"
 dependencies = [
  "nitinol",
+ "nitinol-persistence",
  "proc-macro2",
  "quote",
  "syn",

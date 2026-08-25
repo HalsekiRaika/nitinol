@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use bytes::Bytes;
+use nitinol_persistence::AggregateId;
 
-use crate::id::SagaId;
 use crate::outbox::OutboxEvent;
 use crate::persisted::SagaPersisted;
 use crate::scheduler::{ScheduleEvent, TimerName};
@@ -32,7 +32,7 @@ pub(crate) struct PendingTell {
     pub(crate) crash_restart: Option<Bytes>,
     /// The target aggregate's stream key, if stored in the `TellRequested`
     /// (absent for events written before this field was added to the proto).
-    pub(crate) target: Option<SagaId>,
+    pub(crate) target: Option<AggregateId>,
 }
 
 /// The facts replay needs, folded out of the saga's own event stream.
@@ -81,8 +81,13 @@ impl JournalState {
             SagaPersisted::Outbox(marker) => self.fold_outbox(marker),
             SagaPersisted::Schedule(marker) => self.fold_schedule(marker),
             // Dead letters are not folded into saga state — they are an
-            // observability side-channel delivered to subscribers.
-            SagaPersisted::DeadLetter(_) => {}
+            // observability side-channel delivered to subscribers — and neither
+            // are the disposition markers the DLQ pull API writes for them,
+            // which record an operator's decision about the queue rather than
+            // anything the saga did.  Their stream positions are still observed
+            // ([`Self::observe_sequence`]), so a marker at the tail cannot
+            // desynchronise the saga's next append.
+            SagaPersisted::DeadLetter(_) | SagaPersisted::DeadLetterDisposition(_) => {}
         }
         None
     }
@@ -95,7 +100,7 @@ impl JournalState {
                 let target = if m.target.is_empty() {
                     None
                 } else {
-                    Some(SagaId::new(&m.target))
+                    Some(AggregateId::new(&m.target))
                 };
                 self.pending_tells.insert(
                     m.tell_id,
@@ -159,7 +164,9 @@ mod tests {
 
     use super::*;
 
-    use crate::dead_letter::{DeadLetterEvent, SagaFailure, SourceContext};
+    use crate::dead_letter::{
+        DeadLetterDispositionEvent, DeadLetterEvent, Disposition, SagaFailure, SourceContext,
+    };
     use crate::id::SagaId;
     use crate::outbox::{
         Ended, OutboxEvent, Scheduled as OutboxScheduled, TellAcked, TellFailed, TellRequested,
@@ -266,7 +273,7 @@ mod tests {
             .get(&7)
             .expect("TellRequested must register a pending tell keyed by its tell_id");
         assert_eq!(
-            pending.target.as_ref().map(SagaId::as_str),
+            pending.target.as_ref().map(AggregateId::as_str),
             Some("target-stream"),
             "a non-empty target must be preserved so replay can dead-letter the tell"
         );
@@ -432,6 +439,37 @@ mod tests {
                 && !journal.ended,
             "a dead letter must leave the projection untouched"
         );
+    }
+
+    /// The DLQ pull API appends its markers onto the saga's **own** stream, so
+    /// replay folds them.  Neither arm may contribute a journal fact — an
+    /// `evicted` marker mistaken for termination would leave the saga looking
+    /// `ended` and silently deaf to upstream events.
+    #[test]
+    fn a_dead_letter_disposition_is_not_folded_into_the_journal() {
+        for disposition in [Disposition::Processed, Disposition::Evicted] {
+            let mut journal = JournalState::new(0);
+
+            let handed_back = journal.fold(SagaPersisted::<DomainEvt>::DeadLetterDisposition(
+                DeadLetterDispositionEvent {
+                    dead_letter_sequence: 1,
+                    disposition,
+                },
+            ));
+
+            assert!(
+                handed_back.is_none(),
+                "a disposition marker is an operator's DLQ bookkeeping, not a \
+                 domain event to apply"
+            );
+            assert!(
+                journal.pending_tells.is_empty()
+                    && journal.failed_tell_ids.is_empty()
+                    && journal.active_schedules.is_empty()
+                    && !journal.ended,
+                "a disposition marker must leave the projection untouched"
+            );
+        }
     }
 
     #[test]

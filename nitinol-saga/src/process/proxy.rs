@@ -5,10 +5,15 @@
 //! `pid()` and `stop()` for ad-hoc control — sagas are reactive and are driven
 //! by their subscription, not by direct calls from application code.
 
+use std::sync::Arc;
+
+use nitinol_persistence::store::EventStore;
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::ProcessProxy;
 
-use crate::process::manager::SagaManagerProcess;
+use crate::dead_letter::DeadLetterQueue;
+use crate::id::SagaId;
+use crate::process::manager::{make_disposition_arbiter, SagaManagerProcess};
 use crate::process::saga_process::SagaProcess;
 use crate::saga::Saga;
 
@@ -64,17 +69,31 @@ impl<S: Saga> From<ProcessProxy<SagaProcess<S>>> for SagaProxy<S> {
 /// manager (e.g. via [`Self::stop`] or supervision) does.
 pub struct SagaManagerProxy<S: Saga> {
     inner: ProcessProxy<SagaManagerProcess<S>>,
+    /// The store the manager persists its instances' streams to.
+    ///
+    /// Held so [`Self::dead_letter_queue`] can hand out a queue that reads the
+    /// same store the arbiter writes to — asking the caller for a store again
+    /// would let the two drift apart without any way to notice.
+    store: Arc<dyn EventStore>,
 }
 
 impl<S: Saga> Clone for SagaManagerProxy<S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            store: Arc::clone(&self.store),
         }
     }
 }
 
 impl<S: Saga> SagaManagerProxy<S> {
+    pub(crate) fn new(
+        inner: ProcessProxy<SagaManagerProcess<S>>,
+        store: Arc<dyn EventStore>,
+    ) -> Self {
+        Self { inner, store }
+    }
+
     /// Returns the runtime pid of the underlying manager process.
     pub fn pid(&self) -> Pid {
         self.inner.pid()
@@ -85,10 +104,24 @@ impl<S: Saga> SagaManagerProxy<S> {
     pub async fn stop(&self) -> Result<(), nitinol_runtime::error::SendError> {
         self.inner.stop().await
     }
-}
 
-impl<S: Saga> From<ProcessProxy<SagaManagerProcess<S>>> for SagaManagerProxy<S> {
-    fn from(inner: ProcessProxy<SagaManagerProcess<S>>) -> Self {
-        Self { inner }
+    /// The dead letter queue for one of this manager's sagas.
+    ///
+    /// The queue lists straight from the store, and routes
+    /// [`mark_processed`](DeadLetterQueue::mark_processed) /
+    /// [`evict`](DeadLetterQueue::evict) back through this manager — the single
+    /// writer of every stream in its fan-out — so an operator settling a dead
+    /// letter never contends with a running saga for its own stream. The call
+    /// waits for the write's outcome.
+    ///
+    /// `saga_id` must name a saga of *this* manager's type: it is this manager
+    /// that owns that stream, and only dispositions it arbitrates are ordered
+    /// against the instance's own appends.
+    pub fn dead_letter_queue(&self, saga_id: SagaId) -> DeadLetterQueue {
+        DeadLetterQueue::arbitrated(
+            Arc::clone(&self.store),
+            saga_id,
+            make_disposition_arbiter(self.inner.clone()),
+        )
     }
 }

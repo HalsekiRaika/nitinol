@@ -11,10 +11,21 @@
 //! Generated code refers to the framework exclusively through the umbrella
 //! crate (`::nitinol::eventsource::Event`, `::nitinol::persistence::{...}`),
 //! mirroring how `serde`'s derive targets the single `serde` crate.
+//!
+//! # Reserved namespace
+//!
+//! `nitinol` is reserved for the framework's own records in both the stream-key
+//! and the event-type space (see `nitinol_persistence::reserved`).  Here the
+//! family is a literal known at expansion time, so the derive refuses it
+//! outright: a family inside the reserved namespace is a compile error, not a
+//! runtime surprise.  A hand-written `impl Event` bypasses this derive and so
+//! is bound by the same rule as documentation only.
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields, Lit, LitStr};
+
+use nitinol_persistence::{is_within_reserved_namespace, RESERVED_NAMESPACE};
 
 /// Derives `nitinol::eventsource::Event` for a struct or enum.
 ///
@@ -84,10 +95,12 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     })
 }
 
-/// Extracts the mandatory `#[event(family = "...")]` string literal.
+/// Extracts the mandatory `#[event(family = "...")]` string literal, refusing
+/// one that names the framework's reserved namespace.
 ///
-/// A missing attribute or a non-string value is a hard error (Fail Fast): the
-/// derive never falls back to a default family.
+/// A missing attribute, a non-string value, or a reserved family is a hard
+/// error (Fail Fast): the derive never falls back to a default family, and
+/// never lets a user event take an identity `nitinol`'s own records answer to.
 fn extract_family(input: &DeriveInput) -> syn::Result<LitStr> {
     let mut family: Option<LitStr> = None;
 
@@ -113,10 +126,22 @@ fn extract_family(input: &DeriveInput) -> syn::Result<LitStr> {
         })?;
     }
 
-    family.ok_or_else(|| {
+    let family = family.ok_or_else(|| {
         syn::Error::new_spanned(
             &input.ident,
             "#[derive(Event)] requires a `#[event(family = \"...\")]` attribute",
         )
-    })
+    })?;
+
+    if is_within_reserved_namespace(&family.value()) {
+        return Err(syn::Error::new_spanned(
+            &family,
+            format!(
+                "`family` is within the `{RESERVED_NAMESPACE}` reserved namespace, \
+                 which is reserved for framework events"
+            ),
+        ));
+    }
+
+    Ok(family)
 }

@@ -44,7 +44,7 @@ use nitinol_eventsource::SystemEvent;
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
-    AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -386,7 +386,7 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
         SagaFailure::TellFailed { target, .. } => {
             assert_eq!(
                 target,
-                SagaId::new("inventory-42"),
+                AggregateId::new("inventory-42"),
                 "DLQ TellFailed must carry the target recovered from the TellRequested proto field"
             );
         }
