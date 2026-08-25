@@ -1,6 +1,6 @@
 //! Tests for the new dedicated `SubscriberContext<'_, T>` introduced in
-//! Issue #52 to keep the internal `SubscriberProcess<S, T>` wrapper out of
-//! the public-facing `Subscriber<T>` trait.
+//! to keep the internal `SubscriberProcess<S, T>` wrapper out of the
+//! public-facing `Subscriber<T>` trait.
 //!
 //! Goals pinned down here:
 //! - `Subscriber<T>::recv` accepts `&mut SubscriberContext<'_, T>` (new signature)
@@ -23,9 +23,7 @@ use nitinol_runtime::ident::{Pid, ProcessName};
 use nitinol_runtime::process::{Process, ProcessContext, Subscriber, SubscriberContext};
 use nitinol_runtime::{BoxedMessage, ProcessSystem, Props};
 
-// ---------------------------------------------------------------------------
 // Fixture: a subscriber that counts incoming messages.
-// ---------------------------------------------------------------------------
 
 struct CountingSubscriber {
     count: Arc<AtomicU32>,
@@ -47,9 +45,7 @@ impl Subscriber<BoxedMessage> for CountingSubscriber {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixture: a subscriber that captures the PID from its context.
-// ---------------------------------------------------------------------------
 
 struct PidCapturingSubscriber {
     observed: Arc<Mutex<Option<Pid>>>,
@@ -72,9 +68,7 @@ impl Subscriber<BoxedMessage> for PidCapturingSubscriber {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers.
-// ---------------------------------------------------------------------------
 
 async fn wait_for_count(counter: &AtomicU32, expected: u32) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -104,9 +98,7 @@ async fn wait_for_some_pid(slot: &Arc<Mutex<Option<Pid>>>) -> Pid {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Behavioral tests.
-// ---------------------------------------------------------------------------
 
 /// Given a `Subscriber<BoxedMessage>` whose `recv` uses the new
 /// `&mut SubscriberContext<'_, BoxedMessage>` parameter,
@@ -195,12 +187,10 @@ async fn subscriber_context_pid_matches_spawned_subscriber_pid() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Static type-level checks: `SubscriberContext` is generic over `T`, and the
 // `Subscriber<T>` trait's `recv` signature really uses it. These would fail
 // to compile if either the generic parameter or the new context type were
 // removed.
-// ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
 fn assert_subscriber_context_is_generic_over_t<'a, T>(_ctx: &SubscriberContext<'a, T>) {
@@ -226,11 +216,9 @@ fn assert_subscriber_context_exposes_pid<T>(ctx: &SubscriberContext<'_, T>) -> P
     ctx.pid()
 }
 
-// ---------------------------------------------------------------------------
 // Regression guard: dropping the original spawn proxy must not stop the
 // subscriber-context-driven subscriber early. (Mirrors the captured-self-proxy
 // guarantee from self_proxy.rs at the subscriber level.)
-// ---------------------------------------------------------------------------
 
 /// Given a subscriber registered to a stream,
 /// when the original spawn proxy is dropped after subscription,
@@ -271,14 +259,12 @@ async fn subscriber_remains_addressable_after_spawn_proxy_drop() {
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
-// ---------------------------------------------------------------------------
 // Behavioral tests for SubscriberContext wiring operations.
 //
 // `SubscriberContext::watch`, `unwatch`, and `stop_self` delegate to the same
 // private `wiring` module as `ProcessContext`.  These tests prove that the
 // delegation is wired up correctly and that each operation produces the
 // expected observable side-effect at the actor level.
-// ---------------------------------------------------------------------------
 
 /// Minimal process used as a watch target — starts, can be stopped.
 struct TargetProcess {
@@ -306,9 +292,7 @@ async fn wait_for_process_stopped(system: &ProcessSystem, pid: Pid) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // stop_self
-// ---------------------------------------------------------------------------
 
 /// A subscriber that calls `ctx.stop_self()` on its first received message.
 struct StopOnFirstSubscriber {
@@ -386,9 +370,7 @@ async fn subscriber_context_stop_self_stops_subscriber() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // watch
-// ---------------------------------------------------------------------------
 
 /// A subscriber that, on its first message, watches a specified target PID
 /// and increments a counter.
@@ -491,9 +473,7 @@ async fn subscriber_context_watch_live_process_continues_working_after_target_st
     );
 }
 
-// ---------------------------------------------------------------------------
 // unwatch
-// ---------------------------------------------------------------------------
 
 /// A subscriber that, on its first message, unwatches a specified PID.
 struct UnwatchOnFirstSubscriber {

@@ -1,9 +1,7 @@
 use nitinol_eventsource::{Aggregate, Context, Event, Snapshotable};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct Incremented;
@@ -41,9 +39,7 @@ impl Snapshotable for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Event: EVENT_TYPE constant
-// ---------------------------------------------------------------------------
 
 /// EVENT_TYPE constant carries the correct string value
 #[test]
@@ -56,9 +52,7 @@ fn event_type_constant_has_correct_string() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Aggregate: Default initial state
-// ---------------------------------------------------------------------------
 
 /// Counter::default() starts with value 0
 #[test]
@@ -70,9 +64,7 @@ fn default_counter_has_value_zero() {
     assert_eq!(counter.value, 0, "initial Counter value must be 0");
 }
 
-// ---------------------------------------------------------------------------
 // Aggregate: apply updates state
-// ---------------------------------------------------------------------------
 
 /// apply(Incremented) increments Counter.value by 1
 #[test]
@@ -108,9 +100,7 @@ fn apply_multiple_events_accumulates_state() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Context: constructor and accessors
-// ---------------------------------------------------------------------------
 
 /// Context::new stores the given aggregate_id and sequence
 #[test]
@@ -145,9 +135,7 @@ fn context_sequence_zero_is_valid() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Snapshotable: capture
-// ---------------------------------------------------------------------------
 
 /// capture() returns the current counter value as a snapshot.
 #[test]
@@ -177,9 +165,7 @@ fn snapshotable_capture_default_counter_returns_zero() {
     assert_eq!(snapshot, 0, "capture() of a default Counter must return 0");
 }
 
-// ---------------------------------------------------------------------------
 // Snapshotable: restore
-// ---------------------------------------------------------------------------
 
 /// restore(n) creates a Counter with value n.
 #[test]
@@ -207,9 +193,7 @@ fn snapshotable_restore_zero_produces_zero_value() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Snapshotable: capture → restore roundtrip
-// ---------------------------------------------------------------------------
 
 /// capture() followed by restore() reproduces the original state.
 #[test]

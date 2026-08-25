@@ -1,6 +1,5 @@
-//! Spec C-9 — `SagaContext::failed_tell_ids`: the saga must be able to detect
-//! `TellFailed` outcomes in a subsequent `Saga::handle` call (regression for
-//! VAL-NEW-nitinol-saga-src-context-L7).
+//! `SagaContext::failed_tell_ids`: the saga must be able to detect
+//! `TellFailed` outcomes in a subsequent `Saga::handle` call.
 //!
 //! Two paths are tested:
 //!
@@ -9,13 +8,17 @@
 //!    the corresponding `tell_id` in `ctx.failed_tell_ids()`.
 //!
 //! 2. **Runtime path** — the outbox executor exhausts all retry attempts and
-//!    appends a `TellFailed` marker during the current run.  The next `handle`
-//!    call must expose the `tell_id` in `ctx.failed_tell_ids()`.
+//!    appends a `TellFailed` marker during the current run.  That failure is
+//!    delivered to `Saga::on_tell_failed` the moment it settles, so it is
+//!    already accounted for: the next `handle` call must **not** see the same
+//!    `tell_id` again in `ctx.failed_tell_ids()`.  Only replay-sourced
+//!    failures reach the saga through this slice.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{
-    encode_outbox_tell_failed, encode_outbox_tell_requested, outbox_kind_of, JsonCodec,
-    OutboxKind, OUTBOX_MARKER,
+    encode_outbox_tell_failed, encode_outbox_tell_requested, outbox_kind_of, JsonCodec, OutboxKind,
+    OUTBOX_MARKER,
 };
 
 use std::marker::PhantomData;
@@ -33,14 +36,12 @@ use nitinol_eventsource::{
     SequenceCursor, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, TypeName};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
-// ---------------------------------------------------------------------------
 // Domain types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -64,9 +65,7 @@ impl Event for OrderProcessed {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Minimal aggregate — used only so we can build a real TellIntent.
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct DummyTarget;
@@ -99,17 +98,17 @@ impl Decider<DummyCmd> for DummyTarget {
     }
 }
 
-// ---------------------------------------------------------------------------
 // A TellTarget that always returns an error — forces TellFailed via executor.
-// ---------------------------------------------------------------------------
 
 struct FailingTarget<A: Aggregate> {
+    target_id: AggregateId,
     _phantom: PhantomData<fn() -> A>,
 }
 
 impl<A: Aggregate> Clone for FailingTarget<A> {
     fn clone(&self) -> Self {
         Self {
+            target_id: self.target_id.clone(),
             _phantom: PhantomData,
         }
     }
@@ -118,6 +117,7 @@ impl<A: Aggregate> Clone for FailingTarget<A> {
 impl<A: Aggregate> FailingTarget<A> {
     fn new() -> Self {
         Self {
+            target_id: AggregateId::new("test-failing-target"),
             _phantom: PhantomData,
         }
     }
@@ -132,32 +132,35 @@ impl<A: Aggregate> AggregateTellTarget<A> for FailingTarget<A> {
         Box::pin(async move { Err(TellError::Send(SendError)) })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        "test-failing-target"
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.target_id
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shared capture state: collects the `failed_tell_ids` seen by each `handle`.
-// ---------------------------------------------------------------------------
 
 type Captured = Arc<Mutex<Vec<Vec<u64>>>>;
 
-// ---------------------------------------------------------------------------
 // Replay-path test saga: records `ctx.failed_tell_ids()` on each handle call.
-// ---------------------------------------------------------------------------
 
 struct RecordingSaga {
     captured: Captured,
 }
 
+/// Correlation rule of [`RecordingSaga`]: the one order process every
+/// `OrderPlaced` published by the replay-path tests belongs to.
+const RECORDING_SAGA_ID: &str = "failed-tell-replay-saga-1";
+
 #[async_trait]
 impl Saga for RecordingSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = OrderProcessed;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(RECORDING_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: OrderProcessed) {}
 
@@ -174,10 +177,8 @@ impl Saga for RecordingSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Runtime-path test saga: emits a failing tell on the first event, then
 // records failed_tell_ids on the second event.
-// ---------------------------------------------------------------------------
 
 struct RuntimeSaga {
     /// Shared with the test.  Each `handle` call appends the current
@@ -196,13 +197,20 @@ impl RuntimeSaga {
     }
 }
 
+/// Correlation rule of [`RuntimeSaga`]: the one order process every
+/// `OrderPlaced` published by the runtime-path test belongs to.
+const RUNTIME_SAGA_ID: &str = "failed-tell-runtime-saga-1";
+
 #[async_trait]
 impl Saga for RuntimeSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = OrderProcessed;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(RUNTIME_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: OrderProcessed) {}
 
@@ -225,16 +233,14 @@ impl Saga for RuntimeSaga {
             Ok(SagaEffect::persist(OrderProcessed {
                 order_id: "runtime-1".to_owned(),
             })
-            .with_tells(vec![intent]))
+            .combine(SagaEffect::tell_intent(intent)))
         } else {
             Ok(SagaEffect::None)
         }
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_raw(
     store: &Arc<dyn EventStore>,
@@ -273,24 +279,25 @@ async fn publish_order_placed(upstream_store: &Arc<dyn EventStore>, order_id: &s
     .await;
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: replay path — TellFailed in event history is surfaced via context.
-// ---------------------------------------------------------------------------
 
 /// When the saga restarts and its event history contains a `TellFailed` marker,
 /// the first `Saga::handle` invocation after `on_start` must expose the
 /// corresponding `tell_id` in `ctx.failed_tell_ids()`.
 ///
-/// This validates spec C-9: "Saga は次の handle で TellFailed を検知して補償判断可能".
+/// This confirms the saga can detect `TellFailed` in the next `handle` call
+/// and decide on compensation.
 #[tokio::test]
 async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let saga_id = SagaId::new("failed-tell-replay-saga-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
 
     // Pre-seed: TellRequested(tell_id=1) + TellFailed(tell_id=1).
     // This simulates a saga that had a tell fail in a previous run.
@@ -314,9 +321,6 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let captured_for_saga = Arc::clone(&captured);
 
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
-
     let _saga_proxy =
         SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             RecordingSaga {
@@ -331,7 +335,6 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
                 key: "upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -370,11 +373,9 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 2 (ARCH-45-002 regression): replay synthetic TellFailed surfaces via context.
-// ---------------------------------------------------------------------------
+// Test 2: replay synthetic TellFailed surfaces via context.
 
-/// Regression test for ARCH-45-002 (call-chain-integrity).
+/// Regression test for call-chain integrity on the replay path.
 ///
 /// When the replay path appends a **synthetic** `TellFailed` for an
 /// unresolvable `TellRequested` (no `PendingIntents`, no crash-restart factory,
@@ -388,12 +389,14 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
 #[tokio::test]
 async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let saga_id = SagaId::new("failed-tell-synthetic-replay-saga-1");
+    let saga_id = SagaId::new(RECORDING_SAGA_ID);
 
     // Seed only a TellRequested — no TellAcked/TellFailed yet, no crash-restart
     // bytes (prost TellRequested with field 2 absent).  Simulates a crash between
@@ -412,9 +415,6 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let captured_for_saga = Arc::clone(&captured);
 
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
-
     // Spawn without crash-restart factory and without pre-populated PendingIntents.
     // The replay path must append synthetic TellFailed(tell_id=5) AND push tell_id
     // to the shared accumulator.
@@ -432,7 +432,6 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
                 key: "upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -469,34 +468,36 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
         vec![5u64],
         "handle must see tell_id=5 in ctx.failed_tell_ids() because the replay \
          path appended synthetic TellFailed(tell_id=5) and must update the \
-         failed-tell-ids accumulator (ARCH-45-002 regression)"
+         failed-tell-ids accumulator"
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 3: runtime path — executor-appended TellFailed surfaces to next handle.
-// ---------------------------------------------------------------------------
+// Test 3: runtime path — an executor-appended TellFailed is reported through
+// the tell-failure hook, so it is not repeated to the next handle.
 
 /// When the outbox executor exhausts all retry attempts and appends a
-/// `TellFailed` marker during the current run, the **next** `Saga::handle`
-/// invocation must expose the corresponding `tell_id` in
-/// `ctx.failed_tell_ids()`.
+/// `TellFailed` marker during the current run, the failure is handed to
+/// `Saga::on_tell_failed` immediately.  The **next** `Saga::handle` invocation
+/// must therefore see an empty `ctx.failed_tell_ids()` — the same failure is
+/// never announced twice.
 ///
-/// This validates spec C-9 for the in-process (non-restart) path.
+/// `RuntimeSaga` leaves `on_tell_failed` at its trait default, so this pins
+/// the deduplication itself rather than any compensating behaviour: an
+/// implementation that notifies the hook but leaves the entry in the drain
+/// path would surface the `tell_id` here a second time.
 #[tokio::test]
-async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
+async fn runtime_tell_failed_is_not_repeated_to_the_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let saga_id = SagaId::new("failed-tell-runtime-saga-1");
+    let saga_id = SagaId::new(RUNTIME_SAGA_ID);
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let captured_for_saga = Arc::clone(&captured);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<RuntimeSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -510,7 +511,6 @@ async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
                 key: "upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -521,7 +521,7 @@ async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
     // Wait for the first handle call to complete (captured.len() == 1).
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if captured.lock().await.len() >= 1 {
+        if !captured.lock().await.is_empty() {
             break;
         }
         if std::time::Instant::now() >= deadline {
@@ -584,11 +584,13 @@ async fn runtime_tell_failed_is_surfaced_in_next_handle_via_context() {
         snapshots[0].is_empty(),
         "first handle must see an empty failed_tell_ids (no tell has failed yet)"
     );
-    // Second handle: the executor appended TellFailed between the two events.
-    assert_eq!(
-        snapshots[1].len(),
-        1,
-        "second handle must see exactly one failed tell_id \
-         (the tell from the first handle exhausted its retries)"
+    // Second handle: the executor appended TellFailed between the two events,
+    // and the tell-failure hook already consumed it.
+    assert!(
+        snapshots[1].is_empty(),
+        "second handle must see an empty failed_tell_ids: the failure was \
+         already delivered to on_tell_failed when the executor settled, and \
+         announcing it again here would be a duplicate notification; got {:?}",
+        snapshots[1]
     );
 }

@@ -1,4 +1,4 @@
-//! Spec D-13: the `End` variant is the single-responsibility termination
+//! The `End` variant is the single-responsibility termination
 //! marker.  Interpreting it must stop the saga process (`ctx.stop_self()`),
 //! which causes the subscriber to stop via the direct poller's subscriber
 //! watch, and in turn tears down the upstream subscription.
@@ -6,6 +6,7 @@
 //! Also exercises the Sequence short-circuit invariant: effects placed after
 //! `End` inside a Sequence are not interpreted (the interpreter must break).
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::JsonCodec;
 
@@ -46,6 +47,10 @@ impl Event for ReservationRequested {
         EventType::new(Family::new("end"), TypeName::new("ReservationRequested"));
 }
 
+/// Correlation rule of [`PersistThenEndSaga`]: this file drives one order
+/// process, so every `OrderPlaced` names that single instance.
+const PERSIST_THEN_END_SAGA_ID: &str = "end-saga-1";
+
 /// A saga that emits `Persist.combine(End)` so we can verify both:
 /// 1. The user event is persisted before End is interpreted
 /// 2. Effects after End in the same handle call must not be interpreted
@@ -58,9 +63,12 @@ struct PersistThenEndSaga {
 impl Saga for PersistThenEndSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(PERSIST_THEN_END_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -69,7 +77,9 @@ impl Saga for PersistThenEndSaga {
         event: Self::SubscribedEvent,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        *self.handle_count.lock().unwrap() += 1;
+        *self.handle_count.lock().expect(
+            "handle_count mutex is never poisoned: no holder panics while the guard is alive",
+        ) += 1;
 
         // After-End effect is a Persist that would be observable in the stream
         // (a second user event at sequence 2) if the Sequence short-circuit
@@ -125,22 +135,21 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 #[tokio::test]
 async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("end-order");
     append_order_placed(&upstream_store, &order_id, 1, "FIRST").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("end-saga-1");
+    let saga_id = SagaId::new(PERSIST_THEN_END_SAGA_ID);
     let handle_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let handled_first = Arc::new(Notify::new());
 
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_first_clone = Arc::clone(&handled_first);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -157,7 +166,6 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -190,7 +198,9 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     append_order_placed(&upstream_store, &order_id, 2, "SECOND").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let final_handle_count = *handle_count.lock().unwrap();
+    let final_handle_count = *handle_count
+        .lock()
+        .expect("handle_count mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         final_handle_count, 1,
         "after End, the saga process must be stopped; \

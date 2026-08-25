@@ -1,5 +1,13 @@
-03-project-consistency-supervision.mdで指摘された不足だけを追加監査し、
-02-project-consistency-audit.mdを更新してください。コードや設定は変更しません。
+03-project-consistency-supervision.mdで指摘された不足だけを追加監査してください。
+コードや設定は変更しません。
+
+## Report Phaseとの境界
+
+- Workflow ContextのReport DirectoryはPhase 1では読み取り専用です。
+- `02-project-consistency-audit.md`を直接更新しないでください。
+- 追加監査の差分はPhase 1の最終回答として返してください。
+- Workflowでは別名のレポート、推奨名`04-project-consistency-audit-review.md`へ保存してください。
+- ファイル保存はWorkflowの`output_contracts`とTAKTのReport Phaseが担当します。
 
 - 既存findingを言い換えて件数だけ増やさない。
 - 未監査のCriteriaまたはプロジェクト領域を実際に検索、確認する。

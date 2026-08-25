@@ -2,7 +2,7 @@ use std::any::Any;
 use std::collections::HashSet;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -45,11 +45,31 @@ pub struct ProcessContext<P: Process> {
     /// Used by the lifecycle loop to distinguish hierarchy-only children (where
     /// `on_terminated` must NOT fire) from explicitly-watched children (where it
     /// MUST fire).  Maintained as interior-mutable state so `watch`/`unwatch` can
-    /// keep `&self` signatures required by ARCH-REVIEW-004.
+    /// keep the `&self` signatures the watch/unwatch contract requires.
     pub(crate) explicit_watches: Mutex<HashSet<Pid>>,
 }
 
 impl<P: Process> ProcessContext<P> {
+    /// Record `pid` as explicitly watched, so its `Terminated` reaches
+    /// `on_terminated` even when it is also a hierarchy child.
+    pub(crate) fn track_explicit_watch(&self, pid: Pid) {
+        self.lock_explicit_watches().insert(pid);
+    }
+
+    /// Drop `pid` from the explicit-watch set, returning whether it was there.
+    ///
+    /// The lifecycle loop uses the return value to decide whether a terminated
+    /// child was explicitly watched or hierarchy-only.
+    pub(crate) fn untrack_explicit_watch(&self, pid: &Pid) -> bool {
+        self.lock_explicit_watches().remove(pid)
+    }
+
+    fn lock_explicit_watches(&self) -> MutexGuard<'_, HashSet<Pid>> {
+        self.explicit_watches
+            .lock()
+            .expect("explicit watch set lock was poisoned by a panicking holder")
+    }
+
     pub fn pid(&self) -> Pid {
         self.pid
     }
@@ -84,7 +104,7 @@ impl<P: Process> ProcessContext<P> {
 
     /// Spawn `spawnable` as a child of this process.
     ///
-    /// The new process inherits the parent's [`ProcessRegistry`] (flat
+    /// The new process inherits the parent's `ProcessRegistry` (flat
     /// registry — no path information attached to the Pid) and the system
     /// default idle timeout used by [`crate::ProcessSystem::spawn`]. Its
     /// `ctx.parent()` returns this process's Pid. When this process stops,
@@ -149,7 +169,7 @@ impl<P: Process> ProcessContext<P> {
     /// Calling `watch` causes `on_terminated` to be invoked when the target
     /// terminates, regardless of whether the target is also a child process.
     pub async fn watch(&self, target_pid: Pid) {
-        self.explicit_watches.lock().unwrap().insert(target_pid);
+        self.track_explicit_watch(target_pid);
         wiring::watch(
             self.pid,
             target_pid,
@@ -168,7 +188,7 @@ impl<P: Process> ProcessContext<P> {
     ///
     /// No-op if the target is no longer in the registry.
     pub async fn unwatch(&self, target_pid: Pid) {
-        self.explicit_watches.lock().unwrap().remove(&target_pid);
+        self.untrack_explicit_watch(&target_pid);
         wiring::unwatch(self.pid, target_pid, &self.registry).await;
     }
 

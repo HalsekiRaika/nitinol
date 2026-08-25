@@ -90,7 +90,10 @@ async fn demo_stop_strategy() {
     let proxy = system.spawn(Props::new(DataTransformer::new)).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let ok = proxy.ask(Parse("21".to_string())).await.unwrap();
+    let ok = proxy
+        .ask(Parse("21".to_string()))
+        .await
+        .expect("\"21\" parses, and the process is still alive on its first message");
     info!("Parse(\"21\") → {ok}");
 
     let err = proxy.ask(Parse("oops".to_string())).await;
@@ -108,24 +111,39 @@ async fn demo_stop_strategy() {
 async fn demo_restart_strategy() {
     info!("Restart strategy (max_retries=2, within=10s)");
     let system = ProcessSystem::new().await;
-    let props = Props::new(DataTransformer::new)
-        .with_supervision_strategy(SupervisionStrategy::restart(2, Duration::from_secs(10)).expect("valid restart config"));
+    let props = Props::new(DataTransformer::new).with_supervision_strategy(
+        SupervisionStrategy::restart(2, Duration::from_secs(10)).expect("valid restart config"),
+    );
     let proxy = system.spawn(props).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    proxy.ask(Parse("5".to_string())).await.unwrap();
-    proxy.ask(Parse("10".to_string())).await.unwrap();
-    let count = proxy.ask(GetSuccessCount).await.unwrap();
+    proxy
+        .ask(Parse("5".to_string()))
+        .await
+        .expect("\"5\" parses, so the process stays alive and answers");
+    proxy
+        .ask(Parse("10".to_string()))
+        .await
+        .expect("\"10\" parses, so the process stays alive and answers");
+    let count = proxy
+        .ask(GetSuccessCount)
+        .await
+        .expect("GetSuccessCount never fails and the process has not been stopped yet");
     info!("success_count before error = {count}");
 
     // Trigger a restart — factory closure re-invoked, success_count resets.
     let _ = proxy.ask(Parse("bad".to_string())).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let count_after = proxy.ask(GetSuccessCount).await.unwrap();
+    let count_after = proxy.ask(GetSuccessCount).await.expect(
+        "the first failure is within max_retries, so the process was restarted, not stopped",
+    );
     info!("success_count after restart = {count_after}  (fresh instance → 0)");
 
-    let ok = proxy.ask(Parse("7".to_string())).await.unwrap();
+    let ok = proxy
+        .ask(Parse("7".to_string()))
+        .await
+        .expect("\"7\" parses, and the restarted instance accepts new messages");
     info!("Parse(\"7\") after restart → {ok}");
 
     proxy.stop().await.ok();
@@ -137,8 +155,9 @@ async fn demo_restart_strategy() {
 async fn demo_rate_limit_exceeded() {
     info!("Rate limit exceeded (max_retries=2, within=10s)");
     let system = ProcessSystem::new().await;
-    let props = Props::new(DataTransformer::new)
-        .with_supervision_strategy(SupervisionStrategy::restart(2, Duration::from_secs(10)).expect("valid restart config"));
+    let props = Props::new(DataTransformer::new).with_supervision_strategy(
+        SupervisionStrategy::restart(2, Duration::from_secs(10)).expect("valid restart config"),
+    );
     let proxy = system.spawn(props).await;
     let pid = proxy.pid();
     tokio::time::sleep(Duration::from_millis(50)).await;

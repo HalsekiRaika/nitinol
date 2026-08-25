@@ -139,8 +139,9 @@ async fn stop_strategy_unregisters_process_after_error() {
 async fn restart_strategy_keeps_process_in_registry() {
     // Given: a DataTransformer with Restart{max_retries: 3, within: 10s}
     let system = ProcessSystem::new().await;
-    let props = Props::new(DataTransformer::new)
-        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
+    let props = Props::new(DataTransformer::new).with_supervision_strategy(
+        SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"),
+    );
     let proxy = system.spawn(props).await;
     let pid = proxy.pid();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -170,8 +171,9 @@ async fn restart_resets_success_count_to_zero() {
     // on restart the runtime calls the closure again, creating a fresh instance
     // whose success_count starts at 0 — internal state is not preserved.
     let system = ProcessSystem::new().await;
-    let props = Props::new(DataTransformer::new)
-        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
+    let props = Props::new(DataTransformer::new).with_supervision_strategy(
+        SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"),
+    );
     let proxy = system.spawn(props).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -213,8 +215,9 @@ async fn restart_resets_success_count_to_zero() {
 async fn restarted_process_handles_subsequent_valid_messages() {
     // Given: a DataTransformer that has already restarted once after a parse error
     let system = ProcessSystem::new().await;
-    let props = Props::new(DataTransformer::new)
-        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
+    let props = Props::new(DataTransformer::new).with_supervision_strategy(
+        SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"),
+    );
     let proxy = system.spawn(props).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -230,7 +233,10 @@ async fn restarted_process_handles_subsequent_valid_messages() {
         result.is_ok(),
         "restarted process should handle valid messages"
     );
-    assert_eq!(result.unwrap(), "7 * 2 = 14");
+    assert_eq!(
+        result.expect("result is Ok, as asserted immediately above"),
+        "7 * 2 = 14"
+    );
 
     proxy.stop().await.ok();
 }
@@ -246,8 +252,9 @@ async fn rate_limit_exceeded_causes_permanent_stop() {
     //   Fail #2 → restart (retry_count=2, 2 ≤ 2 → allowed)
     //   Fail #3 → stop    (retry_count=3, 3 > 2 → denied → permanent stop)
     let system = ProcessSystem::new().await;
-    let props = Props::new(DataTransformer::new)
-        .with_supervision_strategy(SupervisionStrategy::restart(2, Duration::from_secs(10)).expect("valid restart config"));
+    let props = Props::new(DataTransformer::new).with_supervision_strategy(
+        SupervisionStrategy::restart(2, Duration::from_secs(10)).expect("valid restart config"),
+    );
     let proxy = system.spawn(props).await;
     let pid = proxy.pid();
     tokio::time::sleep(Duration::from_millis(50)).await;

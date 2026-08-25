@@ -19,7 +19,7 @@ use crate::durable_stream::poller::{
 const POLLER_RESTART_MAX_RETRIES: u32 = 5;
 const POLLER_RESTART_WITHIN: Duration = Duration::from_secs(60);
 
-/// Minimal configuration needed to spawn a [`DirectPollerProcess`] as a
+/// Minimal configuration needed to spawn a `DirectPollerProcess` as a
 /// runtime child of any subscriber process via [`Self::spawn_child`].
 ///
 /// Use this instead of holding a full [`DurableStreamProxy`] when the
@@ -83,11 +83,9 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         let transform = Arc::clone(&self.transform);
         let initial_cursor = cursor;
         let driver = IntervalDriver::<DirectPollerProcess<T, S>>::new(self.poll_interval);
-        let restart_strategy = SupervisionStrategy::restart(
-            POLLER_RESTART_MAX_RETRIES,
-            POLLER_RESTART_WITHIN,
-        )
-        .expect("POLLER_RESTART_WITHIN is a positive duration constant");
+        let restart_strategy =
+            SupervisionStrategy::restart(POLLER_RESTART_MAX_RETRIES, POLLER_RESTART_WITHIN)
+                .expect("POLLER_RESTART_WITHIN is a positive duration constant");
         let mut props = Props::new(move || DirectPollerProcess {
             store: Arc::clone(&store),
             subscriber: subscriber.clone(),
@@ -102,7 +100,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         props
     }
 
-    /// Spawn a [`DirectPollerProcess`] as a runtime **child** of `ctx`'s
+    /// Spawn a `DirectPollerProcess` as a runtime **child** of `ctx`'s
     /// process.
     ///
     /// The poller's lifetime is tied to the calling process: when the calling
@@ -117,7 +115,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         ctx.spawn_child(props).await;
     }
 
-    /// Spawn a [`DirectPollerProcess`] as a runtime **child** of `ctx`'s process,
+    /// Spawn a `DirectPollerProcess` as a runtime **child** of `ctx`'s process,
     /// forwarding events to an external `subscriber` process.
     ///
     /// Unlike [`Self::spawn_child`] (where the subscriber IS `ctx`'s process), this
@@ -143,7 +141,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         ctx.spawn_child(props).await;
     }
 
-    /// Spawn a [`DirectPollerProcess`] via a [`ProcessSystem`] reference.
+    /// Spawn a `DirectPollerProcess` via a [`ProcessSystem`] reference.
     ///
     /// Unlike [`Self::spawn_child`] this does not require being inside the
     /// subscriber's [`ProcessContext`], so it can be called from external

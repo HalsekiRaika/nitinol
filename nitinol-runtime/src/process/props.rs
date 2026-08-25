@@ -18,7 +18,7 @@ use crate::process::Process;
 
 /// Aggregated declaration of every per-process resource the runtime needs to
 /// spawn `P` — mailbox / stash / pipe capacity, the per-process driver,
-/// supervision, idle timeout, and optional name (Issue #56).
+/// supervision, idle timeout, and optional name.
 ///
 /// The `D` type parameter (defaulting to [`DefaultDriver`]) holds the single
 /// driver composed on top of the Core trio at spawn time. To install a custom

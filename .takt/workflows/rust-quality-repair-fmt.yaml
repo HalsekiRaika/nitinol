@@ -14,6 +14,7 @@ steps:
       - rust
       - quality-recovery
       - rust-quality-fmt
+      - route-claude-repair-low
     edit: true
     persona: coder
     session_key: rust-quality-repair-fmt
@@ -22,17 +23,8 @@ steps:
       - coding
       - rust-coding
       - rust-quality-recovery
+      - report-phase-boundary
     required_permission_mode: edit
-    provider_options:
-      claude:
-        effort: low
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
     instruction: rust-quality-repair-fmt
     quality_gates:
       - type: command

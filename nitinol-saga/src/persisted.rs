@@ -4,7 +4,10 @@ use nitinol_eventsource::error::CodecError;
 use nitinol_eventsource::{Event, SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::EventType;
 
-use crate::dead_letter::{is_dead_letter_event_type, DeadLetterEvent};
+use crate::dead_letter::{
+    is_dead_letter_disposition_event_type, is_dead_letter_event_type, DeadLetterDispositionEvent,
+    DeadLetterEvent,
+};
 use crate::outbox::{is_outbox_event_type, OutboxEvent};
 use crate::scheduler::{is_schedule_event_type, ScheduleEvent};
 
@@ -13,6 +16,7 @@ pub(crate) enum SagaPersisted<E> {
     Outbox(OutboxEvent),
     Schedule(ScheduleEvent),
     DeadLetter(DeadLetterEvent),
+    DeadLetterDisposition(DeadLetterDispositionEvent),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +27,8 @@ pub(crate) enum SagaPersistedDecodeError {
     Schedule(SystemEventDecodeError),
     #[error("dead letter decode failed: {0}")]
     DeadLetter(SystemEventDecodeError),
+    #[error("dead letter disposition marker decode failed: {0}")]
+    DeadLetterDisposition(SystemEventDecodeError),
     #[error("domain event decode failed: {0}")]
     Domain(#[from] CodecError),
 }
@@ -34,6 +40,7 @@ impl<E: Event> SagaPersisted<E> {
             SagaPersisted::Outbox(marker) => marker.variant(),
             SagaPersisted::Schedule(marker) => marker.variant(),
             SagaPersisted::DeadLetter(event) => event.variant(),
+            SagaPersisted::DeadLetterDisposition(marker) => marker.variant(),
         }
     }
 
@@ -43,6 +50,7 @@ impl<E: Event> SagaPersisted<E> {
             SagaPersisted::Outbox(marker) => Ok(marker.encode()),
             SagaPersisted::Schedule(marker) => Ok(marker.encode()),
             SagaPersisted::DeadLetter(event) => Ok(event.encode()),
+            SagaPersisted::DeadLetterDisposition(marker) => Ok(marker.encode()),
         }
     }
 
@@ -51,10 +59,12 @@ impl<E: Event> SagaPersisted<E> {
         payload: &[u8],
         codec: &dyn ErasedCodec<E>,
     ) -> Result<Self, SagaPersistedDecodeError> {
-        // Classification order: outbox → schedule → dead_letter → domain.  The
-        // three framework families (`nitinol.saga.{outbox,schedule,dead_letter}`)
-        // are siblings, so a user event type can match none of them.  The domain
-        // branch must stay last to preserve envelope transparency.
+        // Classification order: outbox → schedule → dead_letter →
+        // dead_letter_disposition → domain.  The four framework families
+        // (`nitinol.saga.{outbox,schedule,dead_letter,dead_letter_disposition}`)
+        // are siblings, so a user event type can match none of them and the
+        // order between them carries no meaning.  The domain branch must stay
+        // last to preserve envelope transparency.
         if is_outbox_event_type(event_type) {
             Ok(SagaPersisted::Outbox(OutboxEvent::decode(payload)?))
         } else if is_schedule_event_type(event_type) {
@@ -65,6 +75,10 @@ impl<E: Event> SagaPersisted<E> {
             DeadLetterEvent::decode(payload)
                 .map(SagaPersisted::DeadLetter)
                 .map_err(SagaPersistedDecodeError::DeadLetter)
+        } else if is_dead_letter_disposition_event_type(event_type) {
+            DeadLetterDispositionEvent::decode(payload)
+                .map(SagaPersisted::DeadLetterDisposition)
+                .map_err(SagaPersistedDecodeError::DeadLetterDisposition)
         } else {
             Ok(SagaPersisted::Domain(codec.decode(payload)?))
         }
@@ -125,7 +139,8 @@ mod tests {
     #[test]
     fn outbox_path_classifies_as_outbox_never_domain() {
         let codec = codec();
-        let wire = OutboxAppender::build_tell_requested(1, 7, None, "", jiff::Timestamp::UNIX_EPOCH);
+        let wire =
+            OutboxAppender::build_tell_requested(1, 7, None, "", jiff::Timestamp::UNIX_EPOCH);
 
         match SagaPersisted::<DomainEvt>::classify(wire.event_type, &wire.payload, &codec) {
             Ok(SagaPersisted::Outbox(OutboxEvent::TellRequested(m))) => assert_eq!(m.tell_id, 7),
@@ -173,6 +188,21 @@ mod tests {
         match SagaPersisted::<DomainEvt>::classify(outbox_type, &[], &codec) {
             Err(SagaPersistedDecodeError::Outbox(_)) => {}
             _ => panic!("an outbox marker with no oneof kind must surface an Outbox decode error"),
+        }
+    }
+
+    #[test]
+    fn undecodable_dead_letter_disposition_payload_surfaces_a_disposition_decode_error() {
+        let codec = codec();
+        match SagaPersisted::<DomainEvt>::classify(
+            DeadLetterDispositionEvent::EVENT_TYPE,
+            &[],
+            &codec,
+        ) {
+            Err(SagaPersistedDecodeError::DeadLetterDisposition(_)) => {}
+            _ => panic!(
+                "a disposition marker with no oneof kind must surface a DeadLetterDisposition decode error"
+            ),
         }
     }
 }

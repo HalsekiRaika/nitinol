@@ -1,34 +1,32 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
-use bytes::Bytes;
 use futures_util::StreamExt;
 use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 use nitinol_runtime::process::ProcessContext;
 
-use crate::dead_letter::{enqueue_dead_letter, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext};
+use crate::dead_letter::{
+    enqueue_dead_letter, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext,
+};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
+use crate::journal::{ActiveSchedule, JournalState, PendingTell};
 use crate::outbox::RetryPolicy;
-use crate::outbox::{OutboxAppender, OutboxEvent, TellOutcome};
+use crate::outbox::{OutboxAppender, TellOutcome};
 use crate::persisted::{SagaPersisted, SagaPersistedDecodeError};
 use crate::process::outbox_executor::spawn_outbox_executor;
 use crate::process::saga_process::{SagaProcess, TellState};
 use crate::saga::Saga;
-use crate::scheduler::{ScheduleEvent, TimerName};
 
-/// A schedule that replay found still active — a persisted `Scheduled` with no
-/// later `Cancelled` / `Fired` for the same name.  Re-registered with the
-/// resident scheduler on `on_start`.
-pub(crate) struct ActiveSchedule {
-    pub(crate) name: TimerName,
-    pub(crate) after: Duration,
-    pub(crate) payload: Bytes,
-    pub(crate) scheduled_at_unix_millis: i64,
-}
+/// Rebuilds a [`TellIntent`] from the serialized command a `TellRequested`
+/// carried, so a tell pending at crash time can be re-dispatched once the
+/// OS process restarts and the in-memory intent is gone.
+///
+/// Returns `None` when the payload cannot be reconstructed; replay then
+/// appends a synthetic `TellFailed` instead of silently dropping the tell.
+type CrashRestartFactory<'a> = &'a (dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync);
 
 /// Outcome of replaying the saga's own event stream on `on_start`.
 pub(crate) struct ReplayOutcome {
@@ -36,7 +34,7 @@ pub(crate) struct ReplayOutcome {
     /// synthesised for un-redispatchable pending tells).
     pub(crate) failed: Vec<u64>,
     /// `true` when the stream carries a durable `Ended` marker — the saga
-    /// terminated in a previous incarnation and must not be revived (D-14).
+    /// terminated in a previous incarnation and must not be revived.
     pub(crate) ended: bool,
     /// Schedules still pending after replay, to be re-registered with the
     /// scheduler.  Empty when the saga has ended.
@@ -51,36 +49,37 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     store: &Arc<dyn EventStore>,
     sequence: &mut u64,
     tell_states: &mut HashMap<u64, TellState>,
-    crash_restart_factory: Option<&(dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync)>,
+    crash_restart_factory: Option<CrashRestartFactory<'_>>,
     retry_policy: RetryPolicy,
     enqueue_policy: &dyn EnqueuePolicy,
     ctx: &mut ProcessContext<SagaProcess<S>>,
 ) -> Result<ReplayOutcome, ()> {
-    let scan = match scan_stream(saga_id, state, codec, store, sequence).await {
-        Some(s) => s,
+    let journal = match load_journal(saga_id, state, codec, store, *sequence).await {
+        Some(j) => j,
         // store.load() or stream iteration failed — the terminated state is
         // unknown.  Fail safe (not fail-open): return Err so on_start stops
-        // the process without subscribing (D-14 contract).
+        // the process without subscribing.
         None => return Err(()),
     };
-    // D-14: when the stream carries a durable `Ended` marker the saga terminated
+    *sequence = journal.sequence;
+    // When the stream carries a durable `Ended` marker the saga terminated
     // in a previous incarnation.  Skip `redispatch_pending` entirely so that any
     // in-flight `TellRequested` entries are NOT re-executed after termination.
-    // Ended sagas also skip schedule re-registration (E-30).
-    if scan.ended {
+    // Ended sagas also skip schedule re-registration.
+    if journal.ended {
         return Ok(ReplayOutcome {
-            failed: scan.failed,
+            failed: journal.failed_tell_ids,
             ended: true,
             active_schedules: Vec::new(),
         });
     }
-    let active_schedules: Vec<ActiveSchedule> = scan.schedules.into_values().collect();
-    let mut failed = scan.failed;
+    let active_schedules: Vec<ActiveSchedule> = journal.active_schedules.into_values().collect();
+    let mut failed = journal.failed_tell_ids;
     let synthetic_failed = redispatch_pending(
         saga_id,
         store,
         sequence,
-        scan.pending,
+        journal.pending_tells,
         tell_states,
         crash_restart_factory,
         retry_policy,
@@ -96,33 +95,22 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     })
 }
 
-/// A pending tell entry recovered from a durable `TellRequested` outbox marker.
-struct PendingTell {
-    /// The crash-restart payload, if the `TellRequested` carried one.
-    crash_restart: Option<Bytes>,
-    /// The target aggregate's stream key, if stored in the `TellRequested`
-    /// (absent for events written before this field was added to the proto).
-    target: Option<SagaId>,
-}
-
-struct ReplayScan {
-    pending: HashMap<u64, PendingTell>,
-    failed: Vec<u64>,
-    ended: bool,
-    schedules: HashMap<TimerName, ActiveSchedule>,
-}
-
-async fn scan_stream<S: Saga>(
+/// Load the saga's own stream from `from_sequence + 1` and fold it into a
+/// [`JournalState`], applying the domain events it hands back to `state` in
+/// stream order.
+///
+/// Returns `None` when the stream could not be read to its end; the caller then
+/// treats the terminated state as unknown.
+async fn load_journal<S: Saga>(
     saga_id: &SagaId,
     state: &mut S,
     codec: &dyn ErasedCodec<S::Event>,
     store: &Arc<dyn EventStore>,
-    sequence: &mut u64,
-) -> Option<ReplayScan> {
-    let initial_seq = *sequence;
+    from_sequence: u64,
+) -> Option<JournalState> {
     let query = LoadQuery {
         stream_key: Some(saga_id.as_str().to_owned()),
-        from_stream_sequence: Some(initial_seq + 1),
+        from_stream_sequence: Some(from_sequence + 1),
         ..Default::default()
     };
     let stream = match store.load(query).await {
@@ -134,11 +122,7 @@ async fn scan_stream<S: Saga>(
     };
 
     futures_util::pin_mut!(stream);
-    let mut highest_seq = initial_seq;
-    let mut pending: HashMap<u64, PendingTell> = HashMap::new();
-    let mut failed: Vec<u64> = Vec::new();
-    let mut ended = false;
-    let mut schedules: HashMap<TimerName, ActiveSchedule> = HashMap::new();
+    let mut journal = JournalState::new(from_sequence);
     while let Some(item) = stream.next().await {
         let loaded = match item {
             Ok(ev) => ev,
@@ -147,43 +131,27 @@ async fn scan_stream<S: Saga>(
                 return None;
             }
         };
-        highest_seq = highest_seq.max(loaded.sequence);
-        dispatch_loaded::<S>(
-            loaded,
-            state,
-            codec,
-            &mut pending,
-            &mut failed,
-            &mut ended,
-            &mut schedules,
-        );
+        fold_loaded::<S>(loaded, state, codec, &mut journal);
     }
-    *sequence = highest_seq;
-    Some(ReplayScan {
-        pending,
-        failed,
-        ended,
-        schedules,
-    })
+    Some(journal)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn dispatch_loaded<S: Saga>(
+/// Classify one loaded record and fold it, applying a domain event to the
+/// saga's state.  An undecodable record is logged and skipped, so a single
+/// poisoned payload does not abort the replay.
+fn fold_loaded<S: Saga>(
     loaded: LoadedEvent,
     state: &mut S,
     codec: &dyn ErasedCodec<S::Event>,
-    pending: &mut HashMap<u64, PendingTell>,
-    failed: &mut Vec<u64>,
-    ended: &mut bool,
-    schedules: &mut HashMap<TimerName, ActiveSchedule>,
+    journal: &mut JournalState,
 ) {
+    journal.observe_sequence(loaded.sequence);
     match SagaPersisted::classify(loaded.event_type, &loaded.payload, codec) {
-        Ok(SagaPersisted::Outbox(marker)) => apply_outbox_message(marker, pending, failed, ended),
-        Ok(SagaPersisted::Schedule(marker)) => apply_schedule_marker(marker, schedules),
-        // Dead letters are not folded into saga state — they are an
-        // observability side-channel delivered to subscribers (G-27).
-        Ok(SagaPersisted::DeadLetter(_)) => {}
-        Ok(SagaPersisted::Domain(event)) => state.apply(event),
+        Ok(persisted) => {
+            if let Some(event) = journal.fold(persisted) {
+                state.apply(event);
+            }
+        }
         Err(SagaPersistedDecodeError::Outbox(e)) => {
             tracing::error!(error = %e, "saga outbox marker decode failed; skipping event");
         }
@@ -193,77 +161,14 @@ fn dispatch_loaded<S: Saga>(
         Err(SagaPersistedDecodeError::DeadLetter(e)) => {
             tracing::error!(error = %e, "saga dead letter decode failed; skipping event");
         }
+        Err(SagaPersistedDecodeError::DeadLetterDisposition(e)) => {
+            tracing::error!(
+                error = %e,
+                "saga dead letter disposition marker decode failed; skipping event"
+            );
+        }
         Err(SagaPersistedDecodeError::Domain(e)) => {
             tracing::error!(error = %e, "saga event decode failed; skipping event");
-        }
-    }
-}
-
-/// Fold a schedule marker into the active-schedule set: a `Scheduled` inserts
-/// (or supersedes) by name; a `Cancelled` / `Fired` removes it.
-fn apply_schedule_marker(
-    marker: ScheduleEvent,
-    schedules: &mut HashMap<TimerName, ActiveSchedule>,
-) {
-    match marker {
-        ScheduleEvent::Scheduled {
-            token,
-            after,
-            payload,
-            scheduled_at_unix_millis,
-        } => {
-            schedules.insert(
-                token.name.clone(),
-                ActiveSchedule {
-                    name: token.name,
-                    after,
-                    payload,
-                    scheduled_at_unix_millis,
-                },
-            );
-        }
-        ScheduleEvent::Cancelled { token, .. } | ScheduleEvent::Fired { token, .. } => {
-            schedules.remove(&token.name);
-        }
-    }
-}
-
-fn apply_outbox_message(
-    message: OutboxEvent,
-    pending: &mut HashMap<u64, PendingTell>,
-    failed: &mut Vec<u64>,
-    ended: &mut bool,
-) {
-    match message {
-        OutboxEvent::TellRequested(m) => {
-            let target = if m.target.is_empty() {
-                None
-            } else {
-                Some(SagaId::new(&m.target))
-            };
-            pending.insert(
-                m.tell_id,
-                PendingTell {
-                    crash_restart: m.crash_restart.map(Bytes::from),
-                    target,
-                },
-            );
-        }
-        OutboxEvent::TellAcked(m) => {
-            pending.remove(&m.tell_id);
-        }
-        OutboxEvent::TellFailed(m) => {
-            pending.remove(&m.tell_id);
-            failed.push(m.tell_id);
-        }
-        OutboxEvent::Scheduled(m) => {
-            tracing::trace!(
-                at_unix_seconds = m.at_unix_seconds,
-                "saga replay: scheduled marker (no-op)"
-            );
-        }
-        OutboxEvent::Ended(_) => {
-            *ended = true;
         }
     }
 }
@@ -277,13 +182,14 @@ fn intent_of(state: Option<&TellState>) -> Option<TellIntent> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn redispatch_pending<S: Saga>(
     saga_id: &SagaId,
     store: &Arc<dyn EventStore>,
     sequence: &mut u64,
     pending: HashMap<u64, PendingTell>,
     tell_states: &mut HashMap<u64, TellState>,
-    crash_restart_factory: Option<&(dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync)>,
+    crash_restart_factory: Option<CrashRestartFactory<'_>>,
     retry_policy: RetryPolicy,
     enqueue_policy: &dyn EnqueuePolicy,
     ctx: &mut ProcessContext<SagaProcess<S>>,
@@ -350,7 +256,7 @@ async fn redispatch_pending<S: Saga>(
                 // Write a DLQ entry only when the target stream key is recoverable.
                 // Legacy streams written before `TellRequested.target` (proto field 3)
                 // was added have `target == None`; emitting `TellFailed` with an empty
-                // target violates the G-28 contract, so those entries are skipped.
+                // target is not allowed, so those entries are skipped.
                 // The durable outbox marker already records the failure.
                 if let Some(target) = pending_tell.target {
                     let message = pending_tell.crash_restart.unwrap_or_default();
@@ -363,7 +269,7 @@ async fn redispatch_pending<S: Saga>(
                         SourceContext::without_upstream(),
                     )
                     .await;
-                    // G-27: when the DLQ append fails the synthetic TellFailed is
+                    // When the DLQ append fails the synthetic TellFailed is
                     // already written to the outbox, but the DLQ entry is missing.
                     // Stop so the process is not considered cleanly started; a
                     // supervised restart will re-evaluate from the durable markers.
@@ -371,7 +277,7 @@ async fn redispatch_pending<S: Saga>(
                         tracing::error!(
                             tell_id,
                             "saga replay: DLQ append failed for synthetic TellFailed; \
-                             stopping process (G-27)"
+                             stopping process"
                         );
                         return Err(());
                     }
@@ -482,6 +388,17 @@ mod tests {
             EventType::new(Family::new("replay_unit_test"), TypeName::new("SagaEvent"));
     }
 
+    /// Correlation rule of [`InertSaga`].  Its tests subscribe to an upstream
+    /// stream that is deliberately empty — replay, not delivery, is what they
+    /// exercise — so this answer is never consulted.
+    const INERT_SAGA_OWNER: &str = "replay-unit-inert-saga";
+
+    /// Correlation rule of [`CountingInertSaga`], and the id its tests spawn it
+    /// with.  Those tests seed a matching upstream event and assert `handle` is
+    /// never reached, so the two must agree: a correlate answer that named some
+    /// other instance would make the assertion pass for the wrong reason.
+    const COUNTING_INERT_SAGA_OWNER: &str = "replay-unit-counting-inert-saga";
+
     #[derive(Default)]
     struct InertSaga;
 
@@ -489,9 +406,12 @@ mod tests {
     impl Saga for InertSaga {
         type SubscribedEvent = UpstreamEvt;
         type Event = SagaEvt;
-        type State = ();
         type ScheduledMessage = ();
         type Error = std::convert::Infallible;
+
+        fn correlate(_event: &UpstreamEvt) -> Option<SagaId> {
+            Some(SagaId::new(INERT_SAGA_OWNER))
+        }
 
         fn apply(&mut self, _event: SagaEvt) {}
 
@@ -536,7 +456,8 @@ mod tests {
     }
 
     /// A store that always fails `load()`.  Used to simulate an unreachable event
-    /// store during replay, verifying the fail-safe D-14 guard (AIR-004).
+    /// store during replay, verifying the fail-safe guard against reviving a
+    /// possibly-terminated saga.
     struct FailLoadStore;
 
     #[async_trait]
@@ -558,7 +479,7 @@ mod tests {
     }
 
     /// A saga that counts every `handle` call.  Used to assert that the upstream
-    /// subscription is never wired when replay fails (AIR-004).
+    /// subscription is never wired when replay fails.
     #[derive(Default)]
     struct CountingInertSaga {
         handle_count: Arc<AtomicUsize>,
@@ -568,9 +489,12 @@ mod tests {
     impl Saga for CountingInertSaga {
         type SubscribedEvent = UpstreamEvt;
         type Event = SagaEvt;
-        type State = ();
         type ScheduledMessage = ();
         type Error = std::convert::Infallible;
+
+        fn correlate(_event: &UpstreamEvt) -> Option<SagaId> {
+            Some(SagaId::new(COUNTING_INERT_SAGA_OWNER))
+        }
 
         fn apply(&mut self, _event: SagaEvt) {}
 
@@ -603,11 +527,7 @@ mod tests {
             .expect("seed TellRequested must succeed");
     }
 
-    async fn seed_ended(
-        store: &Arc<InMemoryEventStore>,
-        saga_id: &SagaId,
-        sequence: u64,
-    ) {
+    async fn seed_ended(store: &Arc<InMemoryEventStore>, saga_id: &SagaId, sequence: u64) {
         let store_dyn: Arc<dyn EventStore> = Arc::clone(store) as Arc<dyn EventStore>;
         let ok = OutboxAppender::append_ended(&store_dyn, saga_id, sequence).await;
         assert!(ok, "seed Ended must succeed");
@@ -649,9 +569,6 @@ mod tests {
         initial_tell_states.insert(1u64, TellState::Pending(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&inner_store) as Arc<dyn EventStore>,
@@ -666,7 +583,6 @@ mod tests {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -724,9 +640,6 @@ mod tests {
         initial_tell_states.insert(1u64, TellState::Pending(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&fail_store),
@@ -741,7 +654,6 @@ mod tests {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -777,15 +689,11 @@ mod tests {
 
         seed_tell_requested(&store, &saga_id, 1, 1).await;
 
-        let intent =
-            TellIntent::new::<MarkerAggregate, MarkerCmd, _>(mock.clone(), MarkerCmd);
+        let intent = TellIntent::new::<MarkerAggregate, MarkerCmd, _>(mock.clone(), MarkerCmd);
         let mut initial_tell_states = HashMap::new();
         initial_tell_states.insert(1u64, TellState::AppendFailed(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         let _saga_proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&store) as Arc<dyn EventStore>,
@@ -800,7 +708,6 @@ mod tests {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -840,7 +747,7 @@ mod tests {
         );
     }
 
-    /// AIR-003 regression: when the saga stream carries both a `TellRequested`
+    /// Regression test: when the saga stream carries both a `TellRequested`
     /// and a durable `Ended` marker, `replay_and_redispatch` must skip
     /// `redispatch_pending` entirely.  Even with a live in-memory intent
     /// available, no `TellAcked` or `TellFailed` must be appended.
@@ -863,9 +770,6 @@ mod tests {
         initial_tell_states.insert(1u64, TellState::Pending(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&inner_store) as Arc<dyn EventStore>,
@@ -880,7 +784,6 @@ mod tests {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -896,12 +799,12 @@ mod tests {
         assert_eq!(
             acked, 0,
             "pending tell must NOT be redispatched when Ended marker is present \
-             (AIR-003 regression)"
+             (regression)"
         );
         assert_eq!(
             failed, 0,
             "pending tell must NOT produce synthetic TellFailed when Ended marker \
-             is present (AIR-003 regression)"
+             is present (regression)"
         );
     }
 
@@ -916,7 +819,7 @@ mod tests {
     }
 
     impl FailSecondAppendStore {
-        fn new(inner: Arc<InMemoryEventStore>) -> Arc<dyn EventStore> {
+        fn into_store(inner: Arc<InMemoryEventStore>) -> Arc<dyn EventStore> {
             Arc::new(Self {
                 inner,
                 append_count: std::sync::atomic::AtomicUsize::new(0),
@@ -952,12 +855,12 @@ mod tests {
         }
     }
 
-    /// ARCH-REVIEW-001 regression: when `OutboxAppender::append_terminal`
+    /// Regression test: when `OutboxAppender::append_terminal`
     /// succeeds for a synthetic TellFailed during replay but the subsequent DLQ
     /// enqueue fails, `redispatch_pending` must return `Err(())`,
     /// `replay_and_redispatch` must propagate it, and `on_start` must stop the
-    /// process without wiring the upstream subscription (G-27: DLQ append failure
-    /// must not silently treat the failure as processed).
+    /// process without wiring the upstream subscription — a DLQ append failure
+    /// must not silently treat the failure as processed.
     ///
     /// Concretely: even if the upstream store has a routed event, `Saga::handle`
     /// must never be called when the replay DLQ append fails.
@@ -966,7 +869,7 @@ mod tests {
         let ps = ProcessSystem::new().await;
 
         let inner_store = Arc::new(InMemoryEventStore::default());
-        let saga_id = SagaId::new("replay-dlq-fail-regression-1");
+        let saga_id = SagaId::new(COUNTING_INERT_SAGA_OWNER);
 
         // Seed a TellRequested with a non-empty target so the synthetic TellFailed
         // path reaches the DLQ enqueue.  (Empty target → legacy path, no DLQ.)
@@ -985,7 +888,7 @@ mod tests {
         // First append (OutboxAppender::append_terminal) succeeds.
         // Second append (DLQ enqueue) fails → replay_and_redispatch returns Err(()).
         let fail_second: Arc<dyn EventStore> =
-            FailSecondAppendStore::new(Arc::clone(&inner_store));
+            FailSecondAppendStore::into_store(Arc::clone(&inner_store));
 
         let handle_count = Arc::new(AtomicUsize::new(0));
 
@@ -1005,9 +908,6 @@ mod tests {
             .expect("upstream append must succeed");
 
         let handle_count_clone = Arc::clone(&handle_count);
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         let _proxy = SagaProps::<CountingInertSaga>::new(
             saga_id.clone(),
             Arc::clone(&fail_second),
@@ -1023,7 +923,6 @@ mod tests {
                 key: "replay-dlq-fail-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -1035,11 +934,11 @@ mod tests {
             handle_count.load(Ordering::SeqCst),
             0,
             "Saga::handle must never be called when replay DLQ append fails — \
-             the process must stop itself instead of subscribing (ARCH-REVIEW-001 / G-27)"
+             the process must stop itself instead of subscribing"
         );
     }
 
-    /// AIR-004 regression: when `EventStore::load` fails during replay the
+    /// Regression test: when `EventStore::load` fails during replay the
     /// terminated state is unknown.  `replay_and_redispatch` must return `Err`
     /// so `on_start` stops the process instead of subscribing to upstream events
     /// with an indeterminate terminated state (fail-safe, not fail-open).
@@ -1051,14 +950,11 @@ mod tests {
     async fn saga_stops_and_skips_subscription_when_event_store_load_fails() {
         let ps = ProcessSystem::new().await;
 
-        let saga_id = SagaId::new("air-004-load-fail-regression-1");
+        let saga_id = SagaId::new(COUNTING_INERT_SAGA_OWNER);
         let handle_count = Arc::new(AtomicUsize::new(0));
 
         let handle_count_clone = Arc::clone(&handle_count);
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let routed = saga_id.clone();
-        let route_fn = move |_: &UpstreamEvt| Some(routed.clone());
-
         // Pre-seed an upstream event so the subscription would deliver it if
         // the saga were (incorrectly) to subscribe despite the load failure.
         let upstream_ev = nitinol_persistence::AppendingEvent {
@@ -1090,7 +986,6 @@ mod tests {
                 key: "air-004-upstream".to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(&ps)
         .await;
@@ -1102,7 +997,7 @@ mod tests {
             handle_count.load(Ordering::SeqCst),
             0,
             "Saga::handle must never be called when EventStore::load fails during \
-             replay — the process must stop itself instead of subscribing (AIR-004)"
+             replay — the process must stop itself instead of subscribing"
         );
     }
 }

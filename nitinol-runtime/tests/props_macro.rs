@@ -1,10 +1,10 @@
-//! Tests for Issue #58: the `Props![P; D1, D2, ..., Dn]` type-position macro.
+//! Tests for the `Props![P; D1, D2, ..., Dn]` type-position macro.
 //!
-//! These tests pin down the spec from `order.md`:
+//! These tests pin down:
 //!
 //! 1. `Props![P; D]` (arity 1) is **identity** — equals `Props<P, D<P>>`,
-//!    NOT wrapped in `Combine`. This is the explicitly specified
-//!    short-circuit for the single-driver case.
+//!    NOT wrapped in `Combine`. This is the required short-circuit for the
+//!    single-driver case.
 //! 2. `Props![P; D1, D2]` (arity 2) equals `Props<P, Combine<D1<P>, D2<P>>>`
 //!    — the right-fold base case.
 //! 3. `Props![P; D1, D2, D3]` (arity 3+) right-folds to
@@ -41,13 +41,11 @@ use nitinol_runtime::error::HandlerError;
 use nitinol_runtime::process::{Combine, Driver, Process, ProcessContext};
 use nitinol_runtime::{ProcessSystem, Props};
 
-// ---------------------------------------------------------------------------
 // Fixtures: a marker process and a generic driver that takes `P` as its type
 // parameter so the macro's `D<P>` substitution actually has something to
 // substitute into. This mirrors the real `IntervalDriver<P>` shape used at
 // `nitinol-eventsource/src/durable_stream/poller.rs:30`, which is what the
 // `Props!` macro is designed to support.
-// ---------------------------------------------------------------------------
 
 struct CounterProcess;
 
@@ -133,9 +131,41 @@ where
 {
 }
 
-// ---------------------------------------------------------------------------
+// Hand-written spellings of the nested `Combine` trees the `Props!` macro is
+// expected to produce. Written out by hand — never via the macro — so the pins
+// below compare the macro's expansion against an independent definition.
+
+/// `Props<CounterProcess, Combine<D1, Combine<D2, D3>>>` — the arity-3
+/// right-fold.
+type ThreeDriverRightFoldProps = Props<
+    CounterProcess,
+    Combine<
+        TickDriver<CounterProcess>,
+        Combine<OtherDriver<CounterProcess>, TickDriver<CounterProcess>>,
+    >,
+>;
+
+/// `Props<CounterProcess, Combine<D1, Combine<D2, Combine<D3, D4>>>>` — the
+/// arity-4 right-fold, one nesting level deeper than the arity-3 case.
+type FourDriverRightFoldProps = Props<
+    CounterProcess,
+    Combine<
+        TickDriver<CounterProcess>,
+        Combine<
+            OtherDriver<CounterProcess>,
+            Combine<TickDriver<CounterProcess>, OtherDriver<CounterProcess>>,
+        >,
+    >,
+>;
+
+/// `Props<GenericProc<i32, String>, Combine<D1, D2>>` — the arity-2 right-fold
+/// with a generic type expression, rather than a bare ident, in head position.
+type GenericHeadTwoDriverProps = Props<
+    GenericProc<i32, String>,
+    Combine<TickDriver<GenericProc<i32, String>>, OtherDriver<GenericProc<i32, String>>>,
+>;
+
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn wait_for_count(counter: &AtomicU32, expected: u32, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -149,19 +179,17 @@ async fn wait_for_count(counter: &AtomicU32, expected: u32, what: &str) {
     }
 }
 
-// ===========================================================================
 // Type-level pins.
 //
 // Strategy: declare a function whose parameter is the EXPLICIT type
 // `Props<P, ...>` form and whose return type is the macro-form `Props![...]`.
 // The function body returns the parameter unchanged, so the only way this
 // compiles is if the two forms produce LITERALLY the same type. If the
-// macro's expansion ever drifts from the spec's right-fold shape, these
+// macro's expansion ever drifts from the required right-fold shape, these
 // signatures stop compiling.
 //
 // Each fn is `#[allow(dead_code)]` and never called at runtime — the cargo
 // test runner only needs them to compile.
-// ===========================================================================
 
 /// Pin: `Props![P; D]` with a single driver is the identity case —
 /// `Props<P, D<P>>` with NO `Combine` wrapping. If the macro accidentally
@@ -188,7 +216,10 @@ fn _props_macro_one_driver_explicit_form_accepts_macro_value(
 /// `Props<P, Combine<D1<P>, D2<P>>>`. This is the right-fold BASE case.
 #[allow(dead_code)]
 fn _props_macro_two_drivers_equals_explicit_combine(
-    explicit: Props<CounterProcess, Combine<TickDriver<CounterProcess>, OtherDriver<CounterProcess>>>,
+    explicit: Props<
+        CounterProcess,
+        Combine<TickDriver<CounterProcess>, OtherDriver<CounterProcess>>,
+    >,
 ) -> Props![CounterProcess; TickDriver, OtherDriver] {
     explicit
 }
@@ -201,13 +232,7 @@ fn _props_macro_two_drivers_equals_explicit_combine(
 /// implement `Driver<P>`.
 #[allow(dead_code)]
 fn _props_macro_three_drivers_right_folds(
-    explicit: Props<
-        CounterProcess,
-        Combine<
-            TickDriver<CounterProcess>,
-            Combine<OtherDriver<CounterProcess>, TickDriver<CounterProcess>>,
-        >,
-    >,
+    explicit: ThreeDriverRightFoldProps,
 ) -> Props![CounterProcess; TickDriver, OtherDriver, TickDriver] {
     explicit
 }
@@ -218,16 +243,7 @@ fn _props_macro_three_drivers_right_folds(
 /// can be localized to the depth at which it appears.
 #[allow(dead_code)]
 fn _props_macro_four_drivers_right_folds_one_level_deeper(
-    explicit: Props<
-        CounterProcess,
-        Combine<
-            TickDriver<CounterProcess>,
-            Combine<
-                OtherDriver<CounterProcess>,
-                Combine<TickDriver<CounterProcess>, OtherDriver<CounterProcess>>,
-            >,
-        >,
-    >,
+    explicit: FourDriverRightFoldProps,
 ) -> Props![CounterProcess; TickDriver, OtherDriver, TickDriver, OtherDriver] {
     explicit
 }
@@ -238,7 +254,10 @@ fn _props_macro_four_drivers_right_folds_one_level_deeper(
 /// same type as `Props![P; D1, D2]`.
 #[allow(dead_code)]
 fn _props_macro_trailing_comma_accepted(
-    explicit: Props<CounterProcess, Combine<TickDriver<CounterProcess>, OtherDriver<CounterProcess>>>,
+    explicit: Props<
+        CounterProcess,
+        Combine<TickDriver<CounterProcess>, OtherDriver<CounterProcess>>,
+    >,
 ) -> Props![CounterProcess; TickDriver, OtherDriver,] {
     explicit
 }
@@ -258,10 +277,7 @@ fn _props_macro_trailing_comma_accepted_for_single_driver(
 /// terminates the head.
 #[allow(dead_code)]
 fn _props_macro_generic_head_p_compiles(
-    explicit: Props<
-        GenericProc<i32, String>,
-        TickDriver<GenericProc<i32, String>>,
-    >,
+    explicit: Props<GenericProc<i32, String>, TickDriver<GenericProc<i32, String>>>,
 ) -> Props![GenericProc<i32, String>; TickDriver] {
     explicit
 }
@@ -272,18 +288,11 @@ fn _props_macro_generic_head_p_compiles(
 /// as the `D<P>` argument.
 #[allow(dead_code)]
 fn _props_macro_generic_head_p_with_multi_drivers_right_folds(
-    explicit: Props<
-        GenericProc<i32, String>,
-        Combine<
-            TickDriver<GenericProc<i32, String>>,
-            OtherDriver<GenericProc<i32, String>>,
-        >,
-    >,
+    explicit: GenericHeadTwoDriverProps,
 ) -> Props![GenericProc<i32, String>; TickDriver, OtherDriver] {
     explicit
 }
 
-// ===========================================================================
 // Behavior tests.
 //
 // Type-equality alone does not guarantee the macro produces a USABLE type
@@ -291,7 +300,6 @@ fn _props_macro_generic_head_p_with_multi_drivers_right_folds(
 // build a `Props` value whose annotated type is the macro form, hand it to
 // `ProcessSystem::spawn`, push events through the driver tree, and assert
 // the right counters increment.
-// ===========================================================================
 
 /// Given a `Props` typed via `Props![CounterProcess; TickDriver]` (the
 /// identity / single-driver case),
@@ -440,21 +448,17 @@ async fn props_macro_three_drivers_spawns_and_dispatches_to_all_branches() {
     wait_for_count(&cnt_c, 1, "branch c counter == 1").await;
 }
 
-// ---------------------------------------------------------------------------
 // Re-export sanity: the macro is callable through the same `nitinol_runtime`
 // path that exports the `Props` type. If this stops compiling, the macro
 // was either not `#[macro_export]`ed at the crate root or its internal
 // `$crate::process::Props` / `$crate::process::Combine` paths drifted.
-// ---------------------------------------------------------------------------
 
 /// Pin: `use nitinol_runtime::Props;` (already at the top of this file)
 /// brings the **macro** into scope (different namespace, same identifier as
-/// the type). If this stops compiling, the public import contract of
-/// Issue #58 has regressed.
+/// the type). If this stops compiling, the macro's public import contract
+/// has regressed.
 #[allow(dead_code)]
-fn _props_macro_is_reachable_via_crate_root_import()
-    -> Props![CounterProcess; TickDriver]
-{
+fn _props_macro_is_reachable_via_crate_root_import() -> Props![CounterProcess; TickDriver] {
     Props::new(|| CounterProcess).with_driver(TickDriver {
         rx: mpsc::channel::<()>(1).1,
         counter: Arc::new(AtomicU32::new(0)),

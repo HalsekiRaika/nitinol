@@ -1,8 +1,8 @@
 //! Contract tests for the value-level `variant()` accessor added to `Event`
-//! and `SystemEvent` (Issue #64).
+//! and `SystemEvent`.
 //!
 //! `Event` keeps a defaulted `fn variant(&self) -> EventType` returning
-//! `Self::EVENT_TYPE`; `SystemEvent::variant()` is required (Issue #66) so an
+//! `Self::EVENT_TYPE`; `SystemEvent::variant()` is required so an
 //! enum implementor cannot silently drop its per-arm identity. A struct event
 //! keeps the type-level identity (variant `None`) — via the `Event` default or
 //! the explicit `Self::EVENT_TYPE` one-liner a `SystemEvent` struct writes.
@@ -12,9 +12,7 @@ use bytes::Bytes;
 use nitinol_eventsource::{appending_system_event, Event, SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::{EventType, Family, TypeName, Variant};
 
-// ---------------------------------------------------------------------------
 // Event::variant default
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct Incremented;
@@ -81,9 +79,7 @@ fn event_overridden_variant_returns_arm_specific_event_type() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // SystemEvent::variant default
-// ---------------------------------------------------------------------------
 
 struct Marker;
 
@@ -116,9 +112,7 @@ fn system_event_default_variant_returns_event_type_const() {
     assert_eq!(marker.variant().variant(), None);
 }
 
-// ---------------------------------------------------------------------------
 // Routing: variant-Some EventType reaches type-level handler via type_key()
-// ---------------------------------------------------------------------------
 
 /// Regression test for routing dispatch using type_key().
 ///
@@ -146,9 +140,7 @@ fn type_key_routing_matches_variant_some_to_type_level_handler() {
     assert_eq!(incoming.type_key(), registered.type_key());
 }
 
-// ---------------------------------------------------------------------------
 // Regression: appending_system_event uses event.variant() not E::EVENT_TYPE
-// ---------------------------------------------------------------------------
 
 /// A minimal enum SystemEvent whose variant() overrides the type-level
 /// EVENT_TYPE with an arm-specific Variant.  Used to verify that

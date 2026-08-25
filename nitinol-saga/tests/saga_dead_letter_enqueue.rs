@@ -1,9 +1,9 @@
-//! Issue #51 (Saga DLQ): each saga failure kind, when it occurs, must be
+//! Saga DLQ: each saga failure kind, when it occurs, must be
 //! enqueued as a `SagaPersisted::DeadLetter(DeadLetterEvent)` on the saga's
-//! **own** EventStore stream (G-27), written on the wire under the reserved
-//! type key `nitinol.saga.dead_letter` with a per-failure-kind variant (G-28):
+//! **own** EventStore stream, written on the wire under the reserved
+//! type key `nitinol.saga.dead_letter` with a per-failure-kind variant:
 //!
-//! | SagaFailure                | variant (wire)                  | timing (G-30) |
+//! | SagaFailure                | variant (wire)                  | timing        |
 //! |----------------------------|---------------------------------|---------------|
 //! | HandleFailed               | `handle_failed`                 | immediate     |
 //! | ScheduledFailed            | `scheduled_failed`              | immediate     |
@@ -18,7 +18,7 @@
 //! `saga_outbox_tell_retry_failed.rs` (outbox markers) — no `pub(crate)`
 //! internals are touched, so the wire contract is what is pinned.
 //!
-//! Default enqueue policy (all failures enqueued, G-26) is assumed here; the
+//! The default enqueue policy (all failures enqueued) is assumed here; the
 //! policy override is covered in `saga_dead_letter_policy.rs`.
 
 use std::marker::PhantomData;
@@ -35,22 +35,20 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Context, Decider,
-    Effect, Event, SequenceCursor, TellError,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Context, Decider, Effect, Event,
+    SequenceCursor, TellError,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
-    AppendingEvent, AppendOutcome, EventType, Family, LoadQuery, LoadedEvent, TypeName,
-    Variant,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent,
+    TypeName, Variant,
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent, TimerName};
 
-// ---------------------------------------------------------------------------
 // Self-contained JSON codec (kept local like saga_deadline_scheduler.rs).
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct JsonCodec;
@@ -67,9 +65,7 @@ impl<E: Serialize + for<'de> Deserialize<'de> + 'static> Codec<E> for JsonCodec 
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shared domain types
-// ---------------------------------------------------------------------------
 
 /// Upstream event that routes to the saga under test.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -103,9 +99,7 @@ impl std::fmt::Display for SagaBoom {
 
 impl std::error::Error for SagaBoom {}
 
-// ---------------------------------------------------------------------------
-// DLQ wire contract (G-28): reserved type key + per-arm variant.
-// ---------------------------------------------------------------------------
+// DLQ wire contract: reserved type key + per-arm variant.
 
 /// Type-level identity of a dead-letter event: family `nitinol.saga`, type
 /// name `dead_letter`.  Every per-failure-kind variant shares this type key.
@@ -113,9 +107,26 @@ const DEAD_LETTER_TYPE: EventType =
     EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
 
 /// Type-level identity of an outbox marker — used to observe the `tell_failed`
-/// outbox marker that precedes a TellFailed dead letter (G-30 timing).
-const OUTBOX_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("outbox"));
+/// outbox marker that precedes a TellFailed dead letter.
+const OUTBOX_TYPE: EventType = EventType::new(Family::new("nitinol.saga"), TypeName::new("outbox"));
+
+// Correlation rules.  Each saga type below drives exactly one process instance,
+// so its rule is a single constant that both `Saga::correlate` and the spawn
+// site naming that instance refer to.
+
+const HANDLE_FAIL_SAGA_ID: &str = "dlq-handle-saga";
+const SCHEDULE_THEN_FAIL_SAGA_ID: &str = "dlq-sched-saga";
+const TELL_FAIL_SAGA_ID: &str = "dlq-tell-saga";
+const END_ON_FIRST_SAGA_ID: &str = "dlq-ended-saga";
+const PERSIST_FAIL_SAGA_ID: &str = "dlq-persist-saga";
+const DECODE_FAIL_SAGA_ID: &str = "dlq-decode-saga";
+
+/// Correlation rule of `UpstreamDecodeTestSaga`.  Its tests deliver only corrupt
+/// payloads, which carry no typed event, so this answer is never consulted —
+/// which is why those tests can spawn two instances of the one type under
+/// different ids and still tell them apart through
+/// `SagaProps::with_decode_failure_route`.
+const UPSTREAM_DECODE_TEST_SAGA_ID: &str = "dlq-upstream-decode-saga";
 
 fn count_variant(events: &[LoadedEvent], type_key: EventType, variant: &'static str) -> usize {
     events
@@ -134,9 +145,7 @@ fn count_domain(events: &[LoadedEvent], event_type: EventType) -> usize {
         .count()
 }
 
-// ---------------------------------------------------------------------------
 // Store helpers
-// ---------------------------------------------------------------------------
 
 async fn append_ping(store: &Arc<dyn EventStore>, stream_key: &str, sequence: u64, tag: &str) {
     let payload = serde_json::to_vec(&Ping {
@@ -161,7 +170,7 @@ async fn append_ping(store: &Arc<dyn EventStore>, stream_key: &str, sequence: u6
 /// Append an event with `Ping::EVENT_TYPE` but an invalid JSON payload so the
 /// codec's `decode` call fails.  The `EVENT_TYPE` check in the upstream
 /// transform passes; the subsequent decode fails — exercising the
-/// `UpstreamMessage::DecodeFailed` path (G-26).
+/// `UpstreamMessage::DecodeFailed` path.
 async fn append_corrupt_ping(store: &Arc<dyn EventStore>, stream_key: &str, sequence: u64) {
     store
         .append(
@@ -217,9 +226,7 @@ async fn wait_for_dead_letter(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Test 1 — HandleFailed → `handle_failed` (immediate)
-// ---------------------------------------------------------------------------
 
 struct HandleFailSaga {
     handled: Arc<Notify>,
@@ -229,10 +236,12 @@ struct HandleFailSaga {
 impl Saga for HandleFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = SagaBoom;
     type ScheduledMessage = ();
 
+    fn correlate(_event: &Ping) -> Option<SagaId> {
+        Some(SagaId::new(HANDLE_FAIL_SAGA_ID))
+    }
     fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
@@ -252,40 +261,47 @@ impl Saga for HandleFailSaga {
 #[tokio::test]
 async fn handle_error_enqueues_a_handle_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-handle-upstream", 1, "boom").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("dlq-handle-saga");
+    let saga_id = SagaId::new(HANDLE_FAIL_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let handled_for_saga = Arc::clone(&handled);
-    let routed = saga_id.clone();
-    let _proxy = SagaProps::<HandleFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-        HandleFailSaga {
-            handled: Arc::clone(&handled_for_saga),
-        }
-    })
-    .with_codec(system.codec::<SagaLog>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
-        SequenceCursor::Stream {
-            key: "dlq-handle-upstream".to_owned(),
-            after: 0,
-        },
-        move |_event: &Ping| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaProps::<HandleFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            HandleFailSaga {
+                handled: Arc::clone(&handled_for_saga),
+            }
+        })
+        .with_codec(system.codec::<SagaLog>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Ping>(),
+            SequenceCursor::Stream {
+                key: "dlq-handle-upstream".to_owned(),
+                after: 0,
+            },
+        )
+        .spawn(system.process_system())
+        .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
         .expect("Saga::handle must run within 3 seconds");
 
-    let events = wait_for_dead_letter(&saga_store, &saga_id, "handle_failed", Duration::from_secs(5)).await;
+    let events = wait_for_dead_letter(
+        &saga_store,
+        &saga_id,
+        "handle_failed",
+        Duration::from_secs(5),
+    )
+    .await;
 
     assert_eq!(
         count_variant(&events, DEAD_LETTER_TYPE, "handle_failed"),
@@ -299,9 +315,7 @@ async fn handle_error_enqueues_a_handle_failed_dead_letter() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 2 — ScheduledFailed → `scheduled_failed` (immediate)
-// ---------------------------------------------------------------------------
 
 struct ScheduleThenFailSaga;
 
@@ -309,10 +323,12 @@ struct ScheduleThenFailSaga;
 impl Saga for ScheduleThenFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = SagaBoom;
     type ScheduledMessage = ();
 
+    fn correlate(_event: &Ping) -> Option<SagaId> {
+        Some(SagaId::new(SCHEDULE_THEN_FAIL_SAGA_ID))
+    }
     fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
@@ -342,16 +358,17 @@ impl Saga for ScheduleThenFailSaga {
 #[tokio::test]
 async fn on_scheduled_error_enqueues_a_scheduled_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-sched-upstream", 1, "tick").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("dlq-sched-saga");
+    let saga_id = SagaId::new(SCHEDULE_THEN_FAIL_SAGA_ID);
 
-    let routed = saga_id.clone();
     let _proxy = SagaProps::<ScheduleThenFailSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
@@ -365,14 +382,18 @@ async fn on_scheduled_error_enqueues_a_scheduled_failed_dead_letter() {
             key: "dlq-sched-upstream".to_owned(),
             after: 0,
         },
-        move |_event: &Ping| Some(routed.clone()),
     )
     .with_scheduler(scheduler.clone())
     .spawn(system.process_system())
     .await;
 
-    let events =
-        wait_for_dead_letter(&saga_store, &saga_id, "scheduled_failed", Duration::from_secs(6)).await;
+    let events = wait_for_dead_letter(
+        &saga_store,
+        &saga_id,
+        "scheduled_failed",
+        Duration::from_secs(6),
+    )
+    .await;
 
     assert!(
         count_variant(&events, DEAD_LETTER_TYPE, "scheduled_failed") >= 1,
@@ -380,23 +401,21 @@ async fn on_scheduled_error_enqueues_a_scheduled_failed_dead_letter() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 3 — TellFailed → `tell_failed` (after staged retry, G-30)
-// ---------------------------------------------------------------------------
+// Test 3 — TellFailed → `tell_failed` (after staged retry)
 
 /// A tell target that fails every attempt and carries a known stream key so
 /// the `SagaFailure::TellFailed::target` field can be asserted in tests.
 struct FailingTellTarget<A: Aggregate> {
-    /// Reported as `aggregate_id_str()` so `TellIntent` captures it and writes
+    /// Reported as `aggregate_id()` so `TellIntent` captures it and writes
     /// it into the `SagaFailure::TellFailed::target` dead-letter field.
-    target_id: &'static str,
+    target_id: AggregateId,
     _phantom: PhantomData<fn() -> A>,
 }
 
 impl<A: Aggregate> Clone for FailingTellTarget<A> {
     fn clone(&self) -> Self {
         Self {
-            target_id: self.target_id,
+            target_id: self.target_id.clone(),
             _phantom: PhantomData,
         }
     }
@@ -411,8 +430,8 @@ impl<A: Aggregate> AggregateTellTarget<A> for FailingTellTarget<A> {
         Box::pin(async move { Err(TellError::Send(SendError)) })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        self.target_id
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.target_id
     }
 }
 
@@ -460,10 +479,12 @@ struct TellFailSaga {
 impl Saga for TellFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = ();
 
+    fn correlate(_event: &Ping) -> Option<SagaId> {
+        Some(SagaId::new(TELL_FAIL_SAGA_ID))
+    }
     fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
@@ -482,10 +503,10 @@ impl Saga for TellFailSaga {
 /// When the staged retry budget is exhausted,
 /// Then a `tell_failed` dead letter is enqueued — and only alongside the
 /// terminal `tell_failed` outbox marker, proving the DLQ entry is written
-/// *after* staged retry (G-30), never on the first failed attempt.
+/// *after* staged retry, never on the first failed attempt.
 ///
 /// Also verifies that `SagaFailure::TellFailed::target` carries the target
-/// aggregate's stream key (not an internal tell_id) as specified in G-28.
+/// aggregate's stream key, not an internal tell_id.
 #[tokio::test]
 async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_retry() {
     use nitinol_eventsource::SystemEvent;
@@ -493,44 +514,46 @@ async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_ret
     use nitinol_saga::SagaFailure;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-tell-upstream", 1, "order").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("dlq-tell-saga");
+    let saga_id = SagaId::new(TELL_FAIL_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let handled_for_saga = Arc::clone(&handled);
-    let routed = saga_id.clone();
-    let _proxy = SagaProps::<TellFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-        TellFailSaga {
-            target: FailingTellTarget {
-                target_id: TELL_FAIL_TARGET_ID,
-                _phantom: PhantomData,
+    let _proxy =
+        SagaProps::<TellFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            TellFailSaga {
+                target: FailingTellTarget {
+                    target_id: AggregateId::new(TELL_FAIL_TARGET_ID),
+                    _phantom: PhantomData,
+                },
+                handled: Arc::clone(&handled_for_saga),
+            }
+        })
+        .with_codec(system.codec::<SagaLog>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Ping>(),
+            SequenceCursor::Stream {
+                key: "dlq-tell-upstream".to_owned(),
+                after: 0,
             },
-            handled: Arc::clone(&handled_for_saga),
-        }
-    })
-    .with_codec(system.codec::<SagaLog>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
-        SequenceCursor::Stream {
-            key: "dlq-tell-upstream".to_owned(),
-            after: 0,
-        },
-        move |_event: &Ping| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+        )
+        .spawn(system.process_system())
+        .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
         .expect("Saga::handle must run within 3 seconds");
 
-    let events = wait_for_dead_letter(&saga_store, &saga_id, "tell_failed", Duration::from_secs(8)).await;
+    let events =
+        wait_for_dead_letter(&saga_store, &saga_id, "tell_failed", Duration::from_secs(8)).await;
 
     assert_eq!(
         count_variant(&events, DEAD_LETTER_TYPE, "tell_failed"),
@@ -541,10 +564,10 @@ async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_ret
         count_variant(&events, OUTBOX_TYPE, "tell_failed"),
         1,
         "the DLQ entry must coexist with the terminal outbox `tell_failed` marker, \
-         confirming enqueue happens after staged retry is exhausted (G-30)"
+         confirming enqueue happens after staged retry is exhausted"
     );
 
-    // G-28: verify `target` is the target aggregate's stream key — not an
+    // Verify `target` is the target aggregate's stream key — not an
     // internal tell_id numeric placeholder.
     let tell_failed_event = events
         .iter()
@@ -567,9 +590,7 @@ async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_ret
     }
 }
 
-// ---------------------------------------------------------------------------
 // Test 4 — EndedSagaReceivedMessage → `ended_saga_received_message` (immediate)
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct DrainTargetAgg;
@@ -578,8 +599,7 @@ struct DrainTargetAgg;
 struct DrainDone;
 
 impl Event for DrainDone {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("dlq_it"), TypeName::new("DrainDone"));
+    const EVENT_TYPE: EventType = EventType::new(Family::new("dlq_it"), TypeName::new("DrainDone"));
 }
 
 impl Aggregate for DrainTargetAgg {
@@ -604,7 +624,7 @@ impl Decider<DrainCmd> for DrainTargetAgg {
 
 /// A tell target for Test 4 that blocks until a `Notify` is triggered.
 ///
-/// With `ask()`-based delivery (G-27 / ARCH-REVIEW-001 fix), the DirectPoller
+/// With `ask()`-based delivery, the DirectPoller
 /// only dispatches event-2 after event-1's `recv()` returns.  In a
 /// multi-threaded Tokio runtime the OutboxExecutor (spawned during event-1
 /// handling) can complete its round-trip to the tell target before the
@@ -617,6 +637,7 @@ impl Decider<DrainCmd> for DrainTargetAgg {
 #[derive(Clone)]
 struct BlockingDrainTellTarget {
     notify: Arc<Notify>,
+    aggregate_id: AggregateId,
 }
 
 impl AggregateTellTarget<DrainTargetAgg> for BlockingDrainTellTarget {
@@ -632,8 +653,8 @@ impl AggregateTellTarget<DrainTargetAgg> for BlockingDrainTellTarget {
         })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        "dlq-ended-target"
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.aggregate_id
     }
 }
 
@@ -646,10 +667,12 @@ struct EndOnFirstSaga {
 impl Saga for EndOnFirstSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = ();
 
+    fn correlate(_event: &Ping) -> Option<SagaId> {
+        Some(SagaId::new(END_ON_FIRST_SAGA_ID))
+    }
     fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
@@ -662,7 +685,7 @@ impl Saga for EndOnFirstSaga {
         // receive and drop the second upstream event).
         let intent = TellIntent::new(self.target.clone(), DrainCmd);
         Ok(SagaEffect::persist(SagaLog { note: event.tag })
-            .with_tells(vec![intent])
+            .combine(SagaEffect::tell_intent(intent))
             .then_end())
     }
 }
@@ -678,11 +701,13 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
     use nitinol_saga::{DeadLetterEvent, SagaFailure};
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     // Pre-load BOTH events.  The DirectPoller (via `poll_direct_once`) reads the
     // entire batch in one `store.load()` call and delivers event-1 then event-2
-    // sequentially within the same loop using `ask()` (G-27).  Event-2 is
+    // sequentially within the same loop using `ask()`.  Event-2 is
     // therefore dispatched immediately after event-1's `ask()` resolves — there
     // is no inter-poll-tick gap.
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -690,13 +715,15 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
     append_ping(&upstream_store, "dlq-ended-upstream", 2, "second").await;
 
     // Capture the expected raw payload of the second (dropped) ping so we can
-    // assert it is preserved in the dead letter (G-28).
-    let expected_message_payload = serde_json::to_vec(&Ping { tag: "second".to_owned() })
-        .map(Bytes::from)
-        .expect("encode second Ping must succeed");
+    // assert it is preserved in the dead letter.
+    let expected_message_payload = serde_json::to_vec(&Ping {
+        tag: "second".to_owned(),
+    })
+    .map(Bytes::from)
+    .expect("encode second Ping must succeed");
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("dlq-ended-saga");
+    let saga_id = SagaId::new(END_ON_FIRST_SAGA_ID);
     let handle_count = Arc::new(AtomicUsize::new(0));
     // The OutboxExecutor (spawned during event-1 handling) runs concurrently on
     // the Tokio thread pool.  In a multi-threaded runtime it can complete the
@@ -709,25 +736,27 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
 
     let handle_count_for_saga = Arc::clone(&handle_count);
     let drain_unblock_for_saga = Arc::clone(&drain_unblock);
-    let routed = saga_id.clone();
-    let _proxy = SagaProps::<EndOnFirstSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-        EndOnFirstSaga {
-            target: BlockingDrainTellTarget { notify: Arc::clone(&drain_unblock_for_saga) },
-            handle_count: Arc::clone(&handle_count_for_saga),
-        }
-    })
-    .with_codec(system.codec::<SagaLog>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
-        SequenceCursor::Stream {
-            key: "dlq-ended-upstream".to_owned(),
-            after: 0,
-        },
-        move |_event: &Ping| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaProps::<EndOnFirstSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            EndOnFirstSaga {
+                target: BlockingDrainTellTarget {
+                    notify: Arc::clone(&drain_unblock_for_saga),
+                    aggregate_id: AggregateId::new("dlq-ended-target"),
+                },
+                handle_count: Arc::clone(&handle_count_for_saga),
+            }
+        })
+        .with_codec(system.codec::<SagaLog>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Ping>(),
+            SequenceCursor::Stream {
+                key: "dlq-ended-upstream".to_owned(),
+                after: 0,
+            },
+        )
+        .spawn(system.process_system())
+        .await;
 
     let events = wait_for_dead_letter(
         &saga_store,
@@ -756,7 +785,7 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
         "only the first event may persist a domain event; the dropped message must not"
     );
 
-    // G-28: the dead letter must carry the raw wire payload of the dropped
+    // The dead letter must carry the raw wire payload of the dropped
     // upstream message, not an empty placeholder.
     let ended_event = events
         .iter()
@@ -772,16 +801,14 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
             assert_eq!(
                 message, expected_message_payload,
                 "EndedSagaReceivedMessage::message must carry the raw payload of the \
-                 dropped upstream event (G-28)"
+                 dropped upstream event"
             );
         }
         other => panic!("expected EndedSagaReceivedMessage, got {:?}", other),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test 5 — PersistFailed → `persist_failed` (after staged retry, G-30)
-// ---------------------------------------------------------------------------
+// Test 5 — PersistFailed → `persist_failed` (after staged retry)
 
 /// An `EventStore` that fails the first `fail_count` `append` calls, then
 /// routes subsequent appends (and all loads) to a backing `InMemoryEventStore`.
@@ -830,10 +857,12 @@ struct PersistFailSaga {
 impl Saga for PersistFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = ();
 
+    fn correlate(_event: &Ping) -> Option<SagaId> {
+        Some(SagaId::new(PERSIST_FAIL_SAGA_ID))
+    }
     fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
@@ -850,12 +879,14 @@ impl Saga for PersistFailSaga {
 /// persist batch (only the first of three attempts fails),
 /// When a Persist effect is attempted,
 /// Then the domain event is persisted on retry and **no DLQ entry is recorded**
-/// — proving that PersistFailed obeys the staged retry contract (G-30: DLQ is
-/// only enqueued after all retry attempts are exhausted).
+/// — proving that PersistFailed obeys staged retry: the DLQ entry is only
+/// enqueued after all retry attempts are exhausted.
 #[tokio::test]
 async fn persist_retry_recovers_domain_event_without_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(
@@ -868,30 +899,27 @@ async fn persist_retry_recovers_domain_event_without_dead_letter() {
 
     // Fails only the first append; the first retry (attempt 2) succeeds.
     let saga_store: Arc<dyn EventStore> = Arc::new(FailNAppendStore::new(1));
-    let saga_id = SagaId::new("dlq-persist-retry-ok-saga");
+    let saga_id = SagaId::new(PERSIST_FAIL_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let handled_for_saga = Arc::clone(&handled);
-    let routed = saga_id.clone();
-    let _proxy = SagaProps::<PersistFailSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || PersistFailSaga {
-            handled: Arc::clone(&handled_for_saga),
-        },
-    )
-    .with_codec(system.codec::<SagaLog>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
-        SequenceCursor::Stream {
-            key: "dlq-persist-retry-ok-upstream".to_owned(),
-            after: 0,
-        },
-        move |_event: &Ping| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaProps::<PersistFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            PersistFailSaga {
+                handled: Arc::clone(&handled_for_saga),
+            }
+        })
+        .with_codec(system.codec::<SagaLog>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Ping>(),
+            SequenceCursor::Stream {
+                key: "dlq-persist-retry-ok-upstream".to_owned(),
+                after: 0,
+            },
+        )
+        .spawn(system.process_system())
+        .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
@@ -906,7 +934,7 @@ async fn persist_retry_recovers_domain_event_without_dead_letter() {
         count_variant(&events, DEAD_LETTER_TYPE, "persist_failed"),
         0,
         "a persist failure recovered on the first retry must NOT enqueue a \
-         `persist_failed` dead letter (G-30: DLQ only after staged retry is exhausted)"
+         `persist_failed` dead letter (DLQ only after staged retry is exhausted)"
     );
     assert_eq!(
         count_domain(&events, SagaLog::EVENT_TYPE),
@@ -919,11 +947,13 @@ async fn persist_retry_recovers_domain_event_without_dead_letter() {
 /// domain-event persist batch (default budget: 3 attempts),
 /// When a Persist effect is attempted,
 /// Then a `persist_failed` dead letter is appended to the saga stream only
-/// after all attempts are exhausted (G-30).
+/// after all attempts are exhausted.
 #[tokio::test]
 async fn persist_failure_enqueues_a_persist_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-persist-upstream", 1, "persist-test").await;
@@ -932,30 +962,27 @@ async fn persist_failure_enqueues_a_persist_failed_dead_letter() {
     // call (the DLQ enqueue) is routed to the inner store and succeeds, so the
     // dead letter is observable in the saga stream.
     let saga_store: Arc<dyn EventStore> = Arc::new(FailNAppendStore::new(3));
-    let saga_id = SagaId::new("dlq-persist-saga");
+    let saga_id = SagaId::new(PERSIST_FAIL_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let handled_for_saga = Arc::clone(&handled);
-    let routed = saga_id.clone();
-    let _proxy = SagaProps::<PersistFailSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || PersistFailSaga {
-            handled: Arc::clone(&handled_for_saga),
-        },
-    )
-    .with_codec(system.codec::<SagaLog>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
-        SequenceCursor::Stream {
-            key: "dlq-persist-upstream".to_owned(),
-            after: 0,
-        },
-        move |_event: &Ping| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaProps::<PersistFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            PersistFailSaga {
+                handled: Arc::clone(&handled_for_saga),
+            }
+        })
+        .with_codec(system.codec::<SagaLog>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Ping>(),
+            SequenceCursor::Stream {
+                key: "dlq-persist-upstream".to_owned(),
+                after: 0,
+            },
+        )
+        .spawn(system.process_system())
+        .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
@@ -973,7 +1000,7 @@ async fn persist_failure_enqueues_a_persist_failed_dead_letter() {
         count_variant(&events, DEAD_LETTER_TYPE, "persist_failed"),
         1,
         "exhausting all staged persist retries must enqueue exactly one \
-         `persist_failed` dead letter (G-30)"
+         `persist_failed` dead letter"
     );
     assert_eq!(
         count_domain(&events, SagaLog::EVENT_TYPE),
@@ -982,9 +1009,7 @@ async fn persist_failure_enqueues_a_persist_failed_dead_letter() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 6 — DecodeFailed → `decode_failed` (immediate)
-// ---------------------------------------------------------------------------
 
 /// A scheduled-message type whose `Deserialize` always fails regardless of
 /// what bytes it receives.  The `Serialize` implementation produces valid JSON
@@ -1003,7 +1028,9 @@ impl<'de> serde::Deserialize<'de> for AlwaysDecodeFails {
         // Consume the entire value so the deserializer is not left with
         // unconsumed input, then unconditionally signal failure.
         let _ = <serde::de::IgnoredAny as serde::Deserialize<'de>>::deserialize(deserializer)?;
-        Err(serde::de::Error::custom("intentional decode failure for DLQ test"))
+        Err(serde::de::Error::custom(
+            "intentional decode failure for DLQ test",
+        ))
     }
 }
 
@@ -1013,10 +1040,12 @@ struct DecodeFailSaga;
 impl Saga for DecodeFailSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = AlwaysDecodeFails;
 
+    fn correlate(_event: &Ping) -> Option<SagaId> {
+        Some(SagaId::new(DECODE_FAIL_SAGA_ID))
+    }
     fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
@@ -1045,39 +1074,38 @@ impl Saga for DecodeFailSaga {
 
 /// Given a saga whose `ScheduledMessage` type always fails to deserialise,
 /// When the scheduler fires a timer for that saga,
-/// Then a `decode_failed` dead letter is enqueued on the saga stream (G-26/G-30
-/// immediate).
+/// Then a `decode_failed` dead letter is enqueued on the saga stream
+/// immediately.
 #[tokio::test]
 async fn decode_failure_in_scheduled_payload_enqueues_a_decode_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-decode-upstream", 1, "decode-test").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("dlq-decode-saga");
+    let saga_id = SagaId::new(DECODE_FAIL_SAGA_ID);
 
-    let routed = saga_id.clone();
-    let _proxy = SagaProps::<DecodeFailSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || DecodeFailSaga,
-    )
-    .with_codec(system.codec::<SagaLog>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
-        SequenceCursor::Stream {
-            key: "dlq-decode-upstream".to_owned(),
-            after: 0,
-        },
-        move |_event: &Ping| Some(routed.clone()),
-    )
-    .with_scheduler(scheduler.clone())
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaProps::<DecodeFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            DecodeFailSaga
+        })
+        .with_codec(system.codec::<SagaLog>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Ping>(),
+            SequenceCursor::Stream {
+                key: "dlq-decode-upstream".to_owned(),
+                after: 0,
+            },
+        )
+        .with_scheduler(scheduler.clone())
+        .spawn(system.process_system())
+        .await;
 
     let events = wait_for_dead_letter(
         &saga_store,
@@ -1093,9 +1121,7 @@ async fn decode_failure_in_scheduled_payload_enqueues_a_decode_failed_dead_lette
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 7 — upstream message decode failure → `decode_failed` (immediate)
-// ---------------------------------------------------------------------------
 
 /// A minimal saga that accepts Ping events and returns no effect.  Used to
 /// verify the `UpstreamMessage::DecodeFailed` DLQ path without scheduling or
@@ -1106,10 +1132,12 @@ struct UpstreamDecodeTestSaga;
 impl Saga for UpstreamDecodeTestSaga {
     type SubscribedEvent = Ping;
     type Event = SagaLog;
-    type State = ();
     type Error = std::convert::Infallible;
     type ScheduledMessage = ();
 
+    fn correlate(_event: &Ping) -> Option<SagaId> {
+        Some(SagaId::new(UPSTREAM_DECODE_TEST_SAGA_ID))
+    }
     fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
@@ -1126,12 +1154,14 @@ impl Saga for UpstreamDecodeTestSaga {
 /// (`Ping::EVENT_TYPE`) but an invalid JSON payload,
 /// When a saga subscribes to that stream,
 /// Then the transform decode failure is forwarded to the saga as a
-/// `SagaFailure::DecodeFailed` dead letter (G-26 / G-30 immediate) on the
+/// `SagaFailure::DecodeFailed` dead letter, immediately, on the
 /// saga's own stream — not silently discarded.
 #[tokio::test]
 async fn upstream_message_decode_failure_enqueues_a_decode_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     // Append a corrupt payload that carries Ping's EVENT_TYPE but is not valid
@@ -1140,26 +1170,23 @@ async fn upstream_message_decode_failure_enqueues_a_decode_failed_dead_letter() 
     append_corrupt_ping(&upstream_store, "dlq-upstream-decode-upstream", 1).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("dlq-upstream-decode-saga");
+    let saga_id = SagaId::new(UPSTREAM_DECODE_TEST_SAGA_ID);
 
-    let routed = saga_id.clone();
-    let _proxy = SagaProps::<UpstreamDecodeTestSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        || UpstreamDecodeTestSaga,
-    )
-    .with_codec(system.codec::<SagaLog>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
-        SequenceCursor::Stream {
-            key: "dlq-upstream-decode-upstream".to_owned(),
-            after: 0,
-        },
-        move |_event: &Ping| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaProps::<UpstreamDecodeTestSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || {
+            UpstreamDecodeTestSaga
+        })
+        .with_codec(system.codec::<SagaLog>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<Ping>(),
+            SequenceCursor::Stream {
+                key: "dlq-upstream-decode-upstream".to_owned(),
+                after: 0,
+            },
+        )
+        .spawn(system.process_system())
+        .await;
 
     let events = wait_for_dead_letter(
         &saga_store,
@@ -1175,17 +1202,14 @@ async fn upstream_message_decode_failure_enqueues_a_decode_failed_dead_letter() 
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 8 — decode_failure_route_fn: only the routing target records DLQ
-//          (ARCH-REVIEW-002)
-// ---------------------------------------------------------------------------
 
 /// Two sagas subscribe to the **same** upstream stream, which carries a
 /// corrupt event.  Both configure `decode_failure_route_fn` pointing to
 /// saga-A.  Only saga-A records a `decode_failed` dead letter; saga-B routes
 /// the failure to saga-A and, since that is not saga-B, opts out silently.
 ///
-/// This verifies the ARCH-REVIEW-002 contract: when multiple sagas subscribe
+/// This verifies that when multiple sagas subscribe
 /// to the same upstream, a single corrupt event does not produce duplicate DLQ
 /// entries across every subscriber.
 #[tokio::test]
@@ -1193,7 +1217,9 @@ async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_le
     use nitinol_persistence::AggregateId;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     // Single corrupt event on a shared upstream stream.
@@ -1206,7 +1232,6 @@ async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_le
 
     // Saga A: route function returns Some(saga_id_a) for any decode failure.
     // Since saga_id_a == self.saga_id, saga-A records the DLQ entry.
-    let routed_a = saga_id_a.clone();
     let route_target_a = saga_id_a.clone();
     let _proxy_a = SagaProps::<UpstreamDecodeTestSaga>::new(
         saga_id_a.clone(),
@@ -1221,7 +1246,6 @@ async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_le
             key: "dlq-route-shared-upstream".to_owned(),
             after: 0,
         },
-        move |_event: &Ping| Some(routed_a.clone()),
     )
     .with_decode_failure_route(move |_: &AggregateId, _: u64| Some(route_target_a.clone()))
     .spawn(system.process_system())
@@ -1230,7 +1254,6 @@ async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_le
     // Saga B: route function also returns Some(saga_id_a) — pointing at saga-A.
     // Since saga_id_a ≠ self.saga_id (= saga_id_b), saga-B opts out and records
     // no DLQ entry.
-    let routed_b = saga_id_b.clone();
     let route_target_b = saga_id_a.clone();
     let _proxy_b = SagaProps::<UpstreamDecodeTestSaga>::new(
         saga_id_b.clone(),
@@ -1245,7 +1268,6 @@ async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_le
             key: "dlq-route-shared-upstream".to_owned(),
             after: 0,
         },
-        move |_event: &Ping| Some(routed_b.clone()),
     )
     .with_decode_failure_route(move |_: &AggregateId, _: u64| Some(route_target_b.clone()))
     .spawn(system.process_system())
@@ -1263,7 +1285,7 @@ async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_le
     assert!(
         count_variant(&events_a, DEAD_LETTER_TYPE, "decode_failed") >= 1,
         "saga-A (routing target) must record a `decode_failed` dead letter \
-         for the corrupt upstream event (ARCH-REVIEW-002)"
+         for the corrupt upstream event"
     );
 
     // Give saga B ample time to process (or skip) the corrupt event.
@@ -1276,6 +1298,6 @@ async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_le
         0,
         "saga-B must NOT record a `decode_failed` dead letter — its \
          decode_failure_route_fn routes this failure to saga-A, which is not \
-         saga-B (ARCH-REVIEW-002)"
+         saga-B"
     );
 }

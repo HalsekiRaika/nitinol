@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 
 use std::sync::atomic::Ordering;
@@ -14,9 +15,7 @@ use common::{
     Increment, WatchPid,
 };
 
-// ============================================================
 // Type-property tests
-// ============================================================
 
 /// TerminatedReason::Timeout is a valid variant: PartialEq with itself.
 #[tokio::test]
@@ -53,8 +52,10 @@ async fn terminated_reason_timeout_is_copy() {
 /// TerminatedReason::Timeout is Clone: clone produces an equal value.
 #[tokio::test]
 async fn terminated_reason_timeout_is_clone() {
-    // Given / When: clone the Timeout variant
-    let cloned = TerminatedReason::Timeout.clone();
+    // Given / When: clone the Timeout variant. `Clone::clone` is called
+    // through UFCS rather than method syntax so the `Clone` impl is the thing
+    // under test, not the `Copy` impl that method syntax would resolve to.
+    let cloned = Clone::clone(&TerminatedReason::Timeout);
 
     // Then: the clone equals the original
     assert_eq!(cloned, TerminatedReason::Timeout);
@@ -111,22 +112,12 @@ async fn props_with_idle_timeout_builder_is_chainable() {
     let _ = result;
 }
 
-/// ProcessSystem::with_default_idle_timeout consumes self and returns Self,
-/// allowing method chaining after ProcessSystem::new().await.
-#[tokio::test]
-async fn process_system_with_default_idle_timeout_is_consuming_builder() {
-    // Given: a new ProcessSystem
-    let system = ProcessSystem::new().await;
+// The shape of `with_default_idle_timeout` itself — a consuming builder method,
+// on `ProcessSystemBuilder`, chaining through to `build()` — is pinned by
+// `system_defaults_inherit.rs` alongside the other three default axes. What is
+// left here is the behaviour that default produces, below.
 
-    // When: with_default_idle_timeout is called (consuming builder — takes ownership)
-    let _system = system.with_default_idle_timeout(Duration::from_secs(30));
-
-    // Then: method compiles and returns ProcessSystem; no panic
-}
-
-// ============================================================
 // Integration tests
-// ============================================================
 
 /// A process configured with Props::After(d) calls on_stop after the idle period.
 ///
@@ -156,7 +147,8 @@ async fn idle_timeout_after_notifies_watcher_with_timeout_reason() {
     let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let target_props = test_props(started.clone(), stopped.clone(), counter);
-    let target_props = target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
+    let target_props =
+        target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
     let target_proxy = system.spawn(target_props).await;
     let target_pid = target_proxy.pid();
     wait_for_flag(&started).await;
@@ -180,19 +172,22 @@ async fn idle_timeout_after_notifies_watcher_with_timeout_reason() {
 
     // Then: the watcher receives Terminated with who=target_pid and why=Timeout
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::Timeout);
 }
 
-/// Props::Inherit + ProcessSystem::with_default_idle_timeout: the process times out
-/// using the system default duration, and the watcher receives Timeout.
+/// Props::Inherit + ProcessSystemBuilder::with_default_idle_timeout: the process
+/// times out using the system default duration, and the watcher receives Timeout.
 #[tokio::test]
 async fn idle_timeout_inherit_uses_system_default_and_notifies_with_timeout() {
     // Given: a system with a 50ms default idle timeout
-    let system = ProcessSystem::new()
-        .await
-        .with_default_idle_timeout(Duration::from_millis(50));
+    let system = ProcessSystem::builder()
+        .with_default_idle_timeout(Duration::from_millis(50))
+        .build()
+        .await;
 
     // And: a process whose idle timeout is Inherit (the default — no explicit call)
     let (started, stopped, counter) = tracked_state();
@@ -219,7 +214,9 @@ async fn idle_timeout_inherit_uses_system_default_and_notifies_with_timeout() {
 
     // Then: watcher receives Terminated{why: Timeout}
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::Timeout);
 }
@@ -230,9 +227,10 @@ async fn idle_timeout_inherit_uses_system_default_and_notifies_with_timeout() {
 #[tokio::test]
 async fn idle_timeout_persistent_ignores_system_default() {
     // Given: a system with a 50ms default idle timeout
-    let system = ProcessSystem::new()
-        .await
-        .with_default_idle_timeout(Duration::from_millis(50));
+    let system = ProcessSystem::builder()
+        .with_default_idle_timeout(Duration::from_millis(50))
+        .build()
+        .await;
 
     // And: a process explicitly set to Persistent
     let (started, stopped, counter) = tracked_state();
@@ -271,7 +269,9 @@ async fn idle_timeout_persistent_ignores_system_default() {
         .await
         .expect("explicit stop should succeed");
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(
         terminated.why,
         TerminatedReason::Stopped,
@@ -309,14 +309,16 @@ async fn idle_timeout_inherit_with_no_system_default_is_persistent() {
 #[tokio::test]
 async fn idle_timeout_after_overrides_longer_system_default() {
     // Given: a system with a 60-second default (effectively infinite for this test)
-    let system = ProcessSystem::new()
-        .await
-        .with_default_idle_timeout(Duration::from_secs(60));
+    let system = ProcessSystem::builder()
+        .with_default_idle_timeout(Duration::from_secs(60))
+        .build()
+        .await;
 
     // And: a process with its own 50ms timeout (much shorter than the system default)
     let (started, stopped, counter) = tracked_state();
     let target_props = test_props(started.clone(), stopped.clone(), counter);
-    let target_props = target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
+    let target_props =
+        target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(50)));
 
     let _proxy = system.spawn(target_props).await;
     wait_for_flag(&started).await;
@@ -335,7 +337,8 @@ async fn idle_message_resets_timeout_timer() {
     let system = ProcessSystem::new().await;
     let (started, stopped, counter) = tracked_state();
     let target_props = test_props(started.clone(), stopped.clone(), counter);
-    let target_props = target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(100)));
+    let target_props =
+        target_props.with_idle_timeout(IdleTimeout::After(Duration::from_millis(100)));
     let target_proxy = system.spawn(target_props).await;
     wait_for_flag(&started).await;
 
@@ -363,9 +366,10 @@ async fn idle_message_resets_timeout_timer() {
 #[tokio::test]
 async fn dead_letter_stream_survives_system_default_idle_timeout() {
     // Given: a system with a 50ms default idle timeout
-    let system = ProcessSystem::new()
-        .await
-        .with_default_idle_timeout(Duration::from_millis(50));
+    let system = ProcessSystem::builder()
+        .with_default_idle_timeout(Duration::from_millis(50))
+        .build()
+        .await;
 
     // When: the timeout period passes with no messages sent to $dead-letters
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -384,9 +388,10 @@ async fn dead_letter_stream_survives_system_default_idle_timeout() {
 #[tokio::test]
 async fn dead_letter_process_survives_system_default_idle_timeout() {
     // Given: a system with a 50ms default idle timeout
-    let system = ProcessSystem::new()
-        .await
-        .with_default_idle_timeout(Duration::from_millis(50));
+    let system = ProcessSystem::builder()
+        .with_default_idle_timeout(Duration::from_millis(50))
+        .build()
+        .await;
 
     // When: the timeout period passes with no messages sent to $dead-letter
     tokio::time::sleep(Duration::from_millis(200)).await;

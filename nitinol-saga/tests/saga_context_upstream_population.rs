@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::JsonCodec;
 
@@ -22,8 +23,10 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("saga.ctx.upstream"), TypeName::new("OrderPlaced"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("saga.ctx.upstream"),
+        TypeName::new("OrderPlaced"),
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,13 +55,20 @@ struct CapturingSaga {
     notify: Arc<Notify>,
 }
 
+/// Correlation rule of [`CapturingSaga`]: the single order process every
+/// `OrderPlaced` seeded by these tests belongs to.
+const CAPTURING_SAGA_ID: &str = "saga-ctx-upstream-1";
+
 #[async_trait]
 impl Saga for CapturingSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(CAPTURING_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -67,13 +77,16 @@ impl Saga for CapturingSaga {
         _event: Self::SubscribedEvent,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        self.captured.lock().unwrap().push(CapturedUpstream {
-            saga_id: ctx.saga_id().clone(),
-            saga_sequence: ctx.sequence(),
-            upstream_aggregate_id: ctx.upstream_aggregate_id().clone(),
-            upstream_sequence: ctx.upstream_sequence(),
-            now: ctx.now(),
-        });
+        self.captured
+            .lock()
+            .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+            .push(CapturedUpstream {
+                saga_id: ctx.saga_id().clone(),
+                saga_sequence: ctx.sequence(),
+                upstream_aggregate_id: ctx.upstream_aggregate_id().clone(),
+                upstream_sequence: ctx.upstream_sequence(),
+                now: ctx.now(),
+            });
         self.notify.notify_one();
         Ok(SagaEffect::None)
     }
@@ -112,7 +125,14 @@ async fn wait_for_count(
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let notified = notify.notified();
-            if captured.lock().unwrap().len() >= expected {
+            if captured
+                .lock()
+                .expect(
+                    "captured mutex is never poisoned: no holder panics while the guard is alive",
+                )
+                .len()
+                >= expected
+            {
                 return;
             }
             notified.await;
@@ -122,7 +142,12 @@ async fn wait_for_count(
     .unwrap_or_else(|_| {
         panic!(
             "timed out waiting for {expected} handle() calls (got {})",
-            captured.lock().unwrap().len()
+            captured
+                .lock()
+                .expect(
+                    "captured mutex is never poisoned: no holder panics while the guard is alive"
+                )
+                .len()
         )
     });
 }
@@ -130,22 +155,21 @@ async fn wait_for_count(
 #[tokio::test]
 async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-upstream-order");
 
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-ctx-upstream-1");
+    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
@@ -160,14 +184,15 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
 
     wait_for_count(&captured, &notify, 1).await;
 
-    let captured = captured.lock().unwrap();
+    let captured = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(captured.len(), 1);
     assert_eq!(
         captured[0].upstream_aggregate_id, order_id,
@@ -178,7 +203,9 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
 #[tokio::test]
 async fn saga_context_exposes_upstream_sequence_from_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-upstream-seq-order");
 
@@ -187,15 +214,12 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
     append_order_placed(&upstream_store, &order_id, 3, "S-3").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-ctx-upstream-seq-1");
+    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
@@ -210,14 +234,15 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
 
     wait_for_count(&captured, &notify, 3).await;
 
-    let captured = captured.lock().unwrap();
+    let captured = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     let upstream_seqs: Vec<u64> = captured.iter().map(|c| c.upstream_sequence).collect();
     assert_eq!(
         upstream_seqs,
@@ -231,22 +256,21 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
     let started = jiff::Timestamp::now();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-now-order");
 
     append_order_placed(&upstream_store, &order_id, 1, "NOW-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-ctx-now-1");
+    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
@@ -261,14 +285,15 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
 
     wait_for_count(&captured, &notify, 1).await;
 
-    let captured = captured.lock().unwrap();
+    let captured = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     let observed = captured[0].now;
 
     assert_ne!(
@@ -287,22 +312,21 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
 #[tokio::test]
 async fn saga_context_existing_accessors_remain_saga_scoped() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-saga-scope-order");
 
     append_order_placed(&upstream_store, &order_id, 7, "SCOPE-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("saga-ctx-saga-scope-1");
+    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
@@ -317,14 +341,15 @@ async fn saga_context_existing_accessors_remain_saga_scoped() {
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
 
     wait_for_count(&captured, &notify, 1).await;
 
-    let captured = captured.lock().unwrap();
+    let captured = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         captured[0].saga_id, saga_id,
         "ctx.saga_id() must remain the saga instance id, not the upstream aggregate id"

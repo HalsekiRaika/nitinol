@@ -20,13 +20,11 @@ use nitinol_persistence::store::{
 };
 use nitinol_persistence::LoadQuery;
 use nitinol_persistence::{
-    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, TypeName, PersistedSnapshot,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, PersistedSnapshot, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: event
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Debug)]
 struct Incremented;
@@ -35,9 +33,7 @@ impl Event for Incremented {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: aggregate (no snapshot)
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Counter {
@@ -52,9 +48,7 @@ impl Aggregate for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: aggregate (with Snapshotable)
-// ---------------------------------------------------------------------------
 
 /// Counter that supports snapshot capture and restore.
 /// Snapshot value: the raw u64 counter value.
@@ -84,9 +78,7 @@ impl Snapshotable for SnapshotableCounter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: commands and messages
-// ---------------------------------------------------------------------------
 
 struct Increment;
 struct GetCount;
@@ -137,9 +129,7 @@ impl EvtReceive<GetCount> for SnapshotableCounter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: test codecs
-// ---------------------------------------------------------------------------
 
 /// Pass-through codec for Incremented (unit struct — no data to encode).
 struct TestCodec;
@@ -180,9 +170,7 @@ impl Codec<u64> for BigEndianU64Codec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: SlowEventStore — wraps an InMemoryEventStore with a load delay
-// ---------------------------------------------------------------------------
 
 /// Wraps InMemoryEventStore to introduce a delay in `load`, simulating slow storage.
 /// Used to test that messages sent during replay are correctly buffered by the mpsc channel.
@@ -207,9 +195,7 @@ impl EventStore for SlowEventStore {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /// Spawns a fresh Counter process using the provided `Arc<dyn EventStore>`.
 async fn spawn_counter(
@@ -238,9 +224,7 @@ async fn spawn_snapshotable(
         .await
 }
 
-// ---------------------------------------------------------------------------
 // Replay: all events applied from empty state
-// ---------------------------------------------------------------------------
 
 /// Append 3 events via process 1, then spawn process 2 sharing the same store
 /// and aggregate_id. Replay in on_start restores the counter to 3.
@@ -267,9 +251,7 @@ async fn replay_restores_state_from_persisted_events() {
     assert_eq!(count, 3, "replay must restore state to 3");
 }
 
-// ---------------------------------------------------------------------------
 // Replay: empty store yields default state
-// ---------------------------------------------------------------------------
 
 /// Spawning a process when no events exist starts from the aggregate's Default state.
 #[tokio::test]
@@ -286,9 +268,7 @@ async fn replay_from_empty_store_starts_with_default_state() {
     assert_eq!(count, 0, "empty store must yield default state (value=0)");
 }
 
-// ---------------------------------------------------------------------------
 // Replay with Snapshot: restore from snapshot, no delta events
-// ---------------------------------------------------------------------------
 
 /// When a snapshot is present and there are no later events, state is restored
 /// from the snapshot alone.
@@ -320,9 +300,7 @@ async fn replay_with_snapshot_only_restores_snapshot_state() {
     assert_eq!(count, 5, "replay must restore value=5 from snapshot");
 }
 
-// ---------------------------------------------------------------------------
 // Replay with Snapshot + delta events
-// ---------------------------------------------------------------------------
 
 /// Snapshot at sequence=3 (value=3) followed by 2 appended events.
 /// Replay applies the snapshot first, then the 2 delta events → value=5.
@@ -371,9 +349,7 @@ async fn replay_applies_delta_events_after_snapshot() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Replay with Snapshot: snapshot has no subsequent events
-// ---------------------------------------------------------------------------
 
 /// Snapshot at the latest sequence; no events exist beyond it.
 /// Replay restores from snapshot and finds no delta events to apply.
@@ -421,9 +397,7 @@ async fn replay_snapshot_at_latest_sequence_no_delta_events() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Buffering: messages sent during slow replay are processed after on_start
-// ---------------------------------------------------------------------------
 
 /// Messages sent to a newly spawned process while on_start is still running
 /// (replay from a slow EventStore) are buffered in the mpsc channel and

@@ -33,11 +33,14 @@ async fn main() {
     init_tracing();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(store)
+        .build();
 
     let proxy = system
-        .spawn_aggregate::<Wallet>(AggregateId::new("wallet-1"), store)
+        .spawn_aggregate::<Wallet>(AggregateId::new("wallet-1"))
         .await;
 
     // Deposit 100

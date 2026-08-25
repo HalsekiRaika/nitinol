@@ -15,9 +15,7 @@ use nitinol_eventsource::codec::Codec;
 
 use crate::counter::Incremented;
 
-// ---------------------------------------------------------------------------
 // JsonCodec
-// ---------------------------------------------------------------------------
 
 /// JSON codec: encodes events as UTF-8 JSON bytes.
 ///
@@ -37,9 +35,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // PassThrough codec
-// ---------------------------------------------------------------------------
 
 /// Pass-through codec for unit-struct events that carry no data.
 ///
@@ -62,9 +58,7 @@ impl Codec<Incremented> for PassThrough {
     }
 }
 
-// ---------------------------------------------------------------------------
 // UserDefinedCodec — skeleton for a custom format
-// ---------------------------------------------------------------------------
 
 /// Skeleton showing the minimum required to implement a custom codec.
 ///

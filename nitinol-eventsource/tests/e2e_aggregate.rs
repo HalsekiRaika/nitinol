@@ -21,23 +21,20 @@ use nitinol_eventsource::{
     Receive as EvtReceive,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName, LoadQuery};
+use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: event
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.agg"), TypeName::new("Incremented"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("e2e.agg"), TypeName::new("Incremented"));
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: aggregate
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Counter {
@@ -52,9 +49,7 @@ impl Aggregate for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: commands and queries
-// ---------------------------------------------------------------------------
 
 struct Increment;
 struct GetCount;
@@ -82,9 +77,7 @@ impl EvtReceive<GetCount> for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: JsonCodec (serde_json-backed)
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct JsonCodec;
@@ -101,9 +94,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: ask() returns the persisted event
-// ---------------------------------------------------------------------------
 
 /// Given a fresh Counter aggregate backed by InMemoryEventStore + JsonCodec,
 /// When ask(Increment) is called,
@@ -112,7 +103,9 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 async fn e2e_ask_persists_event_and_returns_it() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let proxy = system
         .spawn_aggregate::<Counter>(AggregateId::new("e2e-agg-ask"), store)
@@ -129,22 +122,27 @@ async fn e2e_ask_persists_event_and_returns_it() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 2: persisted event is recovered after process restart (replay)
-// ---------------------------------------------------------------------------
+// Test 2: a later reference observes the persisted state
 
-/// Given one ask(Increment) was processed by process 1 (event persisted),
-/// When a second process is spawned for the same AggregateId,
-/// Then on_start replays the stored event and restores counter to 1.
+/// Given one ask(Increment) was processed through a reference to this aggregate,
+/// When a second reference for the same AggregateId is resolved later,
+/// Then it observes the persisted event as a count of 1.
+///
+/// The caller cannot tell whether that reference activated the aggregate and
+/// replayed the stream, or joined a live activation — resolve is deliberately
+/// silent about which happened, and either way the state a caller sees is the
+/// same.
 #[tokio::test]
-async fn e2e_persisted_event_survives_process_restart() {
+async fn e2e_persisted_state_is_visible_through_a_later_reference() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("e2e-agg-restart");
 
-    // Process 1: write one event via ask()
+    // Reference 1: write one event via ask()
     {
         let proxy1 = system
             .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
@@ -152,20 +150,18 @@ async fn e2e_persisted_event_survives_process_restart() {
         proxy1.ask(Increment).await.expect("ask must succeed");
     }
 
-    // When: spawn process 2 for the same AggregateId — triggers replay in on_start
+    // When: resolve the same AggregateId again
     let proxy2 = system.spawn_aggregate::<Counter>(id, store).await;
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
 
-    // Then: state was fully restored from the persisted event
+    // Then: the later reference sees the persisted increment
     assert_eq!(
         count, 1,
-        "replayed counter must be 1 after one persisted Increment"
+        "a later reference must observe the one persisted Increment"
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: multiple asks advance sequence monotonically
-// ---------------------------------------------------------------------------
 
 /// Given three sequential ask(Increment) calls on the same process,
 /// When the counter state and stored events are inspected,
@@ -175,7 +171,9 @@ async fn e2e_persisted_event_survives_process_restart() {
 async fn e2e_multiple_asks_advance_sequence_monotonically() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("e2e-agg-multi");
     let proxy = system

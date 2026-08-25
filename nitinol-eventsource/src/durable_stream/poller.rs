@@ -121,7 +121,7 @@ where
         // hierarchy already guarantees the poller stops when the subscriber
         // stops — registering an explicit DeathWatch here would cause each
         // subscriber restart to accumulate a stale poller PID in the
-        // subscriber's watcher set (ARCH-REVIEW-006).
+        // subscriber's watcher set.
         //
         // Only register the watch when the poller was spawned as a top-level
         // process (subscriber is NOT the parent) so that it still self-stops
@@ -190,7 +190,7 @@ where
                 // handler completes successfully.  When the handler returns Err
                 // (e.g. Saga DLQ append failure), ask() propagates that error
                 // and the cursor stays at the same position — the upstream
-                // message is NOT treated as processed (G-27 state-consistency).
+                // message is NOT treated as processed (state consistency).
                 match proxy.ask(value).await {
                     Ok(_) => cursor.advance(observed),
                     Err(e) => {

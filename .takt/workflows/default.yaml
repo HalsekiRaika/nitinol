@@ -1,29 +1,16 @@
 name: default
 description: テスト先行開発ワークフロー（計画 → テスト作成 → draft（実装 + AI 自己レビュー） → peer-review（専門レビュー + merge-readiness + supervise） → COMPLETE）
-workflow_config:
-  provider_options:
-    codex:
-      network_access: true
-    opencode:
-      network_access: true
 max_steps: 30
 initial_step: plan
 steps:
   - name: plan
     tags:
       - plan
+      - route-provider-network
+      - route-claude-tools-read
     edit: false
     persona: planner
     knowledge: architecture
-    provider_options:
-      claude:
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Bash
-          - WebSearch
-          - WebFetch
     rules:
       - condition: 要件が明確で実装可能
         next: write_tests
@@ -40,30 +27,24 @@ steps:
       report:
         - name: plan.md
           format: plan
+    policy:
+      - report-phase-boundary
   - name: write_tests
     tags:
       - coding
       - test-planning
+      - route-provider-network
+      - route-claude-tools-edit
     edit: true
     persona: coder
     policy:
       - coding
       - testing
+      - report-phase-boundary
     knowledge:
       - architecture
       - unit-testing
       - e2e-testing
-    provider_options:
-      claude:
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     required_permission_mode: edit
     instruction: write-tests-first
     rules:

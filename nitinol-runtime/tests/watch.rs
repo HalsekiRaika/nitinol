@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 
 use std::future::Future;
@@ -76,12 +77,11 @@ fn faulty_target_props(
     started: Arc<AtomicBool>,
     strategy: SupervisionStrategy,
 ) -> Props<FaultyTarget> {
-    let props = Props::new(move || FaultyTarget {
+    Props::new(move || FaultyTarget {
         start_count: start_count.clone(),
         started: started.clone(),
-    });
-    let props = props.with_supervision_strategy(strategy);
-    props
+    })
+    .with_supervision_strategy(strategy)
 }
 
 /// Tell the watcher to stop watching the given PID.
@@ -148,7 +148,9 @@ async fn watch_live_process_receives_terminated_stopped_on_stop() {
 
     // Then: the watcher receives Terminated{who: target_pid, why: Stopped}
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::Stopped);
 }
@@ -187,7 +189,9 @@ async fn terminated_who_matches_stopped_process_pid() {
 
     // Then: Terminated.who == pid_a (not some other PID)
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(
         terminated.who, pid_a,
         "Terminated.who must be the stopped process PID"
@@ -223,7 +227,9 @@ async fn watch_already_stopped_process_receives_terminated_not_found() {
 
     // Then: the watcher receives Terminated{who: target_pid, why: NotFound}
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::NotFound);
 }
@@ -326,8 +332,12 @@ async fn multiple_watchers_all_receive_terminated() {
     wait_for_terminated(&received_a).await;
     wait_for_terminated(&received_b).await;
 
-    let t_a = received_a.lock().await.clone().unwrap();
-    let t_b = received_b.lock().await.clone().unwrap();
+    let t_a = received_a.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once watcher A stored it",
+    );
+    let t_b = received_b.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once watcher B stored it",
+    );
     assert_eq!(t_a.who, target_pid);
     assert_eq!(t_a.why, TerminatedReason::Stopped);
     assert_eq!(t_b.who, target_pid);
@@ -385,7 +395,9 @@ async fn restart_does_not_send_terminated_to_watchers() {
 
     // Then: Terminated{Stopped} is now received
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::Stopped);
 }
@@ -430,7 +442,9 @@ async fn rate_limit_stop_sends_terminated_to_watchers() {
 
     // Then: Terminated{Stopped} is delivered to the watcher
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::Stopped);
 }
@@ -486,7 +500,9 @@ async fn watch_persists_across_restart() {
 
     // Then: watch still active → Terminated{Stopped} arrives
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::Stopped);
 }
@@ -519,8 +535,11 @@ async fn terminated_is_clone() {
     // Given: a Terminated value (constructed directly for type-property testing)
     // We use the public constructor fields from the integration test below,
     // but here we just confirm Clone compiles — integration tests confirm field values.
-    let _ = TerminatedReason::Stopped.clone();
-    let _ = TerminatedReason::NotFound.clone();
+    // `Clone::clone` is called through UFCS rather than method syntax: the
+    // point of this test is to exercise the `Clone` impl itself, which method
+    // syntax would let `Copy` satisfy instead.
+    let _ = Clone::clone(&TerminatedReason::Stopped);
+    let _ = Clone::clone(&TerminatedReason::NotFound);
 }
 
 /// Poisoning a live process delivers Terminated{Poisoned} to its watcher
@@ -557,7 +576,9 @@ async fn watch_live_process_receives_terminated_poisoned_on_poison() {
 
     // Then: the watcher receives Terminated{who: target_pid, why: Poisoned}
     wait_for_terminated(&received).await;
-    let terminated = received.lock().await.clone().unwrap();
+    let terminated = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(terminated.who, target_pid);
     assert_eq!(terminated.why, TerminatedReason::Poisoned);
 
@@ -608,8 +629,10 @@ async fn terminated_reason_poisoned_is_copy() {
 /// TerminatedReason::Poisoned is Clone: clone produces an equal value.
 #[tokio::test]
 async fn terminated_reason_poisoned_is_clone() {
-    // Given / When: clone the Poisoned variant
-    let cloned = TerminatedReason::Poisoned.clone();
+    // Given / When: clone the Poisoned variant. `Clone::clone` is called
+    // through UFCS rather than method syntax so the `Clone` impl is the thing
+    // under test, not the `Copy` impl that method syntax would resolve to.
+    let cloned = Clone::clone(&TerminatedReason::Poisoned);
 
     // Then: the clone equals the original
     assert_eq!(cloned, TerminatedReason::Poisoned);

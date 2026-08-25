@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
 use nitinol_eventsource::AggregateProxy;
-use nitinol_saga::{Saga, SagaContext, SagaEffect};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
 
 use crate::inventory::{Inventory, Reserve};
 use crate::order::OrderPlaced;
@@ -18,13 +18,26 @@ pub struct ReservationSaga {
     pub inventory: AggregateProxy<Inventory>,
 }
 
+impl ReservationSaga {
+    /// This example runs one reservation process for every order, so its
+    /// correlation rule is the single definition point for that instance's
+    /// identity: `Saga::correlate` answers with it, and the spawn site names the
+    /// instance with it.
+    pub fn instance_id() -> SagaId {
+        SagaId::new("example-reservation-saga")
+    }
+}
+
 #[async_trait]
 impl Saga for ReservationSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(Self::instance_id())
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 

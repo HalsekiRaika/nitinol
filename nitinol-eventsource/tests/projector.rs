@@ -8,7 +8,9 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, Variant, ProjectionId};
+use nitinol_persistence::{
+    AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName, Variant,
+};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Clone)]
@@ -73,7 +75,9 @@ impl Projector<Counted> for TrackingProjector {
         _event: Counted,
         ctx: &mut ProjectionContext<'_, ()>,
     ) -> Result<(), Self::Error> {
-        *self.last_projection_id.lock().unwrap() = Some(ctx.projection_id().clone());
+        *self.last_projection_id.lock().expect(
+            "last_projection_id mutex is only locked by this projector and never poisoned",
+        ) = Some(ctx.projection_id().clone());
         self.last_sequence
             .store(ctx.current_sequence() as usize, Ordering::SeqCst);
         self.count.fetch_add(1, Ordering::SeqCst);
@@ -91,7 +95,9 @@ impl Projector<Labeled> for TrackingProjector {
         _event: Labeled,
         ctx: &mut ProjectionContext<'_, ()>,
     ) -> Result<(), Self::Error> {
-        *self.last_projection_id.lock().unwrap() = Some(ctx.projection_id().clone());
+        *self.last_projection_id.lock().expect(
+            "last_projection_id mutex is only locked by this projector and never poisoned",
+        ) = Some(ctx.projection_id().clone());
         self.last_sequence
             .store(ctx.current_sequence() as usize, Ordering::SeqCst);
         self.label_count.fetch_add(1, Ordering::SeqCst);
@@ -100,13 +106,18 @@ impl Projector<Labeled> for TrackingProjector {
     }
 }
 
-fn make_tracking_state() -> (
-    Arc<AtomicUsize>, // count (Counted)
-    Arc<AtomicUsize>, // label_count (Labeled)
+/// Shared observation handles wired into a [`TrackingProjector`], in order:
+/// `count` (Counted), `label_count` (Labeled), `notify`, `last_projection_id`,
+/// `last_sequence`.
+type TrackingState = (
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
     Arc<Notify>,
     Arc<Mutex<Option<ProjectionId>>>,
-    Arc<AtomicUsize>, // last_sequence
-) {
+    Arc<AtomicUsize>,
+);
+
+fn make_tracking_state() -> TrackingState {
     (
         Arc::new(AtomicUsize::new(0)),
         Arc::new(AtomicUsize::new(0)),
@@ -233,7 +244,10 @@ async fn projector_context_provides_correct_projection_id() {
 
     wait_for_count(&count, &notify, 1).await;
 
-    let seen = last_pid.lock().unwrap().clone();
+    let seen = last_pid
+        .lock()
+        .expect("last_projection_id mutex is not poisoned; the projector never panics")
+        .clone();
     assert_eq!(
         seen,
         Some(projection_id),

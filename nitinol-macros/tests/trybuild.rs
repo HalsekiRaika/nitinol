@@ -1,10 +1,11 @@
-//! Compile-success / compile-failure contract for `#[derive(Event)]`
-//! (`order.md` "テスト: trybuild によるコンパイル成否テスト").
+//! Compile-success / compile-failure contract for `#[derive(Event)]`,
+//! checked with `trybuild`.
 //!
 //! - `tests/ui/pass/*.rs`  — forms that must compile (struct, enum, data-bearing
-//!   enum, empty family, generics).
+//!   enum, empty family, generics, a family adjacent to the reserved namespace).
 //! - `tests/ui/fail/*.rs`  — forms that must be rejected with a `syn::Error`
-//!   (missing family attribute, non-string family, union target).
+//!   (missing family attribute, non-string family, union target, a family
+//!   inside the `nitinol` reserved namespace).
 //!
 //! Note for the implementation step: the `.stderr` snapshots under `tests/ui/fail`
 //! pin the *intended* diagnostic message. If the concrete `syn::Error` wording or

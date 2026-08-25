@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 
 use std::future::Future;
@@ -76,8 +77,7 @@ fn supervised_props(
         start_count: start_count.clone(),
         stop_count: stop_count.clone(),
     });
-    let props = props.with_supervision_strategy(strategy);
-    props
+    props.with_supervision_strategy(strategy)
 }
 
 /// Stop strategy: a handler failure causes the process to stop cleanly.
@@ -418,10 +418,9 @@ async fn failure_in_one_process_does_not_affect_sibling() {
     );
 }
 
-/// Post-spec: `SupervisionStrategy::restart(_, Duration::ZERO)` rejects the
-/// invalid window at the smart-constructor boundary via `ConfigError`. The
-/// pre-spec runtime `assert!` is gone, so the rejection is now a typed
-/// `Result` error (Issue #56).
+/// `SupervisionStrategy::restart(_, Duration::ZERO)` rejects the invalid
+/// window at the smart-constructor boundary via `ConfigError`. The former
+/// runtime `assert!` is gone, so the rejection is now a typed `Result` error.
 #[tokio::test]
 async fn restart_strategy_with_zero_within_returns_config_error() {
     let result = SupervisionStrategy::restart(3, Duration::ZERO);
@@ -576,7 +575,9 @@ async fn props_supervision_strategy_builder_is_chainable() {
         stop_count: st.clone(),
     });
     // Chain: with_supervision_strategy consumes self and returns Self
-    let result = props.with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(60)).expect("valid restart config"));
+    let result = props.with_supervision_strategy(
+        SupervisionStrategy::restart(3, Duration::from_secs(60)).expect("valid restart config"),
+    );
 
     // Then: builder returns Props (self-consuming; compiles and does not panic)
     let _ = result;

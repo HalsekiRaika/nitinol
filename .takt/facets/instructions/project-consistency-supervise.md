@@ -1,6 +1,13 @@
 01-project-consistency-plan.mdと02-project-consistency-audit.mdを独立に検証してください。
 コードや設定は変更しません。
 
+## Report Phaseとの境界
+
+- Workflow ContextのReport DirectoryはPhase 1では読み取り専用です。
+- `03-project-consistency-supervision.md`を直接作成、変更、移動、削除しないでください。
+- 監督結果はPhase 1の最終回答として返してください。
+- ファイル保存はWorkflowの`output_contracts`とTAKTのReport Phaseが担当します。
+
 確認項目:
 
 1. Audit StandardのRevisionと固定Criteria IDが保持され、適用対象へ正しく割り当てられているか。

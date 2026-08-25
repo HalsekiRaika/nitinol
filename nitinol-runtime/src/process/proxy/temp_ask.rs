@@ -11,6 +11,12 @@ use crate::process::registry::ProcessRegistry;
 use crate::process::spawn::SpawnEnv;
 use crate::process::{Process, ProcessContext, Receive};
 
+/// Single-use handoff of the caller's `ask` receiver into the temp process.
+type ReplyInSlot<R, E> = Mutex<Option<oneshot::Receiver<Result<R, E>>>>;
+
+/// Single-use handoff of the caller's reply sender into the temp process.
+type ReplyOutSlot<R, E> = Mutex<Option<oneshot::Sender<Result<R, AskError<E>>>>>;
+
 pub(crate) struct ReplyArrived<R, E> {
     payload: Mutex<Option<Result<R, E>>>,
 }
@@ -23,7 +29,10 @@ impl<R, E> ReplyArrived<R, E> {
     }
 
     fn take(&self) -> Option<Result<R, E>> {
-        self.payload.lock().unwrap().take()
+        self.payload
+            .lock()
+            .expect("reply payload lock was poisoned by a panicking holder")
+            .take()
     }
 }
 
@@ -108,17 +117,20 @@ pub(crate) async fn spawn_temp_ask<R, E>(
     R: 'static + Send,
     E: 'static + Send + Sync + std::error::Error,
 {
-    let in_rx_slot: Mutex<Option<oneshot::Receiver<Result<R, E>>>> = Mutex::new(Some(in_rx));
-    let out_tx_slot: Mutex<Option<oneshot::Sender<Result<R, AskError<E>>>>> =
-        Mutex::new(Some(out_tx));
+    let in_rx_slot: ReplyInSlot<R, E> = Mutex::new(Some(in_rx));
+    let out_tx_slot: ReplyOutSlot<R, E> = Mutex::new(Some(out_tx));
     let producer = move || TempAskProcess {
-        out_tx: out_tx_slot.lock().unwrap().take(),
-        in_rx: in_rx_slot.lock().unwrap().take(),
+        out_tx: out_tx_slot
+            .lock()
+            .expect("reply sender slot lock was poisoned by a panicking holder")
+            .take(),
+        in_rx: in_rx_slot
+            .lock()
+            .expect("reply receiver slot lock was poisoned by a panicking holder")
+            .take(),
         destination,
     };
     let props: Props<TempAskProcess<R, E>> =
         Props::new(producer).with_idle_timeout(IdleTimeout::After(duration));
-    let _ = SpawnEnv::detached(registry, dead_letter)
-        .spawn(props)
-        .await;
+    let _ = SpawnEnv::detached(registry, dead_letter).spawn(props).await;
 }

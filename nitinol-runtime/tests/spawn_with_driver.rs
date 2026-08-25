@@ -1,8 +1,8 @@
-//! Driver-backed spawn tests, migrated to the Issue #56 unified entry and
-//! the Issue #57 single-slot `with_driver` API.
+//! Driver-backed spawn tests, migrated to the unified spawn entry and the
+//! single-slot `with_driver` API.
 //!
-//! Pre-spec: `spawn_with_driver` / `spawn_named_with_driver` replaced the
-//! mailbox driver entirely, so `tell` was unreachable. Post-spec, the Core
+//! Previously, `spawn_with_driver` / `spawn_named_with_driver` replaced the
+//! mailbox driver entirely, so `tell` was unreachable. Now the Core
 //! `MessageDriver` is always composed and `with_driver` installs a single
 //! user driver on top — the same fixtures here exercise the composed shape.
 
@@ -111,16 +111,20 @@ async fn spawn_with_driver_returns_proxies_with_unique_pids() {
     let (_tx_b, rx_b) = mpsc::channel::<()>(4);
 
     let proxy_a = system
-        .spawn(tick_props(ticks_a, started_a, stopped_a).with_driver(ChannelDriver {
-            rx: rx_a,
-            supports_idle: true,
-        }))
+        .spawn(
+            tick_props(ticks_a, started_a, stopped_a).with_driver(ChannelDriver {
+                rx: rx_a,
+                supports_idle: true,
+            }),
+        )
         .await;
     let proxy_b = system
-        .spawn(tick_props(ticks_b, started_b, stopped_b).with_driver(ChannelDriver {
-            rx: rx_b,
-            supports_idle: true,
-        }))
+        .spawn(
+            tick_props(ticks_b, started_b, stopped_b).with_driver(ChannelDriver {
+                rx: rx_b,
+                supports_idle: true,
+            }),
+        )
         .await;
 
     assert_ne!(
@@ -314,7 +318,7 @@ impl Driver<TellableProcess> for NeverDriver {
     }
 }
 
-/// Post-spec contract: under the unified entry, `with_driver` LAYERS the
+/// Contract: under the unified entry, `with_driver` LAYERS the
 /// custom driver on top of the always-composed Core `MessageDriver`, so a
 /// `tell` to a process whose only custom driver pends forever still
 /// succeeds — the mailbox is alive.
@@ -332,4 +336,3 @@ async fn spawn_with_added_driver_keeps_message_driver_alive_for_tell() {
          the only custom driver pends forever"
     );
 }
-

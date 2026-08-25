@@ -1,5 +1,12 @@
 {extends:write-tests-first}
 
+## Report Phaseとの境界
+
+- Workflow ContextのReport DirectoryはPhase 1では読み取り専用です。
+- `test-report.md`をWrite、Edit、Bash、その他のツールで直接作成、変更、移動、削除しないでください。
+- 親Instructionにあるテストレポートの「作成」「出力」は、Phase 1の最終回答へテスト結果と実装stepへの申し送りを含める意味です。
+- `test-report.md`の保存は、Workflowの`output_contracts`とTAKTのReport Phaseが担当します。
+
 ## Rust固有のテスト作成手順
 
 1. 計画レポート、対象crateのmanifest、既存テストを確認する。
@@ -12,6 +19,6 @@
 4. async testでは固定sleepの延長を使わず、既存の決定的な同期方法を使う。
 5. focused testを実行し、Redの原因が未実装要件であることを確認する。
    import、fixture、feature指定、テストlogicの誤りはこのstepで解消する。
-6. 未実装APIによりコンパイル不能なら、計画上のsignatureと解消条件を報告する。
+6. 未実装APIによりコンパイル不能なら、計画上のsignatureと解消条件をPhase 1の最終回答で報告する。
 
 プロダクションコードを変更してGreenにしてはいけません。

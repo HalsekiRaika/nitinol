@@ -14,14 +14,15 @@ use nitinol_eventsource::{
 use nitinol_persistence::store::{
     CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName, ProjectionId};
+use nitinol_persistence::{AggregateId, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.proj"), TypeName::new("Incremented"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("e2e.proj"), TypeName::new("Incremented"));
 }
 
 #[derive(Default)]
@@ -125,7 +126,9 @@ async fn wait_for_checkpoint(
 #[tokio::test]
 async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let id = AggregateId::new("e2e-proj-catchup-agg");
@@ -165,7 +168,9 @@ async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
 #[tokio::test]
 async fn e2e_live_projection_sees_published_event_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("e2e-proj-live-agg");
@@ -205,7 +210,9 @@ async fn e2e_live_projection_sees_published_event_envelope() {
 #[tokio::test]
 async fn e2e_at_most_once_delivery_advances_checkpoint_before_project() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let id = AggregateId::new("e2e-proj-amo-agg");

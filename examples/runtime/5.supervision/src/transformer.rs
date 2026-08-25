@@ -63,6 +63,12 @@ impl DataTransformer {
     }
 }
 
+impl Default for DataTransformer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Process for DataTransformer {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         let pid = ctx.pid();

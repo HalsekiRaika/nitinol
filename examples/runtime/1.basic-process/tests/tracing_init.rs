@@ -1,10 +1,10 @@
 //! Tests for the `init_tracing()` pattern introduced by the println→tracing migration.
 //!
 //! These tests verify the two requirements stated in the plan:
-//! - R3-1: `EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))`
-//!          produces a valid filter without panicking when `RUST_LOG` is absent.
-//! - R4-2 (non-console path): `registry().with(fmt::layer()).with(env_filter)` composes
-//!          successfully — the same assembly used inside `init_tracing()`.
+//! - `EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))`
+//!   produces a valid filter without panicking when `RUST_LOG` is absent.
+//! - Non-console path: `registry().with(fmt::layer()).with(env_filter)` composes
+//!   successfully — the same assembly used inside `init_tracing()`.
 //!
 //! Note: `.init()` is intentionally NOT called here.  Calling `.init()` sets a
 //! process-global tracing subscriber; doing so inside a test binary would cause
@@ -50,7 +50,9 @@ fn env_filter_honours_rust_log_when_set() {
 
     // Restore original state before any assertions that could panic
     match original {
+        // SAFETY: single-threaded restore of the value this test overwrote.
         Some(v) => unsafe { std::env::set_var("RUST_LOG", v) },
+        // SAFETY: single-threaded restore of the absent-variable state.
         None => unsafe { std::env::remove_var("RUST_LOG") },
     }
 

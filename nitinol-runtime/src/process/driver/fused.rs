@@ -12,7 +12,7 @@ use crate::process::{Process, ProcessContext};
 /// exhausted, `FusedDriver` absorbs the `None` so the Core trio
 /// (`MessageDriver` + `PipeDriver` + `StashDriver`) keeps the process alive.
 ///
-/// This preserves the pre-#57 `DynDriverSet` contract: exhausting a
+/// This preserves the driver-set contract: exhausting a
 /// user-supplied driver is a non-fatal event. The process continues to handle
 /// messages, pipe events, and stash operations until an explicit `Stop` or
 /// `Poison` signal arrives.

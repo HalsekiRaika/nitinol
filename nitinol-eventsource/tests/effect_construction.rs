@@ -1,3 +1,4 @@
+#[path = "common/helpers.rs"]
 mod common;
 use common::{shape_of, Shape, TestMsg, TestProcess};
 use nitinol_eventsource::Effect;
@@ -5,9 +6,7 @@ use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::Props;
 use nitinol_runtime::{BoxedMessage, ProcessSystem};
 
-// ---------------------------------------------------------------------------
 // Construction: empty()
-// ---------------------------------------------------------------------------
 
 /// empty() returns the None variant
 #[test]
@@ -22,9 +21,7 @@ fn empty_returns_none_variant() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Construction: persist()
-// ---------------------------------------------------------------------------
 
 /// persist(e) wraps a single event in the Persist variant with a one-element vec
 #[test]
@@ -43,9 +40,7 @@ fn persist_wraps_single_event_in_persist_variant() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Construction: persist_all()
-// ---------------------------------------------------------------------------
 
 /// persist_all(events) wraps multiple events verbatim in the Persist variant
 #[test]
@@ -78,9 +73,7 @@ fn persist_all_with_empty_vec_returns_persist_with_no_events() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Construction: apply_only()
-// ---------------------------------------------------------------------------
 
 /// apply_only(e) wraps a single event in the Apply variant
 #[test]
@@ -99,9 +92,7 @@ fn apply_only_wraps_single_event_in_apply_variant() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Construction: tell()
-// ---------------------------------------------------------------------------
 
 /// tell(proxy, msg) returns the Side variant; type-safety enforced at compile time
 /// via P: Process + Receive<M>
@@ -121,9 +112,7 @@ async fn tell_returns_side_variant() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Construction: publish()
-// ---------------------------------------------------------------------------
 
 /// publish(stream, msg) returns the Side variant
 #[tokio::test]
@@ -131,7 +120,9 @@ async fn publish_returns_side_variant() {
     // Given: a running process system with a BoxedMessage stream
     let system = ProcessSystem::new().await;
     let stream = system
-        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(ProcessName::new("effect-test-publish")))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(
+            ProcessName::new("effect-test-publish"),
+        ))
         .await
         .expect("spawn_stream should succeed");
 

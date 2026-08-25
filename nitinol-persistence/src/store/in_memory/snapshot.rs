@@ -23,7 +23,10 @@ impl Default for InMemorySnapshotStore {
 #[async_trait]
 impl SnapshotStore for InMemorySnapshotStore {
     async fn save(&self, snapshot: PersistedSnapshot) -> Result<(), SnapshotError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self
+            .state
+            .lock()
+            .expect("in-memory snapshot state lock was poisoned by a panicking holder");
         state.insert(snapshot.aggregate_id.clone(), snapshot);
         Ok(())
     }
@@ -32,7 +35,10 @@ impl SnapshotStore for InMemorySnapshotStore {
         &self,
         aggregate_id: &AggregateId,
     ) -> Result<Option<PersistedSnapshot>, SnapshotError> {
-        let state = self.state.lock().unwrap();
+        let state = self
+            .state
+            .lock()
+            .expect("in-memory snapshot state lock was poisoned by a panicking holder");
         Ok(state.get(aggregate_id).cloned())
     }
 }

@@ -30,20 +30,17 @@ use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Stream};
 use nitinol_runtime::{BoxedMessage, ProcessSystem, Props};
 
-// ---------------------------------------------------------------------------
 // Fixtures: event
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.comm"), TypeName::new("Incremented"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("e2e.comm"), TypeName::new("Incremented"));
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: Counter aggregate (shared for both "A" and "B" roles in tests)
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Counter {
@@ -58,9 +55,7 @@ impl Aggregate for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: commands
-// ---------------------------------------------------------------------------
 
 struct Increment;
 struct GetCount;
@@ -79,9 +74,7 @@ struct PublishNotification {
     stream: ProcessProxy<Stream<BoxedMessage>>,
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: Decider implementations on Counter
-// ---------------------------------------------------------------------------
 
 #[async_trait]
 impl Decider<Increment> for Counter {
@@ -154,9 +147,7 @@ impl Decider<PublishNotification> for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: SideEffect implementations
-// ---------------------------------------------------------------------------
 
 /// Calls `target.tell(Increment)` then notifies `done_notify` that the effect fired.
 struct TellTargetEffect {
@@ -190,9 +181,7 @@ impl SideEffect for AlwaysFailSideEffect {
 #[derive(Clone)]
 struct Notification;
 
-// ---------------------------------------------------------------------------
 // Fixtures: JsonCodec
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct JsonCodec;
@@ -209,9 +198,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: NotificationSubscriber — receives BoxedMessage from a stream
-// ---------------------------------------------------------------------------
 
 struct NotificationSubscriber {
     count: Arc<AtomicUsize>,
@@ -237,9 +224,7 @@ impl Receive<BoxedMessage> for NotificationSubscriber {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helper: spawn a Counter aggregate on a fresh InMemoryEventStore
-// ---------------------------------------------------------------------------
 
 async fn spawn_counter(system: &EventSourceSystem<JsonCodec>, id: &str) -> AggregateProxy<Counter> {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -248,9 +233,7 @@ async fn spawn_counter(system: &EventSourceSystem<JsonCodec>, id: &str) -> Aggre
         .await
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: tell side effect from decide() reaches the target aggregate
-// ---------------------------------------------------------------------------
 
 /// Given Aggregate A's decide(DelegateToB) returns Effect::Side(TellTargetEffect),
 /// When proxy_a.ask(DelegateToB { target: proxy_b, ... }) is called,
@@ -262,7 +245,9 @@ async fn spawn_counter(system: &EventSourceSystem<JsonCodec>, id: &str) -> Aggre
 async fn e2e_tell_side_effect_from_decide_reaches_target_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let proxy_a = spawn_counter(&system, "e2e-comm-tell-a").await;
     let proxy_b = spawn_counter(&system, "e2e-comm-tell-b").await;
     let done = Arc::new(Notify::new());
@@ -296,9 +281,7 @@ async fn e2e_tell_side_effect_from_decide_reaches_target_aggregate() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 2: side effect failure is NOT propagated to the ask() caller
-// ---------------------------------------------------------------------------
 
 /// Given Aggregate A's decide(TriggerFailingSide) returns a Side effect that always fails,
 /// When proxy_a.ask(TriggerFailingSide) is called,
@@ -308,7 +291,9 @@ async fn e2e_tell_side_effect_from_decide_reaches_target_aggregate() {
 async fn e2e_side_effect_failure_not_propagated_to_ask_caller() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let proxy_a = spawn_counter(&system, "e2e-comm-fail").await;
 
     // When
@@ -320,16 +305,14 @@ async fn e2e_side_effect_failure_not_propagated_to_ask_caller() {
         "ask() must succeed when the Side effect fails (fire-and-forget); got {:?}",
         result.err()
     );
-    let events = result.unwrap();
+    let events = result.expect("result is Ok, as asserted immediately above");
     assert!(
         events.is_empty(),
         "TriggerFailingSide must return no persisted events"
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: publish side effect from decide() reaches a stream subscriber
-// ---------------------------------------------------------------------------
 
 /// Given a NotificationSubscriber process subscribed to a BoxedMessage stream,
 /// and an Aggregate A whose decide(PublishNotification) returns Effect::publish,
@@ -339,13 +322,17 @@ async fn e2e_side_effect_failure_not_propagated_to_ask_caller() {
 async fn e2e_publish_side_effect_from_decide_reaches_stream_subscriber() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
     let proxy_a = spawn_counter(&system, "e2e-comm-pub").await;
 
     // Spawn the BoxedMessage stream
     let stream = system
         .process_system()
-        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(ProcessName::new("e2e-comm-pub-stream")))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(
+            ProcessName::new("e2e-comm-pub-stream"),
+        ))
         .await
         .expect("spawn_stream must succeed");
 

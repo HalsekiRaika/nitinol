@@ -3,14 +3,21 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use futures_core::future::BoxFuture;
+use nitinol_persistence::AggregateId;
 
 use crate::aggregate::Aggregate;
 use crate::decider::Decider;
 use crate::error::TellError;
 use crate::process::AggregateTellTarget;
 
+/// The stream key the mock names as its target aggregate.  Fixed and
+/// non-empty, so an intent built over the mock satisfies consumers that
+/// require a target they could report a failure against.
+const MOCK_AGGREGATE_ID: &str = "mock-aggregate-target";
+
 pub struct MockAggregateProxy<A: Aggregate> {
     captured: Arc<Mutex<Vec<Box<dyn Any + Send>>>>,
+    aggregate_id: AggregateId,
     _phantom: PhantomData<fn() -> A>,
 }
 
@@ -18,6 +25,7 @@ impl<A: Aggregate> MockAggregateProxy<A> {
     pub fn new() -> Self {
         Self {
             captured: Arc::new(Mutex::new(Vec::new())),
+            aggregate_id: AggregateId::new(MOCK_AGGREGATE_ID),
             _phantom: PhantomData,
         }
     }
@@ -65,6 +73,7 @@ impl<A: Aggregate> Clone for MockAggregateProxy<A> {
     fn clone(&self) -> Self {
         Self {
             captured: Arc::clone(&self.captured),
+            aggregate_id: self.aggregate_id.clone(),
             _phantom: PhantomData,
         }
     }
@@ -79,7 +88,7 @@ impl<A: Aggregate> AggregateTellTarget<A> for MockAggregateProxy<A> {
         Box::pin(MockAggregateProxy::tell(self, cmd))
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        "mock-aggregate-target"
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.aggregate_id
     }
 }

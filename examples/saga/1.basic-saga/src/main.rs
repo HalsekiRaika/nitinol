@@ -4,16 +4,15 @@ use std::time::Duration;
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::SequenceCursor;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaId, SagaProps};
+use nitinol_saga::SagaDefaultStoreExt;
 
 use saga_basic_saga::codec::JsonCodec;
 use saga_basic_saga::inventory::{GetReservedCount, Inventory};
-use saga_basic_saga::order::{Order, OrderPlaced, PlaceOrder};
-use saga_basic_saga::saga::{ReservationRequested, ReservationSaga};
+use saga_basic_saga::order::{Order, PlaceOrder};
+use saga_basic_saga::saga::ReservationSaga;
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -29,40 +28,32 @@ async fn main() {
     init_tracing();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
-    let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // One store for the whole example.  `EventStore` is stream-keyed, so the
+    // order's stream, the inventory's stream and the saga's own journal are
+    // tenants of this one instance, each under its own key — which is what lets
+    // the system hand it to every spawn below.
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(store)
+        .build();
+
     let order_id = AggregateId::new("example-order");
-    let order_proxy = system
-        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&order_store))
-        .await;
+    let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
-    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory_proxy = system
-        .spawn_aggregate::<Inventory>(AggregateId::new("example-inventory"), inventory_store)
+        .spawn_aggregate::<Inventory>(AggregateId::new("example-inventory"))
         .await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("example-reservation-saga");
 
     let inventory_for_producer = inventory_proxy.clone();
-    let route_target = saga_id.clone();
 
-    let _saga_proxy =
-        SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || ReservationSaga {
+    let _saga_proxy = system
+        .spawn_saga(ReservationSaga::instance_id(), move || ReservationSaga {
             inventory: inventory_for_producer.clone(),
         })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&order_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-            move |_event: &OrderPlaced| Some(route_target.clone()),
-        )
-        .spawn(system.process_system())
+        .subscribed_to(system.subscription(&order_id))
+        .spawn()
         .await;
 
     order_proxy

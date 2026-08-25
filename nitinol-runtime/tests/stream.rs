@@ -129,7 +129,9 @@ async fn spawn_stream_returns_valid_proxy() {
     let topic = ProcessName::new("ss-valid");
 
     // When: a Boxed stream is spawned for the topic
-    let result = system.spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic)).await;
+    let result = system
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
+        .await;
 
     // Then: a proxy is returned successfully
     assert!(result.is_ok());
@@ -141,12 +143,16 @@ async fn spawn_stream_duplicate_topic_returns_error() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("ss-dup");
     system
-        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic.clone()))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(
+            topic.clone(),
+        ))
         .await
         .expect("first spawn_stream should succeed");
 
     // When: a second stream is spawned with the same topic
-    let result = system.spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic)).await;
+    let result = system
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic))
+        .await;
 
     // Then: an error is returned (uniqueness constraint violated)
     assert!(result.is_err());
@@ -160,8 +166,12 @@ async fn spawn_stream_different_topics_both_succeed() {
     let topic_b = ProcessName::new("ss-diff-b");
 
     // When: two streams are spawned with different topics
-    let result_a = system.spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic_a)).await;
-    let result_b = system.spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic_b)).await;
+    let result_a = system
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic_a))
+        .await;
+    let result_b = system
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic_b))
+        .await;
 
     // Then: both succeed
     assert!(result_a.is_ok());
@@ -288,7 +298,9 @@ async fn stream_lookup_by_name_finds_stream() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-stream");
     let _stream = system
-        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic.clone()))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(
+            topic.clone(),
+        ))
         .await
         .expect("spawn_stream should succeed");
 
@@ -318,7 +330,9 @@ async fn stream_any_proxy_downcasts_to_stream_proxy() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-cast");
     let _stream = system
-        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic.clone()))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(
+            topic.clone(),
+        ))
         .await
         .expect("spawn_stream should succeed");
 
@@ -340,7 +354,9 @@ async fn stream_downcast_proxy_can_publish() {
     let system = ProcessSystem::new().await;
     let topic = ProcessName::new("lookup-pub");
     let _stream = system
-        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(topic.clone()))
+        .spawn(nitinol_runtime::StreamProps::<BoxedMessage>::new(
+            topic.clone(),
+        ))
         .await
         .expect("spawn_stream should succeed");
 
@@ -368,7 +384,7 @@ async fn stream_downcast_proxy_can_publish() {
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
-/// Re-prevention: public-api-leak (ARCH-01)
+/// Re-prevention: public API leak.
 ///
 /// This test verifies that the subscriber workflow is fully usable through
 /// crate-level imports only (`Subscriber`, `Props::subscriber`), without
@@ -412,7 +428,7 @@ async fn public_api_does_not_require_subscriber_process_type() {
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
-/// Re-prevention: dead-code (ARCH-02)
+/// Re-prevention: dead code.
 ///
 /// Verifies that `Subscriber<T>::recv` is a required method (no default impl),
 /// so `#[allow(unused_variables)]` on the trait is unnecessary.
@@ -666,8 +682,7 @@ fn faulty_receiving_props(
         start_count: start_count.clone(),
         fail_next: fail_next.clone(),
     });
-    let props = props.with_supervision_strategy(strategy);
-    props
+    props.with_supervision_strategy(strategy)
 }
 
 /// Polls a flag until it becomes true, with a 5-second timeout.

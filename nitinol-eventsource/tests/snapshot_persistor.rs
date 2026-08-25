@@ -15,9 +15,7 @@ use nitinol_persistence::store::InMemorySnapshotStore;
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Test helpers
-// ---------------------------------------------------------------------------
 
 /// Spawns a fresh ProcessSystem with an InMemorySnapshotStore-backed SnapshotPersistor.
 async fn setup() -> (ProcessSystem, SnapshotPersistorProxy) {
@@ -36,9 +34,7 @@ fn make_snapshot(aggregate_id: &AggregateId, sequence: u64, value: u64) -> Persi
     }
 }
 
-// ---------------------------------------------------------------------------
 // SaveSnapshot + LoadLatestSnapshot: 正常系
-// ---------------------------------------------------------------------------
 
 /// SaveSnapshot 後に LoadLatestSnapshot で同じスナップショットが取得できる。
 #[tokio::test]
@@ -71,9 +67,7 @@ async fn snapshot_persistor_save_and_load_latest() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // LoadLatestSnapshot: スナップショットが存在しない場合は None
-// ---------------------------------------------------------------------------
 
 /// スナップショットを保存していない aggregate_id に対して
 /// LoadLatestSnapshot は None を返す。
@@ -95,9 +89,7 @@ async fn snapshot_persistor_load_when_no_snapshot_returns_none() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // LoadLatestSnapshot: 複数回保存後は最大シーケンスを返す
-// ---------------------------------------------------------------------------
 
 /// sequence=3 と sequence=5 を保存した後、
 /// LoadLatestSnapshot は sequence=5 を返す。
@@ -134,9 +126,7 @@ async fn snapshot_persistor_load_latest_returns_highest_sequence() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // LoadLatestSnapshot: 異なる aggregate_id のスナップショットが混在しない
-// ---------------------------------------------------------------------------
 
 /// 2 つの aggregate_id に保存したスナップショットは互いに独立している。
 #[tokio::test]
@@ -181,9 +171,7 @@ async fn snapshot_persistor_load_isolates_by_aggregate_id() {
     assert_eq!(snap_b.sequence, 4, "id_b snapshot must have sequence=4");
 }
 
-// ---------------------------------------------------------------------------
 // SaveSnapshot: 上書き後に load_latest が最新を返す
-// ---------------------------------------------------------------------------
 
 /// 同じ aggregate_id に対して sequence を増やして上書き保存すると、
 /// 次の LoadLatestSnapshot は新しい値を返す。

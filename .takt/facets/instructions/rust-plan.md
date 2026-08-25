@@ -1,5 +1,12 @@
 {extends:plan}
 
+## Report Phaseとの境界
+
+- Workflow ContextのReport DirectoryはPhase 1では読み取り専用です。
+- `plan.md`などのoutput contract対象ファイルを直接作成、変更、移動、削除しないでください。
+- 親Instructionにある計画の「作成」「出力」は、Phase 1の最終回答として計画内容を返す意味です。
+- レポートファイルの保存は、Workflowの`output_contracts`とTAKTのReport Phaseが担当します。
+
 ## Rust固有の計画手順
 
 1. 対象workspaceとcrateを確定する。

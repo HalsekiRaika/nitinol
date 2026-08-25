@@ -17,9 +17,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::codec::{Codec, ErasedCodec};
 use nitinol_eventsource::error::CodecError;
 
-// ---------------------------------------------------------------------------
 // Fixtures: test event type
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 struct MyEvent {
@@ -27,9 +25,7 @@ struct MyEvent {
     name: String,
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: JsonCodec — serde_json-backed Codec<E>
-// ---------------------------------------------------------------------------
 
 /// Codec that uses serde_json for serialisation.
 /// Works for any E that implements Serialize + DeserializeOwned.
@@ -48,9 +44,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: AlwaysFailCodec — produces errors on every call
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct AlwaysFailCodec;
@@ -71,15 +65,11 @@ impl Codec<MyEvent> for AlwaysFailCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helper: type-level assertion that a value is Arc<dyn ErasedCodec<E>>
-// ---------------------------------------------------------------------------
 
 fn assert_erased_codec<E: Send + Sync + 'static>(_: &Arc<dyn ErasedCodec<E>>) {}
 
-// ---------------------------------------------------------------------------
 // Codec<E>: associated functions compile and return the correct types
-// ---------------------------------------------------------------------------
 
 /// Codec::encode returns Ok(Bytes) for a valid event.
 #[test]
@@ -122,9 +112,7 @@ fn codec_decode_returns_ok_for_payload_from_encode() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Codec<E>: encode → decode roundtrip
-// ---------------------------------------------------------------------------
 
 /// encode followed by decode yields a value equal to the original.
 #[test]
@@ -168,9 +156,7 @@ fn codec_roundtrip_zero_value_event_preserved() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // blanket impl: Codec<E> → ErasedCodec<E>
-// ---------------------------------------------------------------------------
 
 /// Arc::new(JsonCodec) can be coerced to Arc<dyn ErasedCodec<MyEvent>>
 /// via the blanket impl.
@@ -202,7 +188,9 @@ fn erased_codec_encode_via_blanket_impl_succeeds() {
         "ErasedCodec encode must succeed via blanket impl"
     );
     assert!(
-        !result.unwrap().is_empty(),
+        !result
+            .expect("result is Ok, as asserted immediately above")
+            .is_empty(),
         "encoded bytes must not be empty for a non-trivial event"
     );
 }
@@ -232,9 +220,7 @@ fn erased_codec_roundtrip_via_blanket_impl_preserves_value() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // CodecError: error variant wrapping
-// ---------------------------------------------------------------------------
 
 /// Decode with an invalid JSON payload produces CodecError::Decode.
 #[test]
@@ -310,9 +296,7 @@ fn erased_codec_decode_failure_produces_codec_error_decode_custom() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // CodecError: implements std::error::Error
-// ---------------------------------------------------------------------------
 
 /// CodecError::Encode implements std::error::Error (Display + Debug + Send + Sync).
 #[test]

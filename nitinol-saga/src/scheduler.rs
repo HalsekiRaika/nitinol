@@ -1,4 +1,4 @@
-//! DeadlineScheduler subsystem (Issue #50): the resident timer core, its
+//! DeadlineScheduler subsystem: the resident timer core, its
 //! per-saga `Timers` view, the identity types, and the persisted
 //! `ScheduleEvent`.
 

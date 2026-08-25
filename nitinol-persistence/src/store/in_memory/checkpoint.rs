@@ -24,7 +24,10 @@ impl CheckpointStore for InMemoryCheckpointStore {
     type Tx = ();
 
     async fn load(&self, projection_id: &ProjectionId) -> Result<Option<u64>, CheckpointError> {
-        let state = self.state.lock().unwrap();
+        let state = self
+            .state
+            .lock()
+            .expect("in-memory checkpoint state lock was poisoned by a panicking holder");
         Ok(state.get(projection_id).copied())
     }
 
@@ -34,7 +37,10 @@ impl CheckpointStore for InMemoryCheckpointStore {
         sequence: u64,
         _tx: Option<&mut Self::Tx>,
     ) -> Result<(), CheckpointError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self
+            .state
+            .lock()
+            .expect("in-memory checkpoint state lock was poisoned by a panicking holder");
         state.insert(projection_id.clone(), sequence);
         Ok(())
     }

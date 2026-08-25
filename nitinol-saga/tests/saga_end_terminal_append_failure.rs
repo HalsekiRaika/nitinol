@@ -1,5 +1,5 @@
-//! Regression test for AI-52-010: when the outbox executor's terminal-marker
-//! append fails, a saga that returned `then_end()` must still stop.
+//! Regression test: when the outbox executor's terminal-marker append fails,
+//! a saga that returned `then_end()` must still stop.
 //!
 //! Without the fix the deferred-stop condition was only triggered when the
 //! terminal append succeeded.  A store failure left the saga stuck in
@@ -17,6 +17,7 @@
 //! The test verifies: after `tell(...).then_end()` where every terminal append
 //! fails, the saga process stops and no further upstream events are processed.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::JsonCodec;
 
@@ -41,9 +42,7 @@ use nitinol_persistence::{
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
-// ---------------------------------------------------------------------------
 // Domain types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UpstreamTrigger {
@@ -67,9 +66,7 @@ impl Event for SagaMarker {
         EventType::new(Family::new("term_append_fail"), TypeName::new("SagaMarker"));
 }
 
-// ---------------------------------------------------------------------------
 // Target aggregate
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct TargetAgg;
@@ -96,9 +93,7 @@ impl Decider<TargetCmd> for TargetAgg {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Saga: issues a tell then calls End on the first upstream event
-// ---------------------------------------------------------------------------
 
 struct TellThenEndSaga {
     target: AggregateProxy<TargetAgg>,
@@ -108,13 +103,21 @@ struct TellThenEndSaga {
     handled_first: Arc<Notify>,
 }
 
+/// Correlation rule of [`TellThenEndSaga`]: both upstream events name this
+/// instance, so the second one being dropped can only be the stop taking
+/// effect — never a correlation mismatch.
+const TELL_THEN_END_SAGA_ID: &str = "term-fail-saga";
+
 #[async_trait]
 impl Saga for TellThenEndSaga {
     type SubscribedEvent = UpstreamTrigger;
     type Event = SagaMarker;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(TELL_THEN_END_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: SagaMarker) {}
 
@@ -123,7 +126,9 @@ impl Saga for TellThenEndSaga {
         event: UpstreamTrigger,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaMarker>, Self::Error> {
-        *self.handle_count.lock().unwrap() += 1;
+        *self.handle_count.lock().expect(
+            "handle_count mutex is never poisoned: no holder panics while the guard is alive",
+        ) += 1;
         self.handled_first.notify_one();
         // Tell the target and immediately end.  The terminal append for the
         // TellRequested outbox marker will fail (injected via the saga store).
@@ -131,14 +136,12 @@ impl Saga for TellThenEndSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Saga store that allows the first two appends to succeed:
 //   attempt 0 — the atomic Persist batch (TellRequested marker)
 //   attempt 1 — the durable Ended marker written by the End interpreter
 // All subsequent appends (TellAcked / TellFailed terminal markers) fail.
 // This lets the saga reach Draining normally; the test then verifies it
 // stops even though the terminal-marker appends fail.
-// ---------------------------------------------------------------------------
 
 struct TwoSuccessStore {
     append_count: AtomicUsize,
@@ -179,9 +182,7 @@ impl EventStore for TwoSuccessStore {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_upstream(store: &Arc<dyn EventStore>, agg_id: &AggregateId, seq: u64, key: &str) {
     let payload = serde_json::to_vec(&UpstreamTrigger {
@@ -203,16 +204,16 @@ async fn append_upstream(store: &Arc<dyn EventStore>, agg_id: &AggregateId, seq:
         .expect("append UpstreamTrigger");
 }
 
-// ---------------------------------------------------------------------------
 // Test
-// ---------------------------------------------------------------------------
 
 /// After `tell(...).then_end()` where every terminal-marker append fails, the
 /// saga must still stop and must not process any subsequent upstream events.
 #[tokio::test]
 async fn saga_stops_after_end_even_when_terminal_append_fails() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("term-fail-agg");
@@ -223,7 +224,7 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
         .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(TwoSuccessStore::new());
-    let saga_id = SagaId::new("term-fail-saga");
+    let saga_id = SagaId::new(TELL_THEN_END_SAGA_ID);
 
     let handle_count: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let handled_first = Arc::new(Notify::new());
@@ -231,7 +232,6 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_first_clone = Arc::clone(&handled_first);
     let target_proxy_clone = target_proxy.clone();
-    let routed = saga_id.clone();
 
     let _saga_proxy =
         SagaProps::<TellThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -249,7 +249,6 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
                 key: agg_id.as_str().to_owned(),
                 after: 0,
             },
-            move |_: &UpstreamTrigger| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;
@@ -270,7 +269,9 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
     append_upstream(&upstream_store, &agg_id, 2, "second").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let final_count = *handle_count.lock().unwrap();
+    let final_count = *handle_count
+        .lock()
+        .expect("handle_count mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         final_count, 1,
         "saga must have stopped after End even though terminal append failed; \

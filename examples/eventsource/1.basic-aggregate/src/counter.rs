@@ -12,18 +12,14 @@ use serde::{Deserialize, Serialize};
 use nitinol::eventsource::Event;
 use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Receive as EvtReceive};
 
-// ---------------------------------------------------------------------------
 // Events
-// ---------------------------------------------------------------------------
 
 /// The single event type for the Counter aggregate.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
 #[event(family = "basic_aggregate.counter")]
 pub struct Incremented;
 
-// ---------------------------------------------------------------------------
 // Aggregate state
-// ---------------------------------------------------------------------------
 
 /// A simple counter aggregate.
 ///
@@ -41,9 +37,7 @@ impl Aggregate for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Commands
-// ---------------------------------------------------------------------------
 
 /// Command: increment the counter by one.
 pub struct Increment;

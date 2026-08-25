@@ -1,7 +1,9 @@
-//! DLQ subscriber wiring via [`DurableSubscription`] (Issue #51, G-29).
+//! DLQ subscriber wiring via [`DurableSubscription`].
 //!
-//! `SagaProps::with_dead_letter_subscriber(proxy)` registers a subscriber
-//! process `P: Receive<DeadLetterEvent>`.  At spawn time the saga starts a
+//! `SagaProps::with_dead_letter_subscriber(proxy)` — or
+//! `SagaManagerProps::with_dead_letter_subscriber(proxy)` for every instance a
+//! manager spawns — registers a subscriber process
+//! `P: Receive<DeadLetterEvent>`.  At spawn time the saga starts a
 //! [`DurableSubscription`] direct poller for the subscriber over the saga's
 //! **own** EventStore stream, decoding only dead-letter events.  The subscriber
 //! catches up from the saga stream even if it was down when the dead letter
@@ -10,14 +12,14 @@
 //! Unlike the previous `DurableStream`-based approach, this wiring never
 //! registers a shared `Stream<T>` process under a topic derived from the saga
 //! id.  This means the same `ProcessSystem` can re-spawn the same saga id
-//! repeatedly without topic collisions, satisfying G-29's catchup contract
+//! repeatedly without topic collisions, so subscriber catchup keeps working
 //! across saga re-spawns.
 //!
 //! The subscriber's process type `P` is erased into a [`DlqChildSpawn<Parent>`]
 //! trait object so it never surfaces as a type parameter of
 //! `SagaProps` / `SagaProcess`.  The DLQ direct poller is spawned as a
 //! **child** of the saga from `SagaProcess::on_start`, so the saga stop's child
-//! cascade automatically stops the poller (ARCH-REVIEW-009).
+//! cascade automatically stops the poller.
 
 use std::sync::Arc;
 
@@ -32,7 +34,7 @@ use crate::dead_letter::event::{is_dead_letter_event_type, DeadLetterEvent};
 use crate::id::SagaId;
 
 /// Object-safe interface for spawning the DLQ direct-poller as a **child** of
-/// the calling process context (ARCH-REVIEW-009).
+/// the calling process context.
 ///
 /// Implemented by [`TypedDlqChildSpawn`] which captures the typed subscriber
 /// proxy.  `SagaProcess<S>` stores `Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>`
@@ -125,7 +127,11 @@ fn dead_letter_transform(loaded: LoadedEvent) -> Option<DeadLetterEvent> {
 /// subscriber process can be wired as a DLQ subscriber for multiple different
 /// sagas simultaneously — each subscription gets its own direct poller and they
 /// coexist without interfering.  Without the saga id component, registering the
-/// same subscriber for saga B would stop the poller for saga A (ARCH-REVIEW-008).
+/// same subscriber for saga B would stop the poller for saga A.
 pub(crate) fn dlq_poller_name(subscriber_pid: Pid, saga_id: &SagaId) -> ProcessName {
-    ProcessName::new(format!("dlq-poller-{}-{}", subscriber_pid, saga_id.as_str()))
+    ProcessName::new(format!(
+        "dlq-poller-{}-{}",
+        subscriber_pid,
+        saga_id.as_str()
+    ))
 }

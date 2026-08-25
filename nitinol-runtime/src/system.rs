@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::SendError;
@@ -39,56 +40,20 @@ impl DeadLetterStream {
     }
 }
 
-pub struct ProcessSystem {
-    registry: ProcessRegistry,
-    dead_letter_proxy: DeadLetterProxy,
-    dead_letter_stream: DeadLetterStream,
+/// Configuration for a [`ProcessSystem`], and the only place it can be set.
+///
+/// Obtained from [`ProcessSystem::builder`].  Each `with_default_*` axis names
+/// the value a `Props` field left at `Inherit` decays to at spawn time;
+/// [`build`][Self::build] then performs the construction and hands back a system
+/// carrying them.
+pub struct ProcessSystemBuilder {
     default_idle_timeout: Option<Duration>,
     default_mailbox_capacity: MailboxCapacity,
     default_stash_capacity: StashCapacity,
     default_pipe_capacity: PipeCapacity,
 }
 
-impl ProcessSystem {
-    pub async fn new() -> Self {
-        let registry = ProcessRegistry::new();
-
-        // Bootstrap env for the dead-letter stream + actor. These spawn
-        // before any caller can set defaults, so they fall back to the
-        // detached env's Inherit-decay values.
-        let bootstrap_env = SpawnEnv::detached(registry.clone(), None);
-
-        // Spawn the dead-letter stream (persistent — must not be affected by any idle timeout).
-        let dl_stream_props: Props<Stream<BoxedMessage>> = Props::new(Stream::new)
-            .with_supervision_strategy(SupervisionStrategy::Resume)
-            .with_name(ProcessName::new(DEAD_LETTERS_TOPIC));
-        let dl_stream: ProcessProxy<Stream<BoxedMessage>> =
-            bootstrap_env.spawn(dl_stream_props).await;
-
-        // Spawn the dead-letter actor (persistent — captures the stream proxy and registry).
-        let dl_stream_for_producer = dl_stream.clone();
-        let registry_for_producer = registry.clone();
-        let dl_process_props = Props::new(move || {
-            DeadLetterProcess::new(
-                dl_stream_for_producer.clone(),
-                registry_for_producer.clone(),
-            )
-        })
-        .with_supervision_strategy(SupervisionStrategy::Resume)
-        .with_name(ProcessName::new(DEAD_LETTER_PROCESS_NAME));
-        let dl_process = bootstrap_env.spawn(dl_process_props).await;
-
-        Self {
-            registry,
-            dead_letter_proxy: DeadLetterProxy::new(dl_process.user_tx.clone()),
-            dead_letter_stream: DeadLetterStream(dl_stream),
-            default_idle_timeout: None,
-            default_mailbox_capacity: MailboxCapacity::Inherit,
-            default_stash_capacity: StashCapacity::Inherit,
-            default_pipe_capacity: PipeCapacity::Inherit,
-        }
-    }
-
+impl ProcessSystemBuilder {
     /// Set a system-wide default idle timeout applied to all user processes whose
     /// `IdleTimeout` is `Inherit`.  Consumes `self` and returns `Self` for chaining.
     pub fn with_default_idle_timeout(mut self, timeout: Duration) -> Self {
@@ -114,9 +79,140 @@ impl ProcessSystem {
         self
     }
 
+    /// Build the system: start the dead-letter infrastructure and settle the
+    /// configured defaults into the handle that is returned.
+    ///
+    /// This is construction, not just configuration — the dead-letter stream and
+    /// actor are running by the time it returns, so the first spawn already has
+    /// somewhere to route to.
+    pub async fn build(self) -> ProcessSystem {
+        let registry = ProcessRegistry::new();
+
+        // Bootstrap env for the dead-letter stream + actor. The configured
+        // defaults are deliberately withheld from it: the dead-letter
+        // infrastructure is persistent, and a system that reaped its own
+        // dead-letter stream on the caller's idle timeout would silently lose
+        // every dead letter from then on.
+        let bootstrap_env = SpawnEnv::detached(registry.clone(), None);
+
+        // Spawn the dead-letter stream (persistent — must not be affected by any idle timeout).
+        let dl_stream_props: Props<Stream<BoxedMessage>> = Props::new(Stream::new)
+            .with_supervision_strategy(SupervisionStrategy::Resume)
+            .with_name(ProcessName::new(DEAD_LETTERS_TOPIC));
+        let dl_stream: ProcessProxy<Stream<BoxedMessage>> =
+            bootstrap_env.spawn(dl_stream_props).await;
+
+        // Spawn the dead-letter actor (persistent — captures the stream proxy and registry).
+        let dl_stream_for_producer = dl_stream.clone();
+        let registry_for_producer = registry.clone();
+        let dl_process_props = Props::new(move || {
+            DeadLetterProcess::new(
+                dl_stream_for_producer.clone(),
+                registry_for_producer.clone(),
+            )
+        })
+        .with_supervision_strategy(SupervisionStrategy::Resume)
+        .with_name(ProcessName::new(DEAD_LETTER_PROCESS_NAME));
+        let dl_process = bootstrap_env.spawn(dl_process_props).await;
+
+        ProcessSystem {
+            inner: Arc::new(SystemInner {
+                registry,
+                dead_letter_proxy: DeadLetterProxy::new(dl_process.user_tx.clone()),
+                dead_letter_stream: DeadLetterStream(dl_stream),
+                default_idle_timeout: self.default_idle_timeout,
+                default_mailbox_capacity: self.default_mailbox_capacity,
+                default_stash_capacity: self.default_stash_capacity,
+                default_pipe_capacity: self.default_pipe_capacity,
+            }),
+        }
+    }
+}
+
+/// One process system, addressed through a cheaply cloned handle.
+///
+/// Cloning a `ProcessSystem` names the same instance rather than creating a
+/// second one: every clone observes the same process registry, the same
+/// dead-letter stream, and the same defaults.  Keeping the instance single is
+/// this type's job, so callers share it by cloning rather than by wrapping it in
+/// an `Arc`, and the entry points below stay by-reference — whether to clone is
+/// the caller's decision, not one this API makes for them.
+///
+/// Configuration is fixed before any handle exists.  The `with_default_*` axes
+/// live on [`ProcessSystemBuilder`], and
+/// [`build`][ProcessSystemBuilder::build] settles them; a built system has no
+/// way to be reconfigured, so no clone can observe defaults that differ from
+/// another's.
+#[derive(Clone)]
+pub struct ProcessSystem {
+    inner: Arc<SystemInner>,
+}
+
+/// The instance every [`ProcessSystem`] handle shares.
+struct SystemInner {
+    registry: ProcessRegistry,
+    dead_letter_proxy: DeadLetterProxy,
+    dead_letter_stream: DeadLetterStream,
+    default_idle_timeout: Option<Duration>,
+    default_mailbox_capacity: MailboxCapacity,
+    default_stash_capacity: StashCapacity,
+    default_pipe_capacity: PipeCapacity,
+}
+
+impl ProcessSystem {
+    /// Build a system with the default configuration.
+    ///
+    /// Shorthand for `ProcessSystem::builder().build().await`; reach for
+    /// [`builder`][Self::builder] when any of the system-wide defaults has to be
+    /// set.
+    pub async fn new() -> Self {
+        Self::builder().build().await
+    }
+
+    /// Begin configuring a system.
+    ///
+    /// # Configuration is fixed by `build()`
+    ///
+    /// The `with_default_*` axes exist on the builder alone.  Reconfiguring a
+    /// system after it has been built — and after clones of it may already be in
+    /// flight — is a **compile error** rather than a change some handles would
+    /// see and others would not:
+    ///
+    /// ```compile_fail
+    /// # use std::time::Duration;
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # async fn bad() {
+    /// let system = ProcessSystem::new().await;
+    /// // compile error: `with_default_idle_timeout` lives on `ProcessSystemBuilder`
+    /// let _ = system.with_default_idle_timeout(Duration::from_secs(30));
+    /// # }
+    /// ```
+    ///
+    /// The same default, set where it belongs, compiles:
+    ///
+    /// ```rust,no_run
+    /// # use std::time::Duration;
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # async fn wiring() {
+    /// let system = ProcessSystem::builder()
+    ///     .with_default_idle_timeout(Duration::from_secs(30))
+    ///     .build()
+    ///     .await;
+    /// # let _ = system;
+    /// # }
+    /// ```
+    pub fn builder() -> ProcessSystemBuilder {
+        ProcessSystemBuilder {
+            default_idle_timeout: None,
+            default_mailbox_capacity: MailboxCapacity::Inherit,
+            default_stash_capacity: StashCapacity::Inherit,
+            default_pipe_capacity: PipeCapacity::Inherit,
+        }
+    }
+
     /// Returns a reference to the dead-letter stream handle.
     pub fn dead_letter_stream(&self) -> &DeadLetterStream {
-        &self.dead_letter_stream
+        &self.inner.dead_letter_stream
     }
 
     /// Spawn `spawnable`. The single unified entry — `Props<P>` returns a
@@ -162,21 +258,21 @@ impl ProcessSystem {
     #[allow(private_bounds)]
     pub async fn spawn<S: SpawnDispatch>(&self, spawnable: S) -> S::Output {
         let env = SpawnEnv::top_level(
-            self.registry.clone(),
-            self.dead_letter_proxy.clone(),
-            self.default_idle_timeout,
-            self.default_mailbox_capacity,
-            self.default_stash_capacity,
-            self.default_pipe_capacity,
+            self.inner.registry.clone(),
+            self.inner.dead_letter_proxy.clone(),
+            self.inner.default_idle_timeout,
+            self.inner.default_mailbox_capacity,
+            self.inner.default_stash_capacity,
+            self.inner.default_pipe_capacity,
         );
         spawnable.spawn_with(&env).await
     }
 
     pub async fn lookup(&self, pid: Pid) -> Option<AnyProxy> {
-        self.registry.lookup(pid).await
+        self.inner.registry.lookup(pid).await
     }
 
     pub async fn lookup_by_name(&self, name: &ProcessName) -> Option<AnyProxy> {
-        self.registry.lookup_by_name(name).await
+        self.inner.registry.lookup_by_name(name).await
     }
 }

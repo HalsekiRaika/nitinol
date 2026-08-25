@@ -1,9 +1,9 @@
-//! Tests for Issue #56: SupervisionStrategy smart constructors.
+//! Tests for the `SupervisionStrategy` smart constructors.
 //!
-//! The pre-spec code validated `Restart { within }` lazily via `assert!` inside
+//! The earlier code validated `Restart { within }` lazily via `assert!` inside
 //! `Props::into_parts()`, so a zero-duration window was only caught at spawn
-//! time and propagated as a panic. The spec replaces that with three smart
-//! constructors on `SupervisionStrategy`:
+//! time and propagated as a panic. Three smart constructors on
+//! `SupervisionStrategy` replace that:
 //!
 //! ```text
 //! impl SupervisionStrategy {
@@ -18,7 +18,7 @@
 //! - `resume()` returns the `Resume` variant.
 //! - `restart(_, Duration::ZERO)` returns `Err(ConfigError::InvalidRestartWithin)`
 //!   so that the rate-limit window is never silently dropped (the bug class the
-//!   pre-spec `assert!` was meant to catch, lifted into the type system).
+//!   former `assert!` was meant to catch, lifted into the type system).
 //! - `restart(n, within > 0)` returns `Ok(Restart { max_retries: n, within })`
 //!   with the supplied fields intact (round-trip).
 //! - `max_retries = 0` is accepted (it is a legitimate policy: "no restart, but
@@ -30,19 +30,17 @@ use std::time::Duration;
 use nitinol_runtime::error::ConfigError;
 use nitinol_runtime::SupervisionStrategy;
 
-// ---------------------------------------------------------------------------
 // stop() / resume()
-// ---------------------------------------------------------------------------
 
-/// `SupervisionStrategy::stop()` returns the `Stop` variant — the spec's
-/// canonical "no restart, on_stop runs" policy.
+/// `SupervisionStrategy::stop()` returns the `Stop` variant — the canonical
+/// "no restart, on_stop runs" policy.
 #[test]
 fn supervision_strategy_stop_returns_stop_variant() {
     let s = SupervisionStrategy::stop();
     assert!(matches!(s, SupervisionStrategy::Stop));
 }
 
-/// `SupervisionStrategy::resume()` returns the `Resume` variant — the spec's
+/// `SupervisionStrategy::resume()` returns the `Resume` variant — the
 /// "swallow handler error, keep running" policy.
 #[test]
 fn supervision_strategy_resume_returns_resume_variant() {
@@ -50,16 +48,14 @@ fn supervision_strategy_resume_returns_resume_variant() {
     assert!(matches!(s, SupervisionStrategy::Resume));
 }
 
-// ---------------------------------------------------------------------------
 // restart(_, Duration::ZERO) is the failure case
-// ---------------------------------------------------------------------------
 
 /// Given `Duration::ZERO` as the rate-limit window,
 /// when `SupervisionStrategy::restart(3, Duration::ZERO)` is called,
 /// then it returns `Err(ConfigError::InvalidRestartWithin)`.
 ///
-/// This is the key contract change vs. pre-spec: the pre-spec code accepted
-/// the value at construction time and panicked at `Props::into_parts()` via
+/// This is the key contract change: the earlier code accepted the value at
+/// construction time and panicked at `Props::into_parts()` via
 /// `assert!`. The new path rejects it eagerly at the public boundary so no
 /// invalid policy can reach the spawn path.
 #[test]
@@ -80,9 +76,7 @@ fn supervision_strategy_restart_zero_retries_with_zero_within_still_fails() {
     assert!(matches!(result, Err(ConfigError::InvalidRestartWithin)));
 }
 
-// ---------------------------------------------------------------------------
 // restart(n, within > 0) round-trip
-// ---------------------------------------------------------------------------
 
 /// Given `max_retries = 3` and `within = 60s`,
 /// when `SupervisionStrategy::restart(...)` is called,
@@ -116,13 +110,14 @@ fn supervision_strategy_restart_accepts_zero_max_retries_when_within_is_positive
 #[test]
 fn supervision_strategy_restart_accepts_smallest_positive_duration() {
     let result = SupervisionStrategy::restart(1, Duration::from_nanos(1));
-    assert!(result.is_ok(), "1ns is > 0 and must be accepted; got {result:?}");
+    assert!(
+        result.is_ok(),
+        "1ns is > 0 and must be accepted; got {result:?}"
+    );
 }
 
-// ---------------------------------------------------------------------------
 // Trait-level: ConfigError flows like a normal error type so the smart
 // constructor can compose with `?` in `Props` builder chains.
-// ---------------------------------------------------------------------------
 
 /// The `?` operator must work on `restart`'s `Result<_, ConfigError>` inside
 /// a function returning `Result<_, ConfigError>`. Compile-time check; if

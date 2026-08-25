@@ -3,9 +3,11 @@
 use async_trait::async_trait;
 
 use nitinol_eventsource::Event;
+use nitinol_persistence::AggregateId;
 
 use crate::context::SagaContext;
 use crate::effect::SagaEffect;
+use crate::id::SagaId;
 
 /// Event-sourced process manager.
 ///
@@ -29,6 +31,22 @@ use crate::effect::SagaEffect;
 /// `Saga` is the only trait the user implements.  The internal
 /// `SagaProcess<S: Saga>` wrapper that adapts it to `nitinol_runtime::Process`
 /// is `pub(crate)` and never appears in any signature exposed by this crate.
+///
+/// # Where the saga's state lives
+///
+/// A saga's state is the implementor itself: [`Saga::apply`] mutates `&mut
+/// self`, so fields on the implementing type are the whole of the state.  The
+/// trait carries no associated state type.
+///
+/// # Snapshotting is not part of this trait
+///
+/// A saga replays purely from its own event stream.  When snapshotting is
+/// implemented it arrives as a separate opt-in extension trait
+/// (`SagaSnapshotable`, symmetrical to
+/// [`nitinol_eventsource::Snapshotable`]) carrying an associated snapshot type
+/// plus its capture/restore pair — so a saga that does not snapshot never sees
+/// the surface, and the ability is visible in the type system rather than
+/// hidden behind a default that panics.
 #[async_trait]
 pub trait Saga: Send + Sync + 'static {
     /// The upstream domain event the saga reacts to.
@@ -40,19 +58,15 @@ pub trait Saga: Send + Sync + 'static {
     /// process restarts.
     type Event: Event;
 
-    /// The saga's domain state.  No constraints are imposed here; if the saga
-    /// needs an aggregated view, place fields directly on the implementor.
-    type State: Send + Sync + 'static;
-
     /// Domain-level error type produced by [`Saga::handle`].
     ///
-    /// Per spec, MVP only logs handle errors and continues; this type exists
+    /// The MVP only logs handle errors and continues; this type exists
     /// to keep the signature symmetrical with `Decider::Rejection` and to
     /// give the implementation a place to surface diagnostics.
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// The typed payload delivered to [`Saga::on_scheduled`] when a scheduled
-    /// timer fires (E-27).
+    /// timer fires.
     ///
     /// [`SagaEffect::schedule`](crate::SagaEffect::schedule) serializes a value
     /// of this type into the schedule's payload; on firing it is deserialized
@@ -60,47 +74,55 @@ pub trait Saga: Send + Sync + 'static {
     /// `type ScheduledMessage = ();`.
     type ScheduledMessage: serde::Serialize + serde::de::DeserializeOwned + Send + 'static;
 
+    /// Derive the identity of the business process instance an upstream event
+    /// belongs to — "how do I get found?".
+    ///
+    /// # Why this is an associated function
+    ///
+    /// The runtime has to decide whom an event belongs to *before* it has a
+    /// saga to ask, so correlation cannot depend on instance state.  Taking no
+    /// receiver states that in the type system: the answer is derived from the
+    /// event alone, and the call site is `<S as Saga>::correlate(&event)`.
+    ///
+    /// # Why correlation, and not routing
+    ///
+    /// Correlation is the domain knowledge that maps an event to a process
+    /// instance; routing is the runtime responsibility of carrying a message to
+    /// wherever that instance lives.  This trait declares the former, so it
+    /// travels with the saga type instead of leaking into every spawn site.
+    /// The latter stays with the runtime — see
+    /// [`SagaProps::with_decode_failure_route`](crate::SagaProps::with_decode_failure_route)
+    /// and
+    /// [`SagaManagerProps::with_decode_failure_route`](crate::SagaManagerProps::with_decode_failure_route)
+    /// for the one case that has no typed event to correlate on.
+    ///
+    /// # How the answer is used
+    ///
+    /// A subscribed event reaches [`Saga::handle`] only when the returned
+    /// [`SagaId`] equals the id this instance was spawned with.  `None`, or a
+    /// `Some` naming a different instance, means the event belongs to somebody
+    /// else and is ignored silently — it is not a failure and records no dead
+    /// letter.
+    ///
+    /// There is deliberately no default: correlation has no universal rule, and
+    /// a defaulted `None` would silently discard every upstream event.
+    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId>;
+
     /// Apply one of the saga's own events to the in-memory state.
     ///
     /// Called during replay (`on_start`) for every event in the saga's event
     /// stream, and again after each [`SagaEffect::Persist`] event is appended.
     fn apply(&mut self, event: Self::Event);
 
-    /// Reactive entry point.  Invoked for every subscribed event whose
-    /// routing function maps to this saga instance.
+    /// Reactive entry point.  Invoked for every subscribed event that
+    /// [`Saga::correlate`] maps to this saga instance.
     async fn handle(
         &mut self,
         event: Self::SubscribedEvent,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error>;
 
-    /// Capture a snapshot of the saga's state (B-5b).
-    ///
-    /// The MVP takes no snapshots, so the default returns `None`.  A future
-    /// snapshotting implementation overrides this to return a
-    /// [`SagaSnapshot`]; until then a saga replays purely from its event
-    /// stream.
-    fn snapshot(&self) -> Option<SagaSnapshot> {
-        None
-    }
-
-    /// Reconstruct the saga from a previously captured [`SagaSnapshot`] (B-5b).
-    ///
-    /// This is a stub: with no snapshotting in the MVP there is no way to
-    /// obtain a `SagaSnapshot`, so the default panics.  Implementors that
-    /// override [`Saga::snapshot`] must override this as its inverse.
-    fn from_snapshot(snapshot: SagaSnapshot) -> Self
-    where
-        Self: Sized,
-    {
-        let _ = snapshot;
-        unimplemented!(
-            "Saga::from_snapshot is a stub; override it together with Saga::snapshot \
-             to restore a saga from a captured snapshot"
-        )
-    }
-
-    /// Timer-driven entry point invoked when a scheduled message fires (E-27).
+    /// Timer-driven entry point invoked when a scheduled message fires.
     ///
     /// Delivered at-least-once: the saga must treat `on_scheduled` idempotently.
     /// The default is a no-op returning [`SagaEffect::None`]; a saga that opts
@@ -114,13 +136,40 @@ pub trait Saga: Send + Sync + 'static {
         let _ = (message, ctx);
         Ok(SagaEffect::None)
     }
-}
 
-/// Opaque handle to a captured saga snapshot (B-5b).
-///
-/// Snapshotting is not implemented in this MVP; this type is the trait-level
-/// placeholder referenced by [`Saga::snapshot`] and [`Saga::from_snapshot`].
-/// It is `#[non_exhaustive]` so it cannot be constructed outside this crate —
-/// a future issue gives it real fields.
-#[non_exhaustive]
-pub struct SagaSnapshot {}
+    /// Failure entry point invoked when a tell dispatched by this saga has
+    /// exhausted its retry budget.
+    ///
+    /// Without this hook a saga whose upstream fell silent would never learn
+    /// that its tell failed, and its compensation would never run.  The hook is
+    /// therefore called the moment the failure settles, and the
+    /// [`SagaEffect`] it returns is interpreted exactly like the one
+    /// [`Saga::handle`] returns — so a compensating event reaches the saga's
+    /// stream with no further upstream event involved.
+    ///
+    /// `target` is the target aggregate's stream key, and
+    /// [`SagaContext::failed_tell_ids`] carries the single failed tell this
+    /// invocation is about, so a saga with several outstanding tells can tell
+    /// them apart.  A failure announced here is not repeated through
+    /// `failed_tell_ids` on the next [`Saga::handle`] call.
+    ///
+    /// The hook is skipped — and the failure survives only as a dead letter —
+    /// once the saga has ended and is draining its in-flight tells, because a
+    /// terminated saga must produce no further effects.
+    ///
+    /// Delivered at-least-once across restarts: an incarnation that dies before
+    /// the compensation is durable replays the failure, which then reaches
+    /// [`Saga::handle`] through `failed_tell_ids`.  Compensations must
+    /// therefore be idempotent.
+    ///
+    /// The default is a no-op returning [`SagaEffect::None`].  Returning `Err`
+    /// records a dead letter instead of a compensation.
+    async fn on_tell_failed(
+        &mut self,
+        target: AggregateId,
+        ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let _ = (target, ctx);
+        Ok(SagaEffect::None)
+    }
+}

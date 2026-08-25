@@ -1,5 +1,6 @@
-//! `EnqueuePolicy` — the per-saga filter deciding which failures reach the DLQ
-//! (Issue #51, G-26).
+//! `EnqueuePolicy` — the per-saga filter deciding which failures reach the DLQ.
+
+use std::sync::Arc;
 
 use crate::dead_letter::event::SagaFailure;
 
@@ -14,20 +15,31 @@ pub enum EnqueueDecision {
 
 /// A user-supplied filter over saga failures.
 ///
-/// The default ([`EnqueueAll`]) enqueues every failure kind; an implementor can
+/// The default (`EnqueueAll`) enqueues every failure kind; an implementor can
 /// override [`decide`](EnqueuePolicy::decide) to suppress selected (or all)
-/// failures.  Wired via [`crate::SagaProps::with_enqueue_policy`].
+/// failures.  Wired via [`crate::SagaProps::with_enqueue_policy`] for a
+/// standalone saga, or [`crate::SagaManagerProps::with_enqueue_policy`] for
+/// every instance a manager spawns.
 pub trait EnqueuePolicy: Send + Sync {
     fn decide(&self, failure: &SagaFailure) -> EnqueueDecision;
 }
 
-/// The default policy: enqueue every failure kind (G-26).
+/// The default policy: enqueue every failure kind.
 pub(crate) struct EnqueueAll;
 
 impl EnqueuePolicy for EnqueueAll {
     fn decide(&self, _failure: &SagaFailure) -> EnqueueDecision {
         EnqueueDecision::Enqueue
     }
+}
+
+/// The policy an instance runs with when its spawn boundary was given none.
+///
+/// Owned here so every spawn path — the standalone builder and the manager
+/// that spawns instances per correlation id — resolves the same default
+/// instead of each picking its own.
+pub(crate) fn default_enqueue_policy() -> Arc<dyn EnqueuePolicy> {
+    Arc::new(EnqueueAll)
 }
 
 #[cfg(test)]
@@ -43,7 +55,7 @@ mod tests {
                 error: "e".to_owned(),
             },
             SagaFailure::TellFailed {
-                target: crate::SagaId::new(""),
+                target: nitinol_persistence::AggregateId::new(""),
                 message: Bytes::new(),
             },
         ];

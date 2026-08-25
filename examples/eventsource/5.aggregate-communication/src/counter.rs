@@ -29,9 +29,7 @@ impl Aggregate for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Commands
-// ---------------------------------------------------------------------------
 
 /// Plain increment command — no side effects.
 pub struct Increment;
@@ -45,9 +43,7 @@ pub struct DelegateToTarget {
     pub done: Arc<Notify>,
 }
 
-// ---------------------------------------------------------------------------
 // Decider / Receive impls
-// ---------------------------------------------------------------------------
 
 #[async_trait]
 impl Decider<Increment> for Counter {

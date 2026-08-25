@@ -1,4 +1,4 @@
-//! Spec C-9 / replay path — synthetic `TellFailed` and negative cases.
+//! Replay path — synthetic `TellFailed` and negative cases.
 //!
 //! ## Positive case
 //!
@@ -25,10 +25,11 @@
 //! registered, crash-restart bytes present), see
 //! `saga_tell_crash_restart_redispatch.rs`.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{
-    encode_outbox_tell_acked, encode_outbox_tell_requested, encode_outbox_tell_requested_with_target,
-    outbox_kind_of, JsonCodec, OutboxKind, OUTBOX_MARKER,
+    encode_outbox_tell_acked, encode_outbox_tell_requested,
+    encode_outbox_tell_requested_with_target, outbox_kind_of, JsonCodec, OutboxKind, OUTBOX_MARKER,
 };
 
 use std::sync::Arc;
@@ -39,14 +40,16 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
+use nitinol_eventsource::SystemEvent;
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
-    AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_eventsource::SystemEvent;
-use nitinol_saga::{DeadLetterEvent, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaProps};
+use nitinol_saga::{
+    DeadLetterEvent, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaProps,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -68,6 +71,12 @@ impl Event for ReservationRequested {
         EventType::new(Family::new("replay"), TypeName::new("ReservationRequested"));
 }
 
+/// Correlation rule of [`InertSaga`]: the one instance each replay scenario
+/// spawns.  No upstream event is ever delivered here — the subscriptions point
+/// at an empty stream — but `correlate` has no default body, so the rule must
+/// still be stated.
+const INERT_SAGA_ID: &str = "replay-acked-saga-1";
+
 /// Inert saga used only to drive the on_start replay path — never invoked.
 #[derive(Default)]
 struct InertSaga;
@@ -76,9 +85,12 @@ struct InertSaga;
 impl Saga for InertSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(INERT_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -128,10 +140,12 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
     // before replay, no extra outbox event must be appended.
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("replay-acked-saga-1");
+    let saga_id = SagaId::new(INERT_SAGA_ID);
 
     let pending_tell_id_payload = encode_outbox_tell_requested(2, None);
     let ack_payload = encode_outbox_tell_acked(2);
@@ -148,9 +162,6 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
-
     let _saga_proxy =
         SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
             .with_codec(system.codec::<ReservationRequested>())
@@ -161,7 +172,6 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
                     key: "no-such-stream".to_owned(),
                     after: 0,
                 },
-                route_fn,
             )
             .spawn(system.process_system())
             .await;
@@ -198,11 +208,14 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
 #[tokio::test]
 async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    // Use a unique saga id to avoid collisions with the negative-case test.
-    let saga_id = SagaId::new("replay-unresolvable-saga-1");
+    // Each test owns its EventStore, so sharing the correlation id with the
+    // negative-case test cannot make the two streams collide.
+    let saga_id = SagaId::new(INERT_SAGA_ID);
 
     // Seed a TellRequested with tell_id = 1 and NO crash-restart bytes.
     // This simulates a `TellIntent::new` direct usage — prost TellRequested
@@ -219,9 +232,6 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
-
     // Spawn without crash-restart factory and without pre-populated PendingIntents.
     // This simulates a full OS-process crash restart where no in-memory state survives.
     let _saga_proxy =
@@ -234,7 +244,6 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
                     key: "no-such-stream".to_owned(),
                     after: 0,
                 },
-                route_fn,
             )
             .spawn(system.process_system())
             .await;
@@ -284,7 +293,7 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
         .iter()
         .find(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .expect("the synthetic TellFailed marker must be present");
-    // Issue #66: outbox markers now carry a per-arm variant on the wire. The
+    // Outbox markers carry a per-arm variant on the wire. The
     // synthetic TellFailed must write the `tell_failed` variant so the marker is
     // queryable by Materialized Path, while its variant-free `type_key` still
     // equals `OUTBOX_MARKER`'s so `classify`/routing keeps decoding it.
@@ -301,7 +310,7 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
     );
 }
 
-/// Regression test (ARCH-REVIEW-001 / SUPERVISOR-001): when a `TellRequested`
+/// Regression test: when a `TellRequested`
 /// carries a non-empty `target` field (proto field 3, written after the DLQ
 /// replay fix), the replay path must write a `DeadLetterEvent` with
 /// `SagaFailure::TellFailed { target, .. }` in addition to the synthetic
@@ -309,10 +318,12 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
 #[tokio::test]
 async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("replay-dlq-with-target-1");
+    let saga_id = SagaId::new(INERT_SAGA_ID);
 
     // Seed a TellRequested (tell_id = 1) WITH target = "inventory-42".
     // This simulates a stream written after the `target` proto field was added —
@@ -321,9 +332,6 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
     append_raw(&saga_store, saga_id.as_str(), 1, OUTBOX_MARKER, payload).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
-
     // Spawn without crash-restart factory and without pre-populated PendingIntents.
     let _saga_proxy =
         SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
@@ -335,7 +343,6 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
                     key: "no-such-stream".to_owned(),
                     after: 0,
                 },
-                route_fn,
             )
             .spawn(system.process_system())
             .await;
@@ -379,39 +386,35 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
         SagaFailure::TellFailed { target, .. } => {
             assert_eq!(
                 target,
-                SagaId::new("inventory-42"),
+                AggregateId::new("inventory-42"),
                 "DLQ TellFailed must carry the target recovered from the TellRequested proto field"
             );
         }
-        other => panic!(
-            "DLQ entry must be TellFailed, got: {:?}",
-            other
-        ),
+        other => panic!("DLQ entry must be TellFailed, got: {:?}", other),
     }
 }
 
-/// Regression test (ARCH-REVIEW-001): when a `TellRequested` has **no**
+/// Regression test: when a `TellRequested` has **no**
 /// `target` field (legacy stream predating proto field 3), the replay path
 /// must write the synthetic `TellFailed` outbox marker but **must NOT** write
 /// a `DeadLetterEvent`.  Emitting `TellFailed` with an empty target would
-/// violate the G-28 contract; the durable outbox marker already records the
+/// be invalid; the durable outbox marker already records the
 /// failure without producing an invalid DLQ entry.
 #[tokio::test]
 async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("replay-dlq-no-target-1");
+    let saga_id = SagaId::new(INERT_SAGA_ID);
 
     // Seed a TellRequested with NO target (legacy stream — field 3 absent / empty).
     let payload = encode_outbox_tell_requested(1, None);
     append_raw(&saga_store, saga_id.as_str(), 1, OUTBOX_MARKER, payload).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
-
     // Spawn without crash-restart factory and without pre-populated PendingIntents.
     let _saga_proxy =
         SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
@@ -423,7 +426,6 @@ async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay(
                     key: "no-such-stream".to_owned(),
                     after: 0,
                 },
-                route_fn,
             )
             .spawn(system.process_system())
             .await;
@@ -447,14 +449,14 @@ async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay(
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-    };
+    }
 
     // Allow a brief settling period so any spurious DLQ write would have had time to appear.
     tokio::time::sleep(Duration::from_millis(200)).await;
     let events = load_saga_events(&saga_store, &saga_id).await;
 
     // No DLQ entry must be written for a legacy stream that lacks a target field —
-    // emitting TellFailed with an empty target would violate G-28.
+    // emitting TellFailed with an empty target would be invalid.
     let dead_letter_type_key = DeadLetterEvent::EVENT_TYPE.type_key();
     let has_dead_letter = events
         .iter()
@@ -462,6 +464,6 @@ async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay(
     assert!(
         !has_dead_letter,
         "replay must NOT write a DLQ entry for a legacy TellRequested without a target field \
-         (G-28 requires TellFailed.target to be non-empty)"
+         (TellFailed.target must be non-empty)"
     );
 }

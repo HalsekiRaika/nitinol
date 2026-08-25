@@ -1,9 +1,8 @@
-//! `SagaId` is an independent newtype distinct from `AggregateId` (Issue #40).
+//! `SagaId` is an independent newtype distinct from `AggregateId`.
 //!
-//! Previously `pub type SagaId = AggregateId`.  The refactor (carrying the
-//! resolution of spec category F-21 (a)) splits them apart so each can carry
-//! domain semantics, while a shared `Borrow<str>` bound lets both serve as
-//! keys to the same `EventStore`.
+//! Previously `pub type SagaId = AggregateId`.  The two are now split apart so
+//! each can carry its own domain semantics, while a shared `Borrow<str>` bound
+//! lets both serve as keys to the same `EventStore`.
 
 use std::borrow::Borrow;
 use std::collections::hash_map::DefaultHasher;
@@ -11,9 +10,7 @@ use std::hash::{Hash, Hasher};
 
 use nitinol_saga::SagaId;
 
-// ---------------------------------------------------------------------------
 // SagaId implements Borrow<str>
-// ---------------------------------------------------------------------------
 
 /// SagaId implements Borrow<str> so it can be passed where a string-borrowable
 /// key is expected (e.g. `EventStore::append`, `LoadQuery::by_stream`).
@@ -29,9 +26,7 @@ fn saga_id_borrows_as_str() {
     assert_eq!(borrowed, "saga-borrow");
 }
 
-// ---------------------------------------------------------------------------
 // SagaId exposes as_str()
-// ---------------------------------------------------------------------------
 
 /// SagaId exposes `as_str()` mirroring `AggregateId::as_str()`.  This keeps
 /// call sites that previously assumed `SagaId = AggregateId` working with a
@@ -45,9 +40,7 @@ fn saga_id_exposes_as_str() {
     assert_eq!(id.as_str(), "saga-as-str");
 }
 
-// ---------------------------------------------------------------------------
 // SagaId derives Clone + PartialEq + Eq + Hash + Debug
-// ---------------------------------------------------------------------------
 
 /// SagaId implements the standard newtype trait set required by the saga
 /// runtime (cloning into context, equality routing, hashing for registries,
@@ -70,9 +63,7 @@ fn saga_id_implements_standard_traits() {
     let _ = format!("{:?}", a);
 }
 
-// ---------------------------------------------------------------------------
 // SagaId is distinct from AggregateId at the type level
-// ---------------------------------------------------------------------------
 
 /// SagaId and AggregateId are independent types — assigning a function pointer
 /// that returns AggregateId to a slot that expects SagaId must fail to compile.

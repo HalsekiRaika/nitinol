@@ -42,16 +42,18 @@ async fn main() {
     init_tracing();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
 
     // Shared stores
     let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
 
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(Arc::clone(&event_store))
+        .build();
+
     let agg_id = AggregateId::new("proj-counter");
-    let proxy = system
-        .spawn_aggregate::<Counter>(agg_id.clone(), Arc::clone(&event_store))
-        .await;
+    let proxy = system.spawn_aggregate::<Counter>(agg_id.clone()).await;
 
     // Persist two events
     proxy.ask(Increment).await.expect("ask 1");

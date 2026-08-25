@@ -10,7 +10,7 @@ use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, Pro
 use nitinol_persistence::store::{
     CheckpointStore, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, ProjectionId};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Clone)]
@@ -49,7 +49,10 @@ impl Projector<Evt> for SequenceRecordingProjector {
         _event: Evt,
         ctx: &mut ProjectionContext<'_, ()>,
     ) -> Result<(), Self::Error> {
-        self.sequences.lock().unwrap().push(ctx.current_sequence());
+        self.sequences
+            .lock()
+            .expect("sequences mutex is not poisoned; this projector never panics while holding it")
+            .push(ctx.current_sequence());
         self.count.fetch_add(1, Ordering::SeqCst);
         self.notify.notify_one();
         Ok(())
@@ -120,7 +123,10 @@ async fn catchup_all_events_processed_from_empty_checkpoint() {
 
     wait_for_count(&count, &notify, 3).await;
 
-    let seen = sequences.lock().unwrap().clone();
+    let seen = sequences
+        .lock()
+        .expect("sequences mutex is not poisoned; the projector never panics")
+        .clone();
     assert_eq!(
         seen,
         vec![1, 2, 3],
@@ -170,7 +176,10 @@ async fn catchup_skips_events_before_checkpoint() {
     wait_for_count(&count, &notify, 1).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let seen = sequences.lock().unwrap().clone();
+    let seen = sequences
+        .lock()
+        .expect("sequences mutex is not poisoned; the projector never panics")
+        .clone();
     assert_eq!(
         seen,
         vec![3],
@@ -295,7 +304,10 @@ async fn catchup_then_live_append_is_projected_via_durable_stream() {
 
     wait_for_count(&count, &notify, 3).await;
 
-    let seen = sequences.lock().unwrap().clone();
+    let seen = sequences
+        .lock()
+        .expect("sequences mutex is not poisoned; the projector never panics")
+        .clone();
     assert_eq!(
         seen,
         vec![1, 2, 3],

@@ -23,12 +23,10 @@ use nitinol_eventsource::{Event, ProjectionContext, Projector, ProjectorProps};
 use nitinol_persistence::store::{
     CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName, ProjectionId};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: event
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct Evt;
@@ -37,9 +35,7 @@ impl Event for Evt {
     const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.ckpt"), TypeName::new("Evt"));
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: pass-through codec
-// ---------------------------------------------------------------------------
 
 struct UnitCodec;
 
@@ -55,9 +51,7 @@ impl Codec<Evt> for UnitCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: ConditionallyFailingProjector
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 #[error("intentional projection failure")]
@@ -88,9 +82,7 @@ impl Projector<Evt> for ConditionallyFailingProjector {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: ExactlyOnceProjector — user saves checkpoint inside project()
-// ---------------------------------------------------------------------------
 
 struct ExactlyOnceProjector {
     /// Direct reference to the checkpoint store so the user can save atomically.
@@ -122,9 +114,7 @@ impl Projector<Evt> for ExactlyOnceProjector {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /// Append one Evt to the event store at the given sequence number.
 async fn append_evt(store: &InMemoryEventStore, agg_id: &AggregateId, sequence: u64) {
@@ -179,9 +169,7 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
     .unwrap_or_else(|_| panic!("timed out waiting for {expected} project() calls"));
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: AtLeastOnce — failed event retried on restart
-// ---------------------------------------------------------------------------
 
 /// Given two events (seq=1, seq=2) and an AtLeastOnce projector that fails on seq=2,
 /// When the projector is restarted,
@@ -299,9 +287,7 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
     wait_for_checkpoint(&checkpoint_store, &projection_id, Some(2)).await;
 }
 
-// ---------------------------------------------------------------------------
 // Test 2: ExactlyOnce — user saves checkpoint inside project(); no reprocessing on restart
-// ---------------------------------------------------------------------------
 
 /// Given two events and an ExactlyOnce projector that saves its own checkpoint
 /// inside project() (simulating an atomic read-model + checkpoint TX),
@@ -396,9 +382,7 @@ async fn e2e_exactly_once_user_saves_checkpoint_prevents_reprocessing() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: AtMostOnce — failed event is NOT retried on restart
-// ---------------------------------------------------------------------------
 
 /// Given one event (seq=1) and an AtMostOnce projector whose project() fails,
 /// When the projector is restarted,

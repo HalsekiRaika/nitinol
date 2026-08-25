@@ -8,12 +8,10 @@ use nitinol_eventsource::{
     Projector, ProjectorProps,
 };
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName, ProjectionId};
+use nitinol_persistence::{AggregateId, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: minimal aggregate
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Counter;
@@ -45,9 +43,7 @@ impl Decider<Increment> for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: minimal codec
-// ---------------------------------------------------------------------------
 
 struct IncrementedCodec;
 
@@ -63,9 +59,7 @@ impl Codec<Incremented> for IncrementedCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: minimal projector
-// ---------------------------------------------------------------------------
 
 struct NoopProjector;
 
@@ -82,9 +76,7 @@ impl Projector<Incremented> for NoopProjector {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Positive path: AggregateProps::new().with_codec().spawn()
-// ---------------------------------------------------------------------------
 
 /// The correct AggregateProps builder chain must compile and run successfully.
 #[tokio::test]
@@ -106,9 +98,7 @@ async fn aggregate_props_correct_chain_compiles_and_spawns() {
         .expect("ask must succeed after correct typestate chain");
 }
 
-// ---------------------------------------------------------------------------
 // Positive path: ProjectorProps full mandatory chain
-// ---------------------------------------------------------------------------
 
 /// The correct ProjectorProps builder chain must compile and run successfully.
 #[tokio::test]
@@ -139,9 +129,7 @@ impl NoopProjector {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Positive path: multiple with_event() calls are allowed
-// ---------------------------------------------------------------------------
 
 /// Calling with_event() more than once must remain valid.
 /// Registering multiple event types (EventSet → EventSet) must not be blocked.
@@ -168,9 +156,7 @@ async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
     // Then: spawn succeeds with multiple event registrations
 }
 
-// ---------------------------------------------------------------------------
 // Positive path: catchup_from_aggregate variant
-// ---------------------------------------------------------------------------
 
 /// catchup_from_aggregate() must transition OriginUnset → OriginSet, enabling spawn().
 #[tokio::test]
@@ -197,9 +183,7 @@ async fn projector_props_catchup_from_aggregate_enables_spawn() {
     // Then: spawn succeeds
 }
 
-// ---------------------------------------------------------------------------
 // Compile-fail coverage
-// ---------------------------------------------------------------------------
 //
 // The following scenarios must produce COMPILE ERRORS and are verified via
 // rustdoc compile_fail doctests embedded in the AggregateProps::spawn and

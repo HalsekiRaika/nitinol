@@ -1,4 +1,4 @@
-//! Integration tests for the parent/child hierarchy feature (Issue #54).
+//! Integration tests for the parent/child hierarchy feature.
 //!
 //! These tests pin down:
 //! - `PidSet` behaviour observable via `ctx.children()` (len / is_empty /
@@ -37,9 +37,7 @@ use nitinol_runtime::process::{
 };
 use nitinol_runtime::{IdleTimeout, ProcessSystem, Props, SupervisionStrategy};
 
-// ---------------------------------------------------------------------------
 // Shared helpers
-// ---------------------------------------------------------------------------
 
 /// Poll an async closure until it returns `true`, panicking after 5s.
 ///
@@ -145,17 +143,14 @@ fn watcher_props(
     received: Arc<Mutex<Option<Terminated>>>,
     idle_timeout: IdleTimeout,
 ) -> Props<WatcherProcess> {
-    let props = Props::new(move || WatcherProcess {
+    Props::new(move || WatcherProcess {
         received: received.clone(),
-    });
-    let props = props.with_idle_timeout(idle_timeout);
-    props
+    })
+    .with_idle_timeout(idle_timeout)
 }
 
-// ---------------------------------------------------------------------------
 // `ChildProcess`: a minimal child that records its parent Pid and lifecycle
 // events.
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct ChildState {
@@ -195,11 +190,10 @@ impl Process for ChildProcess {
 }
 
 fn child_props(state: ChildState) -> Props<ChildProcess> {
-    let props = Props::new(move || ChildProcess {
+    Props::new(move || ChildProcess {
         state: state.clone(),
-    });
-    let props = props.with_idle_timeout(IdleTimeout::Persistent);
-    props
+    })
+    .with_idle_timeout(IdleTimeout::Persistent)
 }
 
 /// Request the child to stop itself from within its own handler — used to
@@ -229,10 +223,8 @@ fn fresh_child_state(order: u32, stop_order: Arc<Mutex<Vec<u32>>>) -> ChildState
     }
 }
 
-// ---------------------------------------------------------------------------
 // `ParentProcess`: spawns N children inside `on_start` and exposes its
 // `ctx.children()` snapshot and child proxies.
-// ---------------------------------------------------------------------------
 
 struct ParentConfig {
     children: Vec<ChildState>,
@@ -311,21 +303,18 @@ fn parent_props(config: ParentConfig) -> Props<ParentProcess> {
     let parent_stopped = config.parent_stopped.clone();
     let stop_order = config.stop_order.clone();
     let children = config.children.clone();
-    let props = Props::new(move || ParentProcess {
+    Props::new(move || ParentProcess {
         config: ParentConfig {
             children: children.clone(),
             captured: captured.clone(),
             parent_stopped: parent_stopped.clone(),
             stop_order: stop_order.clone(),
         },
-    });
-    let props = props.with_idle_timeout(IdleTimeout::Persistent);
-    props
+    })
+    .with_idle_timeout(IdleTimeout::Persistent)
 }
 
-// ---------------------------------------------------------------------------
 // Top-level checks: PidSet observable behaviour
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn top_level_process_has_no_parent_and_empty_children() {
@@ -352,7 +341,11 @@ async fn top_level_process_has_no_parent_and_empty_children() {
     .await;
 
     // Then: parent() == None and children() is empty
-    let snap = captured.lock().await.clone().unwrap();
+    let snap = captured
+        .lock()
+        .await
+        .clone()
+        .expect("captured snapshot is Some: the wait above only returns once the parent's on_start has stored it");
     assert!(
         snap.parent_parent.is_none(),
         "top-level process must have ctx.parent() == None"
@@ -396,7 +389,11 @@ async fn spawn_child_returns_proxy_with_unique_pid_and_registers_in_registry() {
 
     // Then: each child Pid is distinct, and each is registered in the
     // (flat) system registry
-    let snap = captured.lock().await.clone().unwrap();
+    let snap = captured
+        .lock()
+        .await
+        .clone()
+        .expect("captured snapshot is Some: the wait above only returns once the parent's on_start has stored it");
     assert_eq!(snap.child_proxies.len(), 2);
     let pid_a = snap.child_proxies[0].pid();
     let pid_b = snap.child_proxies[1].pid();
@@ -445,7 +442,11 @@ async fn parent_children_contains_each_spawned_child_in_insertion_order() {
     )
     .await;
 
-    let snap = captured.lock().await.clone().unwrap();
+    let snap = captured
+        .lock()
+        .await
+        .clone()
+        .expect("captured snapshot is Some: the wait above only returns once the parent's on_start has stored it");
 
     // Then: children() length matches the number of spawns
     assert_eq!(
@@ -506,9 +507,7 @@ async fn child_parent_returns_spawner_pid() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Stop propagation
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn parent_stop_propagates_stop_to_child_and_waits_for_child_on_stop() {
@@ -536,7 +535,13 @@ async fn parent_stop_propagates_stop_to_child_and_waits_for_child_on_stop() {
     )
     .await;
     wait_for_flag(&child_state.started).await;
-    let child_pid = captured.lock().await.clone().unwrap().child_proxies[0].pid();
+    let child_pid = captured
+        .lock()
+        .await
+        .clone()
+        .expect("captured snapshot is Some: the wait above only returns once the parent's on_start has stored it")
+        .child_proxies[0]
+        .pid();
 
     // When: parent is stopped
     parent_proxy.stop().await.expect("parent stop");
@@ -545,7 +550,7 @@ async fn parent_stop_propagates_stop_to_child_and_waits_for_child_on_stop() {
     wait_for_flag(&child_state.stopped).await;
     wait_for_flag(&parent_stopped).await;
 
-    // Stop order (per ProtoActor.go `handleStop` flow encoded by plan D-3):
+    // Stop order (mirroring the ProtoActor.go `handleStop` flow):
     //   1. parent.on_stop runs first  → sentinel u32::MAX
     //   2. stopAllChildren sends Stop → child.on_stop runs → records 1
     //   3. parent waits for child Terminated, then exits
@@ -715,7 +720,11 @@ async fn natural_child_death_removes_pid_from_parent_children_set() {
     wait_for_flag(&child_state.started).await;
 
     // When: the child terminates itself
-    let snap = captured_snapshot.lock().await.clone().unwrap();
+    let snap = captured_snapshot
+        .lock()
+        .await
+        .clone()
+        .expect("captured snapshot is Some: the wait above only returns once WatchedParent's on_start has stored it");
     let child_proxy = snap.child_proxies[0].clone();
     let child_pid = child_proxy.pid();
     child_proxy
@@ -751,7 +760,7 @@ async fn natural_child_death_removes_pid_from_parent_children_set() {
 
     // And: on_terminated must NOT have been called — children spawned via
     // spawn_child (without an explicit ctx.watch call) do not trigger
-    // on_terminated (ARCH-REVIEW-001 regression prevention).
+    // on_terminated (regression prevention).
     assert!(
         !on_terminated_called.load(Ordering::SeqCst),
         "on_terminated must NOT be called for non-watched children; \
@@ -759,9 +768,7 @@ async fn natural_child_death_removes_pid_from_parent_children_set() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Three-generation cascading stop
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn three_generation_cascading_stop_runs_root_on_stop_first() {
@@ -797,12 +804,11 @@ async fn three_generation_cascading_stop_runs_root_on_stop_first() {
     }
 
     fn gc_props(stopped: Arc<AtomicBool>, order: Arc<Mutex<Vec<&'static str>>>) -> Props<GC> {
-        let props = Props::new(move || GC {
+        Props::new(move || GC {
             stopped: stopped.clone(),
             order: order.clone(),
-        });
-        let props = props.with_idle_timeout(IdleTimeout::Persistent);
-        props
+        })
+        .with_idle_timeout(IdleTimeout::Persistent)
     }
 
     // Parent (middle generation)
@@ -841,14 +847,13 @@ async fn three_generation_cascading_stop_runs_root_on_stop_first() {
         order: Arc<Mutex<Vec<&'static str>>>,
         gc_started: Arc<AtomicBool>,
     ) -> Props<P> {
-        let props = Props::new(move || P {
+        Props::new(move || P {
             gc_stopped: gc_stopped.clone(),
             p_stopped: p_stopped.clone(),
             order: order.clone(),
             gc_started: gc_started.clone(),
-        });
-        let props = props.with_idle_timeout(IdleTimeout::Persistent);
-        props
+        })
+        .with_idle_timeout(IdleTimeout::Persistent)
     }
 
     // Grandparent (top of the chain)
@@ -917,8 +922,7 @@ async fn three_generation_cascading_stop_runs_root_on_stop_first() {
     // When: GP is stopped
     gp_proxy.stop().await.expect("GP stop");
 
-    // Then: cascading stop runs `on_stop` root-first (per plan D-3 +
-    // handleStop flow):
+    // Then: cascading stop runs `on_stop` root-first (the `handleStop` flow):
     //   GP.on_stop → GP stops P → P.on_stop → P stops GC → GC.on_stop
     //   (then GC unregisters → P exits → GP exits)
     wait_for_flag(&gc_stopped).await;
@@ -933,9 +937,7 @@ async fn three_generation_cascading_stop_runs_root_on_stop_first() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Poison
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn poison_parent_still_stops_children_and_skips_parent_on_stop() {
@@ -961,7 +963,11 @@ async fn poison_parent_still_stops_children_and_skips_parent_on_stop() {
     )
     .await;
     wait_for_flag(&child_state.started).await;
-    let snap = captured.lock().await.clone().unwrap();
+    let snap = captured
+        .lock()
+        .await
+        .clone()
+        .expect("captured snapshot is Some: the wait above only returns once the parent's on_start has stored it");
     let parent_pid = snap.parent_pid;
     let child_pid = snap.child_proxies[0].pid();
 
@@ -998,9 +1004,7 @@ async fn poison_parent_still_stops_children_and_skips_parent_on_stop() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // spawn_child_with_driver
-// ---------------------------------------------------------------------------
 
 struct TickChild {
     started: Arc<AtomicBool>,
@@ -1097,15 +1101,14 @@ async fn spawn_child_with_driver_propagates_parent_pid_and_stops_with_parent() {
             let obs = child_parent_observed.clone();
             let ps = parent_stopped.clone();
             let cps = child_pid_slot.clone();
-            let props = Props::new(move || DriverParent {
+            Props::new(move || DriverParent {
                 child_started: cs.clone(),
                 child_stopped: cst.clone(),
                 child_parent_observed: obs.clone(),
                 parent_stopped: ps.clone(),
                 child_pid: cps.clone(),
-            });
-            let props = props.with_idle_timeout(IdleTimeout::Persistent);
-            props
+            })
+            .with_idle_timeout(IdleTimeout::Persistent)
         })
         .await;
 
@@ -1125,16 +1128,15 @@ async fn spawn_child_with_driver_propagates_parent_pid_and_stops_with_parent() {
     wait_for_flag(&parent_stopped).await;
 }
 
-// ---------------------------------------------------------------------------
 // default_idle_timeout inheritance through spawn_child
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn spawn_child_with_inherit_idle_timeout_uses_system_default() {
     // Given: a system with a short default idle timeout
-    let system = ProcessSystem::new()
-        .await
-        .with_default_idle_timeout(Duration::from_millis(50));
+    let system = ProcessSystem::builder()
+        .with_default_idle_timeout(Duration::from_millis(50))
+        .build()
+        .await;
 
     // And: a parent that spawns one child whose Props leaves idle_timeout
     // at the default (Inherit). The child uses no driver opt-out, so the
@@ -1196,11 +1198,9 @@ async fn spawn_child_with_inherit_idle_timeout_uses_system_default() {
     wait_for_flag(&child_stopped).await;
 }
 
-// ---------------------------------------------------------------------------
-// ARCH-REVIEW-001: on_terminated contract for non-watched children
-// ---------------------------------------------------------------------------
+// on_terminated contract for non-watched children
 
-/// After the ARCH-REVIEW-001 fix, `on_terminated` must NOT be called when a
+/// `on_terminated` must NOT be called when a
 /// child spawned via `spawn_child` dies naturally (without an explicit
 /// `ctx.watch` call on the child).  The Terminated signal is still used
 /// internally to remove the child from `ctx.children()`, but it does not
@@ -1286,8 +1286,14 @@ async fn child_natural_death_does_not_invoke_on_terminated() {
     wait_for_flag(&child_started).await;
 
     // When: the child dies naturally (no explicit ctx.watch call).
-    let child_proxy = child_proxy_slot.lock().await.clone().unwrap();
-    let child_pid = child_pid_slot.lock().await.unwrap();
+    let child_proxy = child_proxy_slot
+        .lock()
+        .await
+        .clone()
+        .expect("child proxy slot is Some: the child_started flag is only set after on_start filled the slot");
+    let child_pid = child_pid_slot.lock().await.expect(
+        "child pid slot is Some: the child_started flag is only set after on_start filled the slot",
+    );
     child_proxy.tell(StopSelf).await.expect("child stop_self");
 
     // Wait for the child to be removed from the registry (it has terminated).
@@ -1311,11 +1317,11 @@ async fn child_natural_death_does_not_invoke_on_terminated() {
     assert!(
         !on_terminated_called.load(Ordering::SeqCst),
         "on_terminated must NOT be called for a child that was spawned via \
-         spawn_child without an explicit ctx.watch call (ARCH-REVIEW-001)"
+         spawn_child without an explicit ctx.watch call"
     );
 }
 
-/// Positive case for ARCH-REVIEW-001: when the parent explicitly calls
+/// Positive case: when the parent explicitly calls
 /// `ctx.watch(child_pid)` after spawning the child, `on_terminated` IS
 /// called when the child dies naturally.
 #[tokio::test]
@@ -1392,8 +1398,14 @@ async fn explicitly_watched_child_on_terminated_is_called() {
     wait_for_flag(&child_started).await;
 
     // When: the child dies naturally (parent had explicitly called ctx.watch).
-    let child_proxy = child_proxy_slot.lock().await.clone().unwrap();
-    let child_pid = child_pid_slot.lock().await.unwrap();
+    let child_proxy = child_proxy_slot
+        .lock()
+        .await
+        .clone()
+        .expect("child proxy slot is Some: the child_started flag is only set after on_start filled the slot");
+    let child_pid = child_pid_slot.lock().await.expect(
+        "child pid slot is Some: the child_started flag is only set after on_start filled the slot",
+    );
     child_proxy.tell(StopSelf).await.expect("child stop_self");
 
     // Then: on_terminated IS called with the child's Pid.
@@ -1407,10 +1419,8 @@ async fn explicitly_watched_child_on_terminated_is_called() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Integration: external watcher still receives Terminated for the parent
 // after children have all been stopped.
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn external_watcher_receives_parent_terminated_after_children_drained() {
@@ -1454,7 +1464,9 @@ async fn external_watcher_receives_parent_terminated_after_children_drained() {
     // why=Stopped} (children-first cleanup must not block the final watcher
     // notification path)
     wait_for_terminated(&received).await;
-    let t = received.lock().await.clone().unwrap();
+    let t = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(t.who, parent_pid);
     assert_eq!(t.why, TerminatedReason::Stopped);
 
@@ -1477,10 +1489,8 @@ async fn external_watcher_receives_parent_terminated_after_children_drained() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // `ctx.children()` is empty immediately after spawn_child on a process whose
 // child has already self-stopped before the parent advances.
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn child_dying_before_parent_stop_decrements_children_len() {
@@ -1510,7 +1520,11 @@ async fn child_dying_before_parent_stop_decrements_children_len() {
     wait_for_flag(&dying_state.started).await;
     wait_for_flag(&alive_state.started).await;
 
-    let snap = captured.lock().await.clone().unwrap();
+    let snap = captured
+        .lock()
+        .await
+        .clone()
+        .expect("captured snapshot is Some: the wait above only returns once the parent's on_start has stored it");
     let dying_proxy = snap.child_proxies[0].clone();
 
     // When: one child dies first, then the parent is stopped
@@ -1536,11 +1550,8 @@ async fn child_dying_before_parent_stop_decrements_children_len() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Regression: reverse insertion order is preserved after a mid-set child dies
-// naturally (family_tag: spec-noncompliance, ARCH-REVIEW-013 /
-// VAL-NEW-reverse-stop-after-removal-L312)
-// ---------------------------------------------------------------------------
+// naturally.
 
 /// Regression: when a middle child (c2) dies naturally before the parent stops,
 /// the remaining live children (c1 and c3) must still be stopped in reverse
@@ -1591,7 +1602,11 @@ async fn remaining_children_stopped_in_reverse_insertion_order_after_middle_chil
     wait_for_flag(&c4.started).await;
 
     // c2 dies naturally (self-initiated stop).
-    let snap = captured.lock().await.clone().unwrap();
+    let snap = captured
+        .lock()
+        .await
+        .clone()
+        .expect("captured snapshot is Some: the wait above only returns once the parent's on_start has stored it");
     let c2_proxy = snap.child_proxies[1].clone();
     c2_proxy.tell(StopSelf).await.expect("c2 stop_self");
     wait_for_flag(&c2.stopped).await;
@@ -1613,9 +1628,7 @@ async fn remaining_children_stopped_in_reverse_insertion_order_after_middle_chil
     );
 }
 
-// ---------------------------------------------------------------------------
 // Restart supervision: old children are stopped before new on_start runs
-// ---------------------------------------------------------------------------
 
 /// A child that does nothing — used by the restart regression test.
 struct NoOpChild;
@@ -1673,8 +1686,11 @@ async fn restart_stops_old_children_before_on_start_reruns() {
         child_pids: pids_clone.clone(),
         children_before_spawn: cbs_clone.clone(),
     });
-    let props = props.with_idle_timeout(IdleTimeout::Persistent)
-        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
+    let props = props
+        .with_idle_timeout(IdleTimeout::Persistent)
+        .with_supervision_strategy(
+            SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"),
+        );
 
     let proxy = system.spawn(props).await;
 
@@ -1747,10 +1763,8 @@ async fn restart_stops_old_children_before_on_start_reruns() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Restart supervision: parent on_stop fires before child on_stop
-// (AI-REVIEW-007 regression test)
-// ---------------------------------------------------------------------------
+// (regression test)
 
 /// Process under Restart supervision that:
 /// - Spawns one `ChildProcess` per `on_start`.
@@ -1792,11 +1806,9 @@ impl Receive<TriggerRestart> for RestartableTracksStopOrder {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Regression AI-REVIEW-010: ctx.unwatch(child) must not break cascade-stop
-// ---------------------------------------------------------------------------
+// Regression: ctx.unwatch(child) must not break cascade-stop
 
-/// Regression for AI-REVIEW-010: a parent that calls `ctx.unwatch(child_pid)`
+/// Regression: a parent that calls `ctx.unwatch(child_pid)`
 /// after spawning a child must still be able to stop cleanly.  Before the fix,
 /// `unwatch` removed the parent from the child's watcher set, so the child
 /// would never send `Terminated` back to the parent.  `stop_children_and_wait`
@@ -1855,7 +1867,9 @@ async fn unwatch_child_does_not_prevent_parent_stop_completion() {
 
     // Wait until on_start has spawned the child and called unwatch.
     wait_for_flag(&on_start_done).await;
-    let child_pid = child_pid_slot.lock().await.unwrap();
+    let child_pid = child_pid_slot.lock().await.expect(
+        "child pid slot is Some: the on_start_done flag is only set after on_start filled the slot",
+    );
 
     // When: the parent is stopped.
     parent_proxy.stop().await.expect("parent stop");
@@ -1878,8 +1892,8 @@ async fn unwatch_child_does_not_prevent_parent_stop_completion() {
     }
 }
 
-/// Regression (AI-REVIEW-007): during a supervision restart, the parent's
-/// `on_stop` must fire before any child's `on_stop`, matching the spec order
+/// Regression: during a supervision restart, the parent's `on_stop` must fire
+/// before any child's `on_stop`, following the shutdown order
 /// (`on_stop` → stop children → await `Terminated`).
 #[tokio::test]
 async fn restart_on_stop_fires_before_child_on_stop() {
@@ -1898,8 +1912,11 @@ async fn restart_on_stop_fires_before_child_on_stop() {
             on_start_count: count.clone(),
         }
     });
-    let props = props.with_idle_timeout(IdleTimeout::Persistent)
-        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
+    let props = props
+        .with_idle_timeout(IdleTimeout::Persistent)
+        .with_supervision_strategy(
+            SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"),
+        );
 
     let proxy = system.spawn(props).await;
 
@@ -1948,10 +1965,8 @@ async fn restart_on_stop_fires_before_child_on_stop() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Restart supervision: signals received during child-drain are not lost
-// (AI-REVIEW-003 regression tests)
-// ---------------------------------------------------------------------------
+// (regression tests)
 
 /// A child that blocks in `on_stop` until `stop_gate` is notified.
 /// `stop_started` is set to `true` when `on_stop` first runs so the test
@@ -2042,8 +2057,11 @@ async fn poison_during_restart_aborts_restart_and_exits_poisoned() {
             on_stop_called: on_stop.clone(),
         }
     });
-    let props = props.with_idle_timeout(IdleTimeout::Persistent)
-        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
+    let props = props
+        .with_idle_timeout(IdleTimeout::Persistent)
+        .with_supervision_strategy(
+            SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"),
+        );
 
     let proxy = system.spawn(props).await;
 
@@ -2074,7 +2092,9 @@ async fn poison_during_restart_aborts_restart_and_exits_poisoned() {
 
     // The parent must exit with Poisoned (not restart again).
     wait_for_terminated(&received).await;
-    let t = received.lock().await.clone().unwrap();
+    let t = received.lock().await.clone().expect(
+        "Terminated is recorded: wait_for_terminated only returns once the watcher stored it",
+    );
     assert_eq!(
         t.why,
         TerminatedReason::Poisoned,
@@ -2184,8 +2204,11 @@ async fn non_child_terminated_during_restart_replayed_to_new_state() {
             first_start_done: fsd.clone(),
         }
     });
-    let props = props.with_idle_timeout(IdleTimeout::Persistent)
-        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
+    let props = props
+        .with_idle_timeout(IdleTimeout::Persistent)
+        .with_supervision_strategy(
+            SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"),
+        );
 
     let proxy = system.spawn(props).await;
 
@@ -2240,12 +2263,10 @@ async fn non_child_terminated_during_restart_replayed_to_new_state() {
     .await;
 }
 
-// ---------------------------------------------------------------------------
-// ARCH-REVIEW-005 regression: no-watch child termination during restart
+// Regression: no-watch child termination during restart
 // must NOT be replayed to the new state.
-// ---------------------------------------------------------------------------
 
-/// Regression for ARCH-REVIEW-005 (design-violation): a non-watched child's
+/// Regression: a non-watched child's
 /// termination during a supervision restart must NOT be surfaced as
 /// `on_terminated` to the new process state.
 ///
@@ -2346,8 +2367,11 @@ async fn non_watched_child_terminated_during_restart_not_replayed() {
         second_start_done: ssd.clone(),
         on_terminated_called: otc.clone(),
     });
-    let props = props.with_idle_timeout(IdleTimeout::Persistent)
-        .with_supervision_strategy(SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"));
+    let props = props
+        .with_idle_timeout(IdleTimeout::Persistent)
+        .with_supervision_strategy(
+            SupervisionStrategy::restart(3, Duration::from_secs(10)).expect("valid restart config"),
+        );
 
     let proxy = system.spawn(props).await;
 
@@ -2378,8 +2402,8 @@ async fn non_watched_child_terminated_during_restart_not_replayed() {
     // Assert: on_terminated must NOT have been called for the non-watched child.
     assert!(
         !on_terminated_called.load(Ordering::SeqCst),
-        "ARCH-REVIEW-005 regression: Terminated (non-watched child stop \
-         during restart) must NOT trigger on_terminated on the new process state"
+        "Terminated (non-watched child stop during restart) must NOT trigger \
+         on_terminated on the new process state"
     );
 
     // Cleanup: stop the parent and unblock the second stalling child.
@@ -2387,12 +2411,10 @@ async fn non_watched_child_terminated_during_restart_not_replayed() {
     proxy.stop().await.expect("stop parent after assertion");
 }
 
-// ---------------------------------------------------------------------------
-// ARCH-REVIEW-019 regression: child terminating before Watch is registered
+// Regression: child terminating before Watch is registered
 // must not leave a dead pid in ctx.children forever.
-// ---------------------------------------------------------------------------
 
-/// Regression for family_tag `call-chain-violation` (ARCH-REVIEW-019).
+/// Regression covering a broken call chain on the watch path.
 ///
 /// A child that terminates before the Watch signal it receives (or before the
 /// registry lookup in `wiring::watch` finds it) must still be removed from the
@@ -2429,13 +2451,12 @@ async fn child_terminating_before_watch_registered_does_not_deadlock_parent_stop
     }
 
     impl Process for QuickChildParent {
-        fn on_start(
-            &mut self,
-            ctx: &mut ProcessContext<Self>,
-        ) -> impl Future<Output = ()> + Send {
+        fn on_start(&mut self, ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
             let stopped = self.child_stopped.clone();
             async move {
-                let props = Props::new(move || QuickDyingChild { stopped: stopped.clone() });
+                let props = Props::new(move || QuickDyingChild {
+                    stopped: stopped.clone(),
+                });
                 let props = props.with_idle_timeout(IdleTimeout::Persistent);
                 // The child may terminate before or during register_child's
                 // wiring::watch call. Either way, the parent must not deadlock.

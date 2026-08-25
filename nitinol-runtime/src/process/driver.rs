@@ -22,7 +22,7 @@ use crate::process::{Process, ProcessContext};
 ///
 /// `lifecycle_loop` is generic over `D: Driver<P>` so that any "driving
 /// source" — message channels, timer ticks, external futures — can ride the
-/// same supervision / registry / dead-letter machinery (Issue #48).
+/// same supervision / registry / dead-letter machinery.
 ///
 /// `next` does NOT borrow `&mut state`, so it can be awaited inside
 /// `tokio::select!` alongside the system-signal receiver. `apply` borrows
@@ -64,7 +64,7 @@ pub trait Driver<P: Process>: Send + 'static {
     /// Whether the lifecycle loop should arm its idle-timeout timer for this
     /// driver. Message-driven drivers default to `true` so existing
     /// `IdleTimeout::After(_)` semantics are preserved. Tick / poll drivers
-    /// (e.g. the planned `IntervalDriver` in #49) override to `false` because
+    /// (e.g. a planned `IntervalDriver`) override to `false` because
     /// "idle" has no meaning for a scheduled source.
     fn supports_idle_timeout(&self) -> bool {
         true

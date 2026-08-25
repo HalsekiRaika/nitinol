@@ -26,6 +26,20 @@ impl Default for EventStoreState {
     }
 }
 
+/// In-memory reference implementation of [`EventStore`].
+///
+/// This type is the reference implementation of the optimistic-concurrency-control
+/// contract every backend must reproduce: unique `(stream, sequence)`, a genesis
+/// conflict meaning "already created", `global_sequence` monotonicity with
+/// commit-unit atomic visibility, and no internal retry.  The clauses, their
+/// labels and their exact wording live on [`EventStore::append`].
+///
+/// The contract itself is fixed by the tests in
+/// `nitinol-persistence/tests/event_store_occ.rs`, which run against this
+/// type.  Those tests — not this implementation's incidental behaviour — are
+/// what a third-party backend has to satisfy.
+///
+/// Intended for tests and examples; not for production use.
 pub struct InMemoryEventStore {
     state: Mutex<EventStoreState>,
 }
@@ -45,7 +59,10 @@ impl EventStore for InMemoryEventStore {
         key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self
+            .state
+            .lock()
+            .expect("in-memory event state lock was poisoned by a panicking holder");
 
         // Empty batch: no-op — return current max sequence (0 if no events exist yet)
         if events.is_empty() {
@@ -106,7 +123,10 @@ impl EventStore for InMemoryEventStore {
     }
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        let state = self.state.lock().unwrap();
+        let state = self
+            .state
+            .lock()
+            .expect("in-memory event state lock was poisoned by a panicking holder");
 
         let mut matching: Vec<LoadedEvent> = state
             .events

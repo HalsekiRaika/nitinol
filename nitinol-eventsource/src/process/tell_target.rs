@@ -1,4 +1,5 @@
 use futures_core::future::BoxFuture;
+use nitinol_persistence::AggregateId;
 
 use crate::aggregate::Aggregate;
 use crate::decider::Decider;
@@ -13,17 +14,21 @@ pub trait AggregateTellTarget<A: Aggregate>: Clone + Send + Sync + 'static {
         A: Decider<C>,
         C: Send + Sync + 'static;
 
-    /// The aggregate's stream key.
+    /// The id of the aggregate this target dispatches to — and, verbatim, the
+    /// key of the stream that aggregate persists to.
     ///
-    /// Used by higher-level consumers (e.g. [`TellIntent`][crate::process]) to
-    /// identify this target without a round-trip to the aggregate's process.
+    /// Used by higher-level consumers (e.g. a saga's tell intent) to identify
+    /// this target without a round-trip to the aggregate's process.
     ///
-    /// Implementations **must** return the actual stream key of the target
-    /// aggregate.  Returning an empty string is rejected at
-    /// [`TellIntent::new`][crate::process] construction time with a panic.
+    /// Implementations **must** return the id of the actual target aggregate.
+    /// An empty [`AggregateId`] is a legitimate value in the framework at large
+    /// — it is how "no aggregate" is spelled where that is a meaningful state —
+    /// so the type cannot rule emptiness out on this accessor's behalf.  A
+    /// consumer for which an empty target would be meaningless rejects it at
+    /// its own construction boundary instead.
     ///
     /// [`AggregateProxy`] provides this automatically from the aggregate id.
-    fn aggregate_id_str(&self) -> &str;
+    fn aggregate_id(&self) -> &AggregateId;
 }
 
 impl<A: Aggregate> AggregateTellTarget<A> for AggregateProxy<A> {
@@ -35,7 +40,7 @@ impl<A: Aggregate> AggregateTellTarget<A> for AggregateProxy<A> {
         Box::pin(AggregateProxy::tell(self, cmd))
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        self.aggregate_id().as_str()
+    fn aggregate_id(&self) -> &AggregateId {
+        AggregateProxy::aggregate_id(self)
     }
 }

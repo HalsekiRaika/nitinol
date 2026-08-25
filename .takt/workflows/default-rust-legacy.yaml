@@ -1,0 +1,336 @@
+name: default-rust-legacy
+description: サブワークフローを使用しないRustテスト先行ワークフロー。計画 → テスト → 実装 → AIアンチパターン修正 → 並列レビュー → 修正 → 完了。
+max_steps: 40
+initial_step: plan
+loop_monitors:
+  - cycle:
+      - ai-antipattern-review-1st
+      - ai-antipattern-fix
+    threshold: 3
+    judge:
+      persona: supervisor
+      instruction: loop-monitor-reviewers-fix
+      rules:
+        - condition: 健全（進捗あり）
+          next: ai-antipattern-review-1st
+        - condition: 非生産的（改善なし）
+          next: reviewers
+  - cycle:
+      - reviewers
+      - fix
+    threshold: 3
+    judge:
+      persona: supervisor
+      instruction: "reviewers と fix のループが {cycle_count} 回繰り返されました。\n\n次の最新レポートと現在のコードを確認し、進捗があるか判断してください。\n\n- Architecture: {report:architect-review.md}\n- AI antipattern: {report:ai-antipattern-review-final.md}\n- Coding: {report:coding-review.md}\n- Supervisor: {report:supervisor-validation.md}\n\n同じ根本原因や同じ指摘が繰り返され、修正が反映されていない場合は非生産的と判断してください。"
+      rules:
+        - condition: 健全（指摘数が減少、修正が反映されている）
+          next: reviewers
+        - condition: 非生産的（同じ指摘が繰り返される）
+          next: ABORT
+steps:
+  - name: plan
+    tags:
+      - plan
+      - rust
+      - route-provider-network
+      - route-claude-opus-high-read
+    edit: false
+    persona: planner
+    session_key: rust-plan
+    session: refresh
+    policy:
+      - rust-design
+      - report-phase-boundary
+    knowledge: architecture
+    rules:
+      - condition: 要件が明確で実装可能
+        next: write_tests
+      - condition: ユーザーが質問をしている（実装タスクではない）
+        next: COMPLETE
+      - condition: 要件が不明確、情報不足
+        next: ABORT
+        appendix: "確認事項:\n- {質問1}\n- {質問2}\n"
+    instruction: rust-plan
+    output_contracts:
+      report:
+        - name: plan.md
+          format: plan
+  - name: write_tests
+    tags:
+      - coding
+      - test-planning
+      - rust
+      - route-provider-network
+      - route-claude-opus-high-edit
+    edit: true
+    persona: coder
+    session_key: rust-tests
+    session: refresh
+    policy:
+      - coding
+      - testing
+      - rust-testing
+      - report-phase-boundary
+    knowledge:
+      - architecture
+      - unit-testing
+      - e2e-testing
+    required_permission_mode: edit
+    instruction: rust-write-tests-first
+    rules:
+      - condition: テスト作成が完了した
+        next: implement
+      - condition: テスト対象が未実装のためテスト作成をスキップする
+        next: implement
+      - condition: テスト作成を進行できない
+        next: ABORT
+      - condition: ユーザーへの確認事項があるためユーザー入力が必要
+        next: write_tests
+        requires_user_input: true
+        interactive_only: true
+    output_contracts:
+      report:
+        - name: test-report.md
+          format: test-report
+  - name: implement
+    tags:
+      - coding
+      - implementation
+      - rust
+      - route-provider-network
+      - route-claude-opus-high-edit
+    edit: true
+    persona: coder
+    session_key: rust-implement
+    session: refresh
+    policy:
+      - coding
+      - testing
+      - rust-coding
+      - report-phase-boundary
+    knowledge:
+      - architecture
+    required_permission_mode: edit
+    instruction: rust-implement-after-tests
+    quality_gates:
+      - type: command
+        name: rust-quality
+        command: bash ./.takt/quality-gates/rust-quality.sh
+        cwd: .
+        timeout_ms: 900000
+    rules:
+      - condition: 実装完了
+        next: ai-antipattern-review-1st
+      - condition: 実装未着手（レポートのみ）
+        next: ai-antipattern-review-1st
+      - condition: 判断できない、情報不足
+        next: plan
+      - condition: ユーザー入力が必要
+        next: implement
+        requires_user_input: true
+        interactive_only: true
+    output_contracts:
+      report:
+        - name: coder-scope.md
+          format: coder-scope
+        - name: coder-decisions.md
+          format: coder-decisions
+  - name: ai-antipattern-review-1st
+    tags:
+      - review
+      - ai-antipattern
+      - rust
+      - route-provider-network
+      - route-codex-gpt55
+    edit: false
+    persona: ai-antipattern-reviewer
+    session_key: rust-ai-review-first
+    session: refresh
+    policy:
+      - review
+      - ai-antipattern
+      - report-phase-boundary
+    instruction: ai-antipattern-review
+    rules:
+      - condition: AI特有の問題なし
+        next: reviewers
+      - condition: AI特有の問題あり
+        next: ai-antipattern-fix
+    output_contracts:
+      report:
+        - name: ai-antipattern-review.md
+          format: ai-antipattern-review
+  - name: ai-antipattern-fix
+    tags:
+      - coding
+      - fix
+      - ai-antipattern
+      - rust
+      - route-provider-network
+      - route-claude-sonnet-high-edit
+    edit: true
+    persona: coder
+    session_key: rust-ai-fix
+    session: refresh
+    policy:
+      - coding
+      - testing
+      - rust-coding
+      - report-phase-boundary
+    knowledge:
+      - architecture
+    required_permission_mode: edit
+    instruction: rust-ai-antipattern-fix
+    pass_previous_response: false
+    quality_gates:
+      - type: command
+        name: rust-quality
+        command: bash ./.takt/quality-gates/rust-quality.sh
+        cwd: .
+        timeout_ms: 900000
+    rules:
+      - condition: AI問題の修正完了
+        next: ai-antipattern-review-1st
+      - condition: 修正不要（指摘対象ファイル/仕様の確認済み）
+        next: reviewers
+      - condition: 修正を進行できない
+        next: reviewers
+  - name: reviewers
+    tags:
+      - review
+      - rust
+    parallel:
+      - name: arch-review
+        tags:
+          - review
+          - architecture
+          - rust
+          - route-provider-network
+          - route-codex-gpt55
+        edit: false
+        persona: architecture-reviewer
+        session_key: rust-arch-review
+        session: refresh
+        policy:
+          - review
+          - report-phase-boundary
+        knowledge: architecture
+        instruction: review-arch
+        rules:
+          - condition: approved
+          - condition: needs_fix
+        output_contracts:
+          report:
+            - name: architect-review.md
+              format: architecture-review
+      - name: ai-antipattern-review-2nd
+        tags:
+          - review
+          - ai-antipattern
+          - rust
+          - route-provider-network
+          - route-codex-gpt55
+        edit: false
+        persona: ai-antipattern-reviewer
+        session_key: rust-ai-review-second
+        session: refresh
+        policy:
+          - review
+          - ai-antipattern
+          - report-phase-boundary
+        instruction: ai-antipattern-review
+        rules:
+          - condition: AI特有の問題なし
+          - condition: AI特有の問題あり
+        output_contracts:
+          report:
+            - name: ai-antipattern-review-final.md
+              format: ai-antipattern-review
+      - name: coding-review
+        tags:
+          - review
+          - coding
+          - rust
+          - route-provider-network
+          - route-codex-gpt55
+        edit: false
+        persona: coding-reviewer
+        session_key: rust-coding-review
+        session: refresh
+        policy:
+          - review
+          - coding
+          - rust-review
+          - report-phase-boundary
+        pass_previous_response: false
+        instruction: review-coding
+        rules:
+          - condition: approved
+          - condition: needs_fix
+        output_contracts:
+          report:
+            - name: coding-review.md
+              format: coding-review
+      - name: supervise
+        tags:
+          - review
+          - supervision
+          - rust
+          - route-provider-network
+          - route-codex-gpt55
+        edit: false
+        persona: supervisor
+        session_key: rust-supervise
+        session: refresh
+        policy:
+          - review
+          - rust-review
+          - report-phase-boundary
+        instruction: supervise
+        rules:
+          - condition: すべて問題なし
+          - condition: 要求未達成、テスト失敗、ビルドエラー
+        output_contracts:
+          report:
+            - name: supervisor-validation.md
+              format: supervisor-validation
+            - name: summary.md
+              format: summary
+              use_judge: false
+    rules:
+      - condition: all("approved", "AI特有の問題なし", "approved", "すべて問題なし")
+        next: COMPLETE
+      - condition: any("needs_fix", "AI特有の問題あり", "needs_fix", "要求未達成、テスト失敗、ビルドエラー")
+        next: fix
+  - name: fix
+    tags:
+      - coding
+      - fix
+      - rust
+      - route-provider-network
+      - route-claude-sonnet-high-edit
+    edit: true
+    persona: coder
+    session_key: rust-peer-fix
+    session: refresh
+    policy:
+      - coding
+      - testing
+      - rust-coding
+      - report-phase-boundary
+    knowledge:
+      - architecture
+    required_permission_mode: edit
+    instruction: rust-legacy-fix
+    pass_previous_response: false
+    quality_gates:
+      - type: command
+        name: rust-quality
+        command: bash ./.takt/quality-gates/rust-quality.sh
+        cwd: .
+        timeout_ms: 900000
+    rules:
+      - condition: 修正完了
+        next: reviewers
+      - condition: 判断できない、情報不足
+        next: plan

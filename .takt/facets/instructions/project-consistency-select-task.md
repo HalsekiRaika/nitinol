@@ -1,7 +1,15 @@
 01-project-consistency-plan.md、02-project-consistency-audit.md、
-03-project-consistency-supervision.md、および
+03-project-consistency-supervision.md、および存在する場合は
+04-project-consistency-audit-review.md、
 `.takt/runs/project-consistency-audit/mechanical-check.md`を読み、
 次に実行すべき改善タスクを1件だけ選んでください。
+
+## Report Phaseとの境界
+
+- Workflow ContextのReport DirectoryはPhase 1では読み取り専用です。
+- 既存の監査レポートを直接変更しないでください。
+- structured outputはPhase 1の最終回答として返してください。
+- 永続化が必要な場合はWorkflowの`output_contracts`とTAKTのReport Phaseが担当します。
 
 現在のTAKTタスクキュー:
 {context:collect_queue_context.queue}
@@ -22,22 +30,13 @@
 `workflow_target`は次から一つだけ選びます。
 
 - `default-rust`
-  - 通常の機能、設計、実装、意味的テスト、文書改善
-  - 現在失敗している特定quality checkの回復自体が主目的ではない
 - `rust-quality-repair-fmt`
-  - `cargo fmt --all -- --check`の既存failureを整形だけで直す
 - `rust-quality-repair-clippy`
-  - 現在のClippy failureまたはClippy実行環境を直す
 - `rust-quality-repair-dylint`
-  - 現在のDylint failureまたはDylint実行環境を直す
 - `rust-quality-repair-test`
-  - 現在の`cargo test` failureを直す
 - `rust-quality-repair-structural`
-  - canonical scriptのstructural check failureを直す
 - `rust-quality-repair-script`
-  - `.takt/quality-gates/rust-quality.sh`自体の欠陥を直す
 - `none`
-  - `wait_before_next_scan`の場合だけ使用する
 
 複数のquality checkが失敗している場合は、full scriptの実行順
 `fmt → clippy → dylint → test → structural`で最初の未解消failureだけを選んでください。
@@ -54,22 +53,20 @@ structured outputには`action`, `workflow_target`, `task_markdown`, `title`, `t
 `enqueue_new_task`の場合:
 - `workflow_target`は`none`以外
 - `decision_reason_code`は`task_selected`
-- `decision_reason`に、選定したCandidate/Finding、優先理由、重複・依存確認の結果を具体的に記載する
-- `decision_evidence`に、Candidate ID、Finding ID、Criteria ID、機械検査ログ参照などを1件以上記載する
+- `decision_reason`に選定理由を具体的に記載する
+- `decision_evidence`に根拠を1件以上記載する
 - `next_scan_condition`は空文字
 - `task_markdown`は空でない完全なタスク指示書
-- quality recoveryでは対象外のfull gate failureを完了条件へ含めない
-- quality recoveryの検証方法は、対応する限定コマンドを含める
 - `goals`は1件以上
 - `acceptance_criteria`は2件以上
 - `issue`は`{ "create": false }`
 
 `wait_before_next_scan`の場合:
 - `workflow_target`は`none`
-- `decision_reason_code`は`task_selected`以外から、最も直接的な理由を一つ選ぶ
-- `decision_reason`は空にせず、なぜ現在タスクを投入できないのかを具体的に説明する
-- `decision_evidence`に、除外したCandidate/Finding、重複タスク、依存先、decision ID、または根拠不足箇所を記載する
-- `next_scan_condition`に、次回の選定が可能になる条件を具体的に記載する
+- `decision_reason_code`は`task_selected`以外
+- `decision_reason`は空にしない
+- `decision_evidence`に根拠を記載する
+- `next_scan_condition`に次回選定条件を記載する
 - `task_markdown`, `title`, `scope`, `summary`は空文字
 - `type`は`chore`
 - `goals`, `acceptance_criteria`, `labels`は空配列

@@ -1,4 +1,4 @@
-//! Contract tests for the owned [`MaterializedPath`] (Issue #66).
+//! Contract tests for the owned [`MaterializedPath`].
 //!
 //! `EventType` stays a `Copy`, `const`-usable identity built from
 //! `&'static str` components. `MaterializedPath` is the owned, parseable
@@ -17,9 +17,7 @@ fn path(s: &str) -> MaterializedPath {
         .unwrap_or_else(|_| panic!("`{s}` must parse as a MaterializedPath"))
 }
 
-// ---------------------------------------------------------------------------
 // Projection from EventType — to_path() / From<&EventType>
-// ---------------------------------------------------------------------------
 
 /// Given a struct EventType (variant None) with a non-empty family, When
 /// projected to a path, Then the canonical string is `family.type_name`.
@@ -104,9 +102,7 @@ fn from_event_type_reference_matches_to_path() {
     assert_eq!(MaterializedPath::from(&et), et.to_path());
 }
 
-// ---------------------------------------------------------------------------
 // String round-trip — Display / FromStr
-// ---------------------------------------------------------------------------
 
 /// Given a canonical multi-segment string, When parsed and re-rendered, Then
 /// the original string is reproduced exactly (round-trip is loss-free).
@@ -141,9 +137,7 @@ fn projected_path_round_trips_through_parse() {
     assert_eq!(reparsed, projected);
 }
 
-// ---------------------------------------------------------------------------
 // is_within — hierarchical prefix match on segment boundaries
-// ---------------------------------------------------------------------------
 
 /// Given a descendant path, When compared against an ancestor prefix, Then it
 /// is reported as within that ancestor (deeper segments are allowed).

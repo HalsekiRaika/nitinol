@@ -13,7 +13,10 @@ pub struct RestartConfig {
 
 impl RestartConfig {
     pub(crate) fn new(max_retries: u32, within: Duration) -> Self {
-        Self { max_retries, within }
+        Self {
+            max_retries,
+            within,
+        }
     }
 
     pub fn max_retries(&self) -> u32 {

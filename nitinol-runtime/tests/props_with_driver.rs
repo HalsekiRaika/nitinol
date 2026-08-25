@@ -1,14 +1,14 @@
-//! Tests for Issue #57: `Props<P, D = DefaultDriver>` — single-slot Driver
-//! type parameter and the `with_driver` type-transitioning builder.
+//! Tests for `Props<P, D = DefaultDriver>` — single-slot Driver type
+//! parameter and the `with_driver` type-transitioning builder.
 //!
-//! Pre-spec, `Props::add_driver` pushed heterogeneous `Driver<P>` impls into a
-//! `Vec<Box<dyn DynDriver<P>>>` via a runtime adapter (`DynAdapter`) and ran
-//! them through a `select_all`-based `DynDriverSet`. Issue #57 lifts the
-//! driver into the type parameter `D` of `Props`, makes the slot single, and
-//! delegates multi-driver composition entirely to the static
+//! Previously, `Props::add_driver` pushed heterogeneous `Driver<P>` impls into
+//! a `Vec<Box<dyn DynDriver<P>>>` via a runtime adapter (`DynAdapter`) and ran
+//! them through a `select_all`-based `DynDriverSet`. The driver is now lifted
+//! into the type parameter `D` of `Props`, the slot is single, and
+//! multi-driver composition is delegated entirely to the static
 //! [`combine_drivers!`](nitinol_runtime::combine_drivers) macro.
 //!
-//! These tests pin down the *new* contract that did not exist pre-spec and
+//! These tests pin down the *new* contract that did not exist before and
 //! that the migrated `combine_drivers.rs` / `spawn_with_driver.rs` /
 //! `props_builder_chain.rs` / `unified_spawn.rs` / `pipe_to_self.rs` /
 //! `child_processes.rs` test files do not by themselves enforce:
@@ -17,7 +17,7 @@
 //!    (type-level pin).
 //! 2. `with_driver<D2>` is a **type-transitioning** builder:
 //!    `Props<P, D> -> Props<P, D2>`. It does NOT keep `Self` (which would
-//!    silently revive the pre-spec "append to a Vec" behavior).
+//!    silently revive the old "append to a Vec" behavior).
 //! 3. Calling `with_driver` twice REPLACES the slot, not appends — the second
 //!    call's driver type is the only one that survives in the final type.
 //! 4. After `with_driver`, the rest of the builder chain (`with_name`,
@@ -28,11 +28,11 @@
 //!    `DefaultDriver` contributes no events of its own.
 //! 6. `combine_drivers!(A, B)` followed by a single `with_driver(combined)`
 //!    drives both child drivers' `apply` for events from their respective
-//!    sources — the canonical multi-driver pattern post-#57.
+//!    sources — the canonical multi-driver pattern.
 //! 7. Exhaustion contract: a user driver that returns `None` from `next` does
 //!    NOT stop the process. `lifecycle.rs` wraps the user driver in
 //!    `FusedDriver`, which absorbs `None` and stays pending, so the Core trio
-//!    keeps the process alive. This preserves the pre-spec `DynDriverSet`
+//!    keeps the process alive. This preserves the earlier `DynDriverSet`
 //!    contract where an exhausted driver was silently removed.
 
 use std::future::Future;
@@ -48,11 +48,9 @@ use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::process::{DefaultDriver, Driver, Process, ProcessContext, Receive};
 use nitinol_runtime::{IdleTimeout, ProcessSystem, Props};
 
-// ---------------------------------------------------------------------------
 // Fixtures: a tick-style process whose ticks/started/stopped state is
 // observable through shared atomics so the lifecycle behavior can be asserted
 // without poking into the runtime.
-// ---------------------------------------------------------------------------
 
 struct TickProcess {
     ticks: Arc<AtomicU32>,
@@ -111,14 +109,12 @@ async fn wait_for_count(counter: &AtomicU32, expected: u32, what: &str) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Custom drivers used across the integration tests.
 //
 // `supports_idle_timeout = false` for every custom driver so idle timeouts
 // never interfere with assertions about *what stopped the process*. The
 // I6 test depends on this: the only way the process can stop is `None`
 // propagation, not the idle timer firing.
-// ---------------------------------------------------------------------------
 
 struct UnitChannelDriver {
     rx: mpsc::Receiver<()>,
@@ -191,12 +187,10 @@ impl Driver<TickProcess> for StrChannelDriver {
     }
 }
 
-// ===========================================================================
 // Type-level checks. These do not execute; they exist purely to anchor the
 // type signature of the new API. If any of them stops compiling, the type
-// shape of Issue #57's contract has regressed and downstream callers will
-// silently shift away from the spec.
-// ===========================================================================
+// shape of the contract has regressed and downstream callers will silently
+// shift away from it.
 
 // Pin: `Props::new` returns `Props<P, DefaultDriver>` — the default type
 // parameter is exactly `DefaultDriver`, not some private alias and not a
@@ -212,7 +206,7 @@ fn _props_new_returns_default_driver_slot() {
 // Pin: `with_driver<D2>` is type-transitioning. The input type's `D` is
 // dropped and the output type's `D` is the freshly supplied driver. If
 // `with_driver` ever regresses to `fn with_driver(self, d: D) -> Self`
-// (the pre-spec append-to-Vec shape), this rebinding stops compiling
+// (the old append-to-Vec shape), this rebinding stops compiling
 // because `Props<P, DefaultDriver>` is not `Props<P, UnitChannelDriver>`.
 #[allow(dead_code)]
 fn _with_driver_transitions_slot_type_from_default_to_custom() {
@@ -225,17 +219,16 @@ fn _with_driver_transitions_slot_type_from_default_to_custom() {
 
 // Pin: calling `with_driver` twice REPLACES the slot rather than appending.
 // The final type is `Props<P, second-driver-type>`, not anything that wraps
-// the first driver. This is the type-level proof of the §I6 / R3 contract
-// that multi-driver use MUST go through `combine_drivers!`.
+// the first driver. This is the type-level proof that multi-driver use MUST
+// go through `combine_drivers!`.
 #[allow(dead_code)]
 fn _with_driver_called_twice_keeps_only_the_second_drivers_type() {
     let (ticks, started, stopped) = fresh_state();
     let (_tx_first, rx_first) = mpsc::channel::<()>(4);
     let (_tx_second, rx_second) = mpsc::channel::<i32>(4);
 
-    let after_first = tick_props(ticks, started, stopped).with_driver(UnitChannelDriver {
-        rx: rx_first,
-    });
+    let after_first =
+        tick_props(ticks, started, stopped).with_driver(UnitChannelDriver { rx: rx_first });
     let _after_second: Props<TickProcess, IntChannelDriver> =
         after_first.with_driver(IntChannelDriver {
             rx: rx_second,
@@ -257,7 +250,7 @@ fn _with_driver_then_with_name_preserves_driver_type_parameter() {
 
 // Pin: combining drivers via `combine_drivers!` and feeding the single
 // composite into `with_driver` produces a `Props` whose `D` is exactly the
-// composite type. This is the only API-level path the spec allows for
+// composite type. This is the only API-level path allowed for
 // "multiple drivers" — there is no `with_driver` overload that accepts a
 // Vec or tuple, and no `add_driver` that appends.
 #[allow(dead_code)]
@@ -281,16 +274,12 @@ fn _combine_drivers_then_with_driver_yields_combined_d_type() {
         tick_props(ticks, started, stopped).with_driver(combined);
 }
 
-// ===========================================================================
 // Behavior tests
-// ===========================================================================
 
-// ---------------------------------------------------------------------------
 // A `Receive`-only process spawned with no `with_driver` call gets the Core
 // trio for free and `tell` succeeds. This guards against `DefaultDriver`
 // ever being implemented in a way that shadows / replaces the Core
 // `MessageDriver`.
-// ---------------------------------------------------------------------------
 
 struct TellableProcess {
     received: Arc<AtomicU32>,
@@ -337,14 +326,17 @@ async fn default_driver_slot_keeps_core_message_driver_alive_for_tell() {
         .await
         .expect("tell must succeed on a Props that never called with_driver");
 
-    wait_for_count(&received, 1, "received == 1 from DefaultDriver-only process").await;
+    wait_for_count(
+        &received,
+        1,
+        "received == 1 from DefaultDriver-only process",
+    )
+    .await;
 }
 
-// ---------------------------------------------------------------------------
 // `with_driver(custom)` composes the user driver on top of the Core trio so
 // custom events drive `apply` AND mailbox traffic still flows. The Core
 // trio is never replaced by the user's driver.
-// ---------------------------------------------------------------------------
 
 /// Given a `Props::with_driver(UnitChannelDriver)` value,
 /// when the process is spawned and three events are pushed onto the
@@ -373,10 +365,8 @@ async fn with_driver_runs_custom_apply_for_each_delivered_event() {
     wait_for_count(&ticks, 3, "ticks == 3 from with_driver apply").await;
 }
 
-// ---------------------------------------------------------------------------
 // The canonical multi-driver pattern: build a single composite with
 // `combine_drivers!`, then hand it to a single `with_driver` call.
-// ---------------------------------------------------------------------------
 
 /// Given a composite driver built with `combine_drivers!(IntDriver, StrDriver)`
 /// and installed via a single `with_driver(combined)`,
@@ -420,12 +410,10 @@ async fn combine_drivers_then_with_driver_dispatches_events_to_both_children() {
     wait_for_count(&str_cnt, 1, "str counter == 1 from combined Right side").await;
 }
 
-// ---------------------------------------------------------------------------
 // Builder chain check: `with_driver` followed by `with_name` produces a
 // process that is BOTH driven by the custom driver AND discoverable under
 // the supplied alias. This guards against the type-transition breaking the
 // downstream `with_*` setters.
-// ---------------------------------------------------------------------------
 
 /// Given a builder chain `Props::with_driver(d).with_name(n)`,
 /// when the process is spawned,
@@ -457,19 +445,17 @@ async fn with_driver_then_with_name_registers_alias_under_supplied_name() {
     assert_eq!(typed.pid(), proxy.pid());
 }
 
-// ---------------------------------------------------------------------------
 // Exhaustion contract: a user driver returning `None` from `next` must NOT
 // stop the process. `lifecycle.rs` wraps the user driver in `FusedDriver`
 // which absorbs the `None` and stays forever-pending, so the Core trio
 // (MessageDriver + PipeDriver + StashDriver) keeps the process alive.
 //
-// This preserves the pre-#57 `DynDriverSet` contract where an exhausted
-// driver was silently removed and the remaining Core trio continued operating.
+// This preserves the driver-set contract where an exhausted driver is
+// silently removed and the remaining Core trio continues operating.
 //
 // `with_idle_timeout(Persistent)` ensures the idle-timeout timer is disarmed
 // so the only way the process can stop is an explicit Stop/Poison signal —
 // not `None` propagation from `FusedDriver(ExhaustibleDriver)`.
-// ---------------------------------------------------------------------------
 
 struct ExhaustibleDriver {
     rx: mpsc::Receiver<()>,

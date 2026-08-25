@@ -5,13 +5,6 @@ subworkflow:
   visibility: internal
   returns:
     - need_replan
-workflow_config:
-  provider_options:
-    codex:
-      network_access: true
-    opencode:
-      network_access: true
-max_steps: 30
 initial_step: implement
 loop_monitors:
   - cycle:
@@ -20,42 +13,31 @@ loop_monitors:
     threshold: 3
     judge:
       persona: supervisor
-      instruction: loop-monitor-ai-antipattern-fix
+      instruction: loop-monitor-reviewers-fix
       rules:
         - condition: 健全（進捗あり）
           next: ai-antipattern-review-1st
         - condition: 非生産的（改善なし）
-          next: COMPLETE
+          next: ABORT
 steps:
   - name: implement
     tags:
       - coding
       - implementation
       - rust
+      - route-provider-network
+      - route-claude-opus-high-edit
     edit: true
     persona: coder
-    provider: claude
-    model: opus
     session_key: rust-implement
     session: refresh
     policy:
       - coding
       - testing
       - rust-coding
+      - report-phase-boundary
     knowledge:
       - architecture
-    provider_options:
-      claude:
-        effort: high
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     required_permission_mode: edit
     instruction: rust-implement-after-tests
     quality_gates:
@@ -86,23 +68,16 @@ steps:
       - review
       - ai-antipattern
       - rust
+      - route-provider-network
+      - route-codex-gpt55
     edit: false
     persona: ai-antipattern-reviewer
-    provider: codex
-    model: gpt-5.5
     session_key: rust-ai-review-first
     session: refresh
     policy:
       - review
       - ai-antipattern
-    provider_options:
-      claude:
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - WebSearch
-          - WebFetch
+      - report-phase-boundary
     instruction: ai-antipattern-review
     rules:
       - condition: AI特有の問題なし
@@ -119,36 +94,21 @@ steps:
       - fix
       - ai-antipattern
       - rust
+      - route-provider-network
+      - route-claude-sonnet-high-edit
     edit: true
     persona: coder
-    provider: claude
-    model: sonnet
-    promotion:
-      - at: 3
-        model: opus
     session_key: rust-ai-fix
     session: refresh
     policy:
       - coding
       - testing
       - rust-coding
+      - report-phase-boundary
     knowledge:
       - architecture
-    provider_options:
-      claude:
-        effort: high
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - Bash
-          - WebSearch
-          - WebFetch
     required_permission_mode: edit
     instruction: rust-ai-antipattern-fix
-    pass_previous_response: false
     quality_gates:
       - type: command
         name: rust-quality
@@ -159,6 +119,6 @@ steps:
       - condition: AI問題の修正完了
         next: ai-antipattern-review-1st
       - condition: 修正不要（指摘対象ファイル/仕様の確認済み）
-        next: COMPLETE
+        next: ai-antipattern-review-1st
       - condition: 修正を進行できない
-        next: COMPLETE
+        return: need_replan

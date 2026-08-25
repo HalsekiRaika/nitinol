@@ -1,10 +1,11 @@
-//! Spec C-9 / replay path — **crash-restart re-dispatch**: when the saga
+//! Replay path — **crash-restart re-dispatch**: when the saga
 //! process starts after a full OS-process crash (no in-memory
 //! `PendingIntents`), the replay path must re-dispatch pending tells using
 //! the crash-restart factory registered via
 //! `SagaProps::with_crash_restart_factory`, provided that the `TellRequested`
 //! marker carries crash-restart bytes.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{encode_outbox_tell_requested, outbox_kind_of, JsonCodec, OutboxKind, OUTBOX_MARKER};
 
@@ -25,10 +26,8 @@ use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEv
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
-// ---------------------------------------------------------------------------
 // Domain types — minimal; Reserve is a unit struct so the crash-restart
 // bytes can be anything (the factory ignores them and always returns Reserve).
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -46,8 +45,10 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("crash_restart"), TypeName::new("ReservationRequested"));
+    const EVENT_TYPE: EventType = EventType::new(
+        Family::new("crash_restart"),
+        TypeName::new("ReservationRequested"),
+    );
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -90,20 +91,26 @@ impl Decider<Reserve> for Inventory {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Inert saga — only the on_start replay path is exercised.
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct InertSaga;
+
+/// Correlation rule of [`InertSaga`]: the one reservation process this test
+/// spawns.  No upstream event is ever delivered here, but correlation has no
+/// default, so the rule still has to be stated.
+const INERT_SAGA_ID: &str = "crash-restart-saga-1";
 
 #[async_trait]
 impl Saga for InertSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(INERT_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -116,9 +123,7 @@ impl Saga for InertSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_raw(
     store: &Arc<dyn EventStore>,
@@ -151,9 +156,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-// ---------------------------------------------------------------------------
 // Test
-// ---------------------------------------------------------------------------
 
 /// When the saga restarts after a full OS-process crash (no `PendingIntents`),
 /// and the `TellRequested` marker carries crash-restart bytes, and a factory
@@ -166,10 +169,12 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
     let mock = MockAggregateProxy::<Inventory>::new();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("crash-restart-saga-1");
+    let saga_id = SagaId::new(INERT_SAGA_ID);
 
     // Seed a TellRequested with tell_id = 1 and crash-restart bytes = b"Reserve".
     // The factory below identifies "Reserve" intents by these bytes.
@@ -177,9 +182,6 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
     append_raw(&saga_store, saga_id.as_str(), 1, OUTBOX_MARKER, payload).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     // Crash-restart factory: ignore the bytes (Reserve is unit struct), always
     // return a fresh TellIntent that tells Inventory to Reserve.
@@ -203,7 +205,6 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
                     key: "no-such-stream".to_owned(),
                     after: 0,
                 },
-                route_fn,
             )
             .with_crash_restart_factory(factory)
             .spawn(system.process_system())

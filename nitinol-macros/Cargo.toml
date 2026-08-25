@@ -14,6 +14,10 @@ proc-macro = true
 syn = { version = "2", default-features = false, features = ["derive", "parsing", "printing", "proc-macro"] }
 quote = "1"
 proc-macro2 = "1"
+# The reserved-namespace law lives in `nitinol-persistence` and is enforced in
+# two spaces; the derive reads the same constant and predicate the identifier
+# constructors do rather than restating the boundary here.
+nitinol-persistence = { path = "../nitinol-persistence" }
 
 [dev-dependencies]
 trybuild = "1"

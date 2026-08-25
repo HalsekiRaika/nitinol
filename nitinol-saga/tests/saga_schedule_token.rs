@@ -1,4 +1,4 @@
-//! Tests for the scheduler identity types (Issue #50, E-28):
+//! Tests for the scheduler identity types:
 //! - `TimerName` — the per-saga logical key for a schedule.
 //! - `ScheduleToken { saga_id, name }` — the globally-unique handle a
 //!   `SchedulerProcess` uses to key a registered timer.
@@ -7,7 +7,7 @@
 //! schedules in different sagas may share a `TimerName` without colliding, and
 //! within one saga two distinct `TimerName`s address distinct timers.
 
-use nitinol_saga::{ScheduleToken, SagaId, TimerName};
+use nitinol_saga::{SagaId, ScheduleToken, TimerName};
 
 #[test]
 fn timer_names_compare_by_value() {

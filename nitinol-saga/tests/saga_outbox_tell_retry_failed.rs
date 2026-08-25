@@ -1,4 +1,4 @@
-//! Spec C-9 staged retry: when every dispatch attempt fails, the executor
+//! Staged retry: when every dispatch attempt fails, the executor
 //! retries up to the default RetryPolicy limit and then appends a `TellFailed`
 //! outbox marker to the saga stream.
 //!
@@ -6,6 +6,7 @@
 //! exercise only the unrecoverable path); the success path is covered in
 //! e2e_saga.rs / saga_outbox_persist_atomicity.rs.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
@@ -26,19 +27,20 @@ use nitinol_eventsource::{
     SequenceCursor, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
+use nitinol_persistence::{
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+};
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
-// ---------------------------------------------------------------------------
 // A custom TellTarget that always returns Err(TellError::Send(SendError)).
 // Counts every dispatch attempt so the test can verify the retry executor
 // actually retried — and exactly that many times.
-// ---------------------------------------------------------------------------
 
 struct FailingTellTarget<A: Aggregate> {
     attempts: Arc<AtomicUsize>,
+    target_id: AggregateId,
     _phantom: PhantomData<fn() -> A>,
 }
 
@@ -49,6 +51,7 @@ impl<A: Aggregate> Clone for FailingTellTarget<A> {
     fn clone(&self) -> Self {
         Self {
             attempts: Arc::clone(&self.attempts),
+            target_id: self.target_id.clone(),
             _phantom: PhantomData,
         }
     }
@@ -58,6 +61,7 @@ impl<A: Aggregate> FailingTellTarget<A> {
     fn new() -> Self {
         Self {
             attempts: Arc::new(AtomicUsize::new(0)),
+            target_id: AggregateId::new("test-failing-target"),
             _phantom: PhantomData,
         }
     }
@@ -80,14 +84,12 @@ impl<A: Aggregate> AggregateTellTarget<A> for FailingTellTarget<A> {
         })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        "test-failing-target"
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.target_id
     }
 }
 
-// ---------------------------------------------------------------------------
 // Domain types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -95,7 +97,8 @@ struct OrderPlaced {
 }
 
 impl Event for OrderPlaced {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("retry"), TypeName::new("OrderPlaced"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("retry"), TypeName::new("OrderPlaced"));
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,7 +107,8 @@ struct ReservationRequested {
 }
 
 impl Event for ReservationRequested {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("retry"), TypeName::new("ReservationRequested"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("retry"), TypeName::new("ReservationRequested"));
 }
 
 #[derive(Default)]
@@ -114,7 +118,8 @@ struct Inventory;
 struct InventoryReserved;
 
 impl Event for InventoryReserved {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("retry"), TypeName::new("InventoryReserved"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("retry"), TypeName::new("InventoryReserved"));
 }
 
 impl Aggregate for Inventory {
@@ -137,6 +142,10 @@ impl Decider<Reserve> for Inventory {
     }
 }
 
+/// Correlation rule of [`FailingSaga`]: the single retry process instance every
+/// `OrderPlaced` in this test belongs to.
+const FAILING_SAGA_ID: &str = "retry-saga-1";
+
 struct FailingSaga {
     target: FailingTellTarget<Inventory>,
     handled: Arc<Notify>,
@@ -146,9 +155,12 @@ struct FailingSaga {
 impl Saga for FailingSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(FAILING_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -228,29 +240,28 @@ async fn wait_for_tell_failed(
 
 #[tokio::test]
 async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack() {
-    // Pinned to the default RetryPolicy as locked in the plan §4:
+    // Pinned to the default RetryPolicy:
     //   max_attempts: 3, initial_backoff: 100ms, multiplier: 2.0
     // 1 initial + 2 retries = 3 total attempts; total backoff: 100ms + 200ms.
     // Use a generous timeout to absorb scheduler jitter.
     const EXPECTED_ATTEMPTS: usize = 3;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("retry-order");
     append_order_placed(&upstream_store, &order_id, 1, "RETRY-SKU").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("retry-saga-1");
+    let saga_id = SagaId::new(FAILING_SAGA_ID);
     let handled = Arc::new(Notify::new());
 
     let target = FailingTellTarget::<Inventory>::new();
     let target_for_saga = target.clone();
     let handled_for_saga = Arc::clone(&handled);
-
-    let routed = saga_id.clone();
-    let route_fn = move |_event: &OrderPlaced| -> Option<SagaId> { Some(routed.clone()) };
 
     let _saga_proxy =
         SagaProps::<FailingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -267,7 +278,6 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
                 key: order_id.as_str().to_owned(),
                 after: 0,
             },
-            route_fn,
         )
         .spawn(system.process_system())
         .await;
@@ -318,6 +328,6 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
         EXPECTED_ATTEMPTS,
         "the retry executor must perform exactly RetryPolicy::max_attempts attempts \
          (default {EXPECTED_ATTEMPTS}: 1 initial + 2 retries); \
-         a different count means RetryPolicy::default() drifted from the plan §4 contract"
+         a different count means RetryPolicy::default() drifted from its documented defaults"
     );
 }

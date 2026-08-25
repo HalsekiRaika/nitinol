@@ -1,5 +1,4 @@
-//! `DeadLetterEvent` — the `SystemEvent` persisted for each saga failure
-//! (Issue #51, G-28).
+//! `DeadLetterEvent` — the `SystemEvent` persisted for each saga failure.
 //!
 //! Modelled one-for-one on the `ScheduleEvent` / `OutboxEvent` canonical
 //! examples: a reserved type-level [`EventType`] (`nitinol.saga.dead_letter`,
@@ -23,7 +22,7 @@ mod proto {
 use self::proto::dead_letter_marker::Failure as ProtoFailure;
 use self::proto::{
     DeadLetterMarker, DecodeFailed, EndedSagaReceivedMessage, HandleFailed, PersistFailed,
-    ScheduledFailed, SourceContext as ProtoSourceContext, TellFailed,
+    ScheduledFailed, SourceContext as ProtoSourceContext, TellFailed, TellFailedHookFailed,
 };
 
 /// Reserved type-level identity shared by every dead-letter event.
@@ -39,16 +38,17 @@ struct MissingFailure;
 struct MissingSourceContext;
 
 #[derive(Debug, thiserror::Error)]
-#[error("dead letter TellFailed.target must not be empty (G-28 required field)")]
+#[error("dead letter TellFailed.target must not be empty; it is a required field")]
 struct EmptyTellTarget;
 
-/// The specific saga failure a dead letter records (G-26 / G-28).
+/// The specific saga failure a dead letter records.
 #[derive(Clone, Debug)]
 pub enum SagaFailure {
-    /// A tell that exhausted its staged retry budget (G-30).  `target` is the
-    /// target aggregate's stream key; `message` is the tell's crash-restart
-    /// payload when one was supplied, else empty.
-    TellFailed { target: SagaId, message: Bytes },
+    /// A tell that exhausted its staged retry budget.  `target` is the
+    /// target aggregate's stream key — an [`AggregateId`], since it names the
+    /// aggregate that was told, not a saga; `message` is the tell's
+    /// crash-restart payload when one was supplied, else empty.
+    TellFailed { target: AggregateId, message: Bytes },
     /// `Saga::handle` returned `Self::Error`.
     HandleFailed { error: String },
     /// `SagaEffect::Persist` failed to write to the EventStore.
@@ -60,6 +60,10 @@ pub enum SagaFailure {
     DecodeFailed { error: String },
     /// `Saga::on_scheduled` returned `Self::Error`.
     ScheduledFailed { error: String },
+    /// `Saga::on_tell_failed` returned `Self::Error`, so the compensation the
+    /// saga would have run never happened.  The tell failure that triggered the
+    /// hook is recorded separately as its own [`SagaFailure::TellFailed`].
+    TellFailedHookFailed { error: String },
 }
 
 /// Context captured at the moment of failure.
@@ -107,6 +111,7 @@ impl SystemEvent for DeadLetterEvent {
             }
             SagaFailure::DecodeFailed { .. } => Variant::new("decode_failed"),
             SagaFailure::ScheduledFailed { .. } => Variant::new("scheduled_failed"),
+            SagaFailure::TellFailedHookFailed { .. } => Variant::new("tell_failed_hook_failed"),
         };
         EventType::with_variant(
             DEAD_LETTER_MARKER.family(),
@@ -135,9 +140,16 @@ impl SystemEvent for DeadLetterEvent {
             SagaFailure::DecodeFailed { error } => ProtoFailure::DecodeFailed(DecodeFailed {
                 error: error.clone(),
             }),
-            SagaFailure::ScheduledFailed { error } => ProtoFailure::ScheduledFailed(ScheduledFailed {
-                error: error.clone(),
-            }),
+            SagaFailure::ScheduledFailed { error } => {
+                ProtoFailure::ScheduledFailed(ScheduledFailed {
+                    error: error.clone(),
+                })
+            }
+            SagaFailure::TellFailedHookFailed { error } => {
+                ProtoFailure::TellFailedHookFailed(TellFailedHookFailed {
+                    error: error.clone(),
+                })
+            }
         };
         let marker = DeadLetterMarker {
             seq: self.seq,
@@ -157,7 +169,7 @@ impl SystemEvent for DeadLetterEvent {
             .map_err(SystemEventDecodeError::new)?;
         let failure = match marker.failure {
             Some(ProtoFailure::TellFailed(m)) => {
-                // G-28: `TellFailed.target` is a required field — an empty
+                // `TellFailed.target` is a required field — an empty
                 // string is never a valid target stream key.  Reject it here
                 // so invalid payloads cannot be re-injected from the EventStore
                 // or subscriber catchup path.
@@ -165,7 +177,7 @@ impl SystemEvent for DeadLetterEvent {
                     return Err(SystemEventDecodeError::new(EmptyTellTarget));
                 }
                 SagaFailure::TellFailed {
-                    target: SagaId::new(m.target),
+                    target: AggregateId::new(m.target),
                     message: Bytes::from(m.message),
                 }
             }
@@ -177,7 +189,12 @@ impl SystemEvent for DeadLetterEvent {
                 }
             }
             Some(ProtoFailure::DecodeFailed(m)) => SagaFailure::DecodeFailed { error: m.error },
-            Some(ProtoFailure::ScheduledFailed(m)) => SagaFailure::ScheduledFailed { error: m.error },
+            Some(ProtoFailure::ScheduledFailed(m)) => {
+                SagaFailure::ScheduledFailed { error: m.error }
+            }
+            Some(ProtoFailure::TellFailedHookFailed(m)) => {
+                SagaFailure::TellFailedHookFailed { error: m.error }
+            }
             None => return Err(SystemEventDecodeError::new(MissingFailure)),
         };
         let source = marker
@@ -202,7 +219,9 @@ impl SystemEvent for DeadLetterEvent {
 /// `nitinol.saga.dead_letter` is a sibling of `nitinol.saga.outbox` and
 /// `nitinol.saga.schedule`, so the classifications never overlap.
 pub(crate) fn is_dead_letter_event_type(event_type: EventType) -> bool {
-    event_type.to_path().is_within(&DEAD_LETTER_MARKER.to_path())
+    event_type
+        .to_path()
+        .is_within(&DEAD_LETTER_MARKER.to_path())
 }
 
 /// Append a single dead-letter event at `*sequence + 1`, advancing `*sequence`
@@ -262,7 +281,7 @@ mod tests {
         let cases = [
             (
                 SagaFailure::TellFailed {
-                    target: SagaId::new("inventory-1"),
+                    target: AggregateId::new("inventory-1"),
                     message: Bytes::from_static(b"m"),
                 },
                 "tell_failed",
@@ -297,6 +316,12 @@ mod tests {
                 },
                 "scheduled_failed",
             ),
+            (
+                SagaFailure::TellFailedHookFailed {
+                    error: "e".to_owned(),
+                },
+                "tell_failed_hook_failed",
+            ),
         ];
         for (failure, expected) in cases {
             let e = event(failure);
@@ -308,7 +333,7 @@ mod tests {
     #[test]
     fn tell_failed_round_trips_through_the_enum_codec() {
         let e = event(SagaFailure::TellFailed {
-            target: SagaId::new("inventory-42"),
+            target: AggregateId::new("inventory-42"),
             message: Bytes::from_static(b"payload"),
         });
         match DeadLetterEvent::decode(&e.encode()) {
@@ -320,12 +345,31 @@ mod tests {
                 assert_eq!(decoded.source.upstream_sequence, 7);
                 match decoded.failure {
                     SagaFailure::TellFailed { target, message } => {
-                        assert_eq!(target, SagaId::new("inventory-42"));
+                        assert_eq!(target, AggregateId::new("inventory-42"));
                         assert_eq!(message, Bytes::from_static(b"payload"));
                     }
                     _ => panic!("expected decoded TellFailed"),
                 }
             }
+            Err(e) => panic!("decode failed: {e}"),
+        }
+    }
+
+    /// The hook rejection carries the saga's own error text, and it must come
+    /// back as `TellFailedHookFailed` — not as the `TellFailed` that records
+    /// the underlying tell failure.
+    #[test]
+    fn tell_failed_hook_failed_round_trips_through_the_enum_codec() {
+        let e = event(SagaFailure::TellFailedHookFailed {
+            error: "compensation refused".to_owned(),
+        });
+        match DeadLetterEvent::decode(&e.encode()) {
+            Ok(decoded) => match decoded.failure {
+                SagaFailure::TellFailedHookFailed { error } => {
+                    assert_eq!(error, "compensation refused");
+                }
+                other => panic!("expected decoded TellFailedHookFailed, got {other:?}"),
+            },
             Err(e) => panic!("decode failed: {e}"),
         }
     }
@@ -356,7 +400,7 @@ mod tests {
     #[test]
     fn decode_reports_error_for_payload_missing_source_context() {
         // Build a well-formed TellFailed payload with `source` explicitly absent.
-        // G-28 requires `source` — a missing field must be rejected, not silently
+        // `source` is required — a missing field must be rejected, not silently
         // defaulted.
         let marker = proto::DeadLetterMarker {
             seq: 1,
@@ -371,13 +415,13 @@ mod tests {
         let payload = prost::Message::encode_to_vec(&marker);
         assert!(
             DeadLetterEvent::decode(&payload).is_err(),
-            "decode must fail when `source` context is absent (G-28 required field)"
+            "decode must fail when `source` context is absent (required field)"
         );
     }
 
-    /// ARCH-REVIEW-006 regression: `DeadLetterEvent::decode()` must reject a
+    /// Regression test: `DeadLetterEvent::decode()` must reject a
     /// `TellFailed` marker whose `target` field is empty.  An empty target is
-    /// never a valid saga stream key (G-28); allowing it would let invalid
+    /// never a valid saga stream key; allowing it would let invalid
     /// `SagaFailure::TellFailed { target: "" }` re-enter from EventStore replay
     /// or subscriber catchup.
     #[test]
@@ -398,11 +442,11 @@ mod tests {
         let payload = prost::Message::encode_to_vec(&marker);
         assert!(
             DeadLetterEvent::decode(&payload).is_err(),
-            "decode must fail when TellFailed.target is empty (G-28 required field)"
+            "decode must fail when TellFailed.target is empty (required field)"
         );
     }
 
-    /// ARCH-REVIEW-006 positive case: a non-empty `target` round-trips correctly
+    /// Positive case: a non-empty `target` round-trips correctly
     /// through decode (guards against overly strict validation).
     #[test]
     fn decode_accepts_tell_failed_with_non_empty_target() {

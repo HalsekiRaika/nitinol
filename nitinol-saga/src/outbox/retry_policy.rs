@@ -2,7 +2,7 @@ use std::time::Duration;
 
 /// Retry policy used by the outbox tell executor.
 ///
-/// Default contract (locked by plan §4):
+/// Default contract:
 /// - `max_attempts`: 3 (1 initial attempt + 2 retries)
 /// - `initial_backoff`: 100 ms
 /// - `multiplier`: 2.0 (exponential backoff: 100 ms, 200 ms, ...)

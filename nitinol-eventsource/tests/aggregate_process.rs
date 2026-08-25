@@ -2,7 +2,7 @@
 //
 // Tests verify the full request lifecycle: spawn → ask/tell/exec → persistence → state.
 //
-// AggregateProps holds Arc<dyn EventStore> directly (Issue #40): the
+// AggregateProps holds Arc<dyn EventStore> directly: the
 // EventPersistor actor was removed and the process now calls store.append /
 // store.load inline.
 
@@ -21,9 +21,7 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName, Variant};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: event
-// ---------------------------------------------------------------------------
 
 /// A unit event representing one successful increment.
 #[derive(Clone, PartialEq, Debug)]
@@ -33,9 +31,7 @@ impl Event for Incremented {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: aggregate
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Counter {
@@ -50,9 +46,7 @@ impl Aggregate for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: commands and messages
-// ---------------------------------------------------------------------------
 
 /// Command: always succeeds, emits one Incremented event.
 struct Increment;
@@ -123,9 +117,7 @@ impl EvtReceive<GetCount> for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: test codec
-// ---------------------------------------------------------------------------
 
 /// Pass-through codec for Incremented (unit struct — no data to encode).
 /// Encodes to empty bytes; decodes by returning Incremented regardless of payload.
@@ -143,9 +135,7 @@ impl Codec<Incremented> for TestCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: side-effect test helpers
-// ---------------------------------------------------------------------------
 
 /// A side effect that notifies a Notify handle when executed.
 struct NotifySideEffect(Arc<tokio::sync::Notify>);
@@ -180,9 +170,7 @@ impl Decider<IncrementWithSide> for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helper: spawn a Counter process holding a fresh Arc<dyn EventStore>
-// ---------------------------------------------------------------------------
 
 /// Creates a ProcessSystem and spawns a Counter AggregateProcess holding an
 /// `Arc<dyn EventStore>` directly.
@@ -198,9 +186,7 @@ async fn spawn_counter(aggregate_id: AggregateId) -> (ProcessSystem, AggregatePr
     (system, proxy)
 }
 
-// ---------------------------------------------------------------------------
 // ask<Increment>: basic success path
-// ---------------------------------------------------------------------------
 
 /// ask(Increment) returns a Vec containing one Incremented event.
 #[tokio::test]
@@ -222,9 +208,7 @@ async fn ask_increment_returns_vec_incremented() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // ask<Increment>: events are persisted and replayable via shared Arc<dyn EventStore>
-// ---------------------------------------------------------------------------
 
 /// After ask(Increment) on process 1, a second process sharing the same
 /// `Arc<dyn EventStore>` replays the stored event and restores the count to 1.
@@ -256,9 +240,7 @@ async fn ask_persists_events_to_event_store() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // ask<Increment>: sequential asks accumulate state
-// ---------------------------------------------------------------------------
 
 /// Three sequential ask(Increment) calls advance the counter to 3.
 #[tokio::test]
@@ -279,9 +261,7 @@ async fn ask_sequential_increments_accumulate_state() {
     assert_eq!(count, 3, "state must be 3 after three Increment asks");
 }
 
-// ---------------------------------------------------------------------------
 // tell<Increment>: fire-and-forget returns Ok(())
-// ---------------------------------------------------------------------------
 
 /// tell(Increment) returns Ok(()) without a response payload.
 #[tokio::test]
@@ -294,9 +274,7 @@ async fn tell_increment_returns_unit() {
     result.expect("tell(Increment) must return Ok(())");
 }
 
-// ---------------------------------------------------------------------------
 // tell then exec: state is reflected after tell
-// ---------------------------------------------------------------------------
 
 /// After tell(Increment), exec(GetCount) returns 1.
 /// The mpsc task queue guarantees tell is processed before exec.
@@ -316,9 +294,7 @@ async fn tell_then_exec_sees_updated_state() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // exec<GetCount>: does not mutate state
-// ---------------------------------------------------------------------------
 
 /// Two consecutive exec(GetCount) calls return the same value.
 #[tokio::test]
@@ -343,9 +319,7 @@ async fn exec_does_not_mutate_state() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Multiple Decider implementations: ask with IncrementBy(n)
-// ---------------------------------------------------------------------------
 
 /// A second Decider (IncrementBy) coexists with Increment on the same Aggregate.
 /// ask(IncrementBy(3)) emits 3 Incremented events in one Persist batch.
@@ -370,9 +344,7 @@ async fn ask_second_decider_increment_by() {
     assert_eq!(count, 3, "state must advance by 3 after IncrementBy(3)");
 }
 
-// ---------------------------------------------------------------------------
 // ask: rejection returns AskError::Rejection
-// ---------------------------------------------------------------------------
 
 /// ask(IncrementIfLessThan(0)) is rejected because value (0) >= threshold (0).
 #[tokio::test]
@@ -393,9 +365,7 @@ async fn ask_rejected_command_returns_rejection_error() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Effect::Side: fire-and-forget, does not block ask response
-// ---------------------------------------------------------------------------
 
 /// ask(IncrementWithSide) returns Vec<Incremented> without waiting for the side effect.
 /// The side effect fires asynchronously and eventually notifies via Arc<Notify>.
@@ -427,9 +397,7 @@ async fn side_effect_is_fire_and_forget_and_does_not_appear_in_response() {
         .expect("side effect must fire within 500 ms");
 }
 
-// ---------------------------------------------------------------------------
 // ask/exec ordering: interleaved operations maintain consistent sequence
-// ---------------------------------------------------------------------------
 
 /// Interleaved ask + exec calls maintain correct sequence numbers and state.
 /// This also validates that sequence is updated correctly across multiple Persist operations.
@@ -449,9 +417,7 @@ async fn interleaved_ask_and_exec_maintain_consistent_state() {
     assert_eq!(after_second, 3, "count must be 3 after IncrementBy(2)");
 }
 
-// ---------------------------------------------------------------------------
 // Regression: aggregate persist path stores enum event's variant() in LoadedEvent
-// ---------------------------------------------------------------------------
 
 /// An enum event with arm-specific `variant()` override.
 #[derive(Clone, PartialEq, Debug)]

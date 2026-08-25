@@ -1,9 +1,9 @@
-//! Tests for Issue #56: `StreamProps<T>` — the spec's strongly-typed
-//! replacement for `ProcessSystem::spawn_stream::<T>`.
+//! Tests for `StreamProps<T>` — the strongly-typed replacement for
+//! `ProcessSystem::spawn_stream::<T>`.
 //!
-//! Pre-spec, `spawn_stream` hardcoded `Supervision::Resume` directly inside
-//! `ProcessSystem` (`system.rs:178-187`). The spec moves that fixity into the
-//! type system via `StreamProps<T>`:
+//! Previously, `spawn_stream` hardcoded `Supervision::Resume` directly inside
+//! `ProcessSystem` (`system.rs:178-187`). That fixity now lives in the type
+//! system via `StreamProps<T>`:
 //!
 //! ```text
 //! pub struct StreamProps<T> {
@@ -36,9 +36,7 @@ use nitinol_runtime::{
     StreamProps,
 };
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 /// Subscriber that always errors out of `recv` for the first message — used to
 /// observe whether the stream's lifecycle absorbs the subscriber-side failure
@@ -63,7 +61,9 @@ impl Receive<BoxedMessage> for CountingSub {
 }
 
 fn counting_sub_props(count: Arc<AtomicU32>) -> Props<CountingSub> {
-    Props::new(move || CountingSub { count: count.clone() })
+    Props::new(move || CountingSub {
+        count: count.clone(),
+    })
 }
 
 async fn wait_for_count(counter: &AtomicU32, expected: u32) {
@@ -77,15 +77,13 @@ async fn wait_for_count(counter: &AtomicU32, expected: u32) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Basic construction + spawn round-trip
-// ---------------------------------------------------------------------------
 
 /// Given `StreamProps::<BoxedMessage>::new(topic)`,
 /// when spawned via the unified entry,
 /// then a working `ProcessProxy<Stream<BoxedMessage>>` is returned and the
-/// proxy can `publish_boxed`. Pins down that `StreamProps` is the spec's
-/// substitute for `spawn_stream` at the public API level.
+/// proxy can `publish_boxed`. Pins down that `StreamProps` is the substitute
+/// for `spawn_stream` at the public API level.
 #[tokio::test]
 async fn stream_props_new_then_spawn_returns_working_stream_proxy() {
     let system = ProcessSystem::new().await;
@@ -103,20 +101,21 @@ async fn stream_props_new_then_spawn_returns_working_stream_proxy() {
         .await
         .expect("subscribe must succeed");
 
-    stream.publish_boxed(7u32).await.expect("publish must succeed");
+    stream
+        .publish_boxed(7u32)
+        .await
+        .expect("publish must succeed");
     wait_for_count(&count, 1).await;
 }
 
-// ---------------------------------------------------------------------------
 // Supervision::Resume is structurally fixed: when a Stream's internal handler
-// produces an `Err`, the stream MUST keep running (Resume). The spec lifts
-// this from a runtime decision in `spawn_stream` into the StreamProps type.
+// produces an `Err`, the stream MUST keep running (Resume). This is lifted
+// from a runtime decision in `spawn_stream` into the StreamProps type.
 //
 // We exercise this via the existing public Stream contract: a subscriber that
 // fails dispatch is auto-removed (test in `stream.rs`) — the stream itself
 // stays alive across multiple such failures. This test re-confirms the
 // invariant under the StreamProps spawn path.
-// ---------------------------------------------------------------------------
 
 /// Given a Stream spawned via `StreamProps::<BoxedMessage>::new(topic)`,
 /// when multiple subscribers are added and removed across many publishes,
@@ -144,9 +143,7 @@ async fn stream_props_spawned_stream_resumes_across_publishes() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Capacity setters delegate to the inner Props (spec §"mailbox/stash/pipe
-// capacity delegates to `inner`").
+// Capacity setters (mailbox / stash / pipe) delegate to the inner Props.
 //
 // We can't observe the buffered sizes directly from outside, but we can
 // observe that calling each setter:
@@ -155,7 +152,6 @@ async fn stream_props_spawned_stream_resumes_across_publishes() {
 //
 // Behavioral end-to-end coverage of bounded behavior is in
 // `system_defaults_inherit.rs` (Props-side) and `pipe_bounded.rs` (Pipe-side).
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn stream_props_with_capacity_setters_chain_and_spawn() {
@@ -180,7 +176,6 @@ async fn stream_props_with_capacity_setters_chain_and_spawn() {
         .expect("publish must succeed on capacity-customized stream");
 }
 
-// ---------------------------------------------------------------------------
 // Type-level: `StreamProps<T>` does NOT expose `with_supervision_strategy`.
 //
 // We can't write a `#[compile_fail]` doctest from a test file, but we CAN
@@ -188,7 +183,7 @@ async fn stream_props_with_capacity_setters_chain_and_spawn() {
 // a method named `with_supervision_strategy`". The technique: define a
 // no-op blanket trait that supplies a method of that name returning `()`. If
 // `StreamProps<T>` already has such a method (regression), calling it through
-// the type yields the inherent method (which the spec says does not exist) —
+// the type yields the inherent method (which must not exist) —
 // the test's compile-only sentinel would still compile, defeating the check.
 //
 // A more reliable check: assert that the function pointer
@@ -199,12 +194,11 @@ async fn stream_props_with_capacity_setters_chain_and_spawn() {
 //
 // `StreamProps<T>` `Deref`s nowhere visible (no public way to reach inner
 // `Props::with_supervision_strategy`). The behavioral test above covers the
-// runtime guarantee — this section pins down the type-system surface by
-// asserting only the spec-listed setters exist.
-// ---------------------------------------------------------------------------
+// runtime guarantee — these assertions pin down the type-system surface by
+// checking that only the permitted setters exist.
 
 /// Compile-only: the type-level shape of `StreamProps<T>` includes the three
-/// capacity setters the spec explicitly lists as "delegating to `inner`"
+/// capacity setters that delegate to `inner`
 /// (`with_mailbox_capacity`, `with_stash_capacity`, `with_pipe_capacity`).
 /// If any of these drift, the test stops compiling — drawing attention to
 /// the surface change.

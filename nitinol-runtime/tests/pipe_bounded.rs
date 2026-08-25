@@ -1,12 +1,12 @@
-//! Tests for Issue #56: bounded `PipeDriver` behavior at capacity exhaustion.
+//! Tests for bounded `PipeDriver` behavior at capacity exhaustion.
 //!
-//! Pre-spec, `PipeDriver` used `tokio::sync::mpsc::unbounded_channel`
-//! (`driver/pipe.rs:76`). The spec replaces it with a bounded channel whose
-//! capacity is sourced from `Props::pipe_capacity` (or the `ProcessSystem`
-//! default for `Inherit`).
+//! `PipeDriver` previously used `tokio::sync::mpsc::unbounded_channel`
+//! (`driver/pipe.rs:76`). It now uses a bounded channel whose capacity is
+//! sourced from `Props::pipe_capacity` (or the `ProcessSystem` default for
+//! `Inherit`).
 //!
-//! Per `plan.md` §"`pipe_to_self` の bounded 移行" the runtime keeps the
-//! existing synchronous `pipe_to_self` API and uses `try_send`:
+//! The runtime keeps the existing synchronous `pipe_to_self` API and uses
+//! `try_send`:
 //! - on-full and on-closed both drop silently;
 //! - the actor stays alive (capacity exhaustion is NOT a crash).
 //!
@@ -25,10 +25,8 @@ use std::time::Duration;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::{PipeCapacity, ProcessSystem, Props};
 
-// ---------------------------------------------------------------------------
 // Fixture: process whose handler enqueues N pipe futures in a tight loop, and
 // counts mapped messages delivered back.
-// ---------------------------------------------------------------------------
 
 struct PipeBurstProcess {
     delivered: Arc<AtomicU32>,
@@ -111,9 +109,7 @@ fn burst_props(delivered: Arc<AtomicU32>) -> Props<PipeBurstProcess> {
     })
 }
 
-// ---------------------------------------------------------------------------
 // At-capacity drop semantics
-// ---------------------------------------------------------------------------
 
 /// Given a process configured with `PipeCapacity::Bounded(2)` and a handler
 /// that bursts 64 pipe-future enqueues,

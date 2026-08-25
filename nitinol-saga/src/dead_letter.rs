@@ -1,19 +1,38 @@
-//! Saga-owned Dead Letter Queue (Issue #51).
+//! Saga-owned Dead Letter Queue.
 //!
 //! Each saga failure kind, when it occurs, is enqueued — subject to the
 //! per-saga [`EnqueuePolicy`] — as a [`DeadLetterEvent`] on the saga's **own**
-//! EventStore stream (`SagaPersisted::DeadLetter`, G-27), mixed into the same
+//! EventStore stream (`SagaPersisted::DeadLetter`), mixed into the same
 //! envelope as the outbox and schedule markers.  A [`DurableStream`] subscriber
-//! (G-29) catches up and receives the events.
+//! catches up and receives the events.
+//!
+//! That subscriber is the **push** path — an observability signal, delivered
+//! whether or not anyone has acted on it.  [`DeadLetterQueue`] is the **pull**
+//! counterpart an operator recovers through: it lists the dead letters still
+//! outstanding and settles them by appending a
+//! `nitinol.saga.dead_letter_disposition` marker.  The two paths are
+//! deliberately independent — a settled dead letter is dropped from the listing
+//! and still delivered to subscribers, because a marker is a sibling family the
+//! push path's dead-letter prefix does not select.
+//!
+//! Listing reads the store directly.  Settling does not: the marker goes onto
+//! the saga's *own* stream, whose sequence a resident instance owns in memory,
+//! so the write is routed through that stream's single arbiter — see
+//! [`settle`] and [`SagaManagerProxy::dead_letter_queue`].
 //!
 //! This is a fresh, persisted, order-preserving implementation — distinct from
 //! the in-memory, best-effort, system-wide `DeadLetterProcess` in
-//! `nitinol-runtime` (G-25), which is neither imported nor reused here.
+//! `nitinol-runtime`.  What the two share is an ownership pattern, not a
+//! mechanism: neither type nor implementation is imported or reused here.
 //!
 //! [`DurableStream`]: nitinol_eventsource::DurableStream
+//! [`SagaManagerProxy::dead_letter_queue`]: crate::SagaManagerProxy::dead_letter_queue
 
+mod disposition;
 mod event;
 mod policy;
+mod queue;
+mod settle;
 mod subscriber;
 
 use std::sync::Arc;
@@ -24,9 +43,20 @@ use crate::id::SagaId;
 
 pub use self::event::{DeadLetterEvent, SagaFailure, SourceContext};
 pub use self::policy::{EnqueueDecision, EnqueuePolicy};
+pub use self::queue::{DeadLetterEntry, DeadLetterQuery, DeadLetterQueue, DeadLetterQueueError};
 
+pub(crate) use self::disposition::{
+    is_dead_letter_disposition_event_type, DeadLetterDispositionEvent,
+};
+// `Disposition` is an internal detail of the marker's codec in production, but
+// the journal tests need it to build fold inputs without a store.
+#[cfg(test)]
+pub(crate) use self::disposition::Disposition;
 pub(crate) use self::event::is_dead_letter_event_type;
-pub(crate) use self::policy::EnqueueAll;
+pub(crate) use self::policy::default_enqueue_policy;
+pub(crate) use self::settle::{
+    DispositionArbiter, RecordDisposition, SettleDeadLetter, SettleError,
+};
 pub(crate) use self::subscriber::{make_dlq_child_spawn, DlqChildSpawn};
 
 use self::event::{append_dead_letter, DeadLetterEvent as Event};
@@ -56,7 +86,7 @@ pub(crate) enum EnqueueOutcome {
 ///
 /// Callers **must** handle [`EnqueueOutcome::AppendFailed`]: when the policy
 /// says `Enqueue` but the store write fails, the upstream message must not be
-/// silently treated as processed (G-27 persisted DLQ contract).
+/// silently treated as processed — the persisted DLQ must stay authoritative.
 pub(crate) async fn enqueue_dead_letter(
     store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
@@ -90,13 +120,13 @@ mod tests {
     use async_trait::async_trait;
     use futures_core::Stream;
     use nitinol_persistence::error::{AppendError, LoadError};
-    use nitinol_persistence::store::{EventStore, EventStream};
+    use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
     use nitinol_persistence::{AppendOutcome, AppendingEvent, LoadQuery};
 
     use super::{enqueue_dead_letter, EnqueueOutcome};
     use crate::dead_letter::event::SourceContext;
     use crate::dead_letter::policy::{EnqueueAll, EnqueuePolicy};
-    use crate::dead_letter::{EnqueueDecision, SagaFailure};
+    use crate::dead_letter::{DeadLetterQuery, DeadLetterQueue, EnqueueDecision, SagaFailure};
     use crate::id::SagaId;
 
     struct AlwaysFailStore;
@@ -113,7 +143,11 @@ mod tests {
 
         async fn load(&self, _query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
             let stream: Pin<
-                Box<dyn Stream<Item = Result<nitinol_persistence::LoadedEvent, LoadError>> + Send + '_>,
+                Box<
+                    dyn Stream<Item = Result<nitinol_persistence::LoadedEvent, LoadError>>
+                        + Send
+                        + '_,
+                >,
             > = Box::pin(futures_util::stream::empty());
             Ok(stream)
         }
@@ -127,7 +161,7 @@ mod tests {
         }
     }
 
-    /// ARCH-REVIEW-005 regression: when policy says `Ignore`, the outcome must
+    /// Regression test: when policy says `Ignore`, the outcome must
     /// be `Ignored` — not `AppendFailed`.  Callers rely on this to distinguish
     /// "intentionally skipped" from "write failure".
     #[tokio::test]
@@ -141,7 +175,9 @@ mod tests {
             &saga_id,
             &mut sequence,
             &IgnoreAllPolicy,
-            SagaFailure::HandleFailed { error: "e".to_owned() },
+            SagaFailure::HandleFailed {
+                error: "e".to_owned(),
+            },
             SourceContext::without_upstream(),
         )
         .await;
@@ -150,10 +186,10 @@ mod tests {
         assert_eq!(sequence, 0, "sequence must not advance when policy ignores");
     }
 
-    /// ARCH-REVIEW-005 regression: when policy says `Enqueue` but the store
+    /// Regression test: when policy says `Enqueue` but the store
     /// append fails, the outcome must be `AppendFailed` so callers can stop the
-    /// process (G-27 persisted DLQ contract).  Before this fix the return value
-    /// was discarded and the failure was silently lost.
+    /// process and keep the persisted DLQ authoritative.  Before this fix the
+    /// return value was discarded and the failure was silently lost.
     #[tokio::test]
     async fn enqueue_outcome_is_append_failed_when_store_rejects_write() {
         let store: Arc<dyn EventStore> = Arc::new(AlwaysFailStore);
@@ -165,7 +201,9 @@ mod tests {
             &saga_id,
             &mut sequence,
             &EnqueueAll,
-            SagaFailure::HandleFailed { error: "e".to_owned() },
+            SagaFailure::HandleFailed {
+                error: "e".to_owned(),
+            },
             SourceContext::without_upstream(),
         )
         .await;
@@ -174,6 +212,78 @@ mod tests {
         assert_eq!(
             sequence, 0,
             "sequence must not advance when the append fails"
+        );
+    }
+
+    /// The write path and the pull path have to agree about what a dead letter
+    /// is.  The other DLQ pull tests seed the store directly, which cannot
+    /// catch the two drifting apart — this one drives the loop end to end:
+    /// [`enqueue_dead_letter`] writes, [`DeadLetterQueue::list`] reads back, and
+    /// each settling arm removes exactly its own entry.
+    #[tokio::test]
+    async fn dead_letters_written_by_the_enqueue_path_are_listed_and_settled_by_the_queue() {
+        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let saga_id = SagaId::new("saga-1");
+        let mut sequence: u64 = 0;
+
+        for error in ["first", "second"] {
+            let outcome = enqueue_dead_letter(
+                &store,
+                &saga_id,
+                &mut sequence,
+                &EnqueueAll,
+                SagaFailure::HandleFailed {
+                    error: error.to_owned(),
+                },
+                SourceContext::without_upstream(),
+            )
+            .await;
+            assert_eq!(outcome, EnqueueOutcome::Enqueued);
+        }
+        assert_eq!(sequence, 2, "each successful append advances the sequence");
+
+        let queue = DeadLetterQueue::new(Arc::clone(&store), saga_id.clone());
+
+        let listed = queue
+            .list(DeadLetterQuery::default())
+            .await
+            .expect("listing the freshly enqueued dead letters");
+        let seen: Vec<(u64, String)> = listed
+            .iter()
+            .map(|entry| match &entry.event.failure {
+                SagaFailure::HandleFailed { error } => (entry.sequence, error.clone()),
+                other => panic!("expected the HandleFailed the enqueue path wrote, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![(1, "first".to_owned()), (2, "second".to_owned())],
+            "list must return what the enqueue path wrote, at the stream \
+             sequences it wrote them to, with the recovery material intact"
+        );
+
+        queue.mark_processed(1).await.expect("marking seq 1");
+        let after_processed = queue
+            .list(DeadLetterQuery::default())
+            .await
+            .expect("listing after mark_processed");
+        assert_eq!(
+            after_processed
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "mark_processed must drop only the dead letter it names"
+        );
+
+        queue.evict(2).await.expect("evicting seq 2");
+        assert!(
+            queue
+                .list(DeadLetterQuery::default())
+                .await
+                .expect("listing after evict")
+                .is_empty(),
+            "evict must drop the last outstanding dead letter"
         );
     }
 }

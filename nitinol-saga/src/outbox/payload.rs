@@ -36,7 +36,7 @@ impl OutboxAppender {
 
     /// Append the durable `Ended` terminal marker at `sequence` on the saga's
     /// own stream.  Written when `SagaEffect::End` is interpreted so a later
-    /// spawn can detect termination and refuse to revive the saga (D-14).
+    /// spawn can detect termination and refuse to revive the saga.
     ///
     /// Returns `false` (and does not advance any caller-held sequence) when the
     /// store rejects the append, mirroring [`OutboxAppender::append_terminal`].
@@ -97,13 +97,8 @@ mod tests {
 
     #[test]
     fn build_tell_requested_normalizes_empty_crash_restart_bytes_to_none() {
-        let event = OutboxAppender::build_tell_requested(
-            1,
-            42,
-            Some(&[]),
-            "",
-            jiff::Timestamp::UNIX_EPOCH,
-        );
+        let event =
+            OutboxAppender::build_tell_requested(1, 42, Some(&[]), "", jiff::Timestamp::UNIX_EPOCH);
         assert!(
             crate::outbox::is_outbox_event_type(event.event_type),
             "build_tell_requested must write an outbox-prefixed event type"

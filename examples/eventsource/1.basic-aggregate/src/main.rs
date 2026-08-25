@@ -3,8 +3,8 @@
 //! Demonstrates the minimal setup needed to run an event-sourced aggregate:
 //!
 //! 1. Create a `ProcessSystem`
-//! 2. Build an `EventSourceSystem` with a codec
-//! 3. Create an `InMemoryEventStore` and wrap it in `Arc<dyn EventStore>`
+//! 2. Create an `InMemoryEventStore` and wrap it in `Arc<dyn EventStore>`
+//! 3. Build an `EventSourceSystem` with a codec and that store as its default
 //! 4. Spawn a `Counter` aggregate and call `ask`, `tell`, `exec`
 //!
 //! Run with:
@@ -41,15 +41,20 @@ async fn main() {
     // 1. Create the runtime.
     let ps = ProcessSystem::new().await;
 
-    // 2. Wire codec into the event-source system.
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
-
-    // 3. Create an in-memory event store.
+    // 2. Create an in-memory event store.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+
+    // 3. Wire codec and default store into the event-source system.  Every
+    //    aggregate spawned below persists onto that store unless it names
+    //    another one.
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(store)
+        .build();
 
     // 4. Spawn the aggregate process.
     let id = AggregateId::new("counter-1");
-    let proxy = system.spawn_aggregate::<Counter>(id, store).await;
+    let proxy = system.spawn_aggregate::<Counter>(id).await;
 
     // ask() sends a command and waits for the persisted events.
     let events = proxy.ask(Increment).await.expect("ask failed");

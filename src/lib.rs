@@ -57,17 +57,18 @@ pub mod eventsource {
         pub use nitinol_eventsource::error::CodecError;
         pub use nitinol_eventsource::error::EffectExecutionError;
         pub use nitinol_eventsource::error::ExecError;
+        pub use nitinol_eventsource::error::Retryability;
         pub use nitinol_eventsource::error::TellError;
     }
 
     pub use nitinol_eventsource::projection;
     pub use nitinol_eventsource::system;
 
-    pub use nitinol_eventsource::{Aggregate, Snapshotable};
     pub use nitinol_eventsource::Context;
     pub use nitinol_eventsource::Decider;
-    pub use nitinol_eventsource::{Effect, SideEffect, SideEffectError};
     pub use nitinol_eventsource::Event;
+    pub use nitinol_eventsource::{Aggregate, Snapshotable};
+    pub use nitinol_eventsource::{Effect, SideEffect, SideEffectError};
 
     /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
     /// `use nitinol::eventsource::Event;` brings both into scope (trait in the
@@ -75,19 +76,19 @@ pub mod eventsource {
     pub use nitinol_macros::Event;
 
     pub use nitinol_eventsource::Receive;
-    pub use nitinol_eventsource::{AskError, ExecError, TellError};
     pub use nitinol_eventsource::{
         AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset,
     };
-    pub use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
-    pub use nitinol_eventsource::{
-        EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, Projector,
-        ProjectorProps, TxProvider,
-    };
+    pub use nitinol_eventsource::{AskError, ExecError, Retryability, TellError};
     pub use nitinol_eventsource::{
         CursorSet, CursorUnset, DurableStream, DurableStreamProxy, DurableSubscription,
         SequenceCursor,
     };
+    pub use nitinol_eventsource::{
+        EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, Projector,
+        ProjectorProps, TxProvider,
+    };
+    pub use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
 }
 
 #[cfg(feature = "saga")]

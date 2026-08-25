@@ -1,4 +1,4 @@
-//! Spec D-14: a saga that has durably terminated must not be revived.
+//! A saga that has durably terminated must not be revived.
 //!
 //! Termination is recorded by a durable `Ended` outbox marker in the saga's
 //! own event stream (persisted when `SagaEffect::End` is interpreted).  On a
@@ -14,6 +14,7 @@
 //! - end-to-end: a saga that reaches `End` (persisting the marker itself) is
 //!   skipped when a fresh process is spawned over the same store.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{encode_outbox_ended, JsonCodec, OUTBOX_MARKER};
 
@@ -35,9 +36,7 @@ use nitinol_persistence::{
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
-// ---------------------------------------------------------------------------
 // Domain types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -61,9 +60,13 @@ impl Event for ReservationRequested {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Sagas
-// ---------------------------------------------------------------------------
+
+/// Correlation rule shared by both sagas in this file.  The respawn test hands
+/// one saga stream from [`EndOnFirstSaga`] to [`RecordingSaga`], so the two
+/// types must name the same instance for the second incarnation to be the same
+/// saga at all.
+const SAGA_ID: &str = "terminated-skip-saga";
 
 /// Records every `handle` call and never terminates.  Used to observe whether
 /// the upstream subscription was wired up at all.
@@ -76,9 +79,12 @@ struct RecordingSaga {
 impl Saga for RecordingSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -104,9 +110,12 @@ struct EndOnFirstSaga {
 impl Saga for EndOnFirstSaga {
     type SubscribedEvent = OrderPlaced;
     type Event = ReservationRequested;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(SAGA_ID))
+    }
 
     fn apply(&mut self, _event: Self::Event) {}
 
@@ -120,9 +129,7 @@ impl Saga for EndOnFirstSaga {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_order_placed(
     store: &Arc<dyn EventStore>,
@@ -179,15 +186,13 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 #[allow(clippy::type_complexity)]
 async fn spawn_recording_saga(
     system: &EventSourceSystem<JsonCodec>,
-    saga_id: &SagaId,
     saga_store: &Arc<dyn EventStore>,
     upstream_store: &Arc<dyn EventStore>,
     upstream_key: &str,
     handle_count: Arc<AtomicUsize>,
     handled: Arc<Notify>,
 ) -> nitinol_saga::SagaProxy<RecordingSaga> {
-    let routed = saga_id.clone();
-    SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(saga_store), move || {
+    SagaProps::<RecordingSaga>::new(SagaId::new(SAGA_ID), Arc::clone(saga_store), move || {
         RecordingSaga {
             handle_count: Arc::clone(&handle_count),
             handled: Arc::clone(&handled),
@@ -201,15 +206,12 @@ async fn spawn_recording_saga(
             key: upstream_key.to_owned(),
             after: 0,
         },
-        move |_event: &OrderPlaced| Some(routed.clone()),
     )
     .spawn(system.process_system())
     .await
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 /// Baseline / positive control: a saga with a fresh (empty) stream must handle
 /// the routed upstream event.  Without this, the skip test below could pass
@@ -217,20 +219,20 @@ async fn spawn_recording_saga(
 #[tokio::test]
 async fn non_terminated_saga_handles_routed_event() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("baseline-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("baseline-saga");
     let handle_count = Arc::new(AtomicUsize::new(0));
     let handled = Arc::new(Notify::new());
 
     let _saga_proxy = spawn_recording_saga(
         &system,
-        &saga_id,
         &saga_store,
         &upstream_store,
         order_id.as_str(),
@@ -250,20 +252,22 @@ async fn non_terminated_saga_handles_routed_event() {
     );
 }
 
-/// Core D-14: when the saga stream already carries a durable `Ended` marker,
+/// When the saga stream already carries a durable `Ended` marker,
 /// `on_start` must refuse to spawn the upstream subscription, so `handle` is
 /// never called for a routed upstream event.
 #[tokio::test]
 async fn terminated_saga_skips_subscription_and_never_handles() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("terminated-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("terminated-saga");
+    let saga_id = SagaId::new(SAGA_ID);
 
     // Simulate a saga that ended in a previous incarnation.
     seed_ended_marker(&saga_store, &saga_id, 1).await;
@@ -273,7 +277,6 @@ async fn terminated_saga_skips_subscription_and_never_handles() {
 
     let _saga_proxy = spawn_recording_saga(
         &system,
-        &saga_id,
         &saga_store,
         &upstream_store,
         order_id.as_str(),
@@ -299,38 +302,37 @@ async fn terminated_saga_skips_subscription_and_never_handles() {
 #[tokio::test]
 async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("respawn-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-FIRST").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("respawn-saga");
+    let saga_id = SagaId::new(SAGA_ID);
 
     // First incarnation: handle the first event and terminate via End.
     let first_count = Arc::new(AtomicUsize::new(0));
     let first_count_clone = Arc::clone(&first_count);
-    let routed = saga_id.clone();
-    let first_proxy = SagaProps::<EndOnFirstSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move || EndOnFirstSaga {
-            handle_count: Arc::clone(&first_count_clone),
-        },
-    )
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-        move |_event: &OrderPlaced| Some(routed.clone()),
-    )
-    .spawn(system.process_system())
-    .await;
+    let first_proxy =
+        SagaProps::<EndOnFirstSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            EndOnFirstSaga {
+                handle_count: Arc::clone(&first_count_clone),
+            }
+        })
+        .with_codec(system.codec::<ReservationRequested>())
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            system.codec::<OrderPlaced>(),
+            SequenceCursor::Stream {
+                key: order_id.as_str().to_owned(),
+                after: 0,
+            },
+        )
+        .spawn(system.process_system())
+        .await;
 
     // Wait until the End interpretation has durably persisted the Ended marker.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -338,7 +340,12 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
         let events = load_saga_events(&saga_store, &saga_id).await;
         let ended = events
             .iter()
-            .filter(|e| matches!(common::outbox_kind_of(e), Some(common::OutboxKind::Ended(_))))
+            .filter(|e| {
+                matches!(
+                    common::outbox_kind_of(e),
+                    Some(common::OutboxKind::Ended(_))
+                )
+            })
             .count();
         if ended >= 1 {
             break;
@@ -367,7 +374,6 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     let second_handled = Arc::new(Notify::new());
     let _second_proxy = spawn_recording_saga(
         &system,
-        &saga_id,
         &saga_store,
         &upstream_store,
         order_id.as_str(),

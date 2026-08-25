@@ -9,8 +9,8 @@ use crate::process::{Process, ProcessContext};
 
 /// `Driver<P>` over the `mpsc::Receiver<UserTask<P>>` that backs `tell` /
 /// `ask`. This is the only driver wired in by `ProcessSystem::spawn*`; other
-/// `Driver` impls live in sibling crates (e.g. the planned `IntervalDriver`
-/// in nitinol-eventsource, #49).
+/// `Driver` impls live in sibling crates (e.g. a planned `IntervalDriver`
+/// in nitinol-eventsource).
 pub(crate) struct MessageDriver<P: Process> {
     rx: mpsc::Receiver<UserTask<P>>,
 }

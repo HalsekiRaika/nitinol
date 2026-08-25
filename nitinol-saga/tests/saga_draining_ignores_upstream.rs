@@ -1,8 +1,8 @@
-//! ARCH-001 regression: upstream events arriving while the saga lifecycle is
+//! Regression: upstream events arriving while the saga lifecycle is
 //! `Draining` must not reach `Saga::handle`.
 //!
 //! When `SagaEffect::End` is interpreted, the framework:
-//!   1. Persists the durable `Ended` marker (D-14 restart guard).
+//!   1. Persists the durable `Ended` marker (restart guard).
 //!   2. If in-flight tells remain, transitions to `Lifecycle::Draining` instead
 //!      of stopping immediately.
 //!
@@ -12,7 +12,7 @@
 //! `Saga::handle`, potentially producing new effects — violating the terminal
 //! lifecycle contract.
 //!
-//! The fix (ARCH-001): `Receive<EventEnvelope<_>>::recv` and
+//! The guard: `Receive<EventEnvelope<_>>::recv` and
 //! `Receive<FireScheduled>::recv` both check `Lifecycle::Draining` at entry
 //! and return `Ok(())` immediately if set.
 //!
@@ -23,6 +23,7 @@
 //!   recv(event-2) → Draining guard → return immediately (no handle call)
 //! This ordering is deterministic because actors process messages one at a time.
 
+#[path = "common/helpers.rs"]
 mod common;
 use common::{outbox_kind_of, JsonCodec, OutboxKind};
 
@@ -46,9 +47,7 @@ use nitinol_persistence::{
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
-// ---------------------------------------------------------------------------
 // Domain types
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UpstreamDrainEvent {
@@ -72,9 +71,7 @@ impl Event for DrainSagaEvent {
         EventType::new(Family::new("drain_guard"), TypeName::new("DrainSagaEvent"));
 }
 
-// ---------------------------------------------------------------------------
 // Target aggregate (receives the tell from the saga)
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct DrainTargetAgg;
@@ -101,9 +98,7 @@ impl Decider<DrainTargetCmd> for DrainTargetAgg {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Saga under test
-// ---------------------------------------------------------------------------
 
 /// On the first (and intended-only) upstream event: persist one saga event,
 /// enqueue one tell, then end.  `handle_count` records every invocation so
@@ -113,13 +108,20 @@ struct DrainGuardSaga {
     handle_count: Arc<AtomicUsize>,
 }
 
+/// Correlation rule of [`DrainGuardSaga`]: both upstream events name the same
+/// process instance — the guard, not correlation, is what must drop the second.
+const DRAIN_GUARD_SAGA_ID: &str = "drain-guard-saga";
+
 #[async_trait]
 impl Saga for DrainGuardSaga {
     type SubscribedEvent = UpstreamDrainEvent;
     type Event = DrainSagaEvent;
-    type State = ();
     type ScheduledMessage = ();
     type Error = std::convert::Infallible;
+
+    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        Some(SagaId::new(DRAIN_GUARD_SAGA_ID))
+    }
 
     fn apply(&mut self, _event: DrainSagaEvent) {}
 
@@ -139,14 +141,12 @@ impl Saga for DrainGuardSaga {
 
         // persist + one in-flight tell + end → enters Draining (not immediate stop)
         Ok(SagaEffect::persist(DrainSagaEvent { key: event.key })
-            .with_tells(vec![intent])
+            .combine(SagaEffect::tell_intent(intent))
             .then_end())
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 async fn append_upstream_drain_event(
     store: &Arc<dyn EventStore>,
@@ -197,17 +197,17 @@ async fn wait_for_ended_marker(store: &Arc<dyn EventStore>, saga_id: &SagaId) ->
     }
 }
 
-// ---------------------------------------------------------------------------
 // Test
-// ---------------------------------------------------------------------------
 
-/// ARCH-001 regression: `Receive<EventEnvelope<_>>::recv` must return `Ok(())`
+/// Regression: `Receive<EventEnvelope<_>>::recv` must return `Ok(())`
 /// immediately when `Lifecycle::Draining`, so that a second upstream event
 /// delivered before the in-flight tell settles is silently dropped.
 #[tokio::test]
 async fn draining_saga_ignores_upstream_event_before_tell_settles() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::new(ps).with_codec::<JsonCodec>().build();
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("drain-guard-agg");
@@ -227,12 +227,11 @@ async fn draining_saga_ignores_upstream_event_before_tell_settles() {
         .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new("drain-guard-saga");
+    let saga_id = SagaId::new(DRAIN_GUARD_SAGA_ID);
     let handle_count = Arc::new(AtomicUsize::new(0));
 
     let handle_count_clone = Arc::clone(&handle_count);
     let target_proxy_clone = target_proxy.clone();
-    let routed = saga_id.clone();
 
     let _saga_proxy =
         SagaProps::<DrainGuardSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
@@ -249,7 +248,6 @@ async fn draining_saga_ignores_upstream_event_before_tell_settles() {
                 key: agg_id.as_str().to_owned(),
                 after: 0,
             },
-            move |_: &UpstreamDrainEvent| Some(routed.clone()),
         )
         .spawn(system.process_system())
         .await;

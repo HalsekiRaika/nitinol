@@ -18,23 +18,20 @@ use nitinol_eventsource::{
     Receive as EvtReceive, SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName, PersistedSnapshot};
+use nitinol_persistence::{AggregateId, EventType, Family, PersistedSnapshot, TypeName};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Fixtures: event
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, Debug)]
 struct Incremented;
 
 impl Event for Incremented {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.snap"), TypeName::new("Incremented"));
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("e2e.snap"), TypeName::new("Incremented"));
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: Snapshotable aggregate
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Counter {
@@ -61,9 +58,7 @@ impl Snapshotable for Counter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: plain aggregate (no Snapshotable) — used for the no-snapshot test
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct PlainCounter {
@@ -78,9 +73,7 @@ impl Aggregate for PlainCounter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: commands and queries
-// ---------------------------------------------------------------------------
 
 struct Increment;
 struct GetCount;
@@ -131,9 +124,7 @@ impl EvtReceive<GetCount> for PlainCounter {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fixtures: codecs
-// ---------------------------------------------------------------------------
 
 /// Pass-through codec for Incremented (unit struct — no payload to encode).
 struct EventCodec;
@@ -172,9 +163,7 @@ impl Codec<u64> for SnapshotCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /// Spawn a Counter (Snapshotable) process with event store + snapshot persistor.
 async fn spawn_counter(
@@ -202,9 +191,7 @@ async fn spawn_plain_counter(
         .await
 }
 
-// ---------------------------------------------------------------------------
 // Test 1: snapshot at latest sequence — no delta events → state restored correctly
-// ---------------------------------------------------------------------------
 
 /// Given 3 events persisted and a snapshot saved at sequence=3 (value=3),
 /// When a new process is spawned (snapshot load, no delta events),
@@ -254,9 +241,7 @@ async fn e2e_snapshot_at_latest_sequence_restores_state() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 2: snapshot + delta events → combined state
-// ---------------------------------------------------------------------------
 
 /// Given 8 events persisted (seq=1..8) and a snapshot at seq=5 (value=5),
 /// When a new process is spawned,
@@ -307,9 +292,7 @@ async fn e2e_snapshot_plus_delta_events_combine_correctly() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: no snapshot configured → full event replay from the beginning
-// ---------------------------------------------------------------------------
 
 /// Given 5 events persisted for a PlainCounter (no Snapshotable),
 /// When a new process is spawned (event persistor only, no snapshot persistor),

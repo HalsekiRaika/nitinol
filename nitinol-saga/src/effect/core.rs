@@ -5,10 +5,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use nitinol_eventsource::{Aggregate, AggregateTellTarget, Decider};
+use nitinol_persistence::AggregateId;
 
 use crate::effect::tell::TypedSagaTell;
 use crate::error::SagaSideEffectError;
-use crate::id::SagaId;
 use crate::scheduler::TimerName;
 
 /// A declarative description of effects produced by a [`crate::Saga::handle`]
@@ -17,7 +17,8 @@ use crate::scheduler::TimerName;
 /// `SagaEffect<E>` is a Monoid: [`SagaEffect::None`] is the identity element
 /// and [`SagaEffect::combine`] is the associative binary operation.  The
 /// [`SagaEffect::Sequence`] variant accumulates leaves in a flat list;
-/// `combine` introduces no nesting.
+/// `combine` introduces no nesting and folds an adjacent `Persist × Persist`
+/// junction into one `Persist` so the pair is written as a single atomic batch.
 ///
 /// # Variants
 ///
@@ -28,13 +29,22 @@ use crate::scheduler::TimerName;
 ///   batch** on the saga's own event store.  After the append succeeds, each
 ///   tell is dispatched via the retry executor and each schedule is registered
 ///   with the resident `SchedulerProcess` via the injected [`SchedulerProxy`].
+///   A branch whose `events`, `tells` and `schedules` are all empty carries
+///   nothing to append and is interpreted exactly like `None`.
 /// - `End` — single-responsibility termination marker.  Stops the saga
 ///   process and tears down its upstream subscription.  Effects placed after
 ///   `End` inside a `Sequence` are not interpreted.
 /// - `Sequence(Vec<SagaEffect<E>>)` — Monoid composition.  Interpreted left
-///   to right with short-circuit on `End`.
+///   to right with short-circuit on `End`.  All variants are public, so a
+///   `Sequence` can be hand-built without going through `combine`; the
+///   interpreter re-applies `combine`'s adjacent `Persist × Persist` merge to
+///   every effect before interpreting it, so the single-atomic-batch
+///   guarantee documented on `Persist` holds regardless of how the effect was
+///   constructed.
 /// - `CancelSchedule(TimerName)` — name-scoped timer cancellation.  Persists a
 ///   `ScheduleEvent::Cancelled` marker and cancels the pending timer.
+///
+/// [`SchedulerProxy`]: crate::SchedulerProxy
 pub enum SagaEffect<E> {
     /// No-op — the identity element of the Monoid.
     None,
@@ -51,8 +61,8 @@ pub enum SagaEffect<E> {
     End,
     /// An ordered collection of effects executed sequentially.
     Sequence(Vec<SagaEffect<E>>),
-    /// Cancel the timer registered under a [`TimerName`] for this saga (E-28 /
-    /// E-29).  Interpreted as a `ScheduleEvent::Cancelled` append plus a
+    /// Cancel the timer registered under a [`TimerName`] for this saga.
+    /// Interpreted as a `ScheduleEvent::Cancelled` append plus a
     /// scheduler cancel; equivalent to token-scoped cancel since the saga id is
     /// fixed to the emitting saga.
     CancelSchedule(TimerName),
@@ -83,6 +93,17 @@ pub enum SagaEffect<E> {
 /// `crash_restart_payload` bytes are appended to the `TellRequested` outbox
 /// marker so the factory can reconstruct the intent after a full process
 /// restart.
+///
+/// # The target must name an aggregate
+///
+/// Both constructors capture [`AggregateTellTarget::aggregate_id`] and panic if
+/// the target reports an empty id.  The requirement belongs here rather than to
+/// [`AggregateId`]: an empty id is a legitimate framework value in general — a
+/// [`crate::SagaContext`] with no upstream aggregate carries one — and is only
+/// meaningless in the tell-target role.  An intent is where that role is fixed,
+/// and it is the last point at which an empty target can still be attributed to
+/// the code that supplied it; by the time `SagaFailure::TellFailed::target`
+/// records it, the target is out of reach and the field names nothing.
 pub struct TellIntent {
     pub(crate) side: Arc<dyn SagaSideEffect>,
     /// Opaque bytes stored in prost field 2 (`crash_restart`) of the
@@ -95,10 +116,15 @@ pub struct TellIntent {
     /// still works).  An empty slice is normalised to `None` at the write path.
     pub(crate) crash_restart_payload: Option<Bytes>,
     /// The target aggregate's stream key, captured from
-    /// [`AggregateTellTarget::aggregate_id_str`] at construction time.  Stored
+    /// [`AggregateTellTarget::aggregate_id`] at construction time.  Stored
     /// so the saga can write `SagaFailure::TellFailed::target` when the tell
     /// exhausts its retry budget.
-    pub(crate) target_id: SagaId,
+    ///
+    /// It is an [`AggregateId`] because that is what it is: the key of the
+    /// *aggregate* being told.  Carrying it as a `SagaId` would launder an
+    /// aggregate's key through the saga's own identifier type, and the two
+    /// answer to different reserved-namespace enforcement points.
+    pub(crate) target_id: AggregateId,
 }
 
 impl Clone for TellIntent {
@@ -121,20 +147,18 @@ impl TellIntent {
     /// This constructor does **not** support crash-restart re-dispatch.  Use
     /// [`TellIntent::new_with_crash_restart`] when you need re-dispatch after
     /// a full OS-process crash.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `target` reports an empty [`AggregateTellTarget::aggregate_id`]
+    /// — see [the target contract](TellIntent#the-target-must-name-an-aggregate).
     pub fn new<A, C, T>(target: T, cmd: C) -> Self
     where
         A: Aggregate + Decider<C>,
         C: Clone + Send + Sync + 'static,
         T: AggregateTellTarget<A>,
     {
-        let target_id_str = target.aggregate_id_str();
-        assert!(
-            !target_id_str.is_empty(),
-            "TellIntent: target returned an empty aggregate_id_str(); \
-             implement AggregateTellTarget::aggregate_id_str() to return \
-             the target aggregate's stream key for TellFailed DLQ tracking"
-        );
-        let target_id = SagaId::new(target_id_str);
+        let target_id = checked_target_id(target.aggregate_id());
         Self {
             side: Arc::new(TypedSagaTell {
                 target,
@@ -155,20 +179,18 @@ impl TellIntent {
     ///
     /// The factory receives exactly the bytes supplied here and must return a
     /// `TellIntent` that re-sends the same command to the same target.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `target` reports an empty [`AggregateTellTarget::aggregate_id`]
+    /// — see [the target contract](TellIntent#the-target-must-name-an-aggregate).
     pub fn new_with_crash_restart<A, C, T>(target: T, cmd: C, crash_restart_payload: Bytes) -> Self
     where
         A: Aggregate + Decider<C>,
         C: Clone + Send + Sync + 'static,
         T: AggregateTellTarget<A>,
     {
-        let target_id_str = target.aggregate_id_str();
-        assert!(
-            !target_id_str.is_empty(),
-            "TellIntent: target returned an empty aggregate_id_str(); \
-             implement AggregateTellTarget::aggregate_id_str() to return \
-             the target aggregate's stream key for TellFailed DLQ tracking"
-        );
-        let target_id = SagaId::new(target_id_str);
+        let target_id = checked_target_id(target.aggregate_id());
         Self {
             side: Arc::new(TypedSagaTell {
                 target,
@@ -181,15 +203,39 @@ impl TellIntent {
     }
 }
 
-/// A timer registration carried inside a `Persist` branch (E-29).
+/// The id a tell target reports, checked for the one thing the tell-target
+/// role demands of it: that it names something.
+///
+/// The check cannot live in [`AggregateId`] itself.  An empty `AggregateId` is
+/// a legitimate framework value — a [`crate::SagaContext`] with no upstream
+/// aggregate carries exactly that — so emptiness is only wrong for this
+/// particular role, and `TellIntent` construction is the boundary that owns
+/// it.  Recording an empty target would leave `SagaFailure::TellFailed::target`
+/// naming nothing at the point where the failure most needs attribution, and
+/// by then the target that produced it is long out of reach.
+///
+/// Both constructors route through here, so neither can drift out of the
+/// contract independently.
+fn checked_target_id(reported: &AggregateId) -> AggregateId {
+    assert!(
+        !reported.as_str().is_empty(),
+        "TellIntent: target reported an empty aggregate id; implement \
+         AggregateTellTarget::aggregate_id() to return the target aggregate's \
+         stream key for TellFailed DLQ tracking"
+    );
+    reported.clone()
+}
+
+/// A timer registration carried inside a `Persist` branch.
 ///
 /// The interpreter appends a `ScheduleEvent::Scheduled` marker as part of the
 /// same atomic batch as the user events, then registers the timer with the
 /// resident scheduler.  The delay is relative (`after: Duration`), not an
 /// absolute instant, so it survives replay via a persisted wall-clock anchor.
 /// `payload` is the serialized `Saga::ScheduledMessage`.  The fields are `pub`
-/// so a saga can build a spec directly or through
-/// [`crate::SagaEffect::schedule`].
+/// so a saga can build a spec directly and put it on an effect through
+/// [`crate::SagaEffect::schedule_spec`], or let
+/// [`crate::SagaEffect::schedule`] build both from a typed message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleSpec {
     pub name: TimerName,

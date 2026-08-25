@@ -11,7 +11,9 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendingEvent, EventType};
 use nitinol_runtime::process::ProcessContext;
 
-use crate::dead_letter::{enqueue_dead_letter, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext};
+use crate::dead_letter::{
+    enqueue_dead_letter, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext,
+};
 use crate::effect::{ScheduleSpec, TellIntent};
 use crate::id::SagaId;
 use crate::outbox::{OutboxAppender, RetryPolicy};
@@ -53,7 +55,7 @@ pub(crate) enum InterpretOutcome {
     /// A dead-letter append failed inside the interpreter for an upstream-
     /// delivered message.  The caller (`Receive<UpstreamMessage>::recv`) must
     /// propagate this as `Err(SagaUpstreamHandlerError)` so the `DirectPoller`
-    /// (via `ask()`) does not advance the upstream cursor (G-27).
+    /// (via `ask()`) does not advance the upstream cursor.
     DlqFailed,
 }
 
@@ -62,7 +64,13 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
     ictx: &'a mut InterpreterCtx<'_, S>,
 ) -> BoxFuture<'a, InterpretOutcome> {
     Box::pin(async move {
-        match effect {
+        // Normalize before interpreting: `SagaEffect`'s variants are public,
+        // so a hand-built `Sequence(vec![Persist(..), Persist(..)])` can
+        // reach this function without ever going through `combine`. Folding
+        // the adjacent `Persist × Persist` junction here — the single choke
+        // point every effect passes through — makes the atomic-batch
+        // guarantee hold regardless of how the effect was constructed.
+        match effect.normalize_for_interpretation() {
             SagaEffect::None => InterpretOutcome::Continue,
             SagaEffect::Persist {
                 events,
@@ -71,8 +79,8 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
             } => persist_batch(events, tells, schedules, ictx).await,
             SagaEffect::End => {
                 // Persist the durable `Ended` marker before transitioning to the
-                // End state.  D-14 relies on this marker being present in the
-                // stream so that a subsequent spawn can detect prior termination
+                // End state.  The revival guard relies on this marker being
+                // present in the stream so a subsequent spawn detects prior termination
                 // and refuse to revive the saga.  If the append fails we do NOT
                 // stop: stopping without the marker would leave the stream without
                 // the guard, allowing the saga to be revived on the next spawn.
@@ -167,10 +175,15 @@ async fn persist_batch<S: Saga>(
         Vec::with_capacity(encoded_events.len() + tells.len() + schedules.len());
     append_user_events(&mut appending, encoded_events, &mut next_seq, now);
     let tell_ids = append_tell_requested(&mut appending, &tells, &mut next_seq, now);
-    let registrations =
-        append_schedule_specs(&mut appending, &ictx.saga_id, &schedules, &mut next_seq, now);
+    let registrations = append_schedule_specs(
+        &mut appending,
+        &ictx.saga_id,
+        &schedules,
+        &mut next_seq,
+        now,
+    );
 
-    // G-30: staged retry before DLQ.  Sequence stays at its pre-batch value
+    // Staged retry before DLQ.  Sequence stays at its pre-batch value
     // throughout so no sequence numbers are skipped on failure.
     let mut last_error = String::new();
     let mut attempt = 0;
@@ -179,7 +192,11 @@ async fn persist_batch<S: Saga>(
         if attempt > 1 {
             tokio::time::sleep(ictx.retry_policy.backoff_before(attempt)).await;
         }
-        match ictx.store.append(ictx.saga_id.borrow(), appending.clone()).await {
+        match ictx
+            .store
+            .append(ictx.saga_id.borrow(), appending.clone())
+            .await
+        {
             Ok(_) => break true,
             Err(e) => {
                 tracing::warn!(
@@ -198,7 +215,7 @@ async fn persist_batch<S: Saga>(
     if !succeeded {
         tracing::warn!(
             max_attempts = ictx.retry_policy.max_attempts,
-            "saga persist batch exhausted staged retries; enqueuing PersistFailed dead letter (G-30)"
+            "saga persist batch exhausted staged retries; enqueuing PersistFailed dead letter"
         );
         let outcome = enqueue_dead_letter(
             &ictx.store,
@@ -209,7 +226,7 @@ async fn persist_batch<S: Saga>(
             SourceContext::without_upstream(),
         )
         .await;
-        // G-27: when the DLQ append also fails, signal DlqFailed so the
+        // When the DLQ append also fails, signal DlqFailed so the
         // caller can propagate Err through recv(), preventing the DirectPoller
         // (via ask()) from advancing the upstream cursor.  For non-upstream
         // callers (e.g. FireScheduled), the caller must call stop_self() on
@@ -217,7 +234,7 @@ async fn persist_batch<S: Saga>(
         if matches!(outcome, EnqueueOutcome::AppendFailed) {
             tracing::error!(
                 saga_id = ictx.saga_id.as_str(),
-                "saga DLQ append failed for PersistFailed; signalling DlqFailed (G-27)"
+                "saga DLQ append failed for PersistFailed; signalling DlqFailed"
             );
             return InterpretOutcome::DlqFailed;
         }
@@ -231,9 +248,10 @@ async fn persist_batch<S: Saga>(
             SagaPersisted::Domain(event) => ictx.state.apply(event),
             SagaPersisted::Outbox(_)
             | SagaPersisted::Schedule(_)
-            | SagaPersisted::DeadLetter(_) => unreachable!(
-                "persist_batch enqueues only Domain events into the envelope"
-            ),
+            | SagaPersisted::DeadLetter(_)
+            | SagaPersisted::DeadLetterDisposition(_) => {
+                unreachable!("persist_batch enqueues only Domain events into the envelope")
+            }
         }
     }
 
@@ -331,8 +349,9 @@ struct PendingRegistration {
     payload: bytes::Bytes,
 }
 
-/// Append one `ScheduleEvent::Scheduled` marker per spec into the atomic batch,
-/// returning the data needed to register each timer once the append succeeds.
+/// Append one `ScheduleEvent::Scheduled` marker per requested timer into the
+/// atomic batch, returning the data needed to register each timer once the
+/// append succeeds.
 ///
 /// `scheduled_at` is captured as a wall-clock anchor so replay can recompute
 /// the remaining delay (`remaining = scheduled_at + after - now`).
@@ -357,7 +376,9 @@ fn append_schedule_specs(
             payload: spec.payload.clone(),
             scheduled_at_unix_millis,
         };
-        appending.push(nitinol_eventsource::appending_system_event(*next_seq, &event, now));
+        appending.push(nitinol_eventsource::appending_system_event(
+            *next_seq, &event, now,
+        ));
         registrations.push(PendingRegistration {
             name: spec.name.clone(),
             after: spec.after,

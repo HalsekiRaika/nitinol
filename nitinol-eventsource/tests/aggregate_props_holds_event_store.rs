@@ -1,4 +1,4 @@
-//! `AggregateProps::new` accepts `Arc<dyn EventStore>` directly (Issue #40).
+//! `AggregateProps::new` accepts `Arc<dyn EventStore>` directly.
 //!
 //! Replaces the previous `EventPersistor` actor wiring.  The aggregate
 //! process now holds the store inline and calls `store.append` /
@@ -24,9 +24,7 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
-// ---------------------------------------------------------------------------
 // Minimal counter aggregate
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct Counter {
@@ -87,9 +85,7 @@ impl Codec<Incremented> for PassThroughCodec {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Compile-time type assertion
-// ---------------------------------------------------------------------------
 
 /// `AggregateProps::<Counter>::new` MUST have the signature
 /// `fn(AggregateId, Arc<dyn EventStore>) -> AggregateProps<Counter>`.
@@ -102,9 +98,7 @@ fn _assert_sig_aggregate_props_new_accepts_arc_dyn_event_store() {
     let _: fn(AggregateId, Arc<dyn EventStore>) -> AggregateProps<Counter> = AggregateProps::new;
 }
 
-// ---------------------------------------------------------------------------
 // Runtime integration: spawn + ask succeeds with Arc<dyn EventStore>
-// ---------------------------------------------------------------------------
 
 /// Spawning an AggregateProcess with Arc<dyn EventStore> succeeds, and a
 /// command flows through `Effect::Persist` to `store.append` without going
@@ -126,9 +120,7 @@ async fn aggregate_props_spawns_with_arc_dyn_event_store() {
     assert_eq!(events, vec![Incremented]);
 }
 
-// ---------------------------------------------------------------------------
 // Runtime integration: state replay via direct store
-// ---------------------------------------------------------------------------
 
 /// After ask(Increment) on process 1, a second process sharing the same
 /// Arc<dyn EventStore> replays the stored event in on_start and observes
@@ -167,9 +159,7 @@ async fn aggregate_replays_state_via_shared_arc_dyn_event_store() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Multiple AggregateProcess can share one Arc<dyn EventStore>
-// ---------------------------------------------------------------------------
 
 /// Two AggregateProcess instances on different ids share the same
 /// Arc<dyn EventStore>.  Without the EventPersistor actor, the store itself

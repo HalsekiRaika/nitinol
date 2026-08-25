@@ -894,6 +894,7 @@ name = "nitinol-macros"
 version = "0.1.0"
 dependencies = [
  "nitinol",
+ "nitinol-persistence",
  "proc-macro2",
  "quote",
  "syn",
@@ -1286,6 +1287,22 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "saga-fanout-pattern"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "nitinol-eventsource",
+ "nitinol-persistence",
+ "nitinol-runtime",
+ "nitinol-saga",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
