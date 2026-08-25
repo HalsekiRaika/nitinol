@@ -49,7 +49,7 @@ use crate::receive::Receive as EvtReceive;
 /// for what that means for side effects.
 pub struct AggregateProxy<A: Aggregate> {
     /// The aggregate's stream key — kept here so
-    /// [`AggregateTellTarget::aggregate_id_str`](crate::AggregateTellTarget::aggregate_id_str)
+    /// [`AggregateTellTarget::aggregate_id`](crate::AggregateTellTarget::aggregate_id)
     /// can answer without resolving anything.
     aggregate_id: AggregateId,
     binding: Arc<Binding<A>>,

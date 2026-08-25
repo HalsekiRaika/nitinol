@@ -36,7 +36,7 @@ use nitinol_eventsource::{
     SequenceCursor, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, TypeName};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
@@ -101,12 +101,14 @@ impl Decider<DummyCmd> for DummyTarget {
 // A TellTarget that always returns an error — forces TellFailed via executor.
 
 struct FailingTarget<A: Aggregate> {
+    target_id: AggregateId,
     _phantom: PhantomData<fn() -> A>,
 }
 
 impl<A: Aggregate> Clone for FailingTarget<A> {
     fn clone(&self) -> Self {
         Self {
+            target_id: self.target_id.clone(),
             _phantom: PhantomData,
         }
     }
@@ -115,6 +117,7 @@ impl<A: Aggregate> Clone for FailingTarget<A> {
 impl<A: Aggregate> FailingTarget<A> {
     fn new() -> Self {
         Self {
+            target_id: AggregateId::new("test-failing-target"),
             _phantom: PhantomData,
         }
     }
@@ -129,8 +132,8 @@ impl<A: Aggregate> AggregateTellTarget<A> for FailingTarget<A> {
         Box::pin(async move { Err(TellError::Send(SendError)) })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        "test-failing-target"
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.target_id
     }
 }
 

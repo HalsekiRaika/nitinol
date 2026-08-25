@@ -40,6 +40,7 @@ use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
 struct FailingTellTarget<A: Aggregate> {
     attempts: Arc<AtomicUsize>,
+    target_id: AggregateId,
     _phantom: PhantomData<fn() -> A>,
 }
 
@@ -50,6 +51,7 @@ impl<A: Aggregate> Clone for FailingTellTarget<A> {
     fn clone(&self) -> Self {
         Self {
             attempts: Arc::clone(&self.attempts),
+            target_id: self.target_id.clone(),
             _phantom: PhantomData,
         }
     }
@@ -59,6 +61,7 @@ impl<A: Aggregate> FailingTellTarget<A> {
     fn new() -> Self {
         Self {
             attempts: Arc::new(AtomicUsize::new(0)),
+            target_id: AggregateId::new("test-failing-target"),
             _phantom: PhantomData,
         }
     }
@@ -81,8 +84,8 @@ impl<A: Aggregate> AggregateTellTarget<A> for FailingTellTarget<A> {
         })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        "test-failing-target"
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.target_id
     }
 }
 

@@ -41,7 +41,8 @@ use nitinol_eventsource::{
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
-    AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent,
+    TypeName, Variant,
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
@@ -405,16 +406,16 @@ async fn on_scheduled_error_enqueues_a_scheduled_failed_dead_letter() {
 /// A tell target that fails every attempt and carries a known stream key so
 /// the `SagaFailure::TellFailed::target` field can be asserted in tests.
 struct FailingTellTarget<A: Aggregate> {
-    /// Reported as `aggregate_id_str()` so `TellIntent` captures it and writes
+    /// Reported as `aggregate_id()` so `TellIntent` captures it and writes
     /// it into the `SagaFailure::TellFailed::target` dead-letter field.
-    target_id: &'static str,
+    target_id: AggregateId,
     _phantom: PhantomData<fn() -> A>,
 }
 
 impl<A: Aggregate> Clone for FailingTellTarget<A> {
     fn clone(&self) -> Self {
         Self {
-            target_id: self.target_id,
+            target_id: self.target_id.clone(),
             _phantom: PhantomData,
         }
     }
@@ -429,8 +430,8 @@ impl<A: Aggregate> AggregateTellTarget<A> for FailingTellTarget<A> {
         Box::pin(async move { Err(TellError::Send(SendError)) })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        self.target_id
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.target_id
     }
 }
 
@@ -529,7 +530,7 @@ async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_ret
         SagaProps::<TellFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             TellFailSaga {
                 target: FailingTellTarget {
-                    target_id: TELL_FAIL_TARGET_ID,
+                    target_id: AggregateId::new(TELL_FAIL_TARGET_ID),
                     _phantom: PhantomData,
                 },
                 handled: Arc::clone(&handled_for_saga),
@@ -636,6 +637,7 @@ impl Decider<DrainCmd> for DrainTargetAgg {
 #[derive(Clone)]
 struct BlockingDrainTellTarget {
     notify: Arc<Notify>,
+    aggregate_id: AggregateId,
 }
 
 impl AggregateTellTarget<DrainTargetAgg> for BlockingDrainTellTarget {
@@ -651,8 +653,8 @@ impl AggregateTellTarget<DrainTargetAgg> for BlockingDrainTellTarget {
         })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        "dlq-ended-target"
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.aggregate_id
     }
 }
 
@@ -739,6 +741,7 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
             EndOnFirstSaga {
                 target: BlockingDrainTellTarget {
                     notify: Arc::clone(&drain_unblock_for_saga),
+                    aggregate_id: AggregateId::new("dlq-ended-target"),
                 },
                 handle_count: Arc::clone(&handle_count_for_saga),
             }

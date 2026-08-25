@@ -93,6 +93,17 @@ pub enum SagaEffect<E> {
 /// `crash_restart_payload` bytes are appended to the `TellRequested` outbox
 /// marker so the factory can reconstruct the intent after a full process
 /// restart.
+///
+/// # The target must name an aggregate
+///
+/// Both constructors capture [`AggregateTellTarget::aggregate_id`] and panic if
+/// the target reports an empty id.  The requirement belongs here rather than to
+/// [`AggregateId`]: an empty id is a legitimate framework value in general — a
+/// [`crate::SagaContext`] with no upstream aggregate carries one — and is only
+/// meaningless in the tell-target role.  An intent is where that role is fixed,
+/// and it is the last point at which an empty target can still be attributed to
+/// the code that supplied it; by the time `SagaFailure::TellFailed::target`
+/// records it, the target is out of reach and the field names nothing.
 pub struct TellIntent {
     pub(crate) side: Arc<dyn SagaSideEffect>,
     /// Opaque bytes stored in prost field 2 (`crash_restart`) of the
@@ -105,7 +116,7 @@ pub struct TellIntent {
     /// still works).  An empty slice is normalised to `None` at the write path.
     pub(crate) crash_restart_payload: Option<Bytes>,
     /// The target aggregate's stream key, captured from
-    /// [`AggregateTellTarget::aggregate_id_str`] at construction time.  Stored
+    /// [`AggregateTellTarget::aggregate_id`] at construction time.  Stored
     /// so the saga can write `SagaFailure::TellFailed::target` when the tell
     /// exhausts its retry budget.
     ///
@@ -136,20 +147,18 @@ impl TellIntent {
     /// This constructor does **not** support crash-restart re-dispatch.  Use
     /// [`TellIntent::new_with_crash_restart`] when you need re-dispatch after
     /// a full OS-process crash.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `target` reports an empty [`AggregateTellTarget::aggregate_id`]
+    /// — see [the target contract](TellIntent#the-target-must-name-an-aggregate).
     pub fn new<A, C, T>(target: T, cmd: C) -> Self
     where
         A: Aggregate + Decider<C>,
         C: Clone + Send + Sync + 'static,
         T: AggregateTellTarget<A>,
     {
-        let target_id_str = target.aggregate_id_str();
-        assert!(
-            !target_id_str.is_empty(),
-            "TellIntent: target returned an empty aggregate_id_str(); \
-             implement AggregateTellTarget::aggregate_id_str() to return \
-             the target aggregate's stream key for TellFailed DLQ tracking"
-        );
-        let target_id = AggregateId::new(target_id_str);
+        let target_id = checked_target_id(target.aggregate_id());
         Self {
             side: Arc::new(TypedSagaTell {
                 target,
@@ -170,20 +179,18 @@ impl TellIntent {
     ///
     /// The factory receives exactly the bytes supplied here and must return a
     /// `TellIntent` that re-sends the same command to the same target.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `target` reports an empty [`AggregateTellTarget::aggregate_id`]
+    /// — see [the target contract](TellIntent#the-target-must-name-an-aggregate).
     pub fn new_with_crash_restart<A, C, T>(target: T, cmd: C, crash_restart_payload: Bytes) -> Self
     where
         A: Aggregate + Decider<C>,
         C: Clone + Send + Sync + 'static,
         T: AggregateTellTarget<A>,
     {
-        let target_id_str = target.aggregate_id_str();
-        assert!(
-            !target_id_str.is_empty(),
-            "TellIntent: target returned an empty aggregate_id_str(); \
-             implement AggregateTellTarget::aggregate_id_str() to return \
-             the target aggregate's stream key for TellFailed DLQ tracking"
-        );
-        let target_id = AggregateId::new(target_id_str);
+        let target_id = checked_target_id(target.aggregate_id());
         Self {
             side: Arc::new(TypedSagaTell {
                 target,
@@ -194,6 +201,29 @@ impl TellIntent {
             target_id,
         }
     }
+}
+
+/// The id a tell target reports, checked for the one thing the tell-target
+/// role demands of it: that it names something.
+///
+/// The check cannot live in [`AggregateId`] itself.  An empty `AggregateId` is
+/// a legitimate framework value — a [`crate::SagaContext`] with no upstream
+/// aggregate carries exactly that — so emptiness is only wrong for this
+/// particular role, and `TellIntent` construction is the boundary that owns
+/// it.  Recording an empty target would leave `SagaFailure::TellFailed::target`
+/// naming nothing at the point where the failure most needs attribution, and
+/// by then the target that produced it is long out of reach.
+///
+/// Both constructors route through here, so neither can drift out of the
+/// contract independently.
+fn checked_target_id(reported: &AggregateId) -> AggregateId {
+    assert!(
+        !reported.as_str().is_empty(),
+        "TellIntent: target reported an empty aggregate id; implement \
+         AggregateTellTarget::aggregate_id() to return the target aggregate's \
+         stream key for TellFailed DLQ tracking"
+    );
+    reported.clone()
 }
 
 /// A timer registration carried inside a `Persist` branch.

@@ -51,7 +51,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
-    AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -119,6 +119,7 @@ impl Decider<DrainCmd> for DrainTargetAgg {
 #[derive(Clone)]
 struct BlockingTellTarget {
     notify: Arc<Notify>,
+    aggregate_id: AggregateId,
 }
 
 impl AggregateTellTarget<DrainTargetAgg> for BlockingTellTarget {
@@ -134,8 +135,8 @@ impl AggregateTellTarget<DrainTargetAgg> for BlockingTellTarget {
         })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        "correlate-drain-order-target"
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.aggregate_id
     }
 }
 
@@ -280,6 +281,7 @@ async fn draining_saga_dead_letters_only_events_it_correlates_to() {
         move || EndOnFirstCorrelatedSaga {
             target: BlockingTellTarget {
                 notify: Arc::clone(&drain_unblock_for_saga),
+                aggregate_id: AggregateId::new("correlate-drain-order-target"),
             },
             handle_count: Arc::clone(&handle_count_for_saga),
         },

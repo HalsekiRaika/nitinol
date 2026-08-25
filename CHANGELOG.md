@@ -106,6 +106,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (`nitinol-eventsource`): `AggregateTellTarget::aggregate_id_str(&self)
+  -> &str` is replaced by `AggregateTellTarget::aggregate_id(&self) ->
+  &AggregateId`. The accessor exists so a higher-level consumer (a saga's tell
+  intent) can identify a target without a round-trip to the aggregate's
+  process, but returning `&str` let a target hand back any string, including
+  one that was never a real aggregate id — the id's provenance was lost at the
+  trait boundary. Returning the typed `&AggregateId` keeps that provenance:
+  the value a target reports is the same `AggregateId` its process was
+  addressed by, not a reconstruction. There is no default implementation and
+  none is planned — a defaulted body would let an implementor's omission
+  compile instead of failing to build, silently reporting whatever the default
+  picked. Implementors change their return type and, if they were formatting
+  or cloning to produce the old `&str`, return the underlying `AggregateId`
+  (or a reference to it) directly; `AggregateProxy`'s implementation already
+  does this and needs no changes from its own callers. This is re-exported
+  from the umbrella crate as `nitinol::eventsource::AggregateTellTarget`, so
+  any out-of-tree implementor of the trait must update at the next compile.
+
 - **BREAKING** (`nitinol-saga`): `SagaEffect::with_tells` and
   `SagaEffect::with_schedules` are replaced by `SagaEffect::tell_intent(intent)`
   and `SagaEffect::schedule_spec(spec)`. The two setters were only defined on

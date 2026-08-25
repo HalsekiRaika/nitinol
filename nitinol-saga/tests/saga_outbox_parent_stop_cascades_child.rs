@@ -58,6 +58,7 @@ struct GatedFailingTarget<A: Aggregate> {
     attempts: Arc<AtomicUsize>,
     first_attempt_reached: Arc<Notify>,
     gate: Arc<Semaphore>,
+    target_id: AggregateId,
     _phantom: PhantomData<fn() -> A>,
 }
 
@@ -69,6 +70,7 @@ impl<A: Aggregate> Clone for GatedFailingTarget<A> {
             attempts: Arc::clone(&self.attempts),
             first_attempt_reached: Arc::clone(&self.first_attempt_reached),
             gate: Arc::clone(&self.gate),
+            target_id: self.target_id.clone(),
             _phantom: PhantomData,
         }
     }
@@ -81,6 +83,7 @@ impl<A: Aggregate> GatedFailingTarget<A> {
             first_attempt_reached: Arc::new(Notify::new()),
             // 0 permits: the first attempt blocks until the test adds one.
             gate: Arc::new(Semaphore::new(0)),
+            target_id: AggregateId::new("test-gated-failing-target"),
             _phantom: PhantomData,
         }
     }
@@ -114,8 +117,8 @@ impl<A: Aggregate> AggregateTellTarget<A> for GatedFailingTarget<A> {
         })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        "test-gated-failing-target"
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.target_id
     }
 }
 

@@ -139,25 +139,25 @@ impl Decider<Reserve> for Inventory {
 }
 
 struct FailingTellTarget<A: Aggregate> {
-    /// Reported as `aggregate_id_str()`, so `TellIntent` captures it as the
+    /// Reported as `aggregate_id()`, so `TellIntent` captures it as the
     /// intent's target and the framework can hand it to the failure hook.
-    target_id: &'static str,
+    target_id: AggregateId,
     _phantom: PhantomData<fn() -> A>,
 }
 
 impl<A: Aggregate> Clone for FailingTellTarget<A> {
     fn clone(&self) -> Self {
         Self {
-            target_id: self.target_id,
+            target_id: self.target_id.clone(),
             _phantom: PhantomData,
         }
     }
 }
 
 impl<A: Aggregate> FailingTellTarget<A> {
-    fn new(target_id: &'static str) -> Self {
+    fn new(target_id: &str) -> Self {
         Self {
-            target_id,
+            target_id: AggregateId::new(target_id),
             _phantom: PhantomData,
         }
     }
@@ -172,8 +172,8 @@ impl<A: Aggregate> AggregateTellTarget<A> for FailingTellTarget<A> {
         Box::pin(async move { Err(TellError::Send(SendError)) })
     }
 
-    fn aggregate_id_str(&self) -> &str {
-        self.target_id
+    fn aggregate_id(&self) -> &AggregateId {
+        &self.target_id
     }
 }
 
