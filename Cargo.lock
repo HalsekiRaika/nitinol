@@ -863,12 +863,20 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 name = "nitinol"
 version = "0.4.2"
 dependencies = [
+ "nitinol-contract",
  "nitinol-eventsource",
  "nitinol-macros",
  "nitinol-persistence",
  "nitinol-runtime",
  "nitinol-saga",
  "tokio",
+]
+
+[[package]]
+name = "nitinol-contract"
+version = "0.1.0"
+dependencies = [
+ "nitinol-persistence",
 ]
 
 [[package]]
@@ -880,6 +888,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "jiff",
+ "nitinol-contract",
  "nitinol-persistence",
  "nitinol-runtime",
  "serde",

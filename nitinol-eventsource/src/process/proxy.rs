@@ -1,10 +1,10 @@
 use std::sync::{Arc, Mutex};
 
+use nitinol_contract::Aggregate;
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::error::AskError as RuntimeAskError;
 
-use crate::aggregate::Aggregate;
 use crate::decider::Decider;
 use crate::error::{
     AskError, AskHandlerError, EffectExecutionError, ExecError, ExecHandlerError, TellError,

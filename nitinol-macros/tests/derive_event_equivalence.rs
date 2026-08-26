@@ -9,8 +9,9 @@
 //!
 //! Both the `Event` trait and the `Event` derive are reached through the single
 //! umbrella path `nitinol::eventsource::Event` (trait namespace vs. macro
-//! namespace), mirroring how the generated code references
-//! `::nitinol::eventsource::Event` and `::nitinol::persistence::{...}`.
+//! namespace). This is the compatibility re-export path; the generated code
+//! itself references the canonical `::nitinol::contract::Event` and
+//! `::nitinol::persistence::{...}`.
 
 use nitinol::eventsource::Event;
 use nitinol::persistence::{EventType, Family, TypeName, Variant};

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
+use nitinol_contract::Aggregate;
 
-use crate::aggregate::Aggregate;
 use crate::context::Context;
 
 /// Handles read-only queries against the current aggregate state.

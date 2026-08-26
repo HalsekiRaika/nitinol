@@ -1,0 +1,14 @@
+[package]
+name = "nitinol-contract"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Runtime-free contract traits between nitinol and downstream domain code"
+
+# The point of this crate is what it may *not* depend on: an async runtime.
+# `nitinol-persistence` supplies the event identity types the contract is
+# written in terms of and is itself runtime-free.
+[dependencies]
+nitinol-persistence = { path = "../nitinol-persistence" }

@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use nitinol_contract::{Aggregate, Snapshotable};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::{ProcessSystem, Props};
 
-use crate::aggregate::{Aggregate, Snapshotable};
 use crate::codec::ErasedCodec;
 use crate::process::aggregate_process::{AggregateProcess, SnapshotRestoreFn};
 use crate::process::proxy::AggregateProxy;

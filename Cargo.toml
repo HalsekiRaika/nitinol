@@ -45,11 +45,15 @@ description = "A utilities for event sourcing"
 default = []
 runtime = ["dep:nitinol-runtime"]
 persistence = ["dep:nitinol-persistence"]
-eventsource = ["dep:nitinol-eventsource", "dep:nitinol-macros", "runtime", "persistence"]
+# The runtime-free contract layer: the aggregate traits and `#[derive(Event)]`,
+# and nothing that would pull in Tokio.
+contract = ["dep:nitinol-contract", "dep:nitinol-macros", "persistence"]
+eventsource = ["dep:nitinol-eventsource", "dep:nitinol-macros", "contract", "runtime", "persistence"]
 saga = ["dep:nitinol-saga", "runtime", "persistence", "eventsource"]
-full = ["runtime", "persistence", "eventsource", "saga"]
+full = ["runtime", "persistence", "contract", "eventsource", "saga"]
 
 [dependencies]
+nitinol-contract = { path = "nitinol-contract", optional = true }
 nitinol-runtime = { path = "nitinol-runtime", optional = true }
 nitinol-persistence = { path = "nitinol-persistence", optional = true }
 nitinol-eventsource = { path = "nitinol-eventsource", optional = true }

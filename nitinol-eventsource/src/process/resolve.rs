@@ -114,13 +114,13 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use nitinol_contract::Aggregate;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{ProcessSystem, Props};
 use tokio::sync::watch;
 
-use crate::aggregate::Aggregate;
 use crate::process::aggregate_process::AggregateProcess;
 
 /// A handle to one activation of an aggregate.

@@ -11,6 +11,7 @@ description = "Effect ADT and event sourcing utilities for nitinol"
 test-helpers = []
 
 [dependencies]
+nitinol-contract = { path = "../nitinol-contract" }
 nitinol-runtime = { path = "../nitinol-runtime" }
 nitinol-persistence = { path = "../nitinol-persistence" }
 async-trait = "0.1"

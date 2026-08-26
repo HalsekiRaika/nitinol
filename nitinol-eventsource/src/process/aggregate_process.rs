@@ -2,17 +2,16 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
+use nitinol_contract::{Aggregate, Event};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
-use crate::aggregate::Aggregate;
 use crate::codec::ErasedCodec;
 use crate::context::Context;
 use crate::decider::Decider;
 use crate::error::{AskHandlerError, CodecError, EffectExecutionError, ExecHandlerError};
-use crate::event::Event;
 use crate::process::snapshot_persistor::SnapshotPersistorProxy;
 use crate::receive::Receive as EvtReceive;
 use crate::Effect;
