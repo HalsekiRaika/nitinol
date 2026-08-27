@@ -4,8 +4,10 @@ use crate::event::Event;
 ///
 /// An aggregate holds domain state and evolves it by applying domain events.
 /// It is the central building block of the CQRS and Event Sourcing pattern:
-/// commands are decided by the `Decider` trait in `nitinol-eventsource`, and
-/// the resulting events are applied here to advance the state.
+/// commands are decided by a `Decider` — the pure, synchronous
+/// [`Decider`](crate::Decider) contract defined in this crate, or the
+/// effectful trait of the same name in `nitinol-eventsource` that drives it —
+/// and the resulting events are applied here to advance the state.
 ///
 /// # Why `apply` is synchronous
 ///

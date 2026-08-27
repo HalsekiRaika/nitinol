@@ -33,8 +33,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trait, so derives on the `eventsource` feature are unaffected.
 
   Execution-side abstractions stay where they are: `Context`, `Effect`,
-  `Codec`, `Decider` and the projection layer describe how the runtime drives
-  an aggregate, not what an aggregate is, and are not part of this crate.
+  `Codec`, the effectful `nitinol_eventsource::Decider` and the projection
+  layer describe how the runtime drives an aggregate, not what an aggregate is,
+  and are not part of this crate.
+
+- (`nitinol-contract`): `Decider<C>`, `Decision<E, O, R>` and `Query<M>` — a
+  pure vocabulary for deciding a command and for asking state a question.
+  `decide` is synchronous, takes `&self` and returns a value, so "a decision
+  performs no I/O" is stated by the type rather than by a comment, and a domain
+  crate can property-test its decisions with no async runtime in the dependency
+  tree. `Query<M>` is the same for questions: it produces an answer, never an
+  event.
+
+  A decision states the facts and the answer together —
+  `Decision::persist(events).output(answer)` — or refuses the command with
+  `Decision::reject(rejection)`, which carries no events and no output. The
+  builder is a typestate: `persist` yields an `Accepting`, and only `output`
+  completes a `Decision`, so a decider that states facts but forgets to answer
+  does not compile. A command that asks nothing says so once, as
+  `type Output = ()`.
+
+  The laws that make any two correct interpreters observationally equivalent
+  (L-1 to L-9) are written out in the crate documentation, along with the
+  extension rule they follow from: existing contracts are frozen, and new
+  meaning arrives as a new trait.
+
+  Nothing moves for existing users. The effectful
+  `nitinol_eventsource::Decider` and its `Effect` are untouched and keep their
+  users; these traits stand beside them under `nitinol-contract`, and no
+  existing crate's API changes.
 
 - (`nitinol-eventsource`, `nitinol-saga`): a system-held default `EventStore`.
   `EventSourceSystemBuilder::with_event_store(store)` binds one store to the
