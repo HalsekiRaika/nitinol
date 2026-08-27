@@ -3,9 +3,9 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use futures_core::future::BoxFuture;
+use nitinol_contract::Aggregate;
 use nitinol_persistence::AggregateId;
 
-use crate::aggregate::Aggregate;
 use crate::decider::Decider;
 use crate::error::TellError;
 use crate::process::AggregateTellTarget;

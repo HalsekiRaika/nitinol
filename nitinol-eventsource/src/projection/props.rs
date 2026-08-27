@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use nitinol_contract::Event;
 use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore};
 use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::process::ProcessProxy;
@@ -8,7 +9,6 @@ use nitinol_runtime::{ProcessSystem, Props};
 
 use crate::codec::ErasedCodec;
 use crate::durable_stream::{DurableSubscription, SequenceCursor};
-use crate::event::Event;
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};
 use crate::projection::process::{CatchupOrigin, ProjectorProcess};
 use crate::projection::projector::Projector;

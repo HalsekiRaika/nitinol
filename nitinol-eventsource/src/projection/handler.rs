@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use nitinol_contract::Event;
 use nitinol_persistence::EventType;
 
 use crate::codec::ErasedCodec;
-use crate::event::Event;
 use crate::projection::context::ProjectionContext;
 use crate::projection::projector::Projector;
 

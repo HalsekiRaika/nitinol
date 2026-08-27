@@ -1,11 +1,11 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use nitinol_contract::Aggregate;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
-use crate::aggregate::Aggregate;
 use crate::codec::{Codec, ErasedCodec};
 use crate::process::resolve::{AggregateRegistry, ResolveHandle};
 use crate::{AggregateProps, AggregateProxy};

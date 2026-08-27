@@ -14,6 +14,11 @@
 //! | [`Effect`] | Algebraic effect ADT returned by `Decider::decide` |
 //! | [`AggregateProxy`] | Identity-based reference to an aggregate; resolves a dispatch to an activation and re-resolves after one dies |
 //!
+//! [`Aggregate`], [`Event`] and [`Snapshotable`] are defined in
+//! `nitinol-contract`, which carries no async runtime, and are re-exported
+//! here unchanged: a domain crate can implement them without depending on the
+//! execution machinery in this crate.
+//!
 //! # Getting started
 //!
 //! See the `examples/eventsource` directory for step-by-step examples:
@@ -25,13 +30,11 @@
 //! 5. `eventsource-aggregate-communication` – inter-aggregate messaging
 //! 6. `eventsource-codec-switch` – custom codec
 
-mod aggregate;
 pub mod codec;
 mod context;
 mod decider;
 mod durable_stream;
 mod effect;
-mod event;
 mod receive;
 mod system_event;
 
@@ -40,11 +43,14 @@ mod process;
 pub mod projection;
 pub mod system;
 
-pub use self::aggregate::{Aggregate, Snapshotable};
+// Defined in `nitinol-contract` so a runtime-free domain crate can implement
+// them; re-exported here because this crate's own API is stated in terms of
+// them and because these are the paths downstream code already imports.
+pub use nitinol_contract::{Aggregate, Event, Snapshotable};
+
 pub use self::context::Context;
 pub use self::decider::Decider;
 pub use self::effect::{Effect, SideEffect, SideEffectError};
-pub use self::event::Event;
 pub use self::receive::Receive;
 
 // Framework-managed persistent message abstraction. Hidden from docs and not

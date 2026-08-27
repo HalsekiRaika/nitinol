@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-contract`, `nitinol`): a contract crate holding `Event`,
+  `Aggregate` and `Snapshotable`, reachable as `nitinol = { features =
+  ["contract"] }`. The three traits are pure — `apply` is a synchronous state
+  transition, replay is deterministic, and none of them performs I/O — but they
+  were defined in `nitinol-eventsource`, which requires Tokio. A domain-layer
+  crate that keeps itself runtime-free therefore could not name the contract it
+  is written against. It now can: `nitinol-contract` depends only on
+  `nitinol-persistence`, and neither `tokio` nor `nitinol-runtime` appears in
+  the `contract` feature's dependency tree.
+
+  Nothing moves for existing users. `nitinol-eventsource` re-exports all three
+  traits, so `nitinol::eventsource::{Event, Aggregate, Snapshotable}` and
+  `nitinol_eventsource::{...}` keep resolving — to the *same* trait items as
+  `nitinol::contract::{...}`, not to forwarding wrappers, so an aggregate
+  written against either path satisfies the other's bounds and can be handed to
+  `AggregateProps` unchanged.
+
+  `#[derive(Event)]` comes with the feature and now generates
+  `impl ::nitinol::contract::Event` instead of `::nitinol::eventsource::Event`.
+  The derive previously forced anyone who used it to enable `eventsource`, and
+  with it Tokio, purely to make the generated path resolve. Both paths name one
+  trait, so derives on the `eventsource` feature are unaffected.
+
+  Execution-side abstractions stay where they are: `Context`, `Effect`,
+  `Codec`, `Decider` and the projection layer describe how the runtime drives
+  an aggregate, not what an aggregate is, and are not part of this crate.
+
 - (`nitinol-eventsource`, `nitinol-saga`): a system-held default `EventStore`.
   `EventSourceSystemBuilder::with_event_store(store)` binds one store to the
   system, and every spawn entry point then resolves it instead of having each

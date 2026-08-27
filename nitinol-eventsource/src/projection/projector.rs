@@ -1,6 +1,6 @@
 use async_trait::async_trait;
+use nitinol_contract::Event;
 
-use crate::event::Event;
 use crate::projection::context::ProjectionContext;
 
 /// A projection handler for event type `E` with transaction type `Tx`.

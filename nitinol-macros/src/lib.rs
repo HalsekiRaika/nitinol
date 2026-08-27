@@ -9,8 +9,10 @@
 //! proc-macro derive, so it is supplied explicitly via `#[event(family = "...")]`.
 //!
 //! Generated code refers to the framework exclusively through the umbrella
-//! crate (`::nitinol::eventsource::Event`, `::nitinol::persistence::{...}`),
-//! mirroring how `serde`'s derive targets the single `serde` crate.
+//! crate (`::nitinol::contract::Event`, `::nitinol::persistence::{...}`),
+//! mirroring how `serde`'s derive targets the single `serde` crate.  Both
+//! paths are reachable without an async runtime, so applying this derive never
+//! obliges the user to enable `eventsource` — and with it Tokio.
 //!
 //! # Reserved namespace
 //!
@@ -27,7 +29,7 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Lit, LitStr};
 
 use nitinol_persistence::{is_within_reserved_namespace, RESERVED_NAMESPACE};
 
-/// Derives `nitinol::eventsource::Event` for a struct or enum.
+/// Derives `nitinol::contract::Event` for a struct or enum.
 ///
 /// Requires `#[event(family = "...")]`. Structs inherit the trait's default
 /// `variant()`; enums additionally get a `variant()` that maps each arm to its
@@ -88,7 +90,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     };
 
     Ok(quote! {
-        impl #impl_generics ::nitinol::eventsource::Event for #ident #ty_generics #where_clause {
+        impl #impl_generics ::nitinol::contract::Event for #ident #ty_generics #where_clause {
             #event_type_const
             #variant_fn
         }
