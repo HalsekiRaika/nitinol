@@ -96,7 +96,7 @@ pub mod eventsource {
     /// type namespace, derive in the macro namespace — as `serde` does).
     pub use nitinol_macros::Event;
 
-    pub use nitinol_eventsource::Receive;
+    pub use nitinol_eventsource::Query;
     pub use nitinol_eventsource::{
         AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset,
     };

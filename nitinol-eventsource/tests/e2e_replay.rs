@@ -16,7 +16,7 @@ use bytes::Bytes;
 
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, Context, Decider, Effect, Event,
-    Receive as EvtReceive, SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
+    Query, SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{
@@ -98,12 +98,11 @@ impl Decider<Increment> for Counter {
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for Counter {
+impl Query<GetCount> for Counter {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }
@@ -121,12 +120,11 @@ impl Decider<Increment> for SnapshotableCounter {
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for SnapshotableCounter {
+impl Query<GetCount> for SnapshotableCounter {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }

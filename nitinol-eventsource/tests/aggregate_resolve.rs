@@ -25,7 +25,7 @@ use nitinol_eventsource::error::EffectExecutionError;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Context, Decider, Effect,
-    Event, Receive as EvtReceive, SnapshotPersistor, Snapshotable,
+    Event, Query, SnapshotPersistor, Snapshotable,
 };
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
@@ -102,12 +102,11 @@ impl Decider<Increment> for Counter {
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for Counter {
+impl Query<GetCount> for Counter {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }

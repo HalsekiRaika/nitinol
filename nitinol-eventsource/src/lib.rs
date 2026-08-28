@@ -7,14 +7,14 @@
 //! |---|---|
 //! | [`Aggregate`] | Domain state holder; evolves state by applying events |
 //! | [`Decider<C>`](Decider) | Maps a command to an [`Effect`] (Persist / Apply / Side / tell / publish) |
-//! | [`Receive<M>`](Receive) | Read-only query against the current aggregate state |
+//! | [`Query<M>`](Query) | Read-only question asked of the current aggregate state |
 //! | [`Event`] | Marker for domain events |
 //! | [`Snapshotable`] | Opt-in snapshot support for faster replay |
 //! | [`Context`] | Runtime identity and sequence number |
 //! | [`Effect`] | Algebraic effect ADT returned by `Decider::decide` |
 //! | [`AggregateProxy`] | Identity-based reference to an aggregate; resolves a dispatch to an activation and re-resolves after one dies |
 //!
-//! [`Aggregate`], [`Event`] and [`Snapshotable`] are defined in
+//! [`Aggregate`], [`Event`], [`Query`] and [`Snapshotable`] are defined in
 //! `nitinol-contract`, which carries no async runtime, and are re-exported
 //! here unchanged: a domain crate can implement them without depending on the
 //! execution machinery in this crate.
@@ -35,7 +35,6 @@ mod context;
 mod decider;
 mod durable_stream;
 mod effect;
-mod receive;
 mod system_event;
 
 pub mod error;
@@ -46,12 +45,11 @@ pub mod system;
 // Defined in `nitinol-contract` so a runtime-free domain crate can implement
 // them; re-exported here because this crate's own API is stated in terms of
 // them and because these are the paths downstream code already imports.
-pub use nitinol_contract::{Aggregate, Event, Snapshotable};
+pub use nitinol_contract::{Aggregate, Event, Query, Snapshotable};
 
 pub use self::context::Context;
 pub use self::decider::Decider;
 pub use self::effect::{Effect, SideEffect, SideEffectError};
-pub use self::receive::Receive;
 
 // Framework-managed persistent message abstraction. Hidden from docs and not
 // re-exported through the umbrella crate so it stays an internal API; direct

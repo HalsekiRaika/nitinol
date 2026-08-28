@@ -19,8 +19,8 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Context, Decider, Effect, Event,
-    Receive as EvtReceive, SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Context, Decider, Effect, Event, Query,
+    SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
@@ -123,12 +123,11 @@ impl Decider<Reserve> for Inventory {
 
 struct GetReservedCount;
 
-#[async_trait]
-impl EvtReceive<GetReservedCount> for Inventory {
+impl Query<GetReservedCount> for Inventory {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetReservedCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetReservedCount) -> Result<u64, Self::Error> {
         Ok(self.reserved_count)
     }
 }

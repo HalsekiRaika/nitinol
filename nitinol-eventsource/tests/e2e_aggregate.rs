@@ -17,8 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use futures_util::TryStreamExt;
 use nitinol_eventsource::{
-    codec::Codec, system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event,
-    Receive as EvtReceive,
+    codec::Codec, system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, Query,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
@@ -67,12 +66,11 @@ impl Decider<Increment> for Counter {
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for Counter {
+impl Query<GetCount> for Counter {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }

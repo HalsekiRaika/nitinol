@@ -6,9 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{
-    Aggregate, AggregateProxy, Context, Decider, Effect, Receive as EvtReceive,
-};
+use nitinol_eventsource::{Aggregate, AggregateProxy, Context, Decider, Effect, Query};
 
 use crate::effects::TellTargetEffect;
 
@@ -43,7 +41,7 @@ pub struct DelegateToTarget {
     pub done: Arc<Notify>,
 }
 
-// Decider / Receive impls
+// Decider / Query impls
 
 #[async_trait]
 impl Decider<Increment> for Counter {
@@ -75,12 +73,11 @@ impl Decider<DelegateToTarget> for Counter {
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for Counter {
+impl Query<GetCount> for Counter {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }

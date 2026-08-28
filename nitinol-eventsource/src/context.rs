@@ -1,6 +1,6 @@
 use nitinol_persistence::AggregateId;
 
-/// Runtime context passed to [`crate::Decider::decide`] and [`crate::Receive::recv`].
+/// Runtime context passed to [`crate::Decider::decide`].
 ///
 /// `Context` exposes the identity and current sequence position of the running
 /// aggregate instance.  It is constructed by the runtime and should not be

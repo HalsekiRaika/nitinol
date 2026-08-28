@@ -242,6 +242,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **BREAKING** (`nitinol-eventsource`, `nitinol`): removed the
+  eventsource-resident query contract `nitinol_eventsource::Receive<M>`. The
+  query path now interprets `nitinol_contract::Query<M>`, which
+  `nitinol-eventsource` re-exports — so `nitinol_eventsource::Query` and
+  `nitinol::eventsource::Query` resolve to the *same* trait item as
+  `nitinol_contract::Query`, not to a forwarding wrapper.
+
+  `Receive<M>` was `async`, took `&mut Context` and lived in the crate that
+  runs an aggregate. A question asked of state produces no events and reaches
+  no store, so none of that was ever needed to answer one — but the signature
+  made it available, and a contract that names an await point and the runtime's
+  identity cannot be implemented by a domain crate that stays runtime-free, nor
+  reasoned about as a pure function of state. `Query::query(&self, msg)` is
+  synchronous and takes the message alone. It also ends the name collision with
+  `nitinol_runtime::process::Receive`, which every call site worked around by
+  importing the eventsource trait under an alias.
+
+  `AggregateProxy::exec` keeps its name, its call shape and its `ExecError`
+  (`Domain` / `Send`), so callers are unchanged. Implementors rewrite
+
+  ```rust
+  #[async_trait]
+  impl Receive<GetCount> for Counter {
+      type Response = u64;
+      type Error = std::convert::Infallible;
+      async fn recv(&self, _: GetCount, _: &mut Context) -> Result<u64, Self::Error> {
+          Ok(self.value)
+      }
+  }
+  ```
+
+  as
+
+  ```rust
+  impl Query<GetCount> for Counter {
+      type Response = u64;
+      type Error = std::convert::Infallible;
+      fn query(&self, _: GetCount) -> Result<u64, Self::Error> {
+          Ok(self.value)
+      }
+  }
+  ```
+
+  `Query::Response` and `Query::Error` carry no bounds, so a domain crate may
+  answer with a non-`Send` value. The bounds the actor machinery needs to carry
+  an answer back — `Response: Send + 'static`, `Error: std::error::Error + Send
+  + Sync + 'static` — now sit on `exec` and on the process's query handler,
+  where the carrying happens, rather than on the contract. An implementation
+  that only ever answers through `exec` sees no difference; `Receive` required
+  `Response: Sync` and `exec` does not, so this is a relaxation.
+
+  The decision path is untouched: `nitinol_eventsource::{Decider, Effect,
+  Context}` keep their meaning and their users, and `Context` is still passed to
+  `Decider::decide`.
+
 - **BREAKING** (`nitinol-saga`): removed `Saga::snapshot`, `Saga::from_snapshot`
   and the `SagaSnapshot` type. Snapshotting was never implemented: `snapshot`
   always returned `None` and the `from_snapshot` default panicked with

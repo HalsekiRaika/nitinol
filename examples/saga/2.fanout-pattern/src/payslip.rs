@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, Receive};
+use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, Query};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 /// The payslip's genesis event.
@@ -99,12 +99,11 @@ impl Decider<IssuePayslip> for Payslip {
 /// Ask a payslip whether it has been issued yet.
 pub struct IsIssued;
 
-#[async_trait]
-impl Receive<IsIssued> for Payslip {
+impl Query<IsIssued> for Payslip {
     type Response = bool;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: IsIssued, _ctx: &mut Context) -> Result<bool, Self::Error> {
+    fn query(&self, _msg: IsIssued) -> Result<bool, Self::Error> {
         Ok(self.issued)
     }
 }

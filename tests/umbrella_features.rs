@@ -109,7 +109,8 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
         ProjectionContext,
         Projector,
         ProjectorProps,
-        Receive,
+        // query
+        Query,
         SequenceCursor,
         SideEffect,
         SideEffectError,

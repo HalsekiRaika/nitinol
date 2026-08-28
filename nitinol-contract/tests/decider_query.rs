@@ -122,12 +122,13 @@ impl Decider<Label> for Wallet {
 }
 
 /// Ask for this wallet's label, qualified by a namespace the caller owns and
-/// shares. `Rc<str>` again: `Query<M>` must leave `M` unbounded, where
-/// `nitinol_eventsource::Receive` requires `M: Send + Sync + 'static`.
+/// shares. `Rc<str>` again: `Query<M>` must leave `M` unbounded, where an
+/// interpreter that carries the message to another task requires
+/// `M: Send + Sync + 'static`.
 struct QualifiedLabel(Rc<str>);
 
-/// Like [`WalletRejection`], deliberately not a `std::error::Error`:
-/// `nitinol_eventsource::Receive` constrains its `Error`, and this one is
+/// Like [`WalletRejection`], deliberately not a `std::error::Error`: an
+/// interpreter constrains the error it has to carry, and this one is
 /// unconstrained.
 #[derive(Debug, PartialEq, Eq)]
 enum WalletQueryError {
@@ -135,8 +136,9 @@ enum WalletQueryError {
 }
 
 impl Query<QualifiedLabel> for Wallet {
-    // `Rc<str>` is not `Send`: `Receive::Response` is `Send + Sync + 'static`,
-    // `Query::Response` is unbounded.
+    // `Rc<str>` is not `Send`, so an answer of this shape can never leave the
+    // task that computed it. `Query::Response` is unbounded all the same: what
+    // an interpreter needs to carry an answer is the interpreter's own bound.
     type Response = Rc<str>;
     type Error = WalletQueryError;
 

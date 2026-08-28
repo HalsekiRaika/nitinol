@@ -22,8 +22,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::SnapshotPersistor;
 use nitinol_eventsource::{
     codec::Codec, codec::ErasedCodec, system::EventSourceSystem, Aggregate, Context, Decider,
-    Effect, Event, ProjectionContext, Projector, ProjectorProps, Receive as EvtReceive,
-    Snapshotable,
+    Effect, Event, ProjectionContext, Projector, ProjectorProps, Query, Snapshotable,
 };
 use nitinol_persistence::store::{
     EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore,
@@ -104,12 +103,11 @@ impl Decider<Increment> for Counter {
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for Counter {
+impl Query<GetCount> for Counter {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }
@@ -127,12 +125,11 @@ impl Decider<Increment> for CounterWithSnapshot {
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for CounterWithSnapshot {
+impl Query<GetCount> for CounterWithSnapshot {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }

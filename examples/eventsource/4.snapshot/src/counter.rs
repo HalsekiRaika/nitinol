@@ -6,9 +6,7 @@
 use async_trait::async_trait;
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{
-    Aggregate, Context, Decider, Effect, Receive as EvtReceive, Snapshotable,
-};
+use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Query, Snapshotable};
 
 #[derive(Clone, Debug, PartialEq, Event)]
 #[event(family = "snapshot.counter")]
@@ -55,12 +53,11 @@ impl Decider<Increment> for Counter {
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for Counter {
+impl Query<GetCount> for Counter {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }

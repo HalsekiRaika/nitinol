@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use nitinol_contract::Aggregate;
+use nitinol_contract::{Aggregate, Query};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::error::AskError as RuntimeAskError;
@@ -11,7 +11,6 @@ use crate::error::{
 };
 use crate::process::aggregate_process::{AskCmd, ExecMsg};
 use crate::process::resolve::{AggregateResolver, Incarnation};
-use crate::receive::Receive as EvtReceive;
 
 /// A reference to an aggregate, addressed by identity rather than by activation.
 ///
@@ -162,10 +161,12 @@ impl<A: Aggregate> AggregateProxy<A> {
     pub async fn exec<M>(
         &self,
         msg: M,
-    ) -> Result<<A as EvtReceive<M>>::Response, ExecError<<A as EvtReceive<M>>::Error>>
+    ) -> Result<<A as Query<M>>::Response, ExecError<<A as Query<M>>::Error>>
     where
-        A: EvtReceive<M>,
+        A: Query<M>,
         M: Send + Sync + 'static,
+        <A as Query<M>>::Response: Send + 'static,
+        <A as Query<M>>::Error: std::error::Error + Send + Sync + 'static,
     {
         let incarnation = self.incarnation().await;
         let outcome = incarnation.ask(ExecMsg(msg)).await.map_err(map_exec_error);

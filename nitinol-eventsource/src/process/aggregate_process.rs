@@ -2,7 +2,7 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use nitinol_contract::{Aggregate, Event};
+use nitinol_contract::{Aggregate, Event, Query};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
@@ -13,7 +13,6 @@ use crate::context::Context;
 use crate::decider::Decider;
 use crate::error::{AskHandlerError, CodecError, EffectExecutionError, ExecHandlerError};
 use crate::process::snapshot_persistor::SnapshotPersistorProxy;
-use crate::receive::Receive as EvtReceive;
 use crate::Effect;
 
 // Type alias for the snapshot restoration callback
@@ -30,13 +29,13 @@ pub(crate) type SnapshotRestoreFn<A> = Arc<dyn Fn(&[u8]) -> Result<A, CodecError
 //
 // The runtime dispatches messages by type.  Wrapping command types in `AskCmd`
 // and query types in `ExecMsg` prevents accidental dispatch to the wrong impl
-// and allows both `Decider<C>` and `eventsource::Receive<M>` to coexist on
+// and allows both `Decider<C>` and `contract::Query<M>` to coexist on
 // the same `AggregateProcess<A>` without overlapping trait bounds.
 
 /// Routes a domain command through the `Decider<C>` path.
 pub(crate) struct AskCmd<C>(pub(crate) C);
 
-/// Routes a domain query through the `eventsource::Receive<M>` path.
+/// Routes a domain query through the `contract::Query<M>` path.
 pub(crate) struct ExecMsg<M>(pub(crate) M);
 
 // AggregateProcess
@@ -244,26 +243,31 @@ where
     }
 }
 
-// Receive<ExecMsg<M>>: query processing (eventsource::Receive path)
+// Receive<ExecMsg<M>>: query processing (contract::Query path)
+//
+// `Query::Response` and `Query::Error` carry no bounds of their own — the
+// contract stays free of the machinery's vocabulary — so the bounds the runtime
+// needs to carry an answer back over a channel are stated here, where the
+// carrying happens.
 
 impl<A, M> Receive<ExecMsg<M>> for AggregateProcess<A>
 where
-    A: Aggregate + EvtReceive<M>,
+    A: Aggregate + Query<M>,
     M: Send + Sync + 'static,
+    <A as Query<M>>::Response: Send + 'static,
+    <A as Query<M>>::Error: std::error::Error + Send + Sync + 'static,
 {
-    type Response = <A as EvtReceive<M>>::Response;
-    type Error = ExecHandlerError<<A as EvtReceive<M>>::Error>;
+    type Response = <A as Query<M>>::Response;
+    type Error = ExecHandlerError<<A as Query<M>>::Error>;
 
     async fn recv(
         &mut self,
         msg: ExecMsg<M>,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<Self::Response, Self::Error> {
-        let mut ctx = Context::new(self.aggregate_id.clone(), self.sequence);
-        self.state
-            .recv(msg.0, &mut ctx)
-            .await
-            .map_err(ExecHandlerError::Domain)
+        // Asking the state a question is a synchronous call: no identity, no
+        // sequence, no await point is available to the answer (L-1).
+        self.state.query(msg.0).map_err(ExecHandlerError::Domain)
     }
 }
 

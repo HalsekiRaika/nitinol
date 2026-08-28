@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Receive as EvtReceive};
+use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Query};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Event)]
 #[event(family = "saga.example")]
@@ -45,12 +45,11 @@ impl Decider<Reserve> for Inventory {
 
 pub struct GetReservedCount;
 
-#[async_trait]
-impl EvtReceive<GetReservedCount> for Inventory {
+impl Query<GetReservedCount> for Inventory {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetReservedCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetReservedCount) -> Result<u64, Self::Error> {
         Ok(self.reserved_count)
     }
 }

@@ -3,13 +3,13 @@
 //! The same `Wallet` type implements:
 //! - `Decider<Deposit>` — adds to the balance
 //! - `Decider<Withdraw>` — deducts from the balance, with a rejection if insufficient funds
-//! - `Receive<GetBalance>` — read-only query for the current balance
+//! - `Query<GetBalance>` — read-only query for the current balance
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Receive as EvtReceive};
+use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Query};
 
 // Events
 
@@ -73,7 +73,7 @@ pub struct InsufficientFunds {
     pub amount: u64,
 }
 
-// Decider / Receive implementations
+// Decider / Query implementations
 
 #[async_trait]
 impl Decider<Deposit> for Wallet {
@@ -111,12 +111,11 @@ impl Decider<Withdraw> for Wallet {
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetBalance> for Wallet {
+impl Query<GetBalance> for Wallet {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetBalance, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetBalance) -> Result<u64, Self::Error> {
         Ok(self.balance)
     }
 }
