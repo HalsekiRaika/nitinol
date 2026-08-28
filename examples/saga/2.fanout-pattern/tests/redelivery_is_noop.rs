@@ -79,6 +79,7 @@ async fn one_fact_event_records_the_approval_and_fans_out_to_thirty_two_payslips
     world
         .payroll_run
         .ask(ApprovePayrollRun {
+            payroll_run: run_id.as_str().to_owned(),
             employee_ids: employees.clone(),
         })
         .await
@@ -174,6 +175,7 @@ async fn redelivered_fact_event_writes_no_second_payslip() {
     world
         .payroll_run
         .ask(ApprovePayrollRun {
+            payroll_run: run_id.as_str().to_owned(),
             employee_ids: employees.clone(),
         })
         .await
@@ -249,6 +251,7 @@ async fn duplicate_genesis_append_conflicts_and_preserves_the_first_write() {
     world
         .payroll_run
         .ask(ApprovePayrollRun {
+            payroll_run: run_id.as_str().to_owned(),
             employee_ids: employees.clone(),
         })
         .await

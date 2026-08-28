@@ -8,7 +8,7 @@
 //! |----------------|---------|
 //! | `runtime`      | `runtime` — actor runtime (`ProcessSystem`, `Process`, …) |
 //! | `persistence`  | `persistence` — persistence abstractions (`EventStore`, IDs, …) |
-//! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Event`, `Snapshotable`, `#[derive(Event)]`) |
+//! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Decider`, `Decision`, `Query`, `Event`, `Snapshotable`, `#[derive(Event)]`) |
 //! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
 //! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
 //! | `full`         | All of the above |
@@ -28,17 +28,20 @@ pub use nitinol_persistence as persistence;
 
 /// Facade for the `contract` feature.
 ///
-/// What a domain layer needs to define an aggregate — the three pure traits and
-/// the derive that writes an `Event` impl — and nothing that runs one. This
-/// feature reaches no async runtime, so a crate that keeps itself Tokio-free
-/// can depend on `nitinol` through it alone.
+/// What a domain layer needs to define an aggregate, decide what its commands
+/// mean, and answer queries about its state — the pure traits and the derive
+/// that writes an `Event` impl — and nothing that runs one. This feature
+/// reaches no async runtime, so a crate that keeps itself Tokio-free can
+/// depend on `nitinol` through it alone.
 ///
 /// The `eventsource` feature re-exports these same trait items under
 /// `nitinol::eventsource`; the two paths are interchangeable. (That module is
 /// not linked here because it does not exist in a `contract`-only build.)
 #[cfg(feature = "contract")]
 pub mod contract {
-    pub use nitinol_contract::{Aggregate, Event, Snapshotable};
+    pub use nitinol_contract::{
+        Accepting, Aggregate, Decider, Decision, Event, Query, Snapshotable,
+    };
 
     /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
     /// `use nitinol::contract::Event;` brings both into scope (trait in the
@@ -76,8 +79,8 @@ pub mod eventsource {
     pub mod error {
         pub use nitinol_eventsource::error::AskError;
         pub use nitinol_eventsource::error::CodecError;
-        pub use nitinol_eventsource::error::EffectExecutionError;
         pub use nitinol_eventsource::error::ExecError;
+        pub use nitinol_eventsource::error::PersistError;
         pub use nitinol_eventsource::error::Retryability;
         pub use nitinol_eventsource::error::TellError;
     }
@@ -85,11 +88,9 @@ pub mod eventsource {
     pub use nitinol_eventsource::projection;
     pub use nitinol_eventsource::system;
 
-    pub use nitinol_eventsource::Context;
-    pub use nitinol_eventsource::Decider;
     pub use nitinol_eventsource::Event;
+    pub use nitinol_eventsource::{Accepting, Decider, Decision};
     pub use nitinol_eventsource::{Aggregate, Snapshotable};
-    pub use nitinol_eventsource::{Effect, SideEffect, SideEffectError};
 
     /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
     /// `use nitinol::eventsource::Event;` brings both into scope (trait in the

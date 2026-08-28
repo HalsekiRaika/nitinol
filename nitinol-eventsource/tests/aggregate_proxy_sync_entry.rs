@@ -12,15 +12,12 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProxy, Context, Decider, Effect, Event,
-};
+use nitinol_eventsource::{codec::Codec, Aggregate, AggregateProxy, Decider, Decision, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -54,16 +51,12 @@ impl Aggregate for Counter {
 
 struct Increment;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 

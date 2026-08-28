@@ -15,17 +15,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Barrier;
 
-use nitinol_eventsource::error::EffectExecutionError;
+use nitinol_eventsource::error::PersistError;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Context, Decider, Effect,
-    Event, Query, SnapshotPersistor, Snapshotable,
+    codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
+    Query, SnapshotPersistor, Snapshotable,
 };
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
@@ -89,16 +88,12 @@ impl Snapshotable for SnapshottingCounter {
 struct Increment;
 struct GetCount;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
@@ -111,16 +106,12 @@ impl Query<GetCount> for Counter {
     }
 }
 
-#[async_trait]
 impl Decider<Increment> for SnapshottingCounter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
@@ -237,15 +228,10 @@ async fn concurrent_resolve_produces_a_single_writer() {
             "resolver {index} must have reached an empty stream before any append"
         );
 
-        match outcome {
-            Ok(events) => assert_eq!(
-                events,
-                vec![Incremented],
-                "resolver {index} must persist exactly one event"
-            ),
-            Err(e) => panic!(
+        if let Err(e) = outcome {
+            panic!(
                 "resolver {index} must reach the one activation, but its append was rejected: {e:?}"
-            ),
+            );
         }
     }
 
@@ -440,33 +426,27 @@ async fn reference_survives_the_death_of_its_activation() {
     assert!(
         matches!(
             err,
-            AskError::Effect(EffectExecutionError::Append(AppendError::SequenceConflict(
-                _
-            )))
+            AskError::Persist(PersistError::Append(AppendError::SequenceConflict(_)))
         ),
         "the store's OCC rejection must reach the caller unchanged, got {err:?}"
     );
 
     // When: the very next dispatch through the same reference — a single call,
     // no retry loop — must reach the re-activated aggregate.
-    let events = tokio::time::timeout(Duration::from_secs(5), resolved.ask(Increment))
+    tokio::time::timeout(Duration::from_secs(5), resolved.ask(Increment))
         .await
         .expect("the single next dispatch must not hang")
         .expect("the next dispatch must reach the re-activated aggregate, not the dying one");
 
     // Then
     assert_eq!(
-        events,
-        vec![Incremented],
-        "the healed dispatch must persist its event like any other"
-    );
-    assert_eq!(
         resolved
             .exec(GetCount)
             .await
             .expect("the query must reach the re-activated aggregate"),
         3,
-        "the re-activated aggregate must have replayed both events the rival wrote"
+        "the re-activated aggregate must have replayed both of the rival's events and \
+         applied the healed dispatch's own on top of them"
     );
     assert_eq!(
         stored_sequences(&store, &id).await,

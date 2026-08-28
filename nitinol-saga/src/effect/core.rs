@@ -157,6 +157,7 @@ impl TellIntent {
         A: Aggregate + Decider<C>,
         C: Clone + Send + Sync + 'static,
         T: AggregateTellTarget<A>,
+        <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
         let target_id = checked_target_id(target.aggregate_id());
         Self {
@@ -189,6 +190,7 @@ impl TellIntent {
         A: Aggregate + Decider<C>,
         C: Clone + Send + Sync + 'static,
         T: AggregateTellTarget<A>,
+        <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
         let target_id = checked_target_id(target.aggregate_id());
         Self {

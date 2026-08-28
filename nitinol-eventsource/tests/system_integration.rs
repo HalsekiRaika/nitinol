@@ -21,8 +21,8 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::SnapshotPersistor;
 use nitinol_eventsource::{
-    codec::Codec, codec::ErasedCodec, system::EventSourceSystem, Aggregate, Context, Decider,
-    Effect, Event, ProjectionContext, Projector, ProjectorProps, Query, Snapshotable,
+    codec::Codec, codec::ErasedCodec, system::EventSourceSystem, Aggregate, Decider, Decision,
+    Event, ProjectionContext, Projector, ProjectorProps, Query, Snapshotable,
 };
 use nitinol_persistence::store::{
     EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore,
@@ -90,16 +90,12 @@ impl Snapshotable for CounterWithSnapshot {
 struct Increment;
 struct GetCount;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
@@ -112,16 +108,12 @@ impl Query<GetCount> for Counter {
     }
 }
 
-#[async_trait]
 impl Decider<Increment> for CounterWithSnapshot {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
@@ -213,7 +205,8 @@ async fn event_source_system_builder_produces_system() {
 
 // Test: spawn_aggregate creates a working proxy
 
-/// spawn_aggregate creates an AggregateProxy that accepts commands.
+/// spawn_aggregate creates an AggregateProxy that accepts commands and writes
+/// the facts they produce to the store it was spawned on.
 #[tokio::test]
 async fn spawn_aggregate_creates_working_aggregate_proxy() {
     // Given
@@ -225,15 +218,25 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
     let id = AggregateId::new("sys-spawn-basic");
 
     // When
-    let proxy = system.spawn_aggregate::<Counter>(id, store).await;
+    let proxy = system
+        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
+        .await;
 
-    let events = proxy.ask(Increment).await.expect("ask must succeed");
+    proxy.ask(Increment).await.expect("ask must succeed");
 
     // Then
+    let loaded: Vec<_> = store
+        .load(LoadQuery::by_stream(&id))
+        .await
+        .expect("load must succeed")
+        .try_collect()
+        .await
+        .expect("collect must succeed");
+    let event_types: Vec<EventType> = loaded.into_iter().map(|event| event.event_type).collect();
     assert_eq!(
-        events,
-        vec![Incremented],
-        "ask must return the persisted event"
+        event_types,
+        vec![Incremented::EVENT_TYPE],
+        "the accepted command's fact must have reached the stream"
     );
 }
 

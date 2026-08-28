@@ -33,7 +33,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
@@ -167,16 +167,12 @@ impl Aggregate for Inventory {
     fn apply(&mut self, _event: Self::Event) {}
 }
 
-#[async_trait]
 impl Decider<Reserve> for Inventory {
+    type Output = ();
     type Rejection = Infallible;
 
-    async fn decide(
-        &self,
-        _command: Reserve,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Reserved>, Self::Rejection> {
-        Ok(Effect::persist(Reserved))
+    fn decide(&self, _command: Reserve) -> Decision<Reserved, (), Self::Rejection> {
+        Decision::persist(vec![Reserved]).output(())
     }
 }
 

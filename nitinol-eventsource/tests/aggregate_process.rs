@@ -7,15 +7,12 @@
 // store.load inline.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use async_trait::async_trait;
 use bytes::Bytes;
-use futures_core::future::BoxFuture;
 
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Context, Decider, Effect,
-    Event, Query, SideEffect, SideEffectError, TellError,
+    codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
+    Query, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName, Variant};
@@ -64,46 +61,33 @@ struct GetCount;
 #[error("counter already at max: {0}")]
 struct AtMaxError(u64);
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
-#[async_trait]
 impl Decider<IncrementBy> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        cmd: IncrementBy,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist_all(vec![Incremented; cmd.0 as usize]))
+    fn decide(&self, cmd: IncrementBy) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented; cmd.0 as usize]).output(())
     }
 }
 
-#[async_trait]
 impl Decider<IncrementIfLessThan> for Counter {
+    type Output = ();
     type Rejection = AtMaxError;
 
-    async fn decide(
-        &self,
-        cmd: IncrementIfLessThan,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
+    fn decide(&self, cmd: IncrementIfLessThan) -> Decision<Incremented, (), AtMaxError> {
         if self.value >= cmd.0 {
-            Err(AtMaxError(self.value))
-        } else {
-            Ok(Effect::persist(Incremented))
+            return Decision::reject(AtMaxError(self.value));
         }
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
@@ -134,41 +118,6 @@ impl Codec<Incremented> for TestCodec {
     }
 }
 
-// Fixtures: side-effect test helpers
-
-/// A side effect that notifies a Notify handle when executed.
-struct NotifySideEffect(Arc<tokio::sync::Notify>);
-
-impl SideEffect for NotifySideEffect {
-    fn execute(self: Box<Self>) -> BoxFuture<'static, Result<(), SideEffectError>> {
-        Box::pin(async move {
-            self.0.notify_one();
-            Ok(())
-        })
-    }
-}
-
-/// Command: persists one Incremented event and attaches a fire-and-forget side effect
-/// that notifies the embedded Notify once it executes.
-struct IncrementWithSide {
-    notify: Arc<tokio::sync::Notify>,
-}
-
-#[async_trait]
-impl Decider<IncrementWithSide> for Counter {
-    type Rejection = std::convert::Infallible;
-
-    async fn decide(
-        &self,
-        cmd: IncrementWithSide,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        // Persist first, then attach side effect — both in one Sequence.
-        Ok(Effect::persist(Incremented)
-            .combine(Effect::Side(Box::new(NotifySideEffect(cmd.notify)))))
-    }
-}
-
 // Helper: spawn a Counter process holding a fresh Arc<dyn EventStore>
 
 /// Creates a ProcessSystem and spawns a Counter AggregateProcess holding an
@@ -183,28 +132,6 @@ async fn spawn_counter(aggregate_id: AggregateId) -> (ProcessSystem, AggregatePr
         .spawn(&system)
         .await;
     (system, proxy)
-}
-
-// ask<Increment>: basic success path
-
-/// ask(Increment) returns a Vec containing one Incremented event.
-#[tokio::test]
-async fn ask_increment_returns_vec_incremented() {
-    // Given
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-basic")).await;
-
-    // When
-    let events = proxy
-        .ask(Increment)
-        .await
-        .expect("ask(Increment) must succeed");
-
-    // Then
-    assert_eq!(
-        events,
-        vec![Incremented],
-        "ask(Increment) must return [Incremented]"
-    );
 }
 
 // ask<Increment>: events are persisted and replayable via shared Arc<dyn EventStore>
@@ -321,24 +248,19 @@ async fn exec_does_not_mutate_state() {
 // Multiple Decider implementations: ask with IncrementBy(n)
 
 /// A second Decider (IncrementBy) coexists with Increment on the same Aggregate.
-/// ask(IncrementBy(3)) emits 3 Incremented events in one Persist batch.
+/// ask(IncrementBy(3)) advances the state by 3.
 #[tokio::test]
 async fn ask_second_decider_increment_by() {
     // Given
     let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-incby")).await;
 
     // When
-    let events = proxy
+    proxy
         .ask(IncrementBy(3))
         .await
         .expect("ask(IncrementBy(3)) must succeed");
 
-    // Then: three events returned and state advanced by 3
-    assert_eq!(
-        events,
-        vec![Incremented, Incremented, Incremented],
-        "ask(IncrementBy(3)) must return 3 Incremented events"
-    );
+    // Then
     let count = proxy.exec(GetCount).await.expect("exec must succeed");
     assert_eq!(count, 3, "state must advance by 3 after IncrementBy(3)");
 }
@@ -362,38 +284,6 @@ async fn ask_rejected_command_returns_rejection_error() {
         Ok(_) => panic!("ask must fail when value >= threshold"),
         Err(other) => panic!("unexpected error variant: {:?}", other),
     }
-}
-
-// Effect::Side: fire-and-forget, does not block ask response
-
-/// ask(IncrementWithSide) returns Vec<Incremented> without waiting for the side effect.
-/// The side effect fires asynchronously and eventually notifies via Arc<Notify>.
-/// Response contains only the Persist events; Side is excluded.
-#[tokio::test]
-async fn side_effect_is_fire_and_forget_and_does_not_appear_in_response() {
-    // Given
-    let (_system, proxy) = spawn_counter(AggregateId::new("agg-side-ff")).await;
-    let notify = Arc::new(tokio::sync::Notify::new());
-
-    // When
-    let events = proxy
-        .ask(IncrementWithSide {
-            notify: notify.clone(),
-        })
-        .await
-        .expect("ask with side effect must succeed");
-
-    // Then: response contains only the Persist event, not the Side result
-    assert_eq!(
-        events,
-        vec![Incremented],
-        "ask response must contain only Persist events; Side is excluded"
-    );
-
-    // Side effect fires asynchronously in a spawned task — wait for notification.
-    tokio::time::timeout(Duration::from_millis(500), notify.notified())
-        .await
-        .expect("side effect must fire within 500 ms");
 }
 
 // ask/exec ordering: interleaved operations maintain consistent sequence
@@ -452,16 +342,12 @@ impl Aggregate for CounterEnum {
 
 struct IncOp;
 
-#[async_trait]
 impl Decider<IncOp> for CounterEnum {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: IncOp,
-        _ctx: &mut Context,
-    ) -> Result<Effect<CounterOp>, Self::Rejection> {
-        Ok(Effect::persist(CounterOp::Incremented))
+    fn decide(&self, _cmd: IncOp) -> Decision<CounterOp, (), Self::Rejection> {
+        Decision::persist(vec![CounterOp::Incremented]).output(())
     }
 }
 

@@ -2,18 +2,15 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use nitinol_contract::{Aggregate, Event, Query};
+use nitinol_contract::{Aggregate, Decider, Decision, Event, Query};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::codec::ErasedCodec;
-use crate::context::Context;
-use crate::decider::Decider;
-use crate::error::{AskHandlerError, CodecError, EffectExecutionError, ExecHandlerError};
+use crate::error::{AskHandlerError, CodecError, ExecHandlerError, PersistError};
 use crate::process::snapshot_persistor::SnapshotPersistorProxy;
-use crate::Effect;
 
 // Type alias for the snapshot restoration callback
 
@@ -28,12 +25,23 @@ pub(crate) type SnapshotRestoreFn<A> = Arc<dyn Fn(&[u8]) -> Result<A, CodecError
 // Internal message wrappers
 //
 // The runtime dispatches messages by type.  Wrapping command types in `AskCmd`
-// and query types in `ExecMsg` prevents accidental dispatch to the wrong impl
-// and allows both `Decider<C>` and `contract::Query<M>` to coexist on
+// and `TellCmd` and query types in `ExecMsg` prevents accidental dispatch to the
+// wrong impl and allows both `Decider<C>` and `contract::Query<M>` to coexist on
 // the same `AggregateProcess<A>` without overlapping trait bounds.
+//
+// A command carries the same decision either way, but the two dispatch paths
+// owe the caller different things (L-5) — one delivers the output, the other has
+// nobody to deliver it to and must report a refusal instead of dropping it — so
+// each is its own wrapper and its own handler rather than one handler guessing
+// which path it is on.
 
-/// Routes a domain command through the `Decider<C>` path.
+/// Routes a domain command through the `Decider<C>` path, answering with the
+/// decision's output.
 pub(crate) struct AskCmd<C>(pub(crate) C);
+
+/// Routes a domain command through the `Decider<C>` path with nobody waiting for
+/// the answer.
+pub(crate) struct TellCmd<C>(pub(crate) C);
 
 /// Routes a domain query through the `contract::Query<M>` path.
 pub(crate) struct ExecMsg<M>(pub(crate) M);
@@ -78,8 +86,9 @@ pub(crate) struct ExecMsg<M>(pub(crate) M);
 /// References to the aggregate outlive the stop and resolve it again, so a
 /// caller sees a transient failure rather than a dead reference.
 ///
-/// Fixed by `non_genesis_conflict_stops_the_losing_writer` and
-/// `replay_failure_does_not_masquerade_as_a_genesis_conflict` in
+/// Fixed by `non_genesis_conflict_stops_the_losing_writer`,
+/// `replay_failure_does_not_masquerade_as_a_genesis_conflict` and
+/// `replay_decode_failure_does_not_masquerade_as_a_genesis_conflict` in
 /// `nitinol-eventsource/tests/aggregate_conflict.rs`.
 ///
 /// # C-2: a genesis conflict means the aggregate already exists
@@ -87,9 +96,18 @@ pub(crate) struct ExecMsg<M>(pub(crate) M);
 /// The one conflict that is not an overtake is a conflict on the stream's
 /// **genesis** sequence — an append made from sequence zero, which is a
 /// creation.  A conflict there says the aggregate has already been created,
-/// which is the expected answer to a creation command redelivered under
-/// at-least-once semantics, not a failure.  The activation reports success and
-/// lives on; C-1 does not apply.
+/// which is the expected shape of a creation command redelivered under
+/// at-least-once semantics rather than a fault of this activation.  So the
+/// activation lives on; C-1 does not apply.
+///
+/// What the caller is told is that collision itself
+/// ([`AskError::AlreadyCreated`](crate::AskError::AlreadyCreated)), not a
+/// success.  No decision was reached — the events never landed — so there is no
+/// output to deliver, and an interpreter that reported success would have to
+/// invent one and let the caller believe it created what someone else did
+/// (L-7).  Whether a redelivered creation is a duplicate to be ignored, a
+/// conflict to be surfaced or a race to be retried is the consumer's judgement,
+/// and it needs to see the collision to make it.
 ///
 /// Nothing was written, so nothing is applied and the sequence counter does not
 /// move.  A later command must address the genesis sequence again rather than
@@ -185,22 +203,27 @@ impl<A: Aggregate> Process for AggregateProcess<A> {
                     self.sequence = loaded.sequence;
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "event decode failed; skipping event");
+                    tracing::error!(error = %e, "event decode failed during replay");
+                    if let Err(e) = ctx.stop_self().await {
+                        tracing::error!(error = %e, "stop-on-replay-failure could not be signalled");
+                    }
+                    return;
                 }
             }
         }
     }
 }
 
-// Receive<AskCmd<C>>: command processing (Decider path)
+// Receive<AskCmd<C>>: command processing with a caller waiting (Decider path)
 
 impl<A, C> Receive<AskCmd<C>> for AggregateProcess<A>
 where
     A: Aggregate + Decider<C>,
-    A::Event: Clone,
     C: Send + Sync + 'static,
+    <A as Decider<C>>::Output: Send + 'static,
+    <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
 {
-    type Response = Vec<A::Event>;
+    type Response = <A as Decider<C>>::Output;
     type Error = AskHandlerError<<A as Decider<C>>::Rejection>;
 
     async fn recv(
@@ -208,38 +231,68 @@ where
         msg: AskCmd<C>,
         process_ctx: &mut ProcessContext<Self>,
     ) -> Result<Self::Response, Self::Error> {
-        let mut ctx = Context::new(self.aggregate_id.clone(), self.sequence);
-        let effect = self
-            .state
-            .decide(msg.0, &mut ctx)
-            .await
-            .map_err(AskHandlerError::Rejection)?;
-
-        let outcome = run_effect(
-            effect,
-            &mut self.state,
-            &self.aggregate_id,
-            &mut self.sequence,
-            self.store.as_ref(),
-            self.codec.as_ref(),
-        )
-        .await;
-
-        // C-1. A conflict that reaches here is not a creation — `run_effect`
-        // answers those as "already created" (C-2) — so the stream has been
-        // written by someone else since this activation replayed it.  Stopping is
-        // the whole response: reloading and retrying would only re-enter the race
-        // this activation has already lost.
-        if let Err(EffectExecutionError::Append(AppendError::SequenceConflict(_))) = &outcome {
-            // Signalled explicitly rather than left to the supervision strategy,
-            // because stopping is a property of the conflict: no strategy may
-            // resume or restart this activation into writing the stream again.
-            if let Err(e) = process_ctx.stop_self().await {
-                tracing::error!(error = %e, "stop-on-conflict could not be signalled");
+        match self.state.decide(msg.0) {
+            Decision::Accept { events, output } => {
+                self.append_and_apply(events, process_ctx).await?;
+                // L-5. Delivery is one road: the output the decision stated is
+                // what the caller receives, exactly once.
+                Ok(output)
             }
+            // L-4. Nothing was written and nothing is applied — the refusal is
+            // the whole of what happened.
+            Decision::Reject(rejection) => Err(AskHandlerError::Rejection(rejection)),
         }
+    }
+}
 
-        outcome.map_err(AskHandlerError::Effect)
+// Receive<TellCmd<C>>: command processing with nobody waiting (Decider path)
+//
+// The output is discarded because no one asked for it.  A refusal is not:
+// dropping it would leave a command that was refused indistinguishable from one
+// that was carried out, so it goes to the one channel that needs no receiver
+// (L-5).  The same is true of a failure to persist an acceptance, which nobody
+// is positioned to be told about either.
+//
+// Nothing here is returned as an error, because there is no one to return it to:
+// `Infallible` states that in the type.
+
+impl<A, C> Receive<TellCmd<C>> for AggregateProcess<A>
+where
+    A: Aggregate + Decider<C>,
+    C: Send + Sync + 'static,
+    <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
+{
+    type Response = ();
+    type Error = std::convert::Infallible;
+
+    async fn recv(
+        &mut self,
+        msg: TellCmd<C>,
+        process_ctx: &mut ProcessContext<Self>,
+    ) -> Result<Self::Response, Self::Error> {
+        // The output is dropped here, before the append is awaited, rather than
+        // carried along unused: nothing on this path ever reads it, and holding
+        // it would make every told command's answer type `Send` for no reason.
+        let events = match self.state.decide(msg.0) {
+            Decision::Accept { events, .. } => events,
+            Decision::Reject(rejection) => {
+                tracing::warn!(
+                    aggregate_id = self.aggregate_id.as_str(),
+                    rejection = %rejection,
+                    "a told command was refused; no caller is waiting for the refusal"
+                );
+                return Ok(());
+            }
+        };
+
+        if let Err(e) = self.append_and_apply(events, process_ctx).await {
+            tracing::error!(
+                aggregate_id = self.aggregate_id.as_str(),
+                error = %e,
+                "a told command was accepted but its facts did not reach the stream"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -271,86 +324,105 @@ where
     }
 }
 
-// Effect executor for AggregateProcess
-//
-// Handles Persist (append + apply), Apply (apply only), Side (fire-and-forget),
-// Sequence (ordered execution), and None (no-op).
+// Writing an acceptance down
 
-fn run_effect<'a, A: Aggregate>(
-    effect: Effect<A::Event>,
-    state: &'a mut A,
-    aggregate_id: &'a AggregateId,
-    sequence: &'a mut u64,
-    store: &'a dyn EventStore,
-    codec: &'a dyn ErasedCodec<A::Event>,
-) -> futures_core::future::BoxFuture<'a, Result<Vec<A::Event>, EffectExecutionError>>
-where
-    A::Event: Clone,
-{
-    Box::pin(async move {
-        match effect {
-            Effect::None => Ok(vec![]),
+/// Why the facts of an accepted decision are not in the stream.
+///
+/// Narrower than [`AskHandlerError`]: by the time an append is attempted the
+/// decision has already been accepted, so no refusal can arise here.
+#[derive(Debug, thiserror::Error)]
+enum NotAppended {
+    /// The genesis sequence was taken, so the aggregate already exists (C-2).
+    #[error("the aggregate has already been created")]
+    AlreadyCreated,
+    #[error(transparent)]
+    Persist(#[from] PersistError),
+}
 
-            Effect::Persist(events) => {
-                let mut next_sequence = *sequence;
-                let mut appending = Vec::with_capacity(events.len());
-                for event in &events {
-                    next_sequence += 1;
-                    let payload = codec.encode(event).map_err(EffectExecutionError::Codec)?;
-                    appending.push(AppendingEvent {
-                        sequence: next_sequence,
-                        event_type: event.variant(),
-                        payload,
-                        occurred_at: jiff::Timestamp::now(),
-                    });
-                }
-                match store.append(aggregate_id.borrow(), appending).await {
-                    Ok(_) => {}
-                    // C-2. Appending from sequence zero is a creation, so a
-                    // conflict there says the aggregate already exists — the
-                    // expected answer to a creation command redelivered under
-                    // at-least-once, not a failure.  Nothing was written, so
-                    // nothing is applied and the counter does not move: a later
-                    // command must address the genesis sequence again rather than
-                    // write into a stream this activation never replayed.
-                    Err(AppendError::SequenceConflict(_)) if *sequence == 0 => return Ok(vec![]),
-                    Err(e) => return Err(EffectExecutionError::Append(e)),
-                }
-                // Commit the sequence counter only after a successful append.
-                *sequence = next_sequence;
-                let returned = events.clone();
-                for event in events {
-                    state.apply(event);
-                }
-                Ok(returned)
-            }
-
-            Effect::Apply(events) => {
-                let returned = events.clone();
-                for event in events {
-                    state.apply(event);
-                }
-                Ok(returned)
-            }
-
-            Effect::Side(side) => {
-                tokio::spawn(async move {
-                    if let Err(e) = side.execute().await {
-                        tracing::warn!(error = %e, "side effect failed");
-                    }
-                });
-                Ok(vec![])
-            }
-
-            Effect::Sequence(effects) => {
-                let mut all = Vec::new();
-                for sub in effects {
-                    let mut events =
-                        run_effect(sub, state, aggregate_id, sequence, store, codec).await?;
-                    all.append(&mut events);
-                }
-                Ok(all)
-            }
+impl<R: std::error::Error + Send + Sync + 'static> From<NotAppended> for AskHandlerError<R> {
+    fn from(e: NotAppended) -> Self {
+        match e {
+            NotAppended::AlreadyCreated => AskHandlerError::AlreadyCreated,
+            NotAppended::Persist(e) => AskHandlerError::Persist(e),
         }
-    })
+    }
+}
+
+impl<A: Aggregate> AggregateProcess<A> {
+    /// Record the facts of an accepted decision and advance the state by them.
+    ///
+    /// The whole acceptance is one atomic append (L-2), so no reader can observe
+    /// its second fact without its first, and the state moves only once the
+    /// store has taken the facts: an activation that applied first would carry
+    /// on from a state its own stream does not hold.
+    ///
+    /// An acceptance that produced no facts is not an empty append but no append
+    /// at all (L-3) — an empty call is still one the store has to arbitrate, and
+    /// nothing about a command that found its work already done needs
+    /// arbitrating.
+    ///
+    /// This is where the conflict contract above is carried out: C-2 recognises
+    /// the one conflict that is not an overtake, and C-1 stops the activation on
+    /// every other one.
+    async fn append_and_apply(
+        &mut self,
+        events: Vec<A::Event>,
+        process_ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), NotAppended> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let mut next_sequence = self.sequence;
+        let mut appending = Vec::with_capacity(events.len());
+        for event in &events {
+            next_sequence += 1;
+            let payload = self.codec.encode(event).map_err(PersistError::Codec)?;
+            appending.push(AppendingEvent {
+                sequence: next_sequence,
+                event_type: event.variant(),
+                payload,
+                occurred_at: jiff::Timestamp::now(),
+            });
+        }
+
+        match self
+            .store
+            .append(self.aggregate_id.borrow(), appending)
+            .await
+        {
+            Ok(_) => {}
+            // C-2. Appending from sequence zero is a creation, so a conflict
+            // there says the aggregate already exists.  Nothing was written, so
+            // nothing is applied and the counter does not move: a later command
+            // must address the genesis sequence again rather than write into a
+            // stream this activation never replayed.  No decision was reached,
+            // so the caller is told exactly that and handed no output (L-7).
+            Err(AppendError::SequenceConflict(_)) if self.sequence == 0 => {
+                return Err(NotAppended::AlreadyCreated)
+            }
+            // C-1. Any other conflict means the stream has been written by
+            // someone else since this activation replayed it.  Stopping is the
+            // whole response: reloading and retrying would only re-enter the
+            // race this activation has already lost.
+            Err(conflict @ AppendError::SequenceConflict(_)) => {
+                // Signalled explicitly rather than left to the supervision
+                // strategy, because stopping is a property of the conflict: no
+                // strategy may resume or restart this activation into writing
+                // the stream again.
+                if let Err(e) = process_ctx.stop_self().await {
+                    tracing::error!(error = %e, "stop-on-conflict could not be signalled");
+                }
+                return Err(PersistError::Append(conflict).into());
+            }
+            Err(e) => return Err(PersistError::Append(e).into()),
+        }
+
+        // Commit the sequence counter only after a successful append.
+        self.sequence = next_sequence;
+        for event in events {
+            self.state.apply(event);
+        }
+        Ok(())
+    }
 }

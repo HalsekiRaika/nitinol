@@ -6,13 +6,13 @@
 //!   Given an AggregateProcess hosting an Aggregate that implements contract::Query<M>
 //!   When a query message is sent with ask (AggregateProxy::exec)
 //!   Then the query's Response comes back exactly once (L-5)
-//!   And the query runs synchronously and purely, observing no Context (L-1)
+//!   And the query runs synchronously and purely, from `&self` alone (L-1)
 //! ```
 //!
-//! The `Decider` fixtures below still take `&mut Context` — the decision path is
-//! untouched here. The `Query` impls beside them take a message and nothing else.
-//! That difference is the point: a question is answered from `&self` alone, so it
-//! cannot reach the identity, the sequence, or an await point that a decision can.
+//! A question is answered from `&self` and the message alone: `Query::query` has
+//! nowhere to receive an identity, a sequence or an await point, so a query
+//! cannot reach any of them. Unlike a decision, it also states no facts — it
+//! returns an answer or the domain's own error, and never moves the state.
 //!
 //! Replaces `tests/receive.rs`, which exercised the removed eventsource-resident
 //! `Receive<M>` contract.
@@ -20,11 +20,10 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, Context, Decider, Effect, Event, ExecError, Query,
+    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, ExecError, Query,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
@@ -85,16 +84,12 @@ struct GetLabel;
 #[error("counter has not been incremented yet")]
 struct NotStarted;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
@@ -143,16 +138,12 @@ impl Aggregate for TallyCounter {
 /// Query: the current count, recording each time it is answered.
 struct Tally;
 
-#[async_trait]
 impl Decider<Increment> for TallyCounter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
@@ -248,12 +239,12 @@ async fn exec_delivers_query_error_as_exec_error_domain() {
 // The question is synchronous and pure (L-1)
 
 /// Given a `Counter` advanced by applying events directly — no process, no async
-/// runtime, no `Context` — When the same question is asked twice, Then both
-/// answers are the state's value and the state has not moved.
+/// runtime — When the same question is asked twice, Then both answers are the
+/// state's value and the state has not moved.
 ///
 /// This is a plain `#[test]`: it does not compile if answering a question needs
-/// an await point, and it does not build a `Context` because `Query::query` has
-/// nowhere to receive one.
+/// an await point, and it hands `query` nothing but the message, because that is
+/// all `Query::query` has anywhere to receive.
 #[test]
 fn query_answers_synchronously_without_a_runtime() {
     // Given

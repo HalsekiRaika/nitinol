@@ -1,15 +1,14 @@
 use std::sync::{Arc, Mutex};
 
-use nitinol_contract::{Aggregate, Query};
+use nitinol_contract::{Aggregate, Decider, Query};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::error::AskError as RuntimeAskError;
 
-use crate::decider::Decider;
 use crate::error::{
-    AskError, AskHandlerError, EffectExecutionError, ExecError, ExecHandlerError, TellError,
+    AskError, AskHandlerError, ExecError, ExecHandlerError, PersistError, TellError,
 };
-use crate::process::aggregate_process::{AskCmd, ExecMsg};
+use crate::process::aggregate_process::{AskCmd, ExecMsg, TellCmd};
 use crate::process::resolve::{AggregateResolver, Incarnation};
 
 /// A reference to an aggregate, addressed by identity rather than by activation.
@@ -115,20 +114,25 @@ impl<A: Aggregate> AggregateProxy<A> {
         &self.aggregate_id
     }
 
-    /// Send a command and wait for the persisted events.
+    /// Send a command and wait for the answer its decision states.
     ///
-    /// Returns `Vec<A::Event>` containing every event produced and applied by
-    /// `Decider::decide`.  Side effects are excluded (fire-and-forget).
+    /// Returns the decider's `Output` — what the command asked for — rather than
+    /// the events it produced.  The events are the aggregate's own record of
+    /// what happened and are read from the stream by whoever needs them; a
+    /// caller that had to derive its answer from them would be deriving it from
+    /// facts the decider already read to reach the answer.
     ///
     /// [`AskError::retryability`] separates a failure that says something about
     /// the command from one that says something about where it was sent.
     pub async fn ask<C>(
         &self,
         cmd: C,
-    ) -> Result<Vec<A::Event>, AskError<<A as Decider<C>>::Rejection>>
+    ) -> Result<<A as Decider<C>>::Output, AskError<<A as Decider<C>>::Rejection>>
     where
         A: Decider<C>,
         C: Send + Sync + 'static,
+        <A as Decider<C>>::Output: Send + 'static,
+        <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
         let incarnation = self.incarnation().await;
         let outcome = incarnation.ask(AskCmd(cmd)).await.map_err(map_ask_error);
@@ -142,13 +146,23 @@ impl<A: Aggregate> AggregateProxy<A> {
     ///
     /// The command is queued and processed in FIFO order; ordering relative to
     /// later `exec` calls is guaranteed by the single-threaded process loop.
+    ///
+    /// The decision's output is discarded — nobody is waiting for it — but a
+    /// refusal is reported through the crate's tracing records rather than
+    /// dropped, so a command that was refused is not mistaken for one that was
+    /// carried out (L-5).  `Ok(())` therefore means the command was accepted for
+    /// delivery, not that the aggregate accepted it.
     pub async fn tell<C>(&self, cmd: C) -> Result<(), TellError>
     where
         A: Decider<C>,
         C: Send + Sync + 'static,
+        <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
         let incarnation = self.incarnation().await;
-        let outcome = incarnation.tell(AskCmd(cmd)).await.map_err(TellError::Send);
+        let outcome = incarnation
+            .tell(TellCmd(cmd))
+            .await
+            .map_err(TellError::Send);
         if outcome.is_err() {
             self.invalidate(&incarnation);
         }
@@ -181,7 +195,8 @@ impl<A: Aggregate> AggregateProxy<A> {
         match &*self.binding {
             Binding::Pinned(incarnation) => incarnation.clone(),
             Binding::Resolved { resolver, cached } => {
-                if let Some(incarnation) = cached.lock().expect(CACHE_LOCK).clone() {
+                let hit = cached.lock().expect(CACHE_LOCK).clone();
+                if let Some(incarnation) = hit {
                     return incarnation;
                 }
                 // Two dispatches racing here both resolve, and the registry's
@@ -230,9 +245,14 @@ const CACHE_LOCK: &str = "the incarnation cache is never held across an await, s
 /// is the proactive case: `AggregateProcess` answers it only after calling
 /// `stop_self`, so an `Append(SequenceConflict)` reaching here always
 /// names an activation that is on its way out, whether or not its mailbox has
-/// closed yet. Every other `Effect` error (backend failure, a side effect's
-/// own error, a codec error) says nothing about whether the activation is
-/// still alive, so it must not evict a cache entry that may still be good.
+/// closed yet.
+///
+/// Nothing else qualifies. A backend failure or a codec error says nothing
+/// about whether the activation is still alive, and
+/// [`AskError::AlreadyCreated`] says the opposite of C-1: the activation
+/// recognised the collision and lives on (C-2). Evicting on any of them would
+/// cost a resolve nobody asked for and hand the next dispatch a different
+/// activation than the one that answered this one.
 fn signals_stopped_activation<T, R>(outcome: &Result<T, AskError<R>>) -> bool
 where
     R: std::error::Error + Send + Sync + 'static,
@@ -240,7 +260,7 @@ where
     matches!(
         outcome,
         Err(AskError::Send(_))
-            | Err(AskError::Effect(EffectExecutionError::Append(
+            | Err(AskError::Persist(PersistError::Append(
                 AppendError::SequenceConflict(_)
             )))
     )
@@ -255,7 +275,8 @@ where
     match e {
         RuntimeAskError::Handler(h) => match h {
             AskHandlerError::Rejection(r) => AskError::Rejection(r),
-            AskHandlerError::Effect(eff) => AskError::Effect(eff),
+            AskHandlerError::AlreadyCreated => AskError::AlreadyCreated,
+            AskHandlerError::Persist(e) => AskError::Persist(e),
         },
         RuntimeAskError::DeadLetter { .. }
         | RuntimeAskError::ReplyDropped

@@ -10,12 +10,11 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, AggregateProxy, Context, Decider, Effect, Event,
-    Query, SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
+    codec::Codec, Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Query,
+    SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, EventType, Family, PersistedSnapshot, TypeName};
@@ -78,16 +77,12 @@ impl Aggregate for PlainCounter {
 struct Increment;
 struct GetCount;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
@@ -100,16 +95,12 @@ impl Query<GetCount> for Counter {
     }
 }
 
-#[async_trait]
 impl Decider<Increment> for PlainCounter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 

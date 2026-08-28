@@ -12,14 +12,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::error::EffectExecutionError;
+use nitinol_eventsource::error::PersistError;
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Context, Decider, Effect,
-    Event, Query, Retryability,
+    codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
+    Query, Retryability,
 };
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
@@ -63,33 +62,24 @@ struct IncrementUntil(u64);
 #[error("counter already at {0}")]
 struct AtMaxError(u64);
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = u64;
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, u64, Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(self.value + 1)
     }
 }
 
-#[async_trait]
 impl Decider<IncrementUntil> for Counter {
+    type Output = u64;
     type Rejection = AtMaxError;
 
-    async fn decide(
-        &self,
-        cmd: IncrementUntil,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
+    fn decide(&self, cmd: IncrementUntil) -> Decision<Incremented, u64, AtMaxError> {
         if self.value >= cmd.0 {
-            Err(AtMaxError(self.value))
-        } else {
-            Ok(Effect::persist(Incremented))
+            return Decision::reject(AtMaxError(self.value));
         }
+        Decision::persist(vec![Incremented]).output(self.value + 1)
     }
 }
 
@@ -187,9 +177,7 @@ async fn sequence_conflict_is_transient() {
     assert!(
         matches!(
             err,
-            AskError::Effect(EffectExecutionError::Append(AppendError::SequenceConflict(
-                _
-            )))
+            AskError::Persist(PersistError::Append(AppendError::SequenceConflict(_)))
         ),
         "the setup must produce a sequence conflict, got {err:?}"
     );
@@ -216,8 +204,8 @@ async fn dispatch_to_a_stopped_activation_is_transient() {
             match loser.ask(Increment).await {
                 Err(e @ AskError::Send(_)) => return e,
                 Err(_) => tokio::task::yield_now().await,
-                Ok(events) => {
-                    panic!("a writer that lost the stream must not persist {events:?}")
+                Ok(output) => {
+                    panic!("a writer that lost the stream must not answer with {output:?}")
                 }
             }
         }
@@ -265,5 +253,46 @@ async fn decider_rejection_is_permanent() {
         err.retryability(),
         Retryability::Permanent,
         "a business refusal must not invite a retry"
+    );
+}
+
+/// Being told the aggregate already exists is a verdict on this command against
+/// this stream, not a report about where it was sent: re-issuing the same
+/// creation against the same stream collides with the same first write again.
+#[tokio::test]
+async fn already_created_is_permanent() {
+    // Given: both writers address the genesis sequence
+    let ps = ProcessSystem::new().await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let id = AggregateId::new("retryability-already-created");
+
+    let creator = spawn_writer(&ps, &id, &store).await;
+    let redelivered = spawn_writer(&ps, &id, &store).await;
+    let replayed = redelivered
+        .exec(GetCount)
+        .await
+        .expect("the activation must answer once it has replayed");
+    assert_eq!(
+        replayed, 0,
+        "the redelivered creation must still be addressing the genesis sequence"
+    );
+
+    creator.ask(Increment).await.expect("genesis append");
+
+    // When
+    let err = redelivered
+        .ask(Increment)
+        .await
+        .expect_err("a creation that collides with an existing aggregate has no answer to give");
+
+    // Then
+    assert!(
+        matches!(err, AskError::AlreadyCreated),
+        "the setup must produce a genesis collision, got {err:?}"
+    );
+    assert_eq!(
+        err.retryability(),
+        Retryability::Permanent,
+        "an aggregate that already exists will exist on the next attempt too"
     );
 }

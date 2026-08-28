@@ -3,10 +3,8 @@
 //! Implements both `Aggregate` and `Snapshotable`.  The snapshot value is the
 //! raw `u64` counter — trivially captured and restored.
 
-use async_trait::async_trait;
-
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Query, Snapshotable};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Query, Snapshotable};
 
 #[derive(Clone, Debug, PartialEq, Event)]
 #[event(family = "snapshot.counter")]
@@ -40,16 +38,14 @@ impl Snapshotable for Counter {
 pub struct Increment;
 pub struct GetCount;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    /// What this example is about is the state a later activation restores, and
+    /// that is read with `GetCount`, so the command itself asks nothing.
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 

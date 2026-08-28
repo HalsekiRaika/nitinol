@@ -19,7 +19,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Context, Decider, Effect, Event, Query,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, Query,
     SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
@@ -74,16 +74,12 @@ struct PlaceOrder {
     sku: String,
 }
 
-#[async_trait]
 impl Decider<PlaceOrder> for Order {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        cmd: PlaceOrder,
-        _ctx: &mut Context,
-    ) -> Result<Effect<OrderPlaced>, Self::Rejection> {
-        Ok(Effect::persist(OrderPlaced { sku: cmd.sku }))
+    fn decide(&self, cmd: PlaceOrder) -> Decision<OrderPlaced, (), Self::Rejection> {
+        Decision::persist(vec![OrderPlaced { sku: cmd.sku }]).output(())
     }
 }
 
@@ -108,16 +104,12 @@ struct Reserve {
     sku: String,
 }
 
-#[async_trait]
 impl Decider<Reserve> for Inventory {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        cmd: Reserve,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Reserved>, Self::Rejection> {
-        Ok(Effect::persist(Reserved { sku: cmd.sku }))
+    fn decide(&self, cmd: Reserve) -> Decision<Reserved, (), Self::Rejection> {
+        Decision::persist(vec![Reserved { sku: cmd.sku }]).output(())
     }
 }
 

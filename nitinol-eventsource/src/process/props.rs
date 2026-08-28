@@ -3,12 +3,12 @@ use std::sync::Arc;
 use nitinol_contract::{Aggregate, Snapshotable};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::{ProcessSystem, Props};
+use nitinol_runtime::ProcessSystem;
 
 use crate::codec::ErasedCodec;
 use crate::process::aggregate_process::{AggregateProcess, SnapshotRestoreFn};
 use crate::process::proxy::AggregateProxy;
-use crate::process::resolve::{Activation, AggregateResolver, ResolveHandle};
+use crate::process::resolve::{activation_props, Activation, AggregateResolver, ResolveHandle};
 use crate::process::snapshot_persistor::SnapshotPersistorProxy;
 
 pub struct CodecUnset;
@@ -119,8 +119,8 @@ impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
             }
             None => {
                 let (aggregate_id, activation) = self.into_parts();
-                let incarnation = system.spawn(Props::new(move || activation())).await;
-                AggregateProxy::pinned(aggregate_id, incarnation)
+                let proxy = system.spawn(activation_props(activation)).await;
+                AggregateProxy::pinned(aggregate_id, proxy)
             }
         }
     }

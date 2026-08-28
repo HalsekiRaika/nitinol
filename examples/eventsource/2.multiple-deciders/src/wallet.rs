@@ -5,11 +5,10 @@
 //! - `Decider<Withdraw>` — deducts from the balance, with a rejection if insufficient funds
 //! - `Query<GetBalance>` — read-only query for the current balance
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Query};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Query};
 
 // Events
 
@@ -23,8 +22,10 @@ pub struct Withdrawn {
     pub amount: u64,
 }
 
-// A wallet holds multiple event types via the `Sequence` variant of `Effect`.
-// The aggregate must fold both event kinds — use an enum as the event union.
+// An aggregate has exactly one event type, so a wallet that records two kinds of
+// fact names them as variants of one enum and folds both in `apply`.  A single
+// decision may state several of them at once — `Decision::persist` takes a `Vec`
+// — and they reach the stream as one atomic append.
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
 #[serde(tag = "kind")]
@@ -75,39 +76,33 @@ pub struct InsufficientFunds {
 
 // Decider / Query implementations
 
-#[async_trait]
 impl Decider<Deposit> for Wallet {
+    /// The balance the deposit leaves behind.
+    type Output = u64;
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        cmd: Deposit,
-        _ctx: &mut Context,
-    ) -> Result<Effect<WalletEvent>, Self::Rejection> {
-        Ok(Effect::persist(WalletEvent::Deposited(Deposited {
-            amount: cmd.amount,
-        })))
+    fn decide(&self, cmd: Deposit) -> Decision<WalletEvent, u64, Self::Rejection> {
+        let event = WalletEvent::Deposited(Deposited { amount: cmd.amount });
+        Decision::persist(vec![event]).output(self.balance + cmd.amount)
     }
 }
 
-#[async_trait]
 impl Decider<Withdraw> for Wallet {
+    /// The balance the withdrawal leaves behind.
+    type Output = u64;
     type Rejection = InsufficientFunds;
 
-    async fn decide(
-        &self,
-        cmd: Withdraw,
-        _ctx: &mut Context,
-    ) -> Result<Effect<WalletEvent>, Self::Rejection> {
+    fn decide(&self, cmd: Withdraw) -> Decision<WalletEvent, u64, Self::Rejection> {
         if self.balance < cmd.amount {
-            return Err(InsufficientFunds {
+            // A domain rule refused the command: no fact was produced and there
+            // is no answer to give, which is all a rejection has to say.
+            return Decision::reject(InsufficientFunds {
                 balance: self.balance,
                 amount: cmd.amount,
             });
         }
-        Ok(Effect::persist(WalletEvent::Withdrawn(Withdrawn {
-            amount: cmd.amount,
-        })))
+        let event = WalletEvent::Withdrawn(Withdrawn { amount: cmd.amount });
+        Decision::persist(vec![event]).output(self.balance - cmd.amount)
     }
 }
 

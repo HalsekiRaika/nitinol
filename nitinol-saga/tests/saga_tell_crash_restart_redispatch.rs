@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
@@ -84,16 +84,12 @@ struct Reserve {
     sku: String,
 }
 
-#[async_trait]
 impl Decider<Reserve> for Inventory {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        cmd: Reserve,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Reserved>, Self::Rejection> {
-        Ok(Effect::persist(Reserved { sku: cmd.sku }))
+    fn decide(&self, cmd: Reserve) -> Decision<Reserved, (), Self::Rejection> {
+        Decision::persist(vec![Reserved { sku: cmd.sku }]).output(())
     }
 }
 

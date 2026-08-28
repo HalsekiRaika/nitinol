@@ -3,7 +3,8 @@
 // C-1: a conflict on a non-genesis sequence means this activation is no longer
 //      the stream's only writer, so it stops.
 // C-2: a conflict on the genesis sequence means the aggregate has already been
-//      created.  That is a normal response, and the activation lives on.
+//      created.  No decision was reached, so the caller is told exactly that
+//      and is handed no answer; the activation lives on.
 //
 // Both cases are produced without a test double.  The raw `AggregateProps` path
 // activates per call, so two writers can be put on one stream and the in-memory
@@ -21,10 +22,11 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::error::EffectExecutionError;
+use nitinol_eventsource::error::PersistError;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Context, Decider, Effect,
-    Event, ExecError, Query,
+    codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
+    ExecError, Query, TellError,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
@@ -63,16 +65,15 @@ impl Aggregate for Counter {
 struct Increment;
 struct GetCount;
 
-#[async_trait]
+/// The answer the command asks for is the counter's new value, so an
+/// interpreter that reported a collision as a success would have to invent a
+/// number nobody decided.
 impl Decider<Increment> for Counter {
+    type Output = u64;
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, u64, Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(self.value + 1)
     }
 }
 
@@ -203,9 +204,7 @@ async fn non_genesis_conflict_stops_the_losing_writer() {
     assert!(
         matches!(
             err,
-            AskError::Effect(EffectExecutionError::Append(AppendError::SequenceConflict(
-                _
-            )))
+            AskError::Persist(PersistError::Append(AppendError::SequenceConflict(_)))
         ),
         "the store's OCC rejection must reach the caller unchanged, got {err:?}"
     );
@@ -218,10 +217,59 @@ async fn non_genesis_conflict_stops_the_losing_writer() {
     );
 }
 
+/// C-1: the stop is reported to a `tell` sender too, as a refused delivery.
+///
+/// `tell` keeps no channel for a decision's verdict, so what it owes a sender is
+/// narrower: that `Ok(())` means the command was taken for delivery.  Once C-1
+/// has stopped the writer, that is no longer true of it, and a `tell` still
+/// answering `Ok(())` would leave the caller believing a command was queued for
+/// an activation that will never read it — the silent loss the told path exists
+/// to avoid.  The failure is what a caller acts on: it names a dispatch that did
+/// not happen, so the command can be re-issued through a reference that resolves
+/// a live writer.
+#[tokio::test]
+async fn a_tell_to_a_writer_stopped_by_a_conflict_is_refused() {
+    // Given: the loser of the same race C-1 stops
+    let ps = ProcessSystem::new().await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let id = AggregateId::new("conflict-non-genesis-tell");
+
+    let winner = spawn_writer(&ps, &id, &store).await;
+    winner.ask(Increment).await.expect("genesis append");
+
+    let loser = spawn_writer(&ps, &id, &store).await;
+    pin_replayed_state(&loser, 1).await;
+
+    winner
+        .ask(Increment)
+        .await
+        .expect("the winner takes sequence 2");
+    loser
+        .ask(Increment)
+        .await
+        .expect_err("the writer that fell behind must lose the stream");
+    await_stopped(&loser).await;
+
+    // When: a command is told to the writer that just stopped
+    let outcome = loser.tell(Increment).await;
+
+    // Then
+    assert!(
+        matches!(outcome, Err(TellError::Send(_))),
+        "a command told to a stopped writer must be reported as undelivered rather than \
+         accepted for a delivery that cannot happen, got {outcome:?}"
+    );
+}
+
 // C-2: genesis conflict
 
 /// C-2: a conflict on the genesis sequence is the store's "already created"
-/// answer, so the dispatch succeeds and reports that nothing new was written.
+/// answer, and that is what the caller is told.
+///
+/// No decision was reached — the events never landed — so there is no output to
+/// deliver.  Reporting the collision as a success would force the interpreter
+/// to invent one, and the caller would believe it created what someone else
+/// did.
 #[tokio::test]
 async fn genesis_conflict_is_answered_as_already_created() {
     // Given: both writers exist before anything is stored, so both address the
@@ -237,15 +285,16 @@ async fn genesis_conflict_is_answered_as_already_created() {
     creator.ask(Increment).await.expect("genesis append");
 
     // When
-    let events = redelivered
+    let err = redelivered
         .ask(Increment)
         .await
-        .expect("a genesis conflict means 'already created', not a failure");
+        .expect_err("a creation that collides with an existing aggregate has no answer to give");
 
     // Then
     assert!(
-        events.is_empty(),
-        "nothing was persisted, so no event may be reported as persisted: {events:?}"
+        matches!(err, AskError::AlreadyCreated),
+        "the collision must be reported as such rather than dressed up as a rejection or a \
+         store failure, got {err:?}"
     );
     assert_eq!(
         stored_sequences(&store, &id).await,
@@ -273,7 +322,7 @@ async fn genesis_conflict_leaves_the_writer_alive_and_unchanged() {
     redelivered
         .ask(Increment)
         .await
-        .expect("a genesis conflict must not fail the dispatch");
+        .expect_err("a genesis conflict is reported, not answered");
 
     // Then
     let count = redelivered
@@ -307,23 +356,76 @@ async fn genesis_conflict_does_not_advance_the_writer_sequence() {
     redelivered
         .ask(Increment)
         .await
-        .expect("first genesis conflict");
+        .expect_err("first genesis conflict");
 
     // When
-    let events = redelivered
+    let err = redelivered
         .ask(Increment)
         .await
-        .expect("second genesis conflict");
+        .expect_err("second genesis conflict");
 
     // Then
     assert!(
-        events.is_empty(),
-        "the repeated command must still write nothing: {events:?}"
+        matches!(err, AskError::AlreadyCreated),
+        "the repeated command must be refused the same way rather than accepted at the next \
+         sequence, got {err:?}"
     );
     assert_eq!(
         stored_sequences(&store, &id).await,
         vec![1],
         "a writer refused at the genesis sequence must never reach sequence 2"
+    );
+}
+
+/// C-2: an already-created answer is not the death of an activation, so a
+/// reference must keep dispatching to the one it already resolved.
+///
+/// A reference drops the activation it cached only when that activation can no
+/// longer be reached — which is what C-1 makes true of an overtaken writer, and
+/// what C-2 explicitly does not make true here.  Dropping it would cost a
+/// resolve nobody asked for, and the difference is observable: an activation
+/// resolved afresh replays the creator's event, while the one that saw the
+/// collision never did.
+#[tokio::test]
+async fn genesis_conflict_keeps_the_reference_on_its_activation() {
+    // Given: a resolved reference parked at the genesis sequence
+    let ps = ProcessSystem::new().await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_codec::<JsonCodec>()
+        .with_event_store(Arc::clone(&store))
+        .build();
+    let id = AggregateId::new("conflict-genesis-reference");
+
+    let resolved = system.spawn_aggregate::<Counter>(id.clone()).await;
+    pin_replayed_state(&resolved, 0).await;
+
+    // And: someone else creates the aggregate first
+    let creator = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
+        .with_codec(system.codec::<Incremented>())
+        .spawn(system.process_system())
+        .await;
+    creator.ask(Increment).await.expect("genesis append");
+
+    // When
+    let err = resolved
+        .ask(Increment)
+        .await
+        .expect_err("the resolved reference must be told the aggregate already exists");
+    assert!(
+        matches!(err, AskError::AlreadyCreated),
+        "the setup must produce a genesis collision, got {err:?}"
+    );
+
+    // Then
+    let count = resolved
+        .exec(GetCount)
+        .await
+        .expect("the reference must still reach an activation");
+    assert_eq!(
+        count, 0,
+        "the reference must still hold the activation that saw the collision: one resolved \
+         again would have replayed the creator's event and answered 1"
     );
 }
 
@@ -406,5 +508,47 @@ async fn replay_failure_does_not_masquerade_as_a_genesis_conflict() {
         stored_sequences(&store, &id).await,
         vec![1],
         "only the real creator's genesis event may exist"
+    );
+}
+
+/// The decode-failure branch of replay must behave like the load and stream
+/// failure branches next to it: an activation that cannot decode an existing
+/// event has not reached the state it would decide from, so it must stop
+/// rather than continue with `sequence == 0` and let a later append conflict
+/// on the genesis sequence be answered as C-2's "already created" from state
+/// it never actually replayed.
+#[tokio::test]
+async fn replay_decode_failure_does_not_masquerade_as_a_genesis_conflict() {
+    // Given: the stream already holds an event this writer's codec cannot
+    // decode.
+    let ps = ProcessSystem::new().await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let id = AggregateId::new("conflict-genesis-decode-failure");
+    store
+        .append(
+            id.as_str(),
+            vec![AppendingEvent {
+                sequence: 1,
+                event_type: Incremented::EVENT_TYPE,
+                payload: Bytes::from_static(b"not valid json"),
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("seeding the undecodable event must succeed");
+
+    // When: a writer is activated against that stream.
+    let unreplayed = spawn_writer(&ps, &id, &store).await;
+    await_stopped(&unreplayed).await;
+
+    // Then: it must already be gone rather than still answering as though it
+    // replayed to `sequence == 0` and can treat the next append conflict on
+    // the genesis sequence as a redelivered creation.
+    let err = unreplayed.ask(Increment).await.expect_err(
+        "an activation that could not decode an existing event must not answer commands",
+    );
+    assert!(
+        matches!(err, AskError::Send(_)),
+        "expected the stopped activation to be unreachable, got {err:?}"
     );
 }

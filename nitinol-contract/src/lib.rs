@@ -13,14 +13,13 @@
 //! runtime. They live here rather than in `nitinol-eventsource` so that a
 //! domain-layer crate can define and property-test its aggregates, decisions
 //! and queries against the framework's contract without taking on the execution
-//! machinery — or Tokio — that runs them. `nitinol-eventsource` re-exports
-//! [`Event`], [`Aggregate`] and [`Snapshotable`], so the framework-side paths
-//! are unchanged.
+//! machinery — or Tokio — that runs them. `nitinol-eventsource` re-exports all
+//! of them, so the framework-side paths are unchanged.
 //!
-//! The execution-side abstractions — `Context`, `Effect`, `Codec`, the
-//! projection layer, and the effectful `Decider` that `nitinol-eventsource`
-//! defines — are deliberately *not* here: they describe how the runtime drives
-//! an aggregate, not what an aggregate is or what it decides.
+//! The execution-side abstractions — the aggregate activation, `Codec`, the
+//! projection layer, the error families — are deliberately *not* here: they
+//! describe how the runtime drives an aggregate, not what an aggregate is or
+//! what it decides.
 //!
 //! # Laws
 //!
@@ -73,16 +72,16 @@
 //!   received it through a creation event, rather than holding it as a handle
 //!   the machinery passed in.
 //!
-//! # Extension rule
+//! # One home for the contract
 //!
-//! Existing contracts are frozen; new meaning arrives as a new trait.
-//!
-//! [`Decider`] here neither replaces nor reshapes the effectful
-//! `nitinol_eventsource::Decider`: that trait keeps its signature, its `Effect`
-//! and its users, and the two stand side by side under different paths. A crate
-//! that depends on this one for the pure contract is not asked to migrate for
-//! the privilege of naming it, and one that stays on the effectful trait is not
-//! broken by its arrival.
+//! [`Decider`] is the only decision contract in the framework. The effectful
+//! trait of the same name that `nitinol-eventsource` used to define — async,
+//! handed a `Context`, returning an `Effect` ADT the runtime then interpreted —
+//! is gone rather than kept alongside this one. Two deciders would have meant
+//! two answers to "what does a command mean", and the effectful one answered it
+//! by describing machinery: it let a decision perform I/O, reach for the
+//! aggregate's identity and sequence number, and fan out into several appends,
+//! none of which a domain rule needs and all of which a replay must reproduce.
 //!
 //! Nor is a new `nitinol-core` crate introduced to hold the pure contract: this
 //! crate already *is* the runtime-free layer, and a second one would leave two

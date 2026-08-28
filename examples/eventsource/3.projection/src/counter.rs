@@ -1,10 +1,9 @@
 //! Counter aggregate for the projection example.
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect};
+use nitinol_eventsource::{Aggregate, Decider, Decision};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
 #[event(family = "projection.counter")]
@@ -25,15 +24,13 @@ impl Aggregate for Counter {
 
 pub struct Increment;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    /// This example reads the count from the projected read model, not from the
+    /// command, so the command asks nothing and says so once, here.
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }

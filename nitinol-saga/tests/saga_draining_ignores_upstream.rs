@@ -37,8 +37,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Context, Decider, Effect, Event,
-    SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
@@ -86,15 +85,12 @@ struct DrainTargetCmd {
     key: String,
 }
 
-#[async_trait]
 impl Decider<DrainTargetCmd> for DrainTargetAgg {
+    type Output = ();
     type Rejection = std::convert::Infallible;
-    async fn decide(
-        &self,
-        cmd: DrainTargetCmd,
-        _ctx: &mut Context,
-    ) -> Result<Effect<DrainSagaEvent>, Self::Rejection> {
-        Ok(Effect::persist(DrainSagaEvent { key: cmd.key }))
+
+    fn decide(&self, cmd: DrainTargetCmd) -> Decision<DrainSagaEvent, (), Self::Rejection> {
+        Decision::persist(vec![DrainSagaEvent { key: cmd.key }]).output(())
     }
 }
 

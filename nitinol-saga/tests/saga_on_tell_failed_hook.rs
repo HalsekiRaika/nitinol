@@ -45,7 +45,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Context, Decider, Effect, Event,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
     SequenceCursor, TellError,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
@@ -125,16 +125,12 @@ impl Aggregate for Inventory {
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct Reserve;
 
-#[async_trait]
 impl Decider<Reserve> for Inventory {
+    type Output = ();
     type Rejection = Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Reserve,
-        _ctx: &mut Context,
-    ) -> Result<Effect<InventoryReserved>, Self::Rejection> {
-        Ok(Effect::persist(InventoryReserved))
+    fn decide(&self, _cmd: Reserve) -> Decision<InventoryReserved, (), Self::Rejection> {
+        Decision::persist(vec![InventoryReserved]).output(())
     }
 }
 

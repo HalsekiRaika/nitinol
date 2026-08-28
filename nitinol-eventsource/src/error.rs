@@ -1,7 +1,5 @@
 use nitinol_persistence::error::AppendError;
 
-use crate::SideEffectError;
-
 /// Error produced when decoding a [`crate::SystemEvent`] payload fails.
 ///
 /// The underlying serializer (prost) is wrapped behind `Box<dyn Error>` so the
@@ -27,11 +25,13 @@ pub enum CodecError {
     Decode(Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// Error produced by the effect interpreter when executing an `Effect`.
+/// Error produced while writing the facts of an accepted decision to the stream.
+///
+/// A decision that reached this point was accepted, so nothing here is a verdict
+/// on the command: these are failures of the machinery that was supposed to
+/// record it (L-6).
 #[derive(Debug, thiserror::Error)]
-pub enum EffectExecutionError {
-    #[error("side effect execution failed: {0}")]
-    Side(#[from] SideEffectError),
+pub enum PersistError {
     #[error("codec error: {0}")]
     Codec(#[from] CodecError),
     #[error("event store append failed: {0}")]
@@ -63,8 +63,16 @@ pub enum Retryability {
 pub enum AskError<R: std::error::Error + Send + Sync + 'static> {
     #[error("command rejected: {0}")]
     Rejection(R),
-    #[error("effect execution failed: {0}")]
-    Effect(EffectExecutionError),
+    /// A creation collided with an aggregate that already exists (L-7).
+    ///
+    /// No decision was reached — the facts never landed — so there is no output
+    /// to hand back, and the interpreter does not invent one.  Whether a
+    /// redelivered creation is a success, a duplicate or a conflict is the
+    /// caller's judgement to make, not this layer's.
+    #[error("the aggregate has already been created")]
+    AlreadyCreated,
+    #[error("persisting the accepted decision failed: {0}")]
+    Persist(PersistError),
     #[error("process send error: {0}")]
     Send(nitinol_runtime::error::SendError),
 }
@@ -75,17 +83,20 @@ impl<R: std::error::Error + Send + Sync + 'static> AskError<R> {
         match self {
             // The decider looked at the command and refused it.
             AskError::Rejection(_) => Retryability::Permanent,
+            // An aggregate that exists will still exist on the next attempt, so
+            // the same creation collides with the same first write again.
+            AskError::AlreadyCreated => Retryability::Permanent,
             // The command never reached an activation, or reached one that was
             // stopping — including one stopped by a conflict of its own.
             AskError::Send(_) => Retryability::Transient,
-            AskError::Effect(e) => e.retryability(),
+            AskError::Persist(e) => e.retryability(),
         }
     }
 }
 
-impl EffectExecutionError {
-    /// Whether the failure was about the environment the effect ran in, rather
-    /// than about the effect itself.
+impl PersistError {
+    /// Whether the failure was about the machinery the append ran through,
+    /// rather than about the facts it carried.
     fn retryability(&self) -> Retryability {
         match self {
             // Losing the sequence means another writer took it; a re-resolved
@@ -94,9 +105,6 @@ impl EffectExecutionError {
             // The store failed to answer.  Nothing was committed, and the fault
             // is the store's rather than the command's.
             Self::Append(AppendError::Backend(_)) => Retryability::Transient,
-            // A side effect's own failure says nothing about the command that
-            // scheduled it.
-            Self::Side(_) => Retryability::Transient,
             // Encoding this event is deterministic: it fails again, identically.
             Self::Codec(_) => Retryability::Permanent,
         }
@@ -121,13 +129,16 @@ pub enum ExecError<E: std::error::Error + Send + Sync + 'static> {
 
 /// Internal error produced by `AggregateProcess::recv` for command messages.
 ///
-/// Mapped to `AskError<R>` by `AggregateProxy`.
+/// Mapped variant-for-variant to `AskError<R>` by `AggregateProxy`, which adds
+/// only the failures it can observe itself.
 #[derive(Debug, thiserror::Error)]
 pub enum AskHandlerError<R: std::error::Error + Send + Sync + 'static> {
     #[error("rejection: {0}")]
     Rejection(R),
-    #[error("effect: {0}")]
-    Effect(#[from] EffectExecutionError),
+    #[error("the aggregate has already been created")]
+    AlreadyCreated,
+    #[error("persist: {0}")]
+    Persist(PersistError),
 }
 
 /// Internal error produced by `AggregateProcess::recv` for query messages.

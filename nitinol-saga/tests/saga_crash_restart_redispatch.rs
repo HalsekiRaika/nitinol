@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
@@ -76,18 +76,15 @@ impl Aggregate for Inventory {
 #[derive(Clone, Debug, PartialEq)]
 struct Reserve;
 
-#[async_trait]
 impl Decider<Reserve> for Inventory {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Reserve,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Reserved>, Self::Rejection> {
-        Ok(Effect::persist(Reserved {
+    fn decide(&self, _cmd: Reserve) -> Decision<Reserved, (), Self::Rejection> {
+        Decision::persist(vec![Reserved {
             sku: "crash-restart-sku".to_owned(),
-        }))
+        }])
+        .output(())
     }
 }
 

@@ -56,9 +56,11 @@ async fn main() {
     let id = AggregateId::new("counter-1");
     let proxy = system.spawn_aggregate::<Counter>(id).await;
 
-    // ask() sends a command and waits for the persisted events.
-    let events = proxy.ask(Increment).await.expect("ask failed");
-    info!(?events, "ask(Increment) returned");
+    // ask() sends a command and waits for the answer its decision states —
+    // here, the counter's new value.
+    let value = proxy.ask(Increment).await.expect("ask failed");
+    info!(value, "ask(Increment) returned");
+    assert_eq!(value, 1, "the first Increment must answer with 1");
 
     // tell() sends a command without waiting for a reply (fire-and-forget).
     proxy.tell(Increment).await.expect("tell failed");

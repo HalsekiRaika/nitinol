@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
@@ -41,16 +41,12 @@ struct PlaceOrder {
     sku: String,
 }
 
-#[async_trait]
 impl Decider<PlaceOrder> for Order {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        cmd: PlaceOrder,
-        _ctx: &mut Context,
-    ) -> Result<Effect<OrderPlaced>, Self::Rejection> {
-        Ok(Effect::persist(OrderPlaced { sku: cmd.sku }))
+    fn decide(&self, cmd: PlaceOrder) -> Decision<OrderPlaced, (), Self::Rejection> {
+        Decision::persist(vec![OrderPlaced { sku: cmd.sku }]).output(())
     }
 }
 

@@ -14,11 +14,10 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, Context, Decider, Effect, Event, Query,
+    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, Query,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
@@ -48,16 +47,12 @@ impl Aggregate for Counter {
 struct Increment;
 struct GetCount;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
@@ -99,9 +94,9 @@ fn _assert_sig_aggregate_props_new_accepts_arc_dyn_event_store() {
 
 // Runtime integration: spawn + ask succeeds with Arc<dyn EventStore>
 
-/// Spawning an AggregateProcess with Arc<dyn EventStore> succeeds, and a
-/// command flows through `Effect::Persist` to `store.append` without going
-/// through an actor proxy.
+/// Spawning an AggregateProcess with Arc<dyn EventStore> succeeds, and the
+/// facts of an accepted decision reach `store.append` without going through an
+/// actor proxy.
 #[tokio::test]
 async fn aggregate_props_spawns_with_arc_dyn_event_store() {
     // Given
@@ -114,9 +109,14 @@ async fn aggregate_props_spawns_with_arc_dyn_event_store() {
         .spawn(&system)
         .await;
 
-    // Then: ask succeeds — the process appends via the held store
-    let events = proxy.ask(Increment).await.expect("ask must succeed");
-    assert_eq!(events, vec![Incremented]);
+    // Then: ask succeeds — the process appends via the held store, and the
+    // applied fact has moved the state it can be queried for
+    proxy.ask(Increment).await.expect("ask must succeed");
+    assert_eq!(
+        proxy.exec(GetCount).await.expect("exec must succeed"),
+        1,
+        "the accepted fact must have been persisted and applied"
+    );
 }
 
 // Runtime integration: state replay via direct store

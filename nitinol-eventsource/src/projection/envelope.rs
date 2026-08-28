@@ -4,8 +4,8 @@ use nitinol_persistence::AggregateId;
 /// and the decoded event value.
 ///
 /// Produced by `DirectPollerProcess` transforms (e.g. the saga's upstream
-/// subscription poller) and accepted by `Effect::publish` when an aggregate
-/// wants to broadcast a typed event to a `Stream<EventEnvelope<E>>`.
+/// subscription poller), and the message type of a
+/// `Stream<EventEnvelope<E>>` that carries typed events to subscribers.
 #[derive(Clone)]
 pub struct EventEnvelope<E> {
     pub aggregate_id: AggregateId,

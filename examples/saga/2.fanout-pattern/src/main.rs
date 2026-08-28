@@ -70,6 +70,7 @@ async fn main() {
 
     payroll_run
         .ask(ApprovePayrollRun {
+            payroll_run: run_id.as_str().to_owned(),
             employee_ids: employees.clone(),
         })
         .await

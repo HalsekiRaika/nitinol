@@ -77,6 +77,8 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
     // Root-level re-exports
     #[allow(unused_imports)]
     use nitinol::eventsource::{
+        // decision
+        Accepting,
         // core traits
         Aggregate,
         // process builder
@@ -87,17 +89,14 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
         AskError,
         CodecSet,
         CodecUnset,
-        // context
-        Context,
         // durable stream
         CursorSet,
         CursorUnset,
         Decider,
+        Decision,
         DurableStream,
         DurableStreamProxy,
         DurableSubscription,
-        // effect
-        Effect,
         Event,
         // projection
         EventEnvelope,
@@ -112,8 +111,6 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
         // query
         Query,
         SequenceCursor,
-        SideEffect,
-        SideEffectError,
         // snapshot
         SnapshotPersistor,
         SnapshotPersistorProxy,
@@ -130,26 +127,24 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
 // Feature: eventsource — error facade exposes only user-facing types
 
 /// Regression guard: `nitinol::eventsource::error` must expose exactly the
-/// five user-facing error types and nothing else.
+/// user-facing error types and nothing else.
 ///
 /// `SystemEventDecodeError` (framework-internal) must NOT be importable via
 /// `nitinol::eventsource::error`. The negative check is enforced structurally
 /// by the explicit re-export list in `src/lib.rs` and by the `compile_fail`
 /// doctest on the `eventsource` module.
 ///
-/// This test covers the positive side: all five user-facing types must be
+/// This test covers the positive side: every user-facing type must be
 /// accessible through the `error` facade.
 #[cfg(feature = "eventsource")]
 #[test]
 fn eventsource_error_facade_exposes_user_facing_types() {
     #[allow(unused_imports)]
-    use nitinol::eventsource::error::{
-        AskError, CodecError, EffectExecutionError, ExecError, TellError,
-    };
+    use nitinol::eventsource::error::{AskError, CodecError, ExecError, PersistError, TellError};
 
-    // CodecError and EffectExecutionError are concrete enums; verify they are in scope.
+    // CodecError and PersistError are concrete enums; verify they are in scope.
     let _ = std::marker::PhantomData::<CodecError>;
-    let _ = std::marker::PhantomData::<EffectExecutionError>;
+    let _ = std::marker::PhantomData::<PersistError>;
     // AskError<R>, ExecError<E> have type parameters — use Infallible as a stand-in.
     let _ = std::marker::PhantomData::<AskError<std::convert::Infallible>>;
     let _ = std::marker::PhantomData::<ExecError<std::convert::Infallible>>;

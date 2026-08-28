@@ -6,18 +6,19 @@
 //! | Trait / Type | Purpose |
 //! |---|---|
 //! | [`Aggregate`] | Domain state holder; evolves state by applying events |
-//! | [`Decider<C>`](Decider) | Maps a command to an [`Effect`] (Persist / Apply / Side / tell / publish) |
+//! | [`Decider<C>`](Decider) | Decides what a command means for the current state |
+//! | [`Decision`] | A decider's conclusion: facts and an answer, or a refusal |
 //! | [`Query<M>`](Query) | Read-only question asked of the current aggregate state |
 //! | [`Event`] | Marker for domain events |
 //! | [`Snapshotable`] | Opt-in snapshot support for faster replay |
-//! | [`Context`] | Runtime identity and sequence number |
-//! | [`Effect`] | Algebraic effect ADT returned by `Decider::decide` |
 //! | [`AggregateProxy`] | Identity-based reference to an aggregate; resolves a dispatch to an activation and re-resolves after one dies |
 //!
-//! [`Aggregate`], [`Event`], [`Query`] and [`Snapshotable`] are defined in
-//! `nitinol-contract`, which carries no async runtime, and are re-exported
-//! here unchanged: a domain crate can implement them without depending on the
-//! execution machinery in this crate.
+//! Every trait and type in that table is defined in `nitinol-contract`, which
+//! carries no async runtime, and is re-exported here unchanged: a domain crate
+//! can implement them without depending on the execution machinery in this
+//! crate.  What this crate adds is the *interpreter* — the activation that reads
+//! a [`Decision`], persists its facts and delivers its output under the laws
+//! stated in [`nitinol_contract`].
 //!
 //! # Getting started
 //!
@@ -27,14 +28,11 @@
 //! 2. `eventsource-multiple-deciders` – multiple commands per aggregate
 //! 3. `eventsource-projection` – aggregate and projector (Catch-up and Live)
 //! 4. `eventsource-snapshot` – snapshot-accelerated replay
-//! 5. `eventsource-aggregate-communication` – inter-aggregate messaging
+//! 5. `eventsource-aggregate-communication` – inter-aggregate messaging, as a saga
 //! 6. `eventsource-codec-switch` – custom codec
 
 pub mod codec;
-mod context;
-mod decider;
 mod durable_stream;
-mod effect;
 mod system_event;
 
 pub mod error;
@@ -45,11 +43,7 @@ pub mod system;
 // Defined in `nitinol-contract` so a runtime-free domain crate can implement
 // them; re-exported here because this crate's own API is stated in terms of
 // them and because these are the paths downstream code already imports.
-pub use nitinol_contract::{Aggregate, Event, Query, Snapshotable};
-
-pub use self::context::Context;
-pub use self::decider::Decider;
-pub use self::effect::{Effect, SideEffect, SideEffectError};
+pub use nitinol_contract::{Accepting, Aggregate, Decider, Decision, Event, Query, Snapshotable};
 
 // Framework-managed persistent message abstraction. Hidden from docs and not
 // re-exported through the umbrella crate so it stays an internal API; direct

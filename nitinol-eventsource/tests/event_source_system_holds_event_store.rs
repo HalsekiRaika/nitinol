@@ -6,15 +6,15 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    codec::Codec, system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event,
+    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Default)]
@@ -50,17 +50,25 @@ impl Aggregate for Counter {
 
 struct Bump;
 
-#[async_trait]
 impl Decider<Bump> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Bump,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Bumped>, Self::Rejection> {
-        Ok(Effect::persist(Bumped))
+    fn decide(&self, _cmd: Bump) -> Decision<Bumped, (), Self::Rejection> {
+        Decision::persist(vec![Bumped]).output(())
     }
+}
+
+/// Event types recorded under `id` in `store`, in stored order.
+async fn stream_event_types(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<EventType> {
+    let loaded: Vec<_> = store
+        .load(LoadQuery::by_stream(id))
+        .await
+        .expect("load must succeed")
+        .try_collect()
+        .await
+        .expect("collect must succeed");
+    loaded.into_iter().map(|event| event.event_type).collect()
 }
 
 // Runtime: EventSourceSystem::spawn_aggregate takes Arc<dyn EventStore>
@@ -76,15 +84,19 @@ async fn spawn_aggregate_accepts_arc_dyn_event_store() {
         .with_codec::<EventSourceSystemCodec>()
         .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let id = AggregateId::new("system-direct-store");
 
     // When
     let proxy = system
-        .spawn_aggregate::<Counter>(AggregateId::new("system-direct-store"), store)
+        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
         .await;
 
-    // Then
-    let events = proxy.ask(Bump).await.expect("ask must succeed");
-    assert_eq!(events, vec![Bumped]);
+    // Then: the command reaches the aggregate and its fact lands on that store
+    proxy.ask(Bump).await.expect("ask must succeed");
+    assert_eq!(
+        stream_event_types(&store, &id).await,
+        vec![Bumped::EVENT_TYPE]
+    );
 }
 
 // Runtime: aggregate_props (no spawn) accepts Arc<dyn EventStore>

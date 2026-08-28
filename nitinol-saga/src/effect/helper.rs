@@ -77,6 +77,7 @@ impl<E> SagaEffect<E> {
         A: Aggregate + Decider<C>,
         C: Clone + serde::Serialize + Send + Sync + 'static,
         T: AggregateTellTarget<A>,
+        <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
         let crash_restart_payload = serde_json::to_vec(&cmd).map(bytes::Bytes::from).expect(
             "SagaEffect::tell: command serialization failed; \

@@ -22,8 +22,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Context, Decider, Effect, Event,
-    SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
@@ -78,16 +77,12 @@ struct TriggerCmd {
     key: String,
 }
 
-#[async_trait]
 impl Decider<TriggerCmd> for TargetAggregate {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        cmd: TriggerCmd,
-        _ctx: &mut Context,
-    ) -> Result<Effect<SagaDomainEvent>, Self::Rejection> {
-        Ok(Effect::persist(SagaDomainEvent { key: cmd.key }))
+    fn decide(&self, cmd: TriggerCmd) -> Decision<SagaDomainEvent, (), Self::Rejection> {
+        Decision::persist(vec![SagaDomainEvent { key: cmd.key }]).output(())
     }
 }
 
