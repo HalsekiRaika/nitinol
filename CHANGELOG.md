@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-conformance`): a conformance suite that makes the laws of the
+  contract (L-1 to L-9) executable for *any* interpreter.
+  `nitinol_conformance::verify(&my_interpretation).await` drives one clause per
+  law and names the law it found broken. Until now those laws were prose in
+  `nitinol-contract` plus one-off fixtures inside `nitinol-eventsource`'s own
+  test files: anyone writing a second interpreter had nothing to check it
+  against, and the laws could only be read, not run.
+
+  The suite supplies the domain — a small `Ledger` with its commands, questions
+  and facts — because a suite that let each interpreter bring its own decider
+  would grade each one against a different domain. It also supplies the store
+  and the stream key, and reads the resulting stream back and decodes it itself,
+  so no clause depends on an interpreter agreeing with its own account of what
+  it did. Wiring an interpreter up means implementing `Interpretation` and
+  `Interpreter`: classify each raw outcome into `Interpreted` / `Unanswered`
+  once at your own boundary, delegate your codec to `LedgerEvent::encode` /
+  `LedgerEvent::decode`, and give `quiesce` a real synchronisation point.
+
+  The crate reaches no interpreter and no async runtime — neither
+  `nitinol-eventsource`, `nitinol-runtime` nor `tokio` is in its dependency
+  tree — so whichever runtime `verify` is awaited on is the caller's choice. It
+  is a `dev-dependency` of `nitinol-eventsource`, whose aggregate activation now
+  passes every clause as part of the ordinary test run, with no feature flag: a
+  law that only held under an opt-in configuration would not be a law the crate
+  keeps. A second integration test consumes one and the same `Decider`
+  implementation through both that activation and an external executor built on
+  no runtime at all, and requires the two to leave the domain unable to tell
+  them apart — same verdicts, same answers, same facts under the same sequence
+  numbers.
+
+  Nothing in `nitinol-contract` changes: the suite is written against its
+  existing public surface, and the laws' documentation gained only the name of
+  the clause that fixes each one.
+
 - (`nitinol-contract`, `nitinol`): a contract crate holding `Event`,
   `Aggregate` and `Snapshotable`, reachable as `nitinol = { features =
   ["contract"] }`. The three traits are pure — `apply` is a synchronous state
