@@ -4,10 +4,9 @@
 //! idempotent: that is what lets the pattern deliver at-least-once and still
 //! need no compensation.
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, Receive};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Query};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 /// The payslip's genesis event.
@@ -27,8 +26,9 @@ impl Event for PayslipIssued {
 /// Issue the payslip this stream stands for.
 ///
 /// `payslip` is the target's stream key.  It is not read by [`Decider::decide`]
-/// — the aggregate already knows which stream it is — but it is what makes the
-/// command routable on its own: a reference to the target is built from it with
+/// — the only thing the decision turns on is whether this payslip has been
+/// issued already — but it is what makes the command routable on its own: a
+/// reference to the target is built from it with
 /// [`EventSourceSystem::aggregate_proxy`](nitinol_eventsource::system::EventSourceSystem::aggregate_proxy),
 /// and after a full process crash the saga's crash-restart factory rebuilds that
 /// reference out of these very bytes (see
@@ -76,35 +76,35 @@ impl Aggregate for Payslip {
     }
 }
 
-#[async_trait]
 impl Decider<IssuePayslip> for Payslip {
+    /// The issue asks nothing back — the saga dispatches it with `tell` — and
+    /// whether it happened is read from the payslip's own stream with
+    /// [`IsIssued`].
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: IssuePayslip,
-        _ctx: &mut Context,
-    ) -> Result<Effect<PayslipIssued>, Self::Rejection> {
+    fn decide(&self, _cmd: IssuePayslip) -> Decision<PayslipIssued, (), Self::Rejection> {
         if self.issued {
             // Already issued — the second delivery of an issue is the success
-            // answer, not a conflict to compensate.  A resident payslip answers
-            // it from `issued`; a payslip restored by replay answers it from
-            // its own stream, because replay is what sets `issued`.
-            return Ok(Effect::empty());
+            // answer, not a conflict to compensate.  An acceptance that states
+            // no facts is exactly that: the command found nothing left to do, so
+            // nothing is appended and it is still accepted.  A resident payslip
+            // answers it from `issued`; a payslip restored by replay answers it
+            // from its own stream, because replay is what sets `issued`.
+            return Decision::persist(Vec::new()).output(());
         }
-        Ok(Effect::persist(PayslipIssued))
+        Decision::persist(vec![PayslipIssued]).output(())
     }
 }
 
 /// Ask a payslip whether it has been issued yet.
 pub struct IsIssued;
 
-#[async_trait]
-impl Receive<IsIssued> for Payslip {
+impl Query<IsIssued> for Payslip {
     type Response = bool;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: IsIssued, _ctx: &mut Context) -> Result<bool, Self::Error> {
+    fn query(&self, _msg: IsIssued) -> Result<bool, Self::Error> {
         Ok(self.issued)
     }
 }

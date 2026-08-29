@@ -73,6 +73,7 @@ async fn replay_completes_the_payslips_an_interrupted_fanout_never_issued() {
     first_run
         .payroll_run
         .ask(ApprovePayrollRun {
+            payroll_run: run_id.as_str().to_owned(),
             employee_ids: employees.clone(),
         })
         .await

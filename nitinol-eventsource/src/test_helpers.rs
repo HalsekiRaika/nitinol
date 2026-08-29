@@ -3,10 +3,9 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use futures_core::future::BoxFuture;
-use nitinol_contract::Aggregate;
+use nitinol_contract::{Aggregate, Decider};
 use nitinol_persistence::AggregateId;
 
-use crate::decider::Decider;
 use crate::error::TellError;
 use crate::process::AggregateTellTarget;
 
@@ -34,6 +33,7 @@ impl<A: Aggregate> MockAggregateProxy<A> {
     where
         A: Decider<C>,
         C: Send + Sync + 'static,
+        <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
         self.captured
             .lock()
@@ -84,6 +84,7 @@ impl<A: Aggregate> AggregateTellTarget<A> for MockAggregateProxy<A> {
     where
         A: Decider<C>,
         C: Send + Sync + 'static,
+        <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
         Box::pin(MockAggregateProxy::tell(self, cmd))
     }

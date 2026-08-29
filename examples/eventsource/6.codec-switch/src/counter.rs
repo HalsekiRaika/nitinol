@@ -1,10 +1,9 @@
 //! Counter aggregate for the codec-switch example.
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Receive as EvtReceive};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Query};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
 #[event(family = "codec_switch.counter")]
@@ -26,25 +25,22 @@ impl Aggregate for Counter {
 pub struct Increment;
 pub struct GetCount;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    /// What varies in this example is the codec, not the answer, so the command
+    /// asks nothing and the count is read with `GetCount`.
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for Counter {
+impl Query<GetCount> for Counter {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }

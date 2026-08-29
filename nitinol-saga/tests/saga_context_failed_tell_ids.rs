@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Context, Decider, Effect, Event,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
     SequenceCursor, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
@@ -86,15 +86,12 @@ impl Aggregate for DummyTarget {
     fn apply(&mut self, _event: DummyEvent) {}
 }
 
-#[async_trait]
 impl Decider<DummyCmd> for DummyTarget {
+    type Output = ();
     type Rejection = std::convert::Infallible;
-    async fn decide(
-        &self,
-        _cmd: DummyCmd,
-        _ctx: &mut Context,
-    ) -> Result<Effect<DummyEvent>, Self::Rejection> {
-        Ok(Effect::empty())
+
+    fn decide(&self, _cmd: DummyCmd) -> Decision<DummyEvent, (), Self::Rejection> {
+        Decision::persist(Vec::new()).output(())
     }
 }
 

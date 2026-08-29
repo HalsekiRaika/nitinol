@@ -1,8 +1,7 @@
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Receive as EvtReceive};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Query};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Event)]
 #[event(family = "saga.example")]
@@ -30,27 +29,24 @@ pub struct Reserve {
     pub sku: String,
 }
 
-#[async_trait]
 impl Decider<Reserve> for Inventory {
+    /// The saga dispatches this with `tell`, so there is nobody waiting for an
+    /// answer; the reservation is read afterwards with `GetReservedCount`.
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        cmd: Reserve,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Reserved>, Self::Rejection> {
-        Ok(Effect::persist(Reserved { sku: cmd.sku }))
+    fn decide(&self, cmd: Reserve) -> Decision<Reserved, (), Self::Rejection> {
+        Decision::persist(vec![Reserved { sku: cmd.sku }]).output(())
     }
 }
 
 pub struct GetReservedCount;
 
-#[async_trait]
-impl EvtReceive<GetReservedCount> for Inventory {
+impl Query<GetReservedCount> for Inventory {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetReservedCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetReservedCount) -> Result<u64, Self::Error> {
         Ok(self.reserved_count)
     }
 }

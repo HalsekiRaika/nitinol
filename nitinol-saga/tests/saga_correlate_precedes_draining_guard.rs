@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Context, Decider, Effect, Event,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
     SequenceCursor, SystemEvent, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
@@ -103,16 +103,12 @@ impl Aggregate for DrainTargetAgg {
 #[derive(Clone, Serialize, Deserialize)]
 struct DrainCmd;
 
-#[async_trait]
 impl Decider<DrainCmd> for DrainTargetAgg {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: DrainCmd,
-        _ctx: &mut Context,
-    ) -> Result<Effect<SagaLog>, Self::Rejection> {
-        Ok(Effect::empty())
+    fn decide(&self, _cmd: DrainCmd) -> Decision<SagaLog, (), Self::Rejection> {
+        Decision::persist(Vec::new()).output(())
     }
 }
 

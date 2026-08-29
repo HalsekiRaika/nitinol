@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
@@ -41,16 +41,12 @@ impl Aggregate for UpstreamAggregate {
 
 struct Trigger;
 
-#[async_trait]
 impl Decider<Trigger> for UpstreamAggregate {
+    type Output = ();
     type Rejection = Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Trigger,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Triggered>, Self::Rejection> {
-        Ok(Effect::persist(Triggered))
+    fn decide(&self, _cmd: Trigger) -> Decision<Triggered, (), Self::Rejection> {
+        Decision::persist(vec![Triggered]).output(())
     }
 }
 

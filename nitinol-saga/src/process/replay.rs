@@ -313,7 +313,7 @@ mod tests {
 
     use nitinol_eventsource::codec::{Codec, ErasedCodec};
     use nitinol_eventsource::test_helpers::MockAggregateProxy;
-    use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event, SequenceCursor};
+    use nitinol_eventsource::{Aggregate, Decider, Decision, Event, SequenceCursor};
     use nitinol_persistence::error::{AppendError, LoadError};
     use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
     use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType, Family, LoadQuery};
@@ -359,16 +359,12 @@ mod tests {
     #[derive(Clone)]
     struct MarkerCmd;
 
-    #[async_trait]
     impl Decider<MarkerCmd> for MarkerAggregate {
+        type Output = ();
         type Rejection = std::convert::Infallible;
 
-        async fn decide(
-            &self,
-            _cmd: MarkerCmd,
-            _ctx: &mut Context,
-        ) -> Result<Effect<MarkerEvent>, Self::Rejection> {
-            Ok(Effect::empty())
+        fn decide(&self, _cmd: MarkerCmd) -> Decision<MarkerEvent, (), Self::Rejection> {
+            Decision::persist(Vec::new()).output(())
         }
     }
 

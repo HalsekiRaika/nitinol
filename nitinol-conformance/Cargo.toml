@@ -1,0 +1,22 @@
+[package]
+name = "nitinol-conformance"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Executable conformance suite for the laws any interpreter of the nitinol contract owes"
+
+# The point of this crate is what it may *not* depend on: an interpreter, or the
+# async runtime one is built on.  A suite that reached for `nitinol-eventsource`
+# would measure that interpreter's machinery instead of the laws every
+# interpreter owes, and would be out of reach of anyone writing their own.
+[dependencies]
+nitinol-contract = { path = "../nitinol-contract" }
+nitinol-persistence = { path = "../nitinol-persistence" }
+async-trait = "0.1"
+bytes = "1"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+jiff = "0.2"
+thiserror = "2"

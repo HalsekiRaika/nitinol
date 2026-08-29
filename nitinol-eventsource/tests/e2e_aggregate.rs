@@ -1,8 +1,8 @@
 // E2E test: Basic Aggregate lifecycle with InMemoryEventStore and JsonCodec.
 //
 // Scenario: Aggregate 1 + EventSourceSystem + InMemoryEventStore + JsonCodec.
-// Flow: ask(Cmd) → Decider::decide → Effect::Persist → EventStore::append
-//       → Aggregate::apply → Vec<Event> returned to caller.
+// Flow: ask(Cmd) → Decider::decide → Decision::Accept → EventStore::append
+//       → Aggregate::apply → the decision's output returned to caller.
 //
 // These tests verify the full user-facing entry point (EventSourceSystem) end-to-end.
 // The key difference from unit tests (aggregate_process.rs, system_integration.rs) is
@@ -11,14 +11,12 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use futures_util::TryStreamExt;
 use nitinol_eventsource::{
-    codec::Codec, system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event,
-    Receive as EvtReceive,
+    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event, Query,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
@@ -54,25 +52,20 @@ impl Aggregate for Counter {
 struct Increment;
 struct GetCount;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for Counter {
+impl Query<GetCount> for Counter {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }
@@ -94,31 +87,56 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     }
 }
 
-// Test 1: ask() returns the persisted event
+// Test 1: ask() persists the fact its decision stated
 
 /// Given a fresh Counter aggregate backed by InMemoryEventStore + JsonCodec,
 /// When ask(Increment) is called,
-/// Then the returned Vec equals [Incremented] — the single persisted event.
+/// Then the store holds exactly the one Incremented the decision stated, and the
+/// aggregate has applied it.
+///
+/// The decision's output is `()`, so the caller learns nothing from the return
+/// value: what the command promised is a fact in the stream, and that is what is
+/// asserted here.
 #[tokio::test]
-async fn e2e_ask_persists_event_and_returns_it() {
+async fn e2e_ask_persists_the_fact_its_decision_stated() {
     // Given
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_codec::<JsonCodec>()
         .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let id = AggregateId::new("e2e-agg-ask");
     let proxy = system
-        .spawn_aggregate::<Counter>(AggregateId::new("e2e-agg-ask"), store)
+        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
         .await;
 
     // When
-    let events = proxy.ask(Increment).await.expect("ask must succeed");
+    proxy.ask(Increment).await.expect("ask must succeed");
 
-    // Then
+    // Then: the stream holds the single stated fact
+    let loaded: Vec<_> = store
+        .load(LoadQuery::by_stream(&id))
+        .await
+        .expect("load must succeed")
+        .try_collect()
+        .await
+        .expect("collect must succeed");
     assert_eq!(
-        events,
-        vec![Incremented],
-        "ask(Increment) must return [Incremented]"
+        loaded.len(),
+        1,
+        "ask(Increment) must persist exactly one event"
+    );
+    assert_eq!(
+        loaded[0].event_type.type_key(),
+        Incremented::EVENT_TYPE.type_key(),
+        "the persisted event must be the Incremented the decision stated"
+    );
+
+    // And: the aggregate applied it
+    let count = proxy.exec(GetCount).await.expect("exec must succeed");
+    assert_eq!(
+        count, 1,
+        "the persisted Incremented must have advanced the state to 1"
     );
 }
 

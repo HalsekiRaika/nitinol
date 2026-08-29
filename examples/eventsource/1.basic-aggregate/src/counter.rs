@@ -3,14 +3,14 @@
 //! Demonstrates:
 //! - Defining an `Event` with a stable `EventType` string
 //! - Implementing `Aggregate` with a pure `apply` function
-//! - Implementing `Decider<C>` to produce `Effect::Persist`
-//! - Implementing `Receive<Q>` for read-only queries
+//! - Implementing `Decider<C>` to return a `Decision` — the facts a command
+//!   produced together with the answer it asked for
+//! - Implementing `Query<M>` for read-only queries
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Receive as EvtReceive};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Query};
 
 // Events
 
@@ -45,25 +45,23 @@ pub struct Increment;
 /// Query: return the current counter value.
 pub struct GetCount;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    /// The counter's value once this command has been carried out.  `ask`
+    /// answers with this, not with the events: the fact is the aggregate's own
+    /// record, the answer is what the caller asked for.
+    type Output = u64;
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, u64, Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(self.value + 1)
     }
 }
 
-#[async_trait]
-impl EvtReceive<GetCount> for Counter {
+impl Query<GetCount> for Counter {
     type Response = u64;
     type Error = std::convert::Infallible;
 
-    async fn recv(&self, _msg: GetCount, _ctx: &mut Context) -> Result<u64, Self::Error> {
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
         Ok(self.value)
     }
 }

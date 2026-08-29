@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    codec::Codec, system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event,
+    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
     ProjectionContext, Projector, ProjectorProps,
 };
 use nitinol_persistence::store::{
@@ -40,16 +40,12 @@ impl Aggregate for Counter {
 
 struct Increment;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 

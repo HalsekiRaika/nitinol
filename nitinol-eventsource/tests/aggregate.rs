@@ -1,5 +1,5 @@
-use nitinol_eventsource::{Aggregate, Context, Event, Snapshotable};
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+use nitinol_eventsource::{Aggregate, Event, Snapshotable};
+use nitinol_persistence::{EventType, Family, TypeName};
 
 // Fixtures
 
@@ -97,41 +97,6 @@ fn apply_multiple_events_accumulates_state() {
     assert_eq!(
         counter.value, 3,
         "value must be 3 after three apply(Incremented) calls"
-    );
-}
-
-// Context: constructor and accessors
-
-/// Context::new stores the given aggregate_id and sequence
-#[test]
-fn context_new_stores_aggregate_id_and_sequence() {
-    // Given / When
-    let ctx = Context::new(AggregateId::new("agg-001"), 42);
-
-    // Then
-    assert_eq!(
-        ctx.aggregate_id().as_str(),
-        "agg-001",
-        "aggregate_id must match the value passed to new()"
-    );
-    assert_eq!(
-        ctx.sequence(),
-        42,
-        "sequence must match the value passed to new()"
-    );
-}
-
-/// Context::sequence returns 0 when constructed with sequence 0
-#[test]
-fn context_sequence_zero_is_valid() {
-    // Given / When
-    let ctx = Context::new(AggregateId::new("agg-zero"), 0);
-
-    // Then
-    assert_eq!(
-        ctx.sequence(),
-        0,
-        "sequence 0 must be a valid initial sequence"
     );
 }
 

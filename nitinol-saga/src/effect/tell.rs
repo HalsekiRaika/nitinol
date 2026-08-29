@@ -29,6 +29,7 @@ where
     A: Aggregate + Decider<C>,
     C: Clone + Send + Sync + 'static,
     T: AggregateTellTarget<A>,
+    <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
 {
     fn execute_once(&self) -> BoxFuture<'_, Result<(), SagaSideEffectError>> {
         let cmd = self.cmd.clone();

@@ -158,13 +158,12 @@ impl<C, St> EventSourceSystemBuilder<C, St> {
 ///   store: an append derived from a state the stream has moved past is
 ///   rejected, and the activation that made it stops.  Never write code whose
 ///   correctness needs single activation.
-/// * **Store-external side effects are not at-most-once.**
-///   [`Effect::Side`](crate::Effect::Side) and a bare
-///   [`tell`](crate::AggregateProxy::tell) leave the store's arbitration, so a
-///   duplicate activation can perform them a second time and nothing detects it.
+/// * **Store-external side effects are not at-most-once.**  A bare
+///   [`tell`](crate::AggregateProxy::tell) leaves the store's arbitration, so a
+///   duplicate activation can perform it a second time and nothing detects it.
 ///   A side effect that must be cluster-safe is expressed as a persisted record
-///   — `Effect::persist`, or a saga outbox — so that some stream's own OCC
-///   decides whether it happened at all.
+///   — the events of a [`Decision`](crate::Decision), or a saga outbox — so that
+///   some stream's own OCC decides whether it happened at all.
 ///
 /// Starting a lifecycle explicitly, rather than resolving one, is
 /// [`AggregateProps::spawn`] on props built directly.

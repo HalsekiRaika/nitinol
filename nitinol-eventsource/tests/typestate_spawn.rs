@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, Context, Decider, Effect, Event, ProjectionContext,
+    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, ProjectionContext,
     Projector, ProjectorProps,
 };
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
@@ -30,16 +30,12 @@ impl Aggregate for Counter {
 
 struct Increment;
 
-#[async_trait]
 impl Decider<Increment> for Counter {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Increment,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Incremented>, Self::Rejection> {
-        Ok(Effect::persist(Incremented))
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
     }
 }
 

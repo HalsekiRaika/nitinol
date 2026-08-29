@@ -1,18 +1,24 @@
 use futures_core::future::BoxFuture;
-use nitinol_contract::Aggregate;
+use nitinol_contract::{Aggregate, Decider};
 use nitinol_persistence::AggregateId;
 
-use crate::decider::Decider;
 use crate::error::TellError;
 use crate::process::proxy::AggregateProxy;
 
 /// Implementors must be `Clone + Send + Sync + 'static` so a producer
 /// closure can capture the target and clone it for each dispatch.
+///
+/// `Rejection` is bounded here rather than on the contract's [`Decider`]: a
+/// refusal that reaches a told command has no caller to be returned to, so the
+/// interpreter reports it instead, and it can only do that for a rejection it
+/// can render.  The contract itself stays free of that requirement, because a
+/// decider tested in isolation owes nobody a report.
 pub trait AggregateTellTarget<A: Aggregate>: Clone + Send + Sync + 'static {
     fn tell<C>(&'_ self, cmd: C) -> BoxFuture<'_, Result<(), TellError>>
     where
         A: Decider<C>,
-        C: Send + Sync + 'static;
+        C: Send + Sync + 'static,
+        <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static;
 
     /// The id of the aggregate this target dispatches to — and, verbatim, the
     /// key of the stream that aggregate persists to.
@@ -36,6 +42,7 @@ impl<A: Aggregate> AggregateTellTarget<A> for AggregateProxy<A> {
     where
         A: Decider<C>,
         C: Send + Sync + 'static,
+        <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
         Box::pin(AggregateProxy::tell(self, cmd))
     }

@@ -1,8 +1,7 @@
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect};
+use nitinol_eventsource::{Aggregate, Decider, Decision};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Event)]
 #[event(family = "saga.example")]
@@ -23,15 +22,13 @@ pub struct PlaceOrder {
     pub sku: String,
 }
 
-#[async_trait]
 impl Decider<PlaceOrder> for Order {
+    /// Placing the order asks nothing back: what follows from it is the saga's
+    /// reservation, which is observed on the inventory's own stream.
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        cmd: PlaceOrder,
-        _ctx: &mut Context,
-    ) -> Result<Effect<OrderPlaced>, Self::Rejection> {
-        Ok(Effect::persist(OrderPlaced { sku: cmd.sku }))
+    fn decide(&self, cmd: PlaceOrder) -> Decision<OrderPlaced, (), Self::Rejection> {
+        Decision::persist(vec![OrderPlaced { sku: cmd.sku }]).output(())
     }
 }

@@ -5,13 +5,12 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -59,16 +58,12 @@ impl Aggregate for TestTarget {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NoopCmd;
 
-#[async_trait]
 impl Decider<NoopCmd> for TestTarget {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: NoopCmd,
-        _ctx: &mut Context,
-    ) -> Result<Effect<TestTargetEvent>, Self::Rejection> {
-        Ok(Effect::empty())
+    fn decide(&self, _cmd: NoopCmd) -> Decision<TestTargetEvent, (), Self::Rejection> {
+        Decision::persist(Vec::new()).output(())
     }
 }
 

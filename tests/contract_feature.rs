@@ -1,6 +1,7 @@
 //! Acceptance scenario "tokio 非依存の契約層 / tokio-free 構成での利用":
 //! with `nitinol = { features = ["contract"] }` alone, `#[derive(Event)]`,
-//! `Aggregate` and `Snapshotable` must be usable and behave as specified.
+//! `Aggregate`, `Snapshotable`, `Decider` and `Query` must be usable and
+//! behave as specified.
 //!
 //! Everything here is reached through `nitinol::contract` and
 //! `nitinol::persistence` only. Referring to `nitinol::eventsource` or
@@ -10,7 +11,7 @@
 //! Run with: `cargo test -p nitinol --no-default-features --features contract`.
 #![cfg(feature = "contract")]
 
-use nitinol::contract::{Aggregate, Event, Snapshotable};
+use nitinol::contract::{Accepting, Aggregate, Decider, Decision, Event, Query, Snapshotable};
 use nitinol::persistence::{EventType, Family, TypeName, Variant};
 
 #[derive(Clone, Event)]
@@ -49,6 +50,33 @@ impl Snapshotable for Counter {
 
     fn restore(snapshot: i64) -> Self {
         Counter { value: snapshot }
+    }
+}
+
+struct Increment;
+struct AtCeiling;
+
+impl Decider<Increment> for Counter {
+    type Output = i64;
+    type Rejection = AtCeiling;
+
+    fn decide(&self, _: Increment) -> Decision<CounterEvent, i64, AtCeiling> {
+        // Named explicitly (rather than chained) to prove `Accepting` itself
+        // resolves through `nitinol::contract`, not just `Decider`/`Decision`.
+        let accepting: Accepting<CounterEvent, i64, AtCeiling> =
+            Decision::persist(vec![CounterEvent::Incremented]);
+        accepting.output(self.value + 1)
+    }
+}
+
+struct CurrentValue;
+
+impl Query<CurrentValue> for Counter {
+    type Response = i64;
+    type Error = std::convert::Infallible;
+
+    fn query(&self, _: CurrentValue) -> Result<i64, std::convert::Infallible> {
+        Ok(self.value)
     }
 }
 
@@ -119,4 +147,19 @@ fn snapshot_capture_and_restore_round_trips() {
 
     restored.apply(CounterEvent::Decremented);
     assert_eq!(restored.value, 1);
+}
+
+/// Given a `Decider` and a `Query` implemented against `nitinol::contract`,
+/// When a command is decided and the state is queried, Then both resolve and
+/// answer synchronously — proving `Decider`, `Decision`, `Accepting` and
+/// `Query` are reachable through the `contract` facade, not just through
+/// `nitinol::eventsource`.
+#[test]
+fn decider_and_query_are_usable_through_the_contract_facade() {
+    let counter = Counter::default();
+
+    let decision = counter.decide(Increment);
+    assert!(matches!(decision, Decision::Accept { output: 1, .. }));
+
+    assert_eq!(counter.query(CurrentValue), Ok(0));
 }

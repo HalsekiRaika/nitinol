@@ -1,9 +1,7 @@
 #![cfg(feature = "test-helpers")]
 
-use async_trait::async_trait;
-
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
-use nitinol_eventsource::{Aggregate, Context, Decider, Effect, Event};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -35,29 +33,21 @@ struct Cancel {
     sku: String,
 }
 
-#[async_trait]
 impl Decider<Reserve> for Inventory {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Reserve,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Reserved>, Self::Rejection> {
-        Ok(Effect::empty())
+    fn decide(&self, _cmd: Reserve) -> Decision<Reserved, (), Self::Rejection> {
+        Decision::persist(Vec::new()).output(())
     }
 }
 
-#[async_trait]
 impl Decider<Cancel> for Inventory {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: Cancel,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Reserved>, Self::Rejection> {
-        Ok(Effect::empty())
+    fn decide(&self, _cmd: Cancel) -> Decision<Reserved, (), Self::Rejection> {
+        Decision::persist(Vec::new()).output(())
     }
 }
 

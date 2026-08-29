@@ -24,7 +24,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Context, Decider, Effect, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
@@ -76,15 +76,12 @@ struct Reserve {
     sku: String,
 }
 
-#[async_trait]
 impl Decider<Reserve> for Inventory {
+    type Output = ();
     type Rejection = std::convert::Infallible;
-    async fn decide(
-        &self,
-        cmd: Reserve,
-        _ctx: &mut Context,
-    ) -> Result<Effect<InventoryReserved>, Self::Rejection> {
-        Ok(Effect::persist(InventoryReserved { sku: cmd.sku }))
+
+    fn decide(&self, cmd: Reserve) -> Decision<InventoryReserved, (), Self::Rejection> {
+        Decision::persist(vec![InventoryReserved { sku: cmd.sku }]).output(())
     }
 }
 

@@ -270,11 +270,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
- "futures-core",
+ "futures-util",
  "nitinol",
  "nitinol-eventsource",
  "nitinol-persistence",
  "nitinol-runtime",
+ "nitinol-saga",
  "serde",
  "serde_json",
  "tokio",
@@ -286,7 +287,6 @@ dependencies = [
 name = "eventsource-basic-aggregate"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bytes",
  "nitinol",
  "nitinol-eventsource",
@@ -303,7 +303,6 @@ dependencies = [
 name = "eventsource-codec-switch"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bytes",
  "nitinol",
  "nitinol-eventsource",
@@ -321,7 +320,6 @@ dependencies = [
 name = "eventsource-multiple-deciders"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bytes",
  "nitinol",
  "nitinol-eventsource",
@@ -356,7 +354,6 @@ dependencies = [
 name = "eventsource-snapshot"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "bytes",
  "jiff",
  "nitinol",
@@ -873,6 +870,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitinol-conformance"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "jiff",
+ "nitinol-contract",
+ "nitinol-persistence",
+ "thiserror",
+]
+
+[[package]]
 name = "nitinol-contract"
 version = "0.1.0"
 dependencies = [
@@ -888,6 +899,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "jiff",
+ "nitinol-conformance",
  "nitinol-contract",
  "nitinol-persistence",
  "nitinol-runtime",

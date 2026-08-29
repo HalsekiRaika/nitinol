@@ -11,13 +11,10 @@
 //! `target_id`, so both are pinned here: a guard applied to only one of them
 //! would let the other through.
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 
-use nitinol_eventsource::{
-    Aggregate, AggregateTellTarget, Context, Decider, Effect, Event, TellError,
-};
+use nitinol_eventsource::{Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_saga::TellIntent;
 
@@ -41,16 +38,12 @@ impl Aggregate for TargetAggregate {
 #[derive(Clone)]
 struct DoNothing;
 
-#[async_trait]
 impl Decider<DoNothing> for TargetAggregate {
+    type Output = ();
     type Rejection = std::convert::Infallible;
 
-    async fn decide(
-        &self,
-        _cmd: DoNothing,
-        _ctx: &mut Context,
-    ) -> Result<Effect<Noop>, Self::Rejection> {
-        Ok(Effect::persist(Noop))
+    fn decide(&self, _cmd: DoNothing) -> Decision<Noop, (), Self::Rejection> {
+        Decision::persist(vec![Noop]).output(())
     }
 }
 

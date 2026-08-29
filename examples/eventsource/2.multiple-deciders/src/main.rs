@@ -43,22 +43,25 @@ async fn main() {
         .spawn_aggregate::<Wallet>(AggregateId::new("wallet-1"))
         .await;
 
-    // Deposit 100
-    let events = proxy
+    // Deposit 100 — `ask` answers with what the command asked for, the new
+    // balance, rather than with the event the wallet recorded.
+    let answered = proxy
         .ask(Deposit { amount: 100 })
         .await
         .expect("deposit failed");
-    info!(?events, "deposit returned");
+    info!(answered, "deposit returned");
+    assert_eq!(answered, 100);
 
     let balance = proxy.exec(GetBalance).await.expect("exec failed");
     info!(balance, "balance after deposit");
     assert_eq!(balance, 100);
 
     // Withdraw 40
-    proxy
+    let answered = proxy
         .ask(Withdraw { amount: 40 })
         .await
         .expect("withdraw failed");
+    assert_eq!(answered, 60);
     let balance = proxy.exec(GetBalance).await.expect("exec failed");
     info!(balance, "balance after withdrawal");
     assert_eq!(balance, 60);

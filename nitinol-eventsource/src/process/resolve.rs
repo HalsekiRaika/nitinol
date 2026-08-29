@@ -44,12 +44,12 @@
 //!
 //! * **Never rely on single activation.** Anything whose correctness needs "only
 //!   one of these exists" must be arbitrated by the store, not by this registry.
-//! * **Store-external side effects are not at-most-once.**
-//!   [`Effect::Side`](crate::Effect::Side) and a bare
-//!   [`tell`](crate::AggregateProxy::tell) escape the store's arbitration, so a
-//!   duplicate activation can perform them twice.  A side effect that must be
-//!   cluster-safe belongs behind a persisted record — `Effect::persist` or a
-//!   saga outbox — whose own stream OCC decides whether it happened at all.
+//! * **Store-external side effects are not at-most-once.**  A bare
+//!   [`tell`](crate::AggregateProxy::tell) escapes the store's arbitration, so a
+//!   duplicate activation can perform it twice.  A side effect that must be
+//!   cluster-safe belongs behind a persisted record — the events of a
+//!   [`Decision`](crate::Decision), or a saga outbox — whose own stream OCC
+//!   decides whether it happened at all.
 //!
 //! Not fixed by a test: this clause is the *absence* of a guarantee, and a node
 //! cannot exhibit the cluster-wide behaviour it declines to promise.  What is
@@ -118,7 +118,7 @@ use nitinol_contract::Aggregate;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::ProcessProxy;
-use nitinol_runtime::{ProcessSystem, Props};
+use nitinol_runtime::{ProcessSystem, Props, SupervisionStrategy};
 use tokio::sync::watch;
 
 use crate::process::aggregate_process::AggregateProcess;
@@ -136,6 +136,28 @@ pub(crate) type Incarnation<A> = ProcessProxy<AggregateProcess<A>>;
 /// Held rather than consumed, because a reference outlives the activation it
 /// resolved and must be able to start another one (R-5).
 pub(crate) type Activation<A> = Arc<dyn Fn() -> AggregateProcess<A> + Send + Sync>;
+
+/// The runtime declaration every activation of an aggregate is spawned under.
+///
+/// The sole owner of that declaration, so that the reference which re-resolves
+/// after a death starts an activation identical to the one an explicit spawn
+/// starts.
+///
+/// # Why `Resume` rather than the runtime's default `Stop`
+///
+/// An aggregate names its own fatal conditions and signals them itself:
+/// `stop_self` on an overtaken append (C-1) and on a replay it could not finish.
+/// Every other outcome a handler reports as an error — a refused command, a
+/// creation that collided, a store that would not answer — leaves the state
+/// exactly as it was and says nothing about whether this activation can carry
+/// the next command.  Terminating on those would let one command's verdict take
+/// down every command after it, and would make a business rule indistinguishable
+/// from a lost stream.
+pub(crate) fn activation_props<A: Aggregate>(
+    activation: Activation<A>,
+) -> Props<AggregateProcess<A>> {
+    Props::new(move || activation()).with_supervision_strategy(SupervisionStrategy::Resume)
+}
 
 /// The identity a reference resolves by: the aggregate type and its stream key.
 ///
@@ -363,10 +385,9 @@ impl<A: Aggregate> AggregateResolver<A> {
     }
 
     async fn activate(&self) -> Incarnation<A> {
-        let activation = Arc::clone(&self.activation);
         self.handle
             .system
-            .spawn(Props::new(move || activation()))
+            .spawn(activation_props(Arc::clone(&self.activation)))
             .await
     }
 

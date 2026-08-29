@@ -33,8 +33,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Context, Decider, Effect, Event,
-    SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, SequenceCursor,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
@@ -91,15 +90,12 @@ struct Reserve {
     sku: String,
 }
 
-#[async_trait]
 impl Decider<Reserve> for Inventory {
+    type Output = ();
     type Rejection = std::convert::Infallible;
-    async fn decide(
-        &self,
-        cmd: Reserve,
-        _ctx: &mut Context,
-    ) -> Result<Effect<InventoryReserved>, Self::Rejection> {
-        Ok(Effect::persist(InventoryReserved { sku: cmd.sku }))
+
+    fn decide(&self, cmd: Reserve) -> Decision<InventoryReserved, (), Self::Rejection> {
+        Decision::persist(vec![InventoryReserved { sku: cmd.sku }]).output(())
     }
 }
 

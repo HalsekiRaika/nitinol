@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, Semaphore};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Context, Decider, Effect, Event,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
     SequenceCursor, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
@@ -167,15 +167,12 @@ impl Aggregate for Inventory {
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct Reserve;
 
-#[async_trait]
 impl Decider<Reserve> for Inventory {
+    type Output = ();
     type Rejection = std::convert::Infallible;
-    async fn decide(
-        &self,
-        _cmd: Reserve,
-        _ctx: &mut Context,
-    ) -> Result<Effect<InventoryReserved>, Self::Rejection> {
-        Ok(Effect::persist(InventoryReserved))
+
+    fn decide(&self, _cmd: Reserve) -> Decision<InventoryReserved, (), Self::Rejection> {
+        Decision::persist(vec![InventoryReserved]).output(())
     }
 }
 
