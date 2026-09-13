@@ -5,7 +5,8 @@ use nitinol_persistence::{AggregateId, LoadedEvent, ProjectionId};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::durable_stream::{DurableSubscription, SequenceCursor};
-use crate::projection::delivery;
+use crate::error::ProjectionNotSettled;
+use crate::projection::delivery::{self, ApplyOutcome};
 use crate::projection::handler::EventTypeHandler;
 use crate::projection::tx_provider::ErasedTxProvider;
 
@@ -51,18 +52,24 @@ where
     Tx: Send + 'static,
 {
     type Response = ();
-    type Error = std::convert::Infallible;
+    /// Returning `Err` stops the `DirectPoller` (via `ask()`) from advancing the
+    /// subscription cursor, so an event this projector could not apply is
+    /// redelivered rather than skipped for good.
+    type Error = ProjectionNotSettled;
 
     async fn recv(
         &mut self,
         loaded: LoadedEvent,
         _ctx: &mut ProcessContext<Self>,
-    ) -> Result<(), std::convert::Infallible> {
+    ) -> Result<(), ProjectionNotSettled> {
         let event_sequence = match &self.catchup_origin {
             CatchupOrigin::Aggregate(_) => loaded.sequence,
             CatchupOrigin::Global => loaded.global_sequence,
         };
 
+        // Already applied by this or an earlier incarnation.  Nothing is owed
+        // for it, and reporting it as unsettled would hold the cursor on a
+        // redelivery that can never produce anything new.
         if event_sequence <= self.checkpoint_sequence {
             return Ok(());
         }
@@ -74,6 +81,9 @@ where
         {
             Some(h) => Arc::clone(h),
             None => {
+                // No handler is registered for this type, so there is no
+                // application to fail and nothing a redelivery would change.
+                // Holding the cursor here would stall every event behind it.
                 tracing::debug!(
                     event_type = ?loaded.event_type,
                     "skipping unregistered event type",
@@ -90,7 +100,7 @@ where
         let projector = &mut self.projector;
         let tx_provider = self.tx_provider.as_deref();
 
-        self.checkpoint_sequence = delivery::apply(
+        let outcome = delivery::apply(
             delivery_mode,
             checkpoint_store.as_ref(),
             &projection_id,
@@ -101,8 +111,16 @@ where
         )
         .await;
 
+        // Both the checkpoint this projector carries forward and the answer the
+        // poller reads come from this one outcome.  Deciding them separately is
+        // how the cursor came to move past events the checkpoint had not.
+        self.checkpoint_sequence = outcome.checkpoint();
+
         tokio::task::yield_now().await;
 
-        Ok(())
+        match outcome {
+            ApplyOutcome::Settled { .. } => Ok(()),
+            ApplyOutcome::Retry { .. } => Err(ProjectionNotSettled),
+        }
     }
 }

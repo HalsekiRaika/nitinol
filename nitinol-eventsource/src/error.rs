@@ -149,3 +149,16 @@ pub enum ExecHandlerError<E: std::error::Error + Send + Sync + 'static> {
     #[error("domain error: {0}")]
     Domain(E),
 }
+
+/// Internal error produced by `ProjectorProcess::recv` when an event's
+/// application did not settle.
+///
+/// Returning this error value from the handler is how the delivery layer
+/// (`DirectPollerProcess` via `ask()`) is told not to advance the subscription
+/// cursor: an event the projector could not apply is redelivered on the next
+/// poll rather than overtaken by the events behind it and lost.  The cause is
+/// already reported by the delivery engine at the stage that failed, so this
+/// type carries no payload of its own.
+#[derive(Debug, thiserror::Error)]
+#[error("event application did not settle; the event must not be treated as processed")]
+pub struct ProjectionNotSettled;

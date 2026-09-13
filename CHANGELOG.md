@@ -501,3 +501,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nitinol_eventsource::Snapshotable`. Implementors that overrode either method
   delete their overrides; callers of `SagaSnapshot` have no replacement until
   that extension trait lands.
+
+### Fixed
+
+- **BREAKING** (`nitinol-eventsource`, `nitinol-persistence`): a projector no
+  longer lets its subscription move past an event it failed to apply. Under
+  `AtLeastOnce` and `ExactlyOnce`, the delivery engine already declined to
+  advance the checkpoint on a failed application, but `ProjectorProcess::recv`
+  returned `Ok(())` regardless — its `Receive<LoadedEvent>::Error` was
+  `Infallible`, so it had no way to say otherwise — and the `DirectPoller`
+  advanced its cursor on that `Ok`. The failed event was then overtaken by the
+  next one, which saved a higher checkpoint, and the failed event was never
+  redelivered: a restart skipped it too, because it now sat below the
+  checkpoint. Events were lost permanently and silently.
+
+  `recv` now reports an unapplied event by returning
+  `error::ProjectionNotSettled`, which is what the poller already reads as
+  "hold the cursor". The projector is spawned with
+  `SupervisionStrategy::Resume` so that reporting a failure does not also stop
+  the projector and cascade-stop the poller that owes the retry.
+
+  The consequence is deliberate and worth planning for: under `AtLeastOnce` and
+  `ExactlyOnce`, an event that can never succeed — an undecodable payload, a
+  record the read model always rejects — now stops that projection rather than
+  being dropped from it. It is retried, and warned about, once per poll
+  interval, and nothing behind it is applied. `AtMostOnce` is unchanged: it
+  saves the checkpoint before the handler and still moves on from a failed one.
+
+  Two cases that previously had no stated answer now have one. `ExactlyOnce`
+  **without** a `TxProvider` takes the `Result` of `project()` as the whole
+  account of what happened — `Err` holds the cursor — while the framework still
+  saves no checkpoint in that mode. A failed `TxProvider::commit` is read as
+  **uncommitted**: `commit` consumes the transaction and answers with a single
+  `Err`, so a rejected commit and a commit whose reply was lost are
+  indistinguishable, and the reading that cannot lose the event is the one
+  taken. An `ExactlyOnce` projector therefore degrades to at-least-once across
+  an unknown commit.
+
+  `Receive<LoadedEvent>` for `ProjectorProcess` changes its `Error` associated
+  type from `std::convert::Infallible` to
+  `nitinol_eventsource::error::ProjectionNotSettled`. Code that spawns
+  projectors through `ProjectorProps` is unaffected; code that named that
+  associated type, or that called `ask` on a projector proxy and matched on the
+  resulting error, sees the new type.

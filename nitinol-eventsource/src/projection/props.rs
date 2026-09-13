@@ -5,7 +5,7 @@ use nitinol_contract::Event;
 use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore};
 use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::process::ProcessProxy;
-use nitinol_runtime::{ProcessSystem, Props};
+use nitinol_runtime::{ProcessSystem, Props, SupervisionStrategy};
 
 use crate::codec::ErasedCodec;
 use crate::durable_stream::{DurableSubscription, SequenceCursor};
@@ -288,7 +288,16 @@ where
             checkpoint_sequence: checkpoint,
             upstream_config: upstream_config_for_props.clone(),
             upstream_cursor: cursor_for_props.clone(),
-        });
+        })
+        // An event the projector could not apply is reported by returning
+        // `Err`, which is also what supervision sees.  Under the runtime's
+        // default `Stop` the first such failure would take the projector down
+        // and cascade-stop its poller, so the event held for redelivery would
+        // never be polled again — the projection would be dead rather than
+        // waiting.  `Restart` is no better here: it rebuilds the projector from
+        // `producer()`, discarding the state a stateful projector accumulated
+        // and the checkpoint it was restored with.
+        .with_supervision_strategy(SupervisionStrategy::Resume);
 
         system.spawn(runtime_props).await
     }

@@ -33,6 +33,23 @@ use crate::projection::context::ProjectionContext;
 /// projector. The framework then manages `begin → project → checkpoint save →
 /// commit`, rolling back the transaction if either step fails, so the event
 /// is redelivered rather than partially applied.
+///
+/// # A failed event holds the ones behind it
+///
+/// Under `AtLeastOnce` and `ExactlyOnce`, an event whose application did not
+/// succeed is not overtaken: the subscription stays on it and redelivers it on
+/// every poll until it succeeds. An event that can never succeed — a payload
+/// its codec cannot decode, a row the read model will always reject — therefore
+/// stops that projection's progress entirely, retrying and logging a warning
+/// once per poll interval. Nothing behind it is applied, and nothing is
+/// silently dropped.
+///
+/// That is the deliberate price of not skipping failures. A projection stalled
+/// this way is visible in the repeated warnings and in a checkpoint that stops
+/// moving; recovering it means making the event succeed — fixing the projector,
+/// or having `project` recognise the record as one it chooses to accept and
+/// return `Ok`. `AtMostOnce` is the mode that trades the event away instead:
+/// there a failed handler is left behind and the subscription moves on.
 #[async_trait]
 pub trait Projector<E: Event, Tx = ()>: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;

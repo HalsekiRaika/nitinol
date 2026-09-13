@@ -74,8 +74,9 @@ pub mod eventsource {
     /// User-facing error types from the eventsource layer.
     ///
     /// Framework-internal errors (`SystemEventDecodeError`, `AskHandlerError`,
-    /// `ExecHandlerError`) are intentionally excluded — they form part of the
-    /// internal request/response plumbing and are not part of the public API.
+    /// `ExecHandlerError`, `ProjectionNotSettled`) are intentionally excluded —
+    /// they form part of the internal request/response plumbing and are not
+    /// part of the public API.
     pub mod error {
         pub use nitinol_eventsource::error::AskError;
         pub use nitinol_eventsource::error::CodecError;

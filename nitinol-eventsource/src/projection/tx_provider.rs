@@ -7,9 +7,28 @@ use async_trait::async_trait;
 /// `ExactlyOnce`. For each event the projector process calls [`begin`] to
 /// get a transaction, runs [`crate::Projector::project`] against that
 /// transaction, saves the checkpoint inside the same transaction, then calls
-/// [`commit`]. If `project` or the checkpoint save fails, the transaction is
-/// handed to [`rollback`] and the checkpoint is not advanced, so the same
-/// event will be redelivered on the next attempt.
+/// [`commit`]. If [`begin`], `project` or the checkpoint save fails, the event
+/// is left unapplied: any transaction that was started is handed to
+/// [`rollback`], the checkpoint is not advanced, and the subscription cursor
+/// stays put so the same event is redelivered on the next poll.
+///
+/// # A failed `commit` is treated as uncommitted
+///
+/// [`commit`] answers with a single `Err`, and it has already consumed the
+/// transaction.  Two different situations therefore arrive here as the same
+/// value: a commit the backend rejected and rolled back, and a commit whose
+/// outcome never came back — a connection lost after the statement was sent,
+/// where the transaction may well have landed.  The framework cannot tell them
+/// apart, and there is nothing left to hand to [`rollback`].
+///
+/// Both are treated as **not committed**: the checkpoint stays where it was and
+/// the event is redelivered.  The alternative — assuming the commit landed —
+/// loses the event permanently whenever it did not.  The cost is that an
+/// `ExactlyOnce` projector degrades to at-least-once across an unknown commit:
+/// if the transaction did commit, the redelivered event is applied a second
+/// time.  Implementations that can tell a rejected commit from an unknown one,
+/// and that can settle the unknown case themselves (by retrying or querying the
+/// backend inside [`commit`]), should do so rather than returning `Err`.
 ///
 /// [`begin`]: TxProvider::begin
 /// [`commit`]: TxProvider::commit
