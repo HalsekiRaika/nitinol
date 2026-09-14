@@ -233,6 +233,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nitinol-eventsource` is in its dependency tree — so whichever runtime
   `verify` is awaited on is the caller's choice.
 
+- (`nitinol-eventsource`): an activation whose append is refused because another
+  writer has taken its sequence now emits one `tracing` event before it stops,
+  under the target `nitinol_eventsource::occ` and the name
+  `non_genesis_sequence_conflict`, carrying `aggregate_id` and the `sequence`
+  the append was refused at. Losing that race is already handled — the
+  activation stops and the reference above it resolves a fresh one — so the
+  repair was invisible from the outside and its rate could not be measured,
+  which is the measurement that decides whether restricting an aggregate to a
+  single activation is worth its cost and whether an aggregate boundary is
+  drawing too many writers. Those two values are fixed as part of the crate's
+  API, because an operator's filter is written against them.
+
+  Nothing else that ends an append emits it: a refusal on the genesis sequence
+  is a creation command arriving twice and is still answered as
+  `AskError::AlreadyCreated`, a store that failed to answer says nothing about
+  who owns the stream, and a command the decider refused never reached the
+  store. No conflict semantics, error type or retryability classification
+  changed, and no dependency was added.
+
+  What the event counts is the refusal, not its cause — a second activation of
+  the same aggregate and an unrelated writer against the same store are
+  indistinguishable here.
+
 ### Changed
 
 - **BREAKING** (`nitinol-eventsource`, `nitinol`): `AggregateProxy::ask` answers

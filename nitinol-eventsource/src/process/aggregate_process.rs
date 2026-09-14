@@ -86,10 +86,22 @@ pub(crate) struct ExecMsg<M>(pub(crate) M);
 /// References to the aggregate outlive the stop and resolve it again, so a
 /// caller sees a transient failure rather than a dead reference.
 ///
+/// That self-repair is invisible from the outside, so the conflict is recorded
+/// on the way through: one `tracing` event per overtaken append, under the name
+/// `non_genesis_sequence_conflict` and the target `nitinol_eventsource::occ`,
+/// carrying the stream it was refused on and the sequence it was refused at.
+/// Those two values are what an operator's filter is written against, so they
+/// are part of this crate's API and stated as such in its crate documentation;
+/// renaming either is a breaking change.  What is counted is the rejection, not
+/// its cause — a second activation and an unrelated writer against the same
+/// store are indistinguishable here.
+///
 /// Fixed by `non_genesis_conflict_stops_the_losing_writer`,
 /// `replay_failure_does_not_masquerade_as_a_genesis_conflict` and
 /// `replay_decode_failure_does_not_masquerade_as_a_genesis_conflict` in
-/// `nitinol-eventsource/tests/aggregate_conflict.rs`.
+/// `nitinol-eventsource/tests/aggregate_conflict.rs`.  The record it leaves
+/// behind is fixed by `a_non_genesis_conflict_is_observed_once_and_nothing_else_is`
+/// in `nitinol-eventsource/tests/occ_conflict_is_observable.rs`.
 ///
 /// # C-2: a genesis conflict means the aggregate already exists
 ///
@@ -406,6 +418,23 @@ impl<A: Aggregate> AggregateProcess<A> {
             // whole response: reloading and retrying would only re-enter the
             // race this activation has already lost.
             Err(conflict @ AppendError::SequenceConflict(_)) => {
+                // The head of the refused batch rather than its tail: the
+                // counter has not moved yet, so this is the sequence the store
+                // said was taken.  `next_sequence` would name the last sequence
+                // a multi-event acceptance asked for, which nothing arbitrated.
+                let refused_at = self.sequence + 1;
+                // Named and targeted explicitly rather than left to the
+                // defaults, because how often this happens is what decides
+                // whether restricting an aggregate to one activation is worth
+                // its cost, and a filter written against a module path and a
+                // line number stops matching as soon as the code moves.
+                tracing::warn!(
+                    name: "non_genesis_sequence_conflict",
+                    target: "nitinol_eventsource::occ",
+                    aggregate_id = self.aggregate_id.as_str(),
+                    sequence = refused_at,
+                    "an append lost the stream to another writer; this activation stops"
+                );
                 // Signalled explicitly rather than left to the supervision
                 // strategy, because stopping is a property of the conflict: no
                 // strategy may resume or restart this activation into writing

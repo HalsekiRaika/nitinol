@@ -30,6 +30,44 @@
 //! 4. `eventsource-snapshot` – snapshot-accelerated replay
 //! 5. `eventsource-aggregate-communication` – inter-aggregate messaging, as a saga
 //! 6. `eventsource-codec-switch` – custom codec
+//!
+//! # Observing lost races
+//!
+//! An activation numbers its appends from the sequence it replayed to, and the
+//! store refuses an append at a sequence another writer has already taken.  The
+//! activation that lost stops, and the [`AggregateProxy`] above it resolves a
+//! fresh one, so nothing a caller sees says the race happened.  How often it
+//! happens is still worth knowing: it is what decides whether restricting an
+//! aggregate to a single activation is worth its cost, and whether an aggregate
+//! boundary is drawing more writers than it should.
+//!
+//! So every such refusal emits one `tracing` event.  Its identity is part of
+//! this crate's API — an operator's filter is written against it, so renaming
+//! any of it is a breaking change:
+//!
+//! | | |
+//! |---|---|
+//! | target | `nitinol_eventsource::occ` |
+//! | name | `non_genesis_sequence_conflict` |
+//! | `aggregate_id` | the stream whose append was refused |
+//! | `sequence` | the sequence it was refused at |
+//!
+//! It is emitted at `WARN`, so `RUST_LOG=nitinol_eventsource::occ=warn` selects
+//! it and nothing else.
+//!
+//! Nothing else that ends an append emits it.  A refusal on the stream's
+//! genesis sequence is a creation command arriving twice rather than a lost
+//! race, and is answered as [`AskError::AlreadyCreated`]; a store that failed to
+//! answer says nothing about who owns the stream; and a command the decider
+//! refused never reached the store at all.
+//!
+//! What the event cannot say is *why* the stream was overtaken.  A second
+//! activation of the same aggregate and an unrelated writer against the same
+//! store produce the same refusal, so this is a count of lost races and not a
+//! diagnosis of them.  Reading a rate off that count — against what total, over
+//! what period, at what replay cost, and whether it justifies a change of
+//! design — is the operator's judgement; this crate emits the events and draws
+//! no conclusion from them.
 
 pub mod codec;
 mod durable_stream;
