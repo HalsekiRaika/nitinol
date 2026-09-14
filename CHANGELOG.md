@@ -196,6 +196,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reduces the manager to exactly one instance, which is the migration path from
   the resident single-saga wiring.
 
+- (`nitinol-persistence`): `EventStore::append` states a fifth OCC clause,
+  `OCC-5`: once a reader has observed `global_sequence = N`, no event carrying
+  a `global_sequence` at or below `N` becomes newly visible afterwards. This is
+  a new obligation on every backend, not a restatement of an existing one — a
+  backend that assigns `global_sequence` outside the transaction that commits
+  the event (a plain auto-increment column taken before commit is the usual
+  way) can let a checkpoint-following reader pass an event that a slower,
+  earlier-numbered writer has not committed yet, so the reader never sees it.
+  Nothing about `OCC-1` through `OCC-4` catches this, because none of them puts
+  a reader and a writer at the same table. `OCC-3`'s note that the
+  concurrent-reader visibility clause is not fixed by a test is updated to
+  point at the new suite that now fixes it. Per #74, the OCC clauses are part
+  of `EventStore`'s documented rustdoc contract, so this addition follows
+  semver: an out-of-tree backend that has not been run through the new
+  conformance suite is not known to satisfy `OCC-5`, even though it compiles
+  and satisfies `OCC-1` through `OCC-4` unchanged.
+
+- (`nitinol-store-conformance`): a conformance suite that verifies any
+  `EventStore` implementation against the full `OCC-1`–`OCC-5` contract — the
+  store contract's counterpart to what `nitinol-conformance` is for the
+  interpreter contract, and to what Akka/Pekko's persistence TCK is for a
+  plugin author. `nitinol_store_conformance::verify(&store_under_test,
+  &executor).await` runs `verify_deterministic`, which constructs each
+  `OCC-1`–`OCC-4` situation itself and needs no executor, followed by
+  `verify_under_concurrency`, which spawns concurrent writers through the
+  caller-supplied `Executor` against a checkpoint-following reader and
+  requires it to observe every committed event exactly once — the one clause
+  that needs a reader and writers at the same time. A provider implements
+  `StoreUnderTest::bring_up` to hand back an empty store and an `Executor` so
+  the writers reach the backend independently of one another; a run whose
+  writers queue behind one connection proves nothing about concurrency even if
+  it passes.
+
+  The crate depends on no async runtime — neither `tokio` nor
+  `nitinol-eventsource` is in its dependency tree — so whichever runtime
+  `verify` is awaited on is the caller's choice.
+
 ### Changed
 
 - **BREAKING** (`nitinol-eventsource`, `nitinol`): `AggregateProxy::ask` answers

@@ -23,11 +23,18 @@ pub trait EventStore: Send + Sync {
     /// The clauses below are the optimistic-concurrency-control (OCC) contract
     /// every backend must reproduce.  They are what a third-party
     /// implementation may rely on — the incidental behaviour of any particular
-    /// backend is not part of the interface.  Each clause carries a stable
-    /// label (`OCC-1` … `OCC-4`) shared with the executable record in
-    /// `nitinol-persistence/tests/event_store_occ.rs`, which runs against
-    /// [`InMemoryEventStore`](crate::store::InMemoryEventStore) as the
-    /// reference implementation.
+    /// backend is not part of the interface — and they change only as the
+    /// crate's version does.  Each clause carries a stable label (`OCC-1` …
+    /// `OCC-5`).
+    ///
+    /// Two executable records share those labels.
+    /// `nitinol-persistence/tests/event_store_occ.rs` runs the deterministic
+    /// clauses against [`InMemoryEventStore`](crate::store::InMemoryEventStore)
+    /// as the reference implementation.  `nitinol-store-conformance` is the
+    /// suite any backend is put through, reference implementation included; it
+    /// is where a clause that needs a reader and a writer at the same time is
+    /// fixed, and a backend that has not been through it has not been shown to
+    /// keep this contract.
     ///
     /// # OCC-1: `unique(stream, sequence)`
     ///
@@ -76,10 +83,11 @@ pub trait EventStore: Send + Sync {
     /// Monotonicity and all-or-nothing commit are fixed by
     /// `occ_3_conflict_does_not_advance_global_sequence_numbering`,
     /// `occ_3_batch_conflict_is_all_or_nothing_and_consumes_no_global_sequence`,
-    /// and `occ_3_load_returns_events_in_ascending_global_sequence_order`.  The
-    /// concurrent-reader visibility clause binds backends but is not fixed by a
-    /// test: those tests pin deterministic invariants only and race no
-    /// concurrent readers or writers.
+    /// and `occ_3_load_returns_events_in_ascending_global_sequence_order`,
+    /// which race no concurrent readers or writers, and by the deterministic
+    /// half of `nitinol-store-conformance` for any other backend.  *When* a
+    /// commit may become visible to a reader that is already reading is OCC-5's
+    /// subject, and is fixed there.
     ///
     /// # OCC-4: no internal retry (tripwire semantics)
     ///
@@ -106,6 +114,36 @@ pub trait EventStore: Send + Sync {
     /// `occ_4_conflicting_append_leaves_observable_state_unchanged`.  The
     /// conditions on backend transaction re-runs bind backends but are not
     /// fixed by a test.
+    ///
+    /// # OCC-5: a reader's checkpoint is never undercut
+    ///
+    /// Once a reader has observed `global_sequence = N`, no event carrying a
+    /// `global_sequence` at or below `N` becomes newly visible afterwards.
+    ///
+    /// *Newly visible* means visible for the first time, in the same store and
+    /// the same global ordering.  Reading events a reader has already passed is
+    /// not covered: replaying from an older checkpoint, or widening a query's
+    /// filter, makes nothing visible that was not visible before.
+    ///
+    /// This is the clause that makes a checkpoint-following reader safe.  Such
+    /// a reader records the highest `global_sequence` it has observed and asks
+    /// only for what lies beyond it — the semantics
+    /// `nitinol_eventsource`'s global cursor is built on — so an event
+    /// appearing below that mark is read by nobody.  Nothing detects it: the
+    /// event is stored, it is intact, every append returned success, and no
+    /// error is raised at the writer, at the reader, or in between.
+    ///
+    /// A backend breaks this clause by assigning `global_sequence` outside the
+    /// transaction that commits the event — a plain auto-increment column taken
+    /// before the commit is the usual way — because two concurrent writers then
+    /// commit in an order other than the one they were numbered in.  Under
+    /// appends from several nodes at once that is the normal case, not an edge
+    /// one.  Numbering and becoming visible have to happen in the one order.
+    ///
+    /// Fixed by the concurrency half of `nitinol-store-conformance`, which runs
+    /// concurrent writers against a reader following the global order by
+    /// checkpoint and requires that reader to have observed every committed
+    /// event exactly once.
     async fn append(
         &self,
         key: &str,

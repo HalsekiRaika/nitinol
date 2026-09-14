@@ -969,6 +969,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitinol-store-conformance"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "jiff",
+ "nitinol-persistence",
+ "tokio",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

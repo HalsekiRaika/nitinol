@@ -31,13 +31,15 @@ impl Default for EventStoreState {
 /// This type is the reference implementation of the optimistic-concurrency-control
 /// contract every backend must reproduce: unique `(stream, sequence)`, a genesis
 /// conflict meaning "already created", `global_sequence` monotonicity with
-/// commit-unit atomic visibility, and no internal retry.  The clauses, their
-/// labels and their exact wording live on [`EventStore::append`].
+/// commit-unit atomic visibility, no internal retry, and a numbering no reader's
+/// checkpoint is undercut by.  The clauses, their labels and their exact wording
+/// live on [`EventStore::append`].
 ///
-/// The contract itself is fixed by the tests in
-/// `nitinol-persistence/tests/event_store_occ.rs`, which run against this
-/// type.  Those tests — not this implementation's incidental behaviour — are
-/// what a third-party backend has to satisfy.
+/// The contract itself is fixed by two executable records, neither of which is
+/// this implementation's incidental behaviour: the tests in
+/// `nitinol-persistence/tests/event_store_occ.rs`, which run the deterministic
+/// clauses against this type, and `nitinol-store-conformance`, the suite a
+/// third-party backend is put through — this type among them.
 ///
 /// Intended for tests and examples; not for production use.
 pub struct InMemoryEventStore {

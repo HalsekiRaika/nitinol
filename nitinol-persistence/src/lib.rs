@@ -20,6 +20,12 @@
 //! preferred storage engine and wire them through
 //! `nitinol_eventsource::system::ProcessSystem`.
 //!
+//! [`store::EventStore`] carries an optimistic-concurrency-control contract
+//! (`OCC-1` … `OCC-5`) that a backend has to reproduce, and one of its clauses
+//! is broken silently by the most obvious way to number events in a relational
+//! store.  `nitinol-store-conformance` is that contract as a suite to run
+//! against your implementation.
+//!
 //! # Reserved namespace
 //!
 //! `nitinol` is reserved for the framework's own records, across **both** the
