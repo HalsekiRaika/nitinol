@@ -1,0 +1,48 @@
+[package]
+name = "nitinol-sqlx"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "sqlx-backed EventStore provider for nitinol"
+
+[features]
+# Enabled by default so that a plain `cargo clippy --workspace --all-targets`
+# and `cargo test --workspace --all-targets` compile the backend rather than an
+# empty crate. The umbrella crate keeps the provider out of a build that did not
+# ask for it by depending on it optionally.
+default = ["postgres"]
+postgres = ["dep:sqlx", "sqlx/postgres", "dep:time"]
+
+[dependencies]
+nitinol-persistence = { path = "../../nitinol-persistence" }
+async-trait = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+jiff = "0.2"
+thiserror = "2"
+
+# No TLS feature is enabled: the roots and backends the sqlx TLS features reach
+# for carry licences outside the set this workspace allows.
+sqlx = { version = "0.9", optional = true, default-features = false, features = [
+  "runtime-tokio",
+  "migrate",
+  "macros",
+  "time",
+] }
+time = { version = "0.3", optional = true }
+
+[dev-dependencies]
+nitinol-store-conformance = { path = "../../nitinol-store-conformance" }
+futures-core = "0.3"
+futures-util = "0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# Pinned exactly rather than by caret: both crates break their API across patch
+# ranges of their own dependency on each other, and a resolver free to move
+# either one turns an unrelated `cargo update` into a compile failure here.
+testcontainers = "=0.27.3"
+testcontainers-modules = { version = "=0.15.0", default-features = false, features = [
+  "postgres",
+] }

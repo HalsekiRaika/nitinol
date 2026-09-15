@@ -12,6 +12,7 @@
 //! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
 //! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
 //! | `full`         | All of the above |
+//! | `postgres`     | `sqlx` — Postgres `EventStore` backend (`PostgresEventStore`, `EventTypeRegistry`) |
 //!
 //! # Example
 //!
@@ -116,3 +117,6 @@ pub mod eventsource {
 
 #[cfg(feature = "saga")]
 pub use nitinol_saga as saga;
+
+#[cfg(feature = "postgres")]
+pub use nitinol_sqlx as sqlx;

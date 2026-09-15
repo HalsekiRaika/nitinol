@@ -2,6 +2,7 @@
 members = [
   ".",
   "nitinol-*",
+  "providers/nitinol-sqlx",
   "examples/runtime/*",
   "examples/eventsource/*",
   "examples/saga/*"
@@ -50,6 +51,10 @@ persistence = ["dep:nitinol-persistence"]
 contract = ["dep:nitinol-contract", "dep:nitinol-macros", "persistence"]
 eventsource = ["dep:nitinol-eventsource", "dep:nitinol-macros", "contract", "runtime", "persistence"]
 saga = ["dep:nitinol-saga", "runtime", "persistence", "eventsource"]
+# A storage backend rather than a layer of the framework, so it stays out of
+# `full`: what that feature means is every part of nitinol, not a database
+# driver and the connections it opens.
+postgres = ["dep:nitinol-sqlx", "nitinol-sqlx/postgres", "persistence"]
 full = ["runtime", "persistence", "contract", "eventsource", "saga"]
 
 [dependencies]
@@ -59,6 +64,7 @@ nitinol-persistence = { path = "nitinol-persistence", optional = true }
 nitinol-eventsource = { path = "nitinol-eventsource", optional = true }
 nitinol-saga = { path = "nitinol-saga", optional = true }
 nitinol-macros = { path = "nitinol-macros", optional = true }
+nitinol-sqlx = { path = "providers/nitinol-sqlx", optional = true }
 
 [dev-dependencies]
 # Required by the `#[tokio::test]` attribute in umbrella integration tests.

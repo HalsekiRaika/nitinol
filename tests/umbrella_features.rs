@@ -153,6 +153,36 @@ fn eventsource_error_facade_exposes_user_facing_types() {
     // in src/lib.rs would catch it at `cargo test --doc`.
 }
 
+// Feature: postgres
+
+/// When the "postgres" feature is enabled, the sqlx provider must be reachable
+/// through the umbrella crate, and its store must be usable as the framework's
+/// `Arc<dyn EventStore>` handle.
+///
+/// Without the feature the provider is not part of the build at all, which is
+/// what `optional = true` on the dependency gives: there is nothing to import
+/// and this test is not compiled.
+#[cfg(feature = "postgres")]
+#[test]
+fn postgres_feature_exposes_the_sqlx_event_store() {
+    use std::sync::Arc;
+
+    use nitinol::persistence::store::EventStore;
+    use nitinol::sqlx::{EventTypeRegistry, PostgresEventStore};
+
+    // Compile-time check: what the provider builds is what the framework plugs in.
+    fn plugged_in(store: PostgresEventStore) -> Arc<dyn EventStore> {
+        Arc::new(store)
+    }
+    let _: fn(PostgresEventStore) -> Arc<dyn EventStore> = plugged_in;
+
+    let registry = EventTypeRegistry::new();
+    assert!(
+        registry.resolve("dummy.event").is_none(),
+        "a registry that was given no event types resolves none"
+    );
+}
+
 // Default: no features enabled → nothing is re-exported
 
 /// With no features enabled, the umbrella crate must still compile (empty lib.rs).
