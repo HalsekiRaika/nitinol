@@ -19,9 +19,10 @@
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::{AppendOutcome, AppendingEvent};
 use sqlx::PgPool;
-use time::OffsetDateTime;
 
-use super::{failure, numbering, timestamp};
+use super::failure::{self, Failure};
+use super::numbering;
+use super::timestamp::Instant;
 
 /// The lock every append against this journal takes before it numbers
 /// anything.
@@ -31,48 +32,21 @@ use super::{failure, numbering, timestamp};
 /// commit at the same time.
 const NUMBERING_LOCK: i64 = 0x6E69_7469_6E6F_6C01;
 
-const LOCK_NUMBERING: &str = "SELECT pg_advisory_xact_lock($1)";
-
-/// Take as many numbers as the batch has events, and report the first of them.
-///
-/// The count comes from the same array the rows are built out of, so what is
-/// taken and what is stored cannot drift apart.
-const TAKE_NUMBERING: &str = "\
-UPDATE nitinol_global_sequence \
-   SET next_value = next_value + cardinality($1::bigint[]) \
- WHERE singleton \
-RETURNING next_value - cardinality($1::bigint[]) AS first_global_sequence";
-
-/// Store the batch in the order it was given, numbering it from the first value
-/// the counter handed over.
-///
-/// There is no `ON CONFLICT` clause: a conflict is the answer this append owes
-/// its caller, and swallowing it would leave a batch carrying one sequence
-/// twice quietly half-stored.
-const STORE_EVENTS: &str = "\
-INSERT INTO nitinol_journal \
-    (persistence_id, sequence_number, global_sequence, event_type, payload, occurred_at) \
-SELECT $1, \
-       appended.sequence_number, \
-       $2 + appended.ordinal - 1, \
-       appended.event_type, \
-       appended.payload, \
-       appended.occurred_at \
-  FROM unnest($3::bigint[], $4::text[], $5::bytea[], $6::timestamptz[]) \
-       WITH ORDINALITY \
-       AS appended(sequence_number, event_type, payload, occurred_at, ordinal) \
-RETURNING global_sequence";
-
-const SEQUENCE_REACHED: &str = "\
-SELECT COALESCE(MAX(sequence_number), 0) \
-  FROM nitinol_journal \
- WHERE persistence_id = $1";
-
 pub(super) async fn append(
     pool: &PgPool,
     key: &str,
     events: Vec<AppendingEvent>,
 ) -> Result<AppendOutcome, AppendError> {
+    store(pool, key, events)
+        .await
+        .map_err(|failure| failure::appending(key, failure))
+}
+
+async fn store(
+    pool: &PgPool,
+    key: &str,
+    events: Vec<AppendingEvent>,
+) -> Result<AppendOutcome, Failure> {
     // An empty batch stores nothing, so it opens no transaction and takes no
     // numbering; what it reports is the sequence the stream had already
     // reached.
@@ -82,38 +56,58 @@ pub(super) async fn append(
 
     let columns = Columns::of(&events)?;
 
-    let mut appending = pool
-        .begin()
-        .await
-        .map_err(|cause| failure::appending(key, cause))?;
+    let mut appending = pool.begin().await?;
 
-    sqlx::query(LOCK_NUMBERING)
+    sqlx::query(r#"SELECT pg_advisory_xact_lock($1)"#)
         .bind(NUMBERING_LOCK)
         .execute(&mut *appending)
-        .await
-        .map_err(|cause| failure::appending(key, cause))?;
+        .await?;
 
-    let first_global_sequence: i64 = sqlx::query_scalar(TAKE_NUMBERING)
-        .bind(columns.sequence_numbers.as_slice())
-        .fetch_one(&mut *appending)
-        .await
-        .map_err(|cause| failure::appending(key, cause))?;
+    // Take as many numbers as the batch has events, and report the first of
+    // them. The count comes from the same array the rows are built out of, so
+    // what is taken and what is stored cannot drift apart.
+    let first_global_sequence: i64 = sqlx::query_scalar(
+        r#"
+        UPDATE nitinol_global_sequence
+           SET next_value = next_value + cardinality($1::bigint[])
+         WHERE singleton
+        RETURNING next_value - cardinality($1::bigint[]) AS first_global_sequence
+        "#,
+    )
+    .bind(columns.sequence_numbers.as_slice())
+    .fetch_one(&mut *appending)
+    .await?;
 
-    let stored: Vec<i64> = sqlx::query_scalar(STORE_EVENTS)
-        .bind(key)
-        .bind(first_global_sequence)
-        .bind(columns.sequence_numbers.as_slice())
-        .bind(columns.event_types.as_slice())
-        .bind(columns.payloads.as_slice())
-        .bind(columns.occurred_at.as_slice())
-        .fetch_all(&mut *appending)
-        .await
-        .map_err(|cause| failure::appending(key, cause))?;
+    // Store the batch in the order it was given, numbering it from the first
+    // value the counter handed over. There is no `ON CONFLICT` clause: a
+    // conflict is the answer this append owes its caller, and swallowing it
+    // would leave a batch carrying one sequence twice quietly half-stored.
+    let stored: Vec<i64> = sqlx::query_scalar(
+        r#"
+        INSERT INTO nitinol_journal
+            (persistence_id, sequence_number, global_sequence, event_type, payload, occurred_at)
+        SELECT $1,
+               appended.sequence_number,
+               $2 + appended.ordinal - 1,
+               appended.event_type,
+               appended.payload,
+               appended.occurred_at
+          FROM unnest($3::bigint[], $4::text[], $5::bytea[], $6::timestamptz[])
+               WITH ORDINALITY
+               AS appended(sequence_number, event_type, payload, occurred_at, ordinal)
+        RETURNING global_sequence
+        "#,
+    )
+    .bind(key)
+    .bind(first_global_sequence)
+    .bind(columns.sequence_numbers.as_slice())
+    .bind(columns.event_types.as_slice())
+    .bind(columns.payloads.as_slice())
+    .bind(columns.occurred_at.as_slice())
+    .fetch_all(&mut *appending)
+    .await?;
 
-    appending
-        .commit()
-        .await
-        .map_err(|cause| failure::appending(key, cause))?;
+    appending.commit().await?;
 
     Ok(AppendOutcome {
         assigned_sequences: assigned(stored)?,
@@ -122,16 +116,21 @@ pub(super) async fn append(
 }
 
 /// The sequence `key` has reached, for an append that stores nothing.
-async fn sequence_reached(pool: &PgPool, key: &str) -> Result<AppendOutcome, AppendError> {
-    let reached: i64 = sqlx::query_scalar(SEQUENCE_REACHED)
-        .bind(key)
-        .fetch_one(pool)
-        .await
-        .map_err(|cause| failure::appending(key, cause))?;
+async fn sequence_reached(pool: &PgPool, key: &str) -> Result<AppendOutcome, Failure> {
+    let reached: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(MAX(sequence_number), 0)
+          FROM nitinol_journal
+         WHERE persistence_id = $1
+        "#,
+    )
+    .bind(key)
+    .fetch_one(pool)
+    .await?;
 
     Ok(AppendOutcome {
         assigned_sequences: Vec::new(),
-        stream_version: numbering::from_bigint("sequence_number", reached).map_err(backend)?,
+        stream_version: numbering::from_bigint("sequence_number", reached)?,
     })
 }
 
@@ -140,13 +139,12 @@ async fn sequence_reached(pool: &PgPool, key: &str) -> Result<AppendOutcome, App
 /// Each event is numbered from its position in the batch, so ascending
 /// `global_sequence` is that order; sorting is what makes the reported order
 /// independent of the order the rows came back in.
-fn assigned(mut stored: Vec<i64>) -> Result<Vec<u64>, AppendError> {
+fn assigned(mut stored: Vec<i64>) -> Result<Vec<u64>, Failure> {
     stored.sort_unstable();
-    stored
+    Ok(stored
         .into_iter()
         .map(|global_sequence| numbering::from_bigint("global_sequence", global_sequence))
-        .collect::<Result<Vec<u64>, _>>()
-        .map_err(backend)
+        .collect::<Result<Vec<u64>, _>>()?)
 }
 
 /// The batch as the columns it is stored in, each in the order it was appended
@@ -155,11 +153,11 @@ struct Columns {
     sequence_numbers: Vec<i64>,
     event_types: Vec<String>,
     payloads: Vec<Vec<u8>>,
-    occurred_at: Vec<OffsetDateTime>,
+    occurred_at: Vec<Instant>,
 }
 
 impl Columns {
-    fn of(events: &[AppendingEvent]) -> Result<Self, AppendError> {
+    fn of(events: &[AppendingEvent]) -> Result<Self, Failure> {
         let mut columns = Self {
             sequence_numbers: Vec::with_capacity(events.len()),
             event_types: Vec::with_capacity(events.len()),
@@ -170,23 +168,16 @@ impl Columns {
         for event in events {
             columns
                 .sequence_numbers
-                .push(numbering::to_bigint("sequence_number", event.sequence).map_err(backend)?);
+                .push(numbering::to_bigint("sequence_number", event.sequence)?);
             columns
                 .event_types
                 .push(event.event_type.to_path().to_string());
             columns.payloads.push(event.payload.to_vec());
             columns
                 .occurred_at
-                .push(timestamp::to_column(event.occurred_at).map_err(backend)?);
+                .push(Instant::try_from(event.occurred_at)?);
         }
 
         Ok(columns)
     }
-}
-
-fn backend<E>(cause: E) -> AppendError
-where
-    E: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    AppendError::Backend(cause.into())
 }

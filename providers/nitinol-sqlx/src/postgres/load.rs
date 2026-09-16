@@ -11,34 +11,16 @@
 
 use bytes::Bytes;
 use futures_util::StreamExt;
+use jiff::Timestamp;
 use nitinol_persistence::error::LoadError;
 use nitinol_persistence::store::EventStream;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
-use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Row};
-use time::OffsetDateTime;
+use sqlx::PgPool;
 
-use super::{numbering, timestamp};
+use super::failure::Failure;
+use super::numbering;
+use super::timestamp::Instant;
 use crate::event_type_registry::{EventTypeRegistry, UnknownEventType};
-
-/// Every condition is a parameter that may be absent, so one statement answers
-/// every shape of query and the database plans it once.
-///
-/// An event type prefix matches on segment boundaries: a stored path is under
-/// the prefix when it is the prefix itself, or when the prefix is followed by a
-/// separator. Comparing the leading characters rather than matching a pattern
-/// is what keeps `_` and `%` — both legal in a family — from behaving as
-/// wildcards.
-const SERVE_QUERY: &str = "\
-SELECT persistence_id, sequence_number, global_sequence, event_type, payload, occurred_at \
-  FROM nitinol_journal \
- WHERE ($1::text   IS NULL OR persistence_id  =  $1) \
-   AND ($2::bigint IS NULL OR global_sequence >= $2) \
-   AND ($3::bigint IS NULL OR sequence_number >= $3) \
-   AND ($4::text   IS NULL OR event_type = $4 \
-                           OR left(event_type, length($4) + 1) = $4 || '.') \
- ORDER BY global_sequence \
- LIMIT $5::bigint";
 
 pub(super) fn load<'a>(
     pool: &'a PgPool,
@@ -47,16 +29,38 @@ pub(super) fn load<'a>(
 ) -> Result<EventStream<'a>, LoadError> {
     let conditions = Conditions::of(query)?;
 
-    let rows = sqlx::query(SERVE_QUERY)
-        .bind(conditions.stream_key)
-        .bind(conditions.from_global_sequence)
-        .bind(conditions.from_stream_sequence)
-        .bind(conditions.event_type_prefix)
-        .bind(conditions.limit)
-        .fetch(pool);
+    // Every condition is a parameter that may be absent, so one statement
+    // answers every shape of query and the database plans it once.
+    //
+    // An event type prefix matches on segment boundaries: a stored path is
+    // under the prefix when it is the prefix itself, or when the prefix is
+    // followed by a separator. Comparing the leading characters rather than
+    // matching a pattern is what keeps `_` and `%` — both legal in a family —
+    // from behaving as wildcards.
+    let rows = sqlx::query_as::<_, StoredEvent>(
+        r#"
+        SELECT persistence_id, sequence_number, global_sequence, event_type, payload, occurred_at
+          FROM nitinol_journal
+         WHERE ($1::text   IS NULL OR persistence_id  =  $1)
+           AND ($2::bigint IS NULL OR global_sequence >= $2)
+           AND ($3::bigint IS NULL OR sequence_number >= $3)
+           AND ($4::text   IS NULL OR event_type = $4
+                                   OR left(event_type, length($4) + 1) = $4 || '.')
+         ORDER BY global_sequence
+         LIMIT $5::bigint
+        "#,
+    )
+    .bind(conditions.stream_key)
+    .bind(conditions.from_global_sequence)
+    .bind(conditions.from_stream_sequence)
+    .bind(conditions.event_type_prefix)
+    .bind(conditions.limit)
+    .fetch(pool);
 
     Ok(Box::pin(rows.map(move |row| {
-        restore(event_types, &row.map_err(backend)?)
+        row.map_err(Failure::from)
+            .and_then(|row| restore(event_types, row))
+            .map_err(LoadError::from)
     })))
 }
 
@@ -70,53 +74,55 @@ struct Conditions {
 }
 
 impl Conditions {
-    fn of(query: LoadQuery) -> Result<Self, LoadError> {
+    fn of(query: LoadQuery) -> Result<Self, Failure> {
         Ok(Self {
             stream_key: query.stream_key,
             from_global_sequence: query
                 .from_global_sequence
                 .map(|from| numbering::to_bigint("global_sequence", from))
-                .transpose()
-                .map_err(backend)?,
+                .transpose()?,
             from_stream_sequence: query
                 .from_stream_sequence
                 .map(|from| numbering::to_bigint("sequence_number", from))
-                .transpose()
-                .map_err(backend)?,
-            event_type_prefix: query.event_type_prefix.map(|prefix| prefix.to_string()),
-            limit: query
-                .limit
-                .map(|limit| i64::try_from(limit).map_err(backend))
                 .transpose()?,
+            event_type_prefix: query.event_type_prefix.map(|prefix| prefix.to_string()),
+            limit: query.limit.map(i64::try_from).transpose()?,
         })
     }
 }
 
-fn restore(event_types: &EventTypeRegistry, row: &PgRow) -> Result<LoadedEvent, LoadError> {
-    let path: String = row.try_get("event_type").map_err(backend)?;
-    let Some(event_type) = event_types.resolve(&path) else {
-        return Err(backend(UnknownEventType { path }));
-    };
-
-    let sequence: i64 = row.try_get("sequence_number").map_err(backend)?;
-    let global_sequence: i64 = row.try_get("global_sequence").map_err(backend)?;
-    let payload: Vec<u8> = row.try_get("payload").map_err(backend)?;
-    let occurred_at: OffsetDateTime = row.try_get("occurred_at").map_err(backend)?;
-
-    Ok(LoadedEvent {
-        stream_key: row.try_get("persistence_id").map_err(backend)?,
-        sequence: numbering::from_bigint("sequence_number", sequence).map_err(backend)?,
-        global_sequence: numbering::from_bigint("global_sequence", global_sequence)
-            .map_err(backend)?,
-        event_type,
-        payload: Bytes::from(payload),
-        occurred_at: timestamp::from_column(occurred_at).map_err(backend)?,
-    })
+/// A journal row as it is read, before the store's own types are put back on
+/// it.
+///
+/// A column holding a number the store does not number with — a negative
+/// sequence — fails the row rather than being folded into one the store does,
+/// which would name an event other than the one stored.
+#[derive(sqlx::FromRow)]
+struct StoredEvent {
+    persistence_id: String,
+    #[sqlx(try_from = "i64")]
+    sequence_number: u64,
+    #[sqlx(try_from = "i64")]
+    global_sequence: u64,
+    event_type: String,
+    payload: Vec<u8>,
+    occurred_at: Instant,
 }
 
-fn backend<E>(cause: E) -> LoadError
-where
-    E: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    LoadError::Backend(cause.into())
+fn restore(event_types: &EventTypeRegistry, row: StoredEvent) -> Result<LoadedEvent, Failure> {
+    let Some(event_type) = event_types.resolve(&row.event_type) else {
+        return Err(UnknownEventType {
+            path: row.event_type,
+        }
+        .into());
+    };
+
+    Ok(LoadedEvent {
+        stream_key: row.persistence_id,
+        sequence: row.sequence_number,
+        global_sequence: row.global_sequence,
+        event_type,
+        payload: Bytes::from(row.payload),
+        occurred_at: Timestamp::try_from(row.occurred_at)?,
+    })
 }
