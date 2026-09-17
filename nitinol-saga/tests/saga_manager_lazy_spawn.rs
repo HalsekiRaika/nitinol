@@ -40,6 +40,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.lazy"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,6 +53,7 @@ impl Event for ReservationRequested {
         Family::new("mgr.lazy"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 // Saga under test
@@ -191,9 +193,7 @@ async fn wait_for_trace_len(
 #[tokio::test]
 async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-lazy-spawn-orders");
@@ -213,10 +213,8 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
             trace: Arc::clone(&trace_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: upstream_key.as_str().to_owned(),
                 after: 0,
@@ -244,9 +242,7 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
 #[tokio::test]
 async fn known_correlation_id_reuses_the_running_instance() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-lazy-reuse-orders");
@@ -268,10 +264,8 @@ async fn known_correlation_id_reuses_the_running_instance() {
             notify: Arc::clone(&notify_for_producer),
         }
     })
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: upstream_key.as_str().to_owned(),
             after: 0,

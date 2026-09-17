@@ -19,6 +19,7 @@ struct Triggered;
 impl Event for Triggered {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.direct"), TypeName::new("Triggered"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,6 +28,7 @@ struct Recorded;
 impl Event for Recorded {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.direct"), TypeName::new("Recorded"));
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`TrivialSaga`]: the single process instance every
@@ -61,21 +63,14 @@ impl Saga for TrivialSaga {
 #[tokio::test]
 async fn saga_props_spawns_with_arc_dyn_event_store() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let saga_id = SagaId::new(TRIVIAL_SAGA_ID);
 
     let _proxy = SagaProps::<TrivialSaga>::new(saga_id, saga_store, TrivialSaga::default)
-        .with_codec(system.codec::<Recorded>())
-        .with_subscription(
-            upstream_store,
-            system.codec::<Triggered>(),
-            SequenceCursor::Global { after: 0 },
-        )
+        .with_subscription(upstream_store, SequenceCursor::Global { after: 0 })
         .spawn(system.process_system())
         .await;
 }

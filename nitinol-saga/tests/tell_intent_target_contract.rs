@@ -14,9 +14,27 @@
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_saga::TellIntent;
+
+/// The format [`Noop`] names.  No store is involved here — the tell targets
+/// below never persist — but `Event` names the codec that would write it, so
+/// one is declared.
+struct UnitCodec;
+
+impl Codec<Noop> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Noop) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Noop, Self::Error> {
+        Ok(Noop)
+    }
+}
 
 #[derive(Clone, Debug)]
 struct Noop;
@@ -24,6 +42,7 @@ struct Noop;
 impl Event for Noop {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("tell_intent_target"), TypeName::new("Noop"));
+    type Codec = UnitCodec;
 }
 
 #[derive(Default)]

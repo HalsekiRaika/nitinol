@@ -22,7 +22,6 @@ use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaDefaultStoreExt;
 
-use eventsource_aggregate_communication::codec::JsonCodec;
 use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment};
 use eventsource_aggregate_communication::saga::RelaySaga;
 
@@ -52,7 +51,6 @@ async fn a_fact_of_one_aggregate_reaches_another_as_a_command() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
 

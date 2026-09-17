@@ -53,6 +53,7 @@ impl Event for UpstreamTrigger {
         Family::new("term_append_fail"),
         TypeName::new("UpstreamTrigger"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,6 +64,7 @@ struct SagaMarker {
 impl Event for SagaMarker {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("term_append_fail"), TypeName::new("SagaMarker"));
+    type Codec = JsonCodec;
 }
 
 // Target aggregate
@@ -207,9 +209,7 @@ async fn append_upstream(store: &Arc<dyn EventStore>, agg_id: &AggregateId, seq:
 #[tokio::test]
 async fn saga_stops_after_end_even_when_terminal_append_fails() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("term-fail-agg");
@@ -237,10 +237,8 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
                 handled_first: Arc::clone(&handled_first_clone),
             }
         })
-        .with_codec(system.codec::<SagaMarker>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<UpstreamTrigger>(),
             SequenceCursor::Stream {
                 key: agg_id.as_str().to_owned(),
                 after: 0,

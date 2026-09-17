@@ -5,17 +5,11 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
-use crate::codec::ErasedCodec;
+use crate::codec;
 use crate::process::aggregate_process::{AggregateProcess, SnapshotRestoreFn};
 use crate::process::proxy::AggregateProxy;
 use crate::process::resolve::{activation_props, Activation, AggregateResolver, ResolveHandle};
 use crate::process::snapshot_persistor::SnapshotPersistorProxy;
-
-pub struct CodecUnset;
-
-pub struct CodecSet<E> {
-    pub(crate) codec: Arc<dyn ErasedCodec<E>>,
-}
 
 /// How one activation of an aggregate is configured.
 ///
@@ -26,7 +20,7 @@ pub struct CodecSet<E> {
 /// aggregate through that system's registry: the configuration below is used
 /// only if this call is the one that activates it, because a second activation
 /// of one stream is what the resolve layer exists to prevent.
-pub struct AggregateProps<A: Aggregate, S = CodecUnset> {
+pub struct AggregateProps<A: Aggregate> {
     aggregate_id: AggregateId,
     store: Arc<dyn EventStore>,
     snapshot_ref: Option<SnapshotPersistorProxy>,
@@ -34,10 +28,9 @@ pub struct AggregateProps<A: Aggregate, S = CodecUnset> {
     /// Set when these props came from an `EventSourceSystem`, whose registry
     /// resolves the aggregate rather than activating it per call.
     resolve: Option<ResolveHandle>,
-    state: S,
 }
 
-impl<A: Aggregate> AggregateProps<A, CodecUnset> {
+impl<A: Aggregate> AggregateProps<A> {
     pub fn new(aggregate_id: AggregateId, store: Arc<dyn EventStore>) -> Self {
         Self {
             aggregate_id,
@@ -45,56 +38,20 @@ impl<A: Aggregate> AggregateProps<A, CodecUnset> {
             snapshot_ref: None,
             snapshot_restore: None,
             resolve: None,
-            state: CodecUnset,
         }
     }
 
-    pub fn with_codec(
-        self,
-        codec: Arc<dyn ErasedCodec<A::Event>>,
-    ) -> AggregateProps<A, CodecSet<A::Event>> {
-        AggregateProps {
-            aggregate_id: self.aggregate_id,
-            store: self.store,
-            snapshot_ref: self.snapshot_ref,
-            snapshot_restore: self.snapshot_restore,
-            resolve: self.resolve,
-            state: CodecSet { codec },
-        }
-    }
-}
-
-impl<A: Aggregate, S> AggregateProps<A, S> {
     /// Route this spawn through `handle`'s registry instead of activating per call.
     pub(crate) fn with_resolve(mut self, handle: ResolveHandle) -> Self {
         self.resolve = Some(handle);
         self
     }
-}
 
-impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
     /// Spawn this aggregate process.
     ///
-    /// [`with_codec`][AggregateProps::with_codec] must be called before `spawn`.
-    /// Calling `spawn` on a builder in [`CodecUnset`] state is a **compile error**:
-    ///
-    /// ```compile_fail
-    /// # use std::sync::Arc;
-    /// # use nitinol_eventsource::{Aggregate, AggregateProps, Event};
-    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
-    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # #[derive(Default)] struct MyAgg;
-    /// # #[derive(Clone, PartialEq, Debug)] struct MyEv;
-    /// # impl Event for MyEv { const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Ev")); }
-    /// # impl Aggregate for MyAgg { type Event = MyEv; fn apply(&mut self, _: MyEv) {} }
-    /// # async fn bad() {
-    /// let system = ProcessSystem::new().await;
-    /// let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    /// // compile error: spawn() requires CodecSet — call with_codec() first
-    /// AggregateProps::<MyAgg>::new(AggregateId::new("x"), store).spawn(&system).await;
-    /// # }
-    /// ```
+    /// There is no codec step: `A::Event` names the codec that writes it, so
+    /// the activation resolves the format from the event type and nothing has
+    /// to be handed one here.
     ///
     /// # Two meanings
     ///
@@ -149,7 +106,6 @@ impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
             snapshot_ref,
             snapshot_restore,
             resolve: _,
-            state: CodecSet { codec },
         } = self;
 
         let identity = aggregate_id.clone();
@@ -158,7 +114,6 @@ impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
             aggregate_id: aggregate_id.clone(),
             store: Arc::clone(&store),
             snapshot_ref: snapshot_ref.clone(),
-            codec: Arc::clone(&codec),
             sequence: 0,
             snapshot_restore: snapshot_restore.clone(),
         });
@@ -167,16 +122,15 @@ impl<A: Aggregate> AggregateProps<A, CodecSet<A::Event>> {
     }
 }
 
-impl<A: Aggregate + Snapshotable> AggregateProps<A, CodecSet<A::Event>> {
-    pub fn with_snapshot_persistor(
-        mut self,
-        snapshot_ref: SnapshotPersistorProxy,
-        snapshot_codec: Arc<dyn ErasedCodec<A::Snapshot>>,
-    ) -> Self {
+impl<A: Aggregate + Snapshotable> AggregateProps<A> {
+    /// Restore this aggregate from the snapshots `snapshot_ref` holds.
+    ///
+    /// No codec argument: the format is `<A as Snapshotable>::Codec`, which the
+    /// aggregate named alongside the snapshot value it writes.
+    pub fn with_snapshot_persistor(mut self, snapshot_ref: SnapshotPersistorProxy) -> Self {
         self.snapshot_ref = Some(snapshot_ref);
-        self.snapshot_restore = Some(Arc::new(move |payload: &[u8]| {
-            let snapshot = snapshot_codec.decode(payload)?;
-            Ok(A::restore(snapshot))
+        self.snapshot_restore = Some(Arc::new(|payload: &[u8]| {
+            codec::decode::<<A as Snapshotable>::Codec, A::Snapshot>(payload).map(A::restore)
         }));
         self
     }

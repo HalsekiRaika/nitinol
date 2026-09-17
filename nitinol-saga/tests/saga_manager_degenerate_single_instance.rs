@@ -43,6 +43,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.degenerate"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,6 +54,7 @@ struct Reserved {
 impl Event for Reserved {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.degenerate"), TypeName::new("Reserved"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,6 +67,7 @@ impl Event for ReservationRequested {
         Family::new("mgr.degenerate"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 // Aggregates
@@ -229,9 +232,7 @@ async fn wait_until_outbox_acked(
 #[tokio::test]
 async fn single_constant_correlation_reproduces_the_resident_saga() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("mgr-degenerate-order");
@@ -261,10 +262,8 @@ async fn single_constant_correlation_reproduces_the_resident_saga() {
                 captured: Arc::clone(&captured_for_producer),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&order_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,

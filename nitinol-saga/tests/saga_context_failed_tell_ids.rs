@@ -51,6 +51,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("failed_tell_ids"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,6 +64,7 @@ impl Event for OrderProcessed {
         Family::new("failed_tell_ids"),
         TypeName::new("OrderProcessed"),
     );
+    type Codec = JsonCodec;
 }
 
 // Minimal aggregate — used only so we can build a real TellIntent.
@@ -79,6 +81,7 @@ struct DummyEvent;
 impl Event for DummyEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("failed_tell_ids"), TypeName::new("DummyEvent"));
+    type Codec = JsonCodec;
 }
 
 impl Aggregate for DummyTarget {
@@ -287,9 +290,7 @@ async fn publish_order_placed(upstream_store: &Arc<dyn EventStore>, order_id: &s
 #[tokio::test]
 async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -324,10 +325,8 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
                 captured: Arc::clone(&captured_for_saga),
             }
         })
-        .with_codec(system.codec::<OrderProcessed>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: "upstream".to_owned(),
                 after: 0,
@@ -386,9 +385,7 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
 #[tokio::test]
 async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -421,10 +418,8 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
                 captured: Arc::clone(&captured_for_saga),
             }
         })
-        .with_codec(system.codec::<OrderProcessed>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: "upstream".to_owned(),
                 after: 0,
@@ -485,9 +480,7 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
 #[tokio::test]
 async fn runtime_tell_failed_is_not_repeated_to_the_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -500,10 +493,8 @@ async fn runtime_tell_failed_is_not_repeated_to_the_next_handle_via_context() {
         SagaProps::<RuntimeSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
             RuntimeSaga::new(Arc::clone(&captured_for_saga))
         })
-        .with_codec(system.codec::<OrderProcessed>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: "upstream".to_owned(),
                 after: 0,

@@ -48,6 +48,7 @@ struct OrderEvent {
 impl Event for OrderEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("ended_fail"), TypeName::new("OrderEvent"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +57,7 @@ struct SagaEvent;
 impl Event for SagaEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("ended_fail"), TypeName::new("SagaEvent"));
+    type Codec = JsonCodec;
 }
 
 // Saga: always returns End; counts handle invocations
@@ -146,9 +148,7 @@ async fn append_order(store: &Arc<dyn EventStore>, agg_id: &AggregateId, sequenc
 #[tokio::test]
 async fn saga_stays_alive_when_ended_append_fails() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("ended-fail-order");
@@ -173,10 +173,8 @@ async fn saga_stays_alive_when_ended_append_fails() {
                 handled: Arc::clone(&handled_clone),
             }
         })
-        .with_codec(system.codec::<SagaEvent>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderEvent>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,

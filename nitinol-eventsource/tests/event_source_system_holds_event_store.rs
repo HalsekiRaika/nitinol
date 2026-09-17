@@ -17,7 +17,6 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
-#[derive(Default)]
 struct EventSourceSystemCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for EventSourceSystemCodec {
@@ -41,6 +40,8 @@ struct Bumped;
 impl Event for Bumped {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("e2e.system"), TypeName::new("Bumped"));
+
+    type Codec = EventSourceSystemCodec;
 }
 
 impl Aggregate for Counter {
@@ -80,9 +81,7 @@ async fn stream_event_types(store: &Arc<dyn EventStore>, id: &AggregateId) -> Ve
 async fn spawn_aggregate_accepts_arc_dyn_event_store() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<EventSourceSystemCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("system-direct-store");
 
@@ -107,9 +106,7 @@ async fn spawn_aggregate_accepts_arc_dyn_event_store() {
 async fn aggregate_props_helper_accepts_arc_dyn_event_store() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<EventSourceSystemCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     // When: obtain a configured builder, then spawn manually

@@ -41,6 +41,7 @@ struct Trigger {
 impl Event for Trigger {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.scheduler"), TypeName::new("Trigger"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,6 +52,7 @@ struct Recorded {
 impl Event for Recorded {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.scheduler"), TypeName::new("Recorded"));
+    type Codec = JsonCodec;
 }
 
 /// The saga's `Self::ScheduledMessage` — a typed payload that must survive the
@@ -151,9 +153,7 @@ async fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
 #[tokio::test]
 async fn manager_with_scheduler_fires_the_degenerate_instances_timer() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -174,10 +174,8 @@ async fn manager_with_scheduler_fires_the_degenerate_instances_timer() {
         SagaManagerProps::<TimerSaga>::new(Arc::clone(&saga_store), move || TimerSaga {
             fired: Arc::clone(&fired_producer),
         })
-        .with_codec(system.codec::<Recorded>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Trigger>(),
             SequenceCursor::Stream {
                 key: UPSTREAM_KEY.to_owned(),
                 after: 0,

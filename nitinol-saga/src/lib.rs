@@ -33,10 +33,10 @@
 //! - Symmetric spawn: [`SagaSystemExt`] extends
 //!   [`nitinol_eventsource::system::EventSourceSystem`] with
 //!   [`spawn_saga`](SagaSystemExt::spawn_saga), the counterpart of
-//!   `EventSourceSystem::spawn_aggregate` — both event codecs and the
-//!   `ProcessSystem` come from the system, and store plus start position arrive
-//!   as one [`Subscription`].  [`SagaProps`] stays the entry point for the
-//!   settings that builder does not take.
+//!   `EventSourceSystem::spawn_aggregate` — the `ProcessSystem` comes from the
+//!   system, store plus start position arrive as one [`Subscription`], and the
+//!   formats are settled already by the event types themselves.  [`SagaProps`]
+//!   stays the entry point for the settings that builder does not take.
 //! - Default store: a system built with
 //!   [`with_event_store`](nitinol_eventsource::system::EventSourceSystemBuilder::with_event_store)
 //!   carries the store as well, and [`SagaDefaultStoreExt`] is the store-less
@@ -252,8 +252,7 @@ pub use self::dead_letter::{
 pub use self::effect::{SagaEffect, ScheduleSpec, TellIntent};
 pub use self::id::SagaId;
 pub use self::process::{
-    CodecSet, CodecUnset, SagaManagerProps, SagaManagerProxy, SagaProps, SagaProxy,
-    SubscriptionSet, SubscriptionUnset,
+    SagaManagerProps, SagaManagerProxy, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset,
 };
 pub use self::saga::Saga;
 pub use self::scheduler::{spawn_scheduler, ScheduleToken, SchedulerProxy, TimerName};

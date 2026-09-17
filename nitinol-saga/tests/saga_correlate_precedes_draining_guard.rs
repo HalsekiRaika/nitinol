@@ -75,6 +75,7 @@ impl Event for Ping {
         Family::new("saga.correlate.drain_order"),
         TypeName::new("Ping"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -87,6 +88,7 @@ impl Event for SagaLog {
         Family::new("saga.correlate.drain_order"),
         TypeName::new("SagaLog"),
     );
+    type Codec = JsonCodec;
 }
 
 // Tell target that never settles until the test releases it, holding the saga
@@ -250,9 +252,7 @@ async fn wait_for_ended_saga_dead_letter(
 #[tokio::test]
 async fn draining_saga_dead_letters_only_events_it_correlates_to() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     // Pre-load all three events: the direct poller reads the batch in one
     // `store.load()` and delivers them sequentially, so SKIP-1 is always
@@ -282,10 +282,8 @@ async fn draining_saga_dead_letters_only_events_it_correlates_to() {
             handle_count: Arc::clone(&handle_count_for_saga),
         },
     )
-    .with_codec(system.codec::<SagaLog>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
         SequenceCursor::Stream {
             key: upstream_key.to_owned(),
             after: 0,

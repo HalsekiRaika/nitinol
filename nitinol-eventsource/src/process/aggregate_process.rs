@@ -8,7 +8,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
-use crate::codec::ErasedCodec;
+use crate::codec;
 use crate::error::{AskHandlerError, CodecError, ExecHandlerError, PersistError};
 use crate::process::snapshot_persistor::SnapshotPersistorProxy;
 
@@ -19,7 +19,7 @@ use crate::process::snapshot_persistor::SnapshotPersistorProxy;
 /// only when both `Snapshotable` and a snapshot persistor are in use.
 ///
 /// The function decodes the raw bytes to the snapshot domain value (via the
-/// snapshot codec) and then calls `A::restore`.
+/// codec `A` named for its snapshot) and then calls `A::restore`.
 pub(crate) type SnapshotRestoreFn<A> = Arc<dyn Fn(&[u8]) -> Result<A, CodecError> + Send + Sync>;
 
 // Internal message wrappers
@@ -141,7 +141,6 @@ pub struct AggregateProcess<A: Aggregate> {
     pub(crate) aggregate_id: AggregateId,
     pub(crate) store: Arc<dyn EventStore>,
     pub(crate) snapshot_ref: Option<SnapshotPersistorProxy>,
-    pub(crate) codec: Arc<dyn ErasedCodec<A::Event>>,
     pub(crate) sequence: u64,
     /// Restores aggregate state from a snapshot payload.
     /// Set only when the aggregate implements `Snapshotable` and a snapshot
@@ -209,7 +208,7 @@ impl<A: Aggregate> Process for AggregateProcess<A> {
                     return;
                 }
             };
-            match self.codec.decode(&loaded.payload) {
+            match codec::decode::<<A::Event as Event>::Codec, A::Event>(&loaded.payload) {
                 Ok(event) => {
                     self.state.apply(event);
                     self.sequence = loaded.sequence;
@@ -389,7 +388,8 @@ impl<A: Aggregate> AggregateProcess<A> {
         let mut appending = Vec::with_capacity(events.len());
         for event in &events {
             next_sequence += 1;
-            let payload = self.codec.encode(event).map_err(PersistError::Codec)?;
+            let payload = codec::encode::<<A::Event as Event>::Codec, A::Event>(event)
+                .map_err(PersistError::Codec)?;
             appending.push(AppendingEvent {
                 sequence: next_sequence,
                 event_type: event.variant(),

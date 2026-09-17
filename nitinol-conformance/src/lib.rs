@@ -52,10 +52,12 @@
 //! clause reach into a raw error would be graded on the suite's reading of its
 //! machinery rather than on the machinery.
 //!
-//! **Wire the facts to your own store boundary.** [`LedgerEvent::encode`] and
-//! [`LedgerEvent::decode`] are the format the suite reads a stream back in. An
-//! interpreter with a codec of its own delegates to them; it need agree with
-//! the suite about nothing else.
+//! **The facts' format is not yours to choose.** [`LedgerEvent`] names
+//! [`LedgerCodec`] as the codec that writes it down, so an interpreter reaches
+//! the suite's format through `<LedgerEvent as Event>::Codec` and has nothing
+//! to wire. [`LedgerEvent::encode`] and [`LedgerEvent::decode`] are the same
+//! format, reachable directly when a store boundary wants the bytes without the
+//! trait.
 //!
 //! **Give [`Interpreter::quiesce`] a real synchronisation point.** The suite
 //! needs to know when a told command has been dealt with, and when the
@@ -81,8 +83,8 @@ mod suite;
 mod wedged_store;
 
 pub use self::fixture::{
-    Balance, Holder, Ledger, LedgerEvent, LedgerNotOpen, LedgerRejection, MalformedLedgerEvent,
-    Open, Settle,
+    Balance, Holder, Ledger, LedgerCodec, LedgerEvent, LedgerNotOpen, LedgerRejection,
+    MalformedLedgerEvent, Open, Settle,
 };
 pub use self::interpreter::{Interpretation, Interpreter};
 pub use self::outcome::{Fault, Interpreted, Unanswered};

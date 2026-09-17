@@ -89,6 +89,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("on_tell_failed"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -99,6 +100,7 @@ struct SagaLog {
 impl Event for SagaLog {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("on_tell_failed"), TypeName::new("SagaLog"));
+    type Codec = JsonCodec;
 }
 
 // Tell target that fails on every attempt, so the executor always exhausts its
@@ -115,6 +117,7 @@ impl Event for InventoryReserved {
         Family::new("on_tell_failed"),
         TypeName::new("InventoryReserved"),
     );
+    type Codec = JsonCodec;
 }
 
 impl Aggregate for Inventory {
@@ -620,9 +623,7 @@ struct Observations {
 /// later upstream delivery.
 async fn run_tell_failure_scenario(saga_key: &str, terminate_after_tell: bool) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -641,10 +642,8 @@ async fn run_tell_failure_scenario(saga_key: &str, terminate_after_tell: bool) -
                 terminate_after_tell,
             }
         })
-        .with_codec(system.codec::<SagaLog>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: upstream_key.clone(),
                 after: 0,
@@ -723,9 +722,7 @@ fn assert_reported_while_draining(events: &[LoadedEvent]) {
 /// shows the tell has settled.
 async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -744,10 +741,8 @@ async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
                 terminate_after_tell: false,
             }
         })
-        .with_codec(system.codec::<SagaLog>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: upstream_key.clone(),
                 after: 0,
@@ -782,9 +777,7 @@ async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
 /// replay, never through an outcome report.
 async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -818,10 +811,8 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
             recorder: Arc::clone(&recorder_for_saga),
         },
     )
-    .with_codec(system.codec::<SagaLog>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: upstream_key.clone(),
             after: 0,
@@ -855,9 +846,7 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
 /// the timer its hook registered has fired.
 async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let scheduler = spawn_scheduler(system.process_system()).await;
 
     let upstream_key = format!("{saga_key}-upstream");
@@ -877,10 +866,8 @@ async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
             recorder: Arc::clone(&recorder_for_saga),
         },
     )
-    .with_codec(system.codec::<SagaLog>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: upstream_key.clone(),
             after: 0,
@@ -909,9 +896,7 @@ async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
 /// stream once the rejected hook has been accounted for (or the wait expires).
 async fn run_rejecting_hook_scenario(saga_key: &str) -> Vec<LoadedEvent> {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -926,10 +911,8 @@ async fn run_rejecting_hook_scenario(saga_key: &str) -> Vec<LoadedEvent> {
                 target: FailingTellTarget::new(TELL_TARGET_ID),
             }
         })
-        .with_codec(system.codec::<SagaLog>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: upstream_key.clone(),
                 after: 0,

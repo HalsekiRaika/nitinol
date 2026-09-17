@@ -59,6 +59,7 @@ struct Ping;
 
 impl Event for Ping {
     const EVENT_TYPE: EventType = EventType::new(Family::new("dlq_policy"), TypeName::new("Ping"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,6 +68,7 @@ struct SagaLog;
 impl Event for SagaLog {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("dlq_policy"), TypeName::new("SagaLog"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Debug)]
@@ -203,9 +205,7 @@ async fn wait_for_handle_failed(
 #[tokio::test]
 async fn default_policy_enqueues_the_failure() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-default-upstream", 1).await;
@@ -224,10 +224,8 @@ async fn default_policy_enqueues_the_failure() {
                 handle_count: Arc::clone(&handle_count_for_saga),
             }
         })
-        .with_codec(system.codec::<SagaLog>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
             SequenceCursor::Stream {
                 key: "dlq-default-upstream".to_owned(),
                 after: 0,
@@ -264,9 +262,7 @@ async fn default_policy_enqueues_the_failure() {
 #[tokio::test]
 async fn ignore_all_policy_suppresses_enqueue() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-ignore-upstream", 1).await;
@@ -285,11 +281,9 @@ async fn ignore_all_policy_suppresses_enqueue() {
                 handle_count: Arc::clone(&handle_count_for_saga),
             }
         })
-        .with_codec(system.codec::<SagaLog>())
         .with_enqueue_policy(Arc::new(IgnoreAll))
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
             SequenceCursor::Stream {
                 key: "dlq-ignore-upstream".to_owned(),
                 after: 0,

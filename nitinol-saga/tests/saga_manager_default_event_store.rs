@@ -3,9 +3,9 @@
 //!
 //! `system.saga_manager_props(subscription, producer)` returns a manager
 //! builder with everything the system already knows filled in: the store each
-//! instance journals onto, the codec for the instances' own events, and the
-//! codec for the subscribed ones.  Only the subscription stays in the caller's
-//! hands, so it is also the manager's override point —
+//! instance journals onto.  The two formats are settled by the event types
+//! themselves — each names its codec — so only the subscription stays in the
+//! caller's hands, which makes it also the manager's override point —
 //! `Subscription::stream(&store, &key)` names an upstream store explicitly
 //! where `system.subscription(&key)` takes the default.
 //!
@@ -47,6 +47,7 @@ impl Event for OrderPlaced {
         Family::new("saga.manager.default.store"),
         TypeName::new("OrderPlaced"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,6 +60,7 @@ impl Event for ReservationRequested {
         Family::new("saga.manager.default.store"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 /// Prefix of every instance id [`FanoutSaga::correlate`] derives; the order key
@@ -171,7 +173,9 @@ async fn instance_persisted_orders(store: &Arc<dyn EventStore>, saga_id: &SagaId
         .filter(|event| event.event_type == ReservationRequested::EVENT_TYPE)
         .map(|event| {
             serde_json::from_slice::<ReservationRequested>(&event.payload)
-                .expect("the instance's own event must be encoded with the system codec")
+                .expect(
+                    "the instance's own event must be encoded with the codec its event type names",
+                )
                 .order
         })
         .collect()
@@ -202,7 +206,6 @@ async fn store_less_manager_props_uses_the_system_default_store_for_upstream_and
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
 
@@ -253,7 +256,6 @@ async fn explicit_subscription_store_overrides_the_default_upstream_for_the_mana
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
 

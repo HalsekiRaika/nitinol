@@ -55,6 +55,7 @@ struct Ping {
 impl Event for Ping {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.decode_route_none"), TypeName::new("Ping"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,6 +66,7 @@ impl Event for SagaLog {
         Family::new("saga.decode_route_none"),
         TypeName::new("SagaLog"),
     );
+    type Codec = JsonCodec;
 }
 
 /// Both instances in this test are of this type: correlation is a property of
@@ -155,9 +157,7 @@ async fn wait_for_decode_failed(store: &Arc<dyn EventStore>, saga_id: &SagaId) {
 #[tokio::test]
 async fn decode_failure_route_returning_none_records_no_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_corrupt_ping(&upstream_store, 1).await;
@@ -174,12 +174,7 @@ async fn decode_failure_route_returning_none_records_no_dead_letter() {
         Arc::clone(&declining_store),
         || DecodeRouteSaga,
     )
-    .with_codec(system.codec::<SagaLog>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
-        cursor.clone(),
-    )
+    .with_subscription(Arc::clone(&upstream_store), cursor.clone())
     .with_decode_failure_route(|_: &AggregateId, _: u64| -> Option<SagaId> { None })
     .spawn(system.process_system())
     .await;
@@ -192,8 +187,7 @@ async fn decode_failure_route_returning_none_records_no_dead_letter() {
         SagaProps::<DecodeRouteSaga>::new(witness_id.clone(), Arc::clone(&witness_store), || {
             DecodeRouteSaga
         })
-        .with_codec(system.codec::<SagaLog>())
-        .with_subscription(Arc::clone(&upstream_store), system.codec::<Ping>(), cursor)
+        .with_subscription(Arc::clone(&upstream_store), cursor)
         .spawn(system.process_system())
         .await;
 

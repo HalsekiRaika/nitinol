@@ -46,6 +46,7 @@ struct Ping {
 impl Event for Ping {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.decode_route"), TypeName::new("Ping"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,6 +55,7 @@ struct SagaLog;
 impl Event for SagaLog {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.decode_route"), TypeName::new("SagaLog"));
+    type Codec = JsonCodec;
 }
 
 struct RouteSaga {
@@ -186,9 +188,7 @@ async fn wait_for_seen(seen: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>, exp
 #[tokio::test]
 async fn decode_failure_route_names_an_owner_records_the_dead_letter_and_advances_the_cursor() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_corrupt_ping(&upstream_store, 1).await;
@@ -206,10 +206,8 @@ async fn decode_failure_route_names_an_owner_records_the_dead_letter_and_advance
             seen: Arc::clone(&seen_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<SagaLog>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
             SequenceCursor::Stream {
                 key: UPSTREAM_KEY.to_owned(),
                 after: 0,
@@ -261,9 +259,7 @@ async fn decode_failure_route_names_an_owner_records_the_dead_letter_and_advance
 #[tokio::test]
 async fn decode_failure_without_a_route_skips_and_advances_the_cursor() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_corrupt_ping(&upstream_store, 1).await;
@@ -281,10 +277,8 @@ async fn decode_failure_without_a_route_skips_and_advances_the_cursor() {
             seen: Arc::clone(&seen_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<SagaLog>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
             SequenceCursor::Stream {
                 key: UPSTREAM_KEY.to_owned(),
                 after: 0,

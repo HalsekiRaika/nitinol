@@ -22,3 +22,8 @@ nitinol-persistence = { path = "../nitinol-persistence" }
 [dev-dependencies]
 trybuild = "1"
 nitinol = { path = "..", features = ["eventsource"] }
+# `Event` names the codec that writes it, so every fixture that derives `Event`
+# must also name a `Codec`, whose signature is stated in `Bytes`. The framework
+# ships no codec implementation of its own (it stays serde-free), so the
+# fixtures write their own.
+bytes = "1"

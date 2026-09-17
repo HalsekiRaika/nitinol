@@ -21,7 +21,6 @@ use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery,
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDefaultStoreExt, SagaManagerProxy};
 
-use saga_fanout_pattern::codec::JsonCodec;
 use saga_fanout_pattern::payroll_run::PayrollRun;
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
 use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
@@ -66,7 +65,7 @@ pub fn payslip_keys(payroll_run: &str, employees: &[String]) -> Vec<String> {
 /// aggregates and the manager run on; dropping the last handle early would take
 /// the incarnation down.
 pub struct FanOutWorld {
-    pub system: EventSourceSystem<JsonCodec, StoreSet>,
+    pub system: EventSourceSystem<StoreSet>,
     pub payroll_run: AggregateProxy<PayrollRun>,
     pub manager: SagaManagerProxy<FanOutSaga>,
 }
@@ -87,7 +86,6 @@ pub struct FanOutWorld {
 pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> FanOutWorld {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();
 
@@ -112,7 +110,7 @@ pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> Fa
 /// the run's own stream while the payslip streams and the saga's journal share
 /// the same store.
 pub async fn spawn_manager(
-    system: &EventSourceSystem<JsonCodec, StoreSet>,
+    system: &EventSourceSystem<StoreSet>,
     run_id: &AggregateId,
 ) -> SagaManagerProxy<FanOutSaga> {
     let system_for_producer = system.clone();
@@ -246,10 +244,7 @@ pub async fn wait_for_decisions(
 /// command has been handled — both dispatches resolve to the one activation.
 /// Draining the mailbox this way is what stops "no duplicate was written" from
 /// passing merely because the redelivered command had not been processed yet.
-pub async fn drain_payslips(
-    system: &EventSourceSystem<JsonCodec, StoreSet>,
-    keys: &[String],
-) -> Vec<bool> {
+pub async fn drain_payslips(system: &EventSourceSystem<StoreSet>, keys: &[String]) -> Vec<bool> {
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
         let proxy: AggregateProxy<Payslip> =

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::SequenceCursor;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
@@ -15,7 +14,7 @@ use crate::dead_letter::{
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::process::manager::SagaManagerProcess;
-use crate::process::props::{CodecSet, CodecUnset, SubscriptionSet, SubscriptionUnset};
+use crate::process::props::{SubscriptionSet, SubscriptionUnset};
 use crate::process::proxy::SagaManagerProxy;
 use crate::process::saga_process::{
     upstream_subscription, CrashRestartFactory, DecodeFailureRouteFn, SagaProcess,
@@ -31,8 +30,7 @@ use crate::scheduler::SchedulerProxy;
 /// [`Saga::correlate`]: an id with no resident instance is spawned and replayed
 /// on the spot, an id already resident is handed the record directly.
 ///
-/// The state parameters mirror [`SagaProps`](crate::SagaProps):
-/// - `C` — codec configuration (`CodecUnset` / `CodecSet<S::Event>`)
+/// The state parameter mirrors [`SagaProps`](crate::SagaProps):
 /// - `Sub` — subscription configuration (`SubscriptionUnset` / `SubscriptionSet<S>`)
 ///
 /// # Relationship to a single resident saga
@@ -54,10 +52,9 @@ use crate::scheduler::SchedulerProxy;
 ///
 /// That is the migration path: the resident saga is the degenerate case of the
 /// manager, not a separate mechanism.
-pub struct SagaManagerProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
+pub struct SagaManagerProps<S: Saga, Sub = SubscriptionUnset> {
     store: Arc<dyn EventStore>,
     producer: Arc<dyn Fn() -> S + Send + Sync>,
-    codec: C,
     subscription: Sub,
     instance_idle_timeout: IdleTimeout,
     scheduler: Option<SchedulerProxy>,
@@ -67,7 +64,7 @@ pub struct SagaManagerProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
     decode_failure_route_fn: Option<DecodeFailureRouteFn>,
 }
 
-impl<S: Saga> SagaManagerProps<S, CodecUnset, SubscriptionUnset> {
+impl<S: Saga> SagaManagerProps<S, SubscriptionUnset> {
     /// Begin a manager spawn.
     ///
     /// `store` is the EventStore every instance persists its own events to;
@@ -82,7 +79,6 @@ impl<S: Saga> SagaManagerProps<S, CodecUnset, SubscriptionUnset> {
         Self {
             store,
             producer: Arc::new(producer),
-            codec: CodecUnset,
             subscription: SubscriptionUnset,
             instance_idle_timeout: IdleTimeout::Inherit,
             scheduler: None,
@@ -94,28 +90,7 @@ impl<S: Saga> SagaManagerProps<S, CodecUnset, SubscriptionUnset> {
     }
 }
 
-impl<S: Saga, Sub> SagaManagerProps<S, CodecUnset, Sub> {
-    /// Bind the codec used to encode and decode the instances' own events.
-    pub fn with_codec(
-        self,
-        codec: Arc<dyn ErasedCodec<S::Event>>,
-    ) -> SagaManagerProps<S, CodecSet<S::Event>, Sub> {
-        SagaManagerProps {
-            store: self.store,
-            producer: self.producer,
-            codec: CodecSet { codec },
-            subscription: self.subscription,
-            instance_idle_timeout: self.instance_idle_timeout,
-            scheduler: self.scheduler,
-            enqueue_policy: self.enqueue_policy,
-            dead_letter_subscriber: self.dead_letter_subscriber,
-            crash_restart_factory: self.crash_restart_factory,
-            decode_failure_route_fn: self.decode_failure_route_fn,
-        }
-    }
-}
-
-impl<S: Saga, C> SagaManagerProps<S, C, SubscriptionUnset> {
+impl<S: Saga> SagaManagerProps<S, SubscriptionUnset> {
     /// Subscribe the manager to an upstream `EventStore`.
     ///
     /// This is the only subscription in the whole fan-out: the manager runs one
@@ -124,17 +99,15 @@ impl<S: Saga, C> SagaManagerProps<S, C, SubscriptionUnset> {
     pub fn with_subscription(
         self,
         upstream_store: Arc<dyn EventStore>,
-        upstream_codec: Arc<dyn ErasedCodec<S::SubscribedEvent>>,
         cursor: SequenceCursor,
-    ) -> SagaManagerProps<S, C, SubscriptionSet<S>> {
+    ) -> SagaManagerProps<S, SubscriptionSet<S>> {
         SagaManagerProps {
             store: self.store,
             producer: self.producer,
-            codec: self.codec,
             subscription: SubscriptionSet {
                 upstream_store,
-                upstream_codec,
                 cursor,
+                _saga: std::marker::PhantomData,
             },
             instance_idle_timeout: self.instance_idle_timeout,
             scheduler: self.scheduler,
@@ -146,7 +119,7 @@ impl<S: Saga, C> SagaManagerProps<S, C, SubscriptionUnset> {
     }
 }
 
-impl<S: Saga, C, Sub> SagaManagerProps<S, C, Sub> {
+impl<S: Saga, Sub> SagaManagerProps<S, Sub> {
     /// Passivate an instance that has been idle for `after`.
     ///
     /// The instance is stopped and leaves the manager's registry; a later event
@@ -254,7 +227,7 @@ impl<S: Saga, C, Sub> SagaManagerProps<S, C, Sub> {
     }
 }
 
-impl<S: Saga> SagaManagerProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
+impl<S: Saga> SagaManagerProps<S, SubscriptionSet<S>> {
     /// Spawn the manager process.
     ///
     /// The upstream poller and every saga instance are runtime **children** of
@@ -265,11 +238,7 @@ impl<S: Saga> SagaManagerProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         // manager writes to, so it keeps its own handle to it.
         let store_for_proxy = Arc::clone(&store);
         let producer = self.producer;
-        let codec = self.codec.codec;
-        let upstream = upstream_subscription::<S>(
-            self.subscription.upstream_store,
-            self.subscription.upstream_codec,
-        );
+        let upstream = upstream_subscription::<S>(self.subscription.upstream_store);
         let cursor = self.subscription.cursor;
         let instance_idle_timeout = self.instance_idle_timeout;
         let scheduler = self.scheduler;
@@ -281,7 +250,6 @@ impl<S: Saga> SagaManagerProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         let props = Props::new(move || SagaManagerProcess::<S> {
             store: Arc::clone(&store),
             producer: Arc::clone(&producer),
-            codec: Arc::clone(&codec),
             enqueue_policy: Arc::clone(&enqueue_policy),
             upstream: upstream.clone(),
             cursor: cursor.clone(),

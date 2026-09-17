@@ -65,6 +65,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("occ-observed"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 // Fixtures: aggregate
@@ -126,7 +128,6 @@ impl Query<GetCount> for Counter {
 
 // Fixtures: codec
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -303,7 +304,6 @@ async fn spawn_writer(
     store: &Arc<dyn EventStore>,
 ) -> AggregateProxy<Counter> {
     AggregateProps::<Counter>::new(id.clone(), Arc::clone(store))
-        .with_codec(Arc::new(JsonCodec))
         .spawn(ps)
         .await
 }

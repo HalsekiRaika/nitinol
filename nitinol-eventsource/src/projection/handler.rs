@@ -1,12 +1,11 @@
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use nitinol_contract::Event;
 use nitinol_persistence::EventType;
 
-use crate::codec::ErasedCodec;
+use crate::codec;
 use crate::projection::context::ProjectionContext;
 use crate::projection::projector::Projector;
 
@@ -28,8 +27,7 @@ pub(crate) trait EventTypeHandler<P: Send + Sync, Tx: Send>: Send + Sync {
 }
 
 pub(crate) struct ConcreteHandler<P, E> {
-    pub codec: Arc<dyn ErasedCodec<E>>,
-    pub _phantom: PhantomData<P>,
+    pub _phantom: PhantomData<(P, E)>,
 }
 
 #[async_trait]
@@ -49,9 +47,7 @@ where
         payload: Bytes,
         ctx: &mut ProjectionContext<'_, Tx>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let event = self
-            .codec
-            .decode(&payload)
+        let event = codec::decode::<E::Codec, E>(&payload)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         projector
             .project(event, ctx)

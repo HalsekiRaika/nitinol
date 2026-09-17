@@ -61,6 +61,7 @@ struct Ping;
 
 impl Event for Ping {
     const EVENT_TYPE: EventType = EventType::new(Family::new("dlq_sub"), TypeName::new("Ping"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,6 +69,7 @@ struct SagaLog;
 
 impl Event for SagaLog {
     const EVENT_TYPE: EventType = EventType::new(Family::new("dlq_sub"), TypeName::new("SagaLog"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Debug)]
@@ -219,9 +221,7 @@ async fn append_ping(store: &Arc<dyn EventStore>, stream_key: &str, sequence: u6
 #[tokio::test]
 async fn dead_letter_subscriber_receives_the_enqueued_event() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     // Spawn the subscriber process and obtain its ProcessProxy<DlqCollector>.
     let received = Arc::new(AtomicUsize::new(0));
@@ -241,11 +241,9 @@ async fn dead_letter_subscriber_receives_the_enqueued_event() {
 
     let _saga_proxy =
         SagaProps::<FailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || FailSaga)
-            .with_codec(system.codec::<SagaLog>())
             .with_dead_letter_subscriber(subscriber_proxy)
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<Ping>(),
                 SequenceCursor::Stream {
                     key: "dlq-sub-upstream".to_owned(),
                     after: 0,
@@ -281,9 +279,7 @@ async fn dead_letter_subscriber_receives_the_enqueued_event() {
 #[tokio::test]
 async fn dead_letter_subscriber_catchup_delivers_pre_existing_dead_letters() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_id = SagaId::new(FAIL_SAGA_ID);
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -321,11 +317,9 @@ async fn dead_letter_subscriber_catchup_delivers_pre_existing_dead_letters() {
 
     let _saga_proxy =
         SagaProps::<FailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || FailSaga)
-            .with_codec(system.codec::<SagaLog>())
             .with_dead_letter_subscriber(subscriber_proxy)
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<Ping>(),
                 SequenceCursor::Stream {
                     key: "dlq-sub-catchup-upstream".to_owned(),
                     after: 0,
@@ -369,9 +363,7 @@ async fn dead_letter_subscriber_catchup_delivers_pre_existing_dead_letters() {
 #[tokio::test]
 async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_id = SagaId::new(FAIL_SAGA_ID);
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -407,11 +399,9 @@ async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
 
     let saga_proxy_first =
         SagaProps::<FailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || FailSaga)
-            .with_codec(system.codec::<SagaLog>())
             .with_dead_letter_subscriber(subscriber_proxy_first)
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<Ping>(),
                 SequenceCursor::Stream {
                     key: "dlq-sub-respawn-upstream".to_owned(),
                     after: 0,
@@ -456,11 +446,9 @@ async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
 
     let _saga_proxy_second =
         SagaProps::<FailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || FailSaga)
-            .with_codec(system.codec::<SagaLog>())
             .with_dead_letter_subscriber(subscriber_proxy_second)
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<Ping>(),
                 SequenceCursor::Stream {
                     key: "dlq-sub-respawn-upstream".to_owned(),
                     after: 0,
@@ -506,9 +494,7 @@ async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
 #[tokio::test]
 async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     // --- Pre-populate saga A stream ---
     let saga_id_a = SagaId::new(MULTI_SAGA_A_ID);
@@ -565,11 +551,9 @@ async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
     // --- Wire subscriber to saga A (first) ---
     let _saga_a =
         SagaProps::<MultiSagaA>::new(saga_id_a.clone(), Arc::clone(&saga_store_a), || MultiSagaA)
-            .with_codec(system.codec::<SagaLog>())
             .with_dead_letter_subscriber(subscriber_proxy.clone())
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<Ping>(),
                 SequenceCursor::Stream {
                     key: "dlq-multi-upstream-a".to_owned(),
                     after: 0,
@@ -583,11 +567,9 @@ async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
     // same process name derived from subscriber_pid alone.
     let _saga_b =
         SagaProps::<MultiSagaB>::new(saga_id_b.clone(), Arc::clone(&saga_store_b), || MultiSagaB)
-            .with_codec(system.codec::<SagaLog>())
             .with_dead_letter_subscriber(subscriber_proxy.clone())
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<Ping>(),
                 SequenceCursor::Stream {
                     key: "dlq-multi-upstream-b".to_owned(),
                     after: 0,
@@ -640,9 +622,7 @@ async fn dlq_poller_is_stopped_when_saga_stops_while_subscriber_stays_alive() {
     use nitinol_runtime::ident::ProcessName;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_id = SagaId::new(FAIL_SAGA_ID);
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -661,11 +641,9 @@ async fn dlq_poller_is_stopped_when_saga_stops_while_subscriber_stays_alive() {
 
     let saga_proxy =
         SagaProps::<FailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || FailSaga)
-            .with_codec(system.codec::<SagaLog>())
             .with_dead_letter_subscriber(subscriber_proxy.clone())
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<Ping>(),
                 SequenceCursor::Stream {
                     key: "dlq-lifecycle-upstream".to_owned(),
                     after: 0,

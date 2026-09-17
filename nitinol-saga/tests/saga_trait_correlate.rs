@@ -27,9 +27,42 @@
 
 use async_trait::async_trait;
 
+use bytes::Bytes;
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
+
+/// The format the events below name.  Nothing in this file writes to a store —
+/// `correlate` is called directly — but `Event` names the codec that would
+/// write it, so one is declared.
+struct UnitCodec;
+
+impl Codec<Signal> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(event: &Signal) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from(event.owner.clone().into_bytes()))
+    }
+
+    fn decode(payload: &[u8]) -> Result<Signal, Self::Error> {
+        Ok(Signal {
+            owner: String::from_utf8_lossy(payload).into_owned(),
+        })
+    }
+}
+
+impl Codec<Noted> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Noted) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Noted, Self::Error> {
+        Ok(Noted)
+    }
+}
 
 /// The one correlation rule of [`MinimalCorrelatedSaga`], defined once and
 /// consulted by both `correlate` and the assertions below.
@@ -44,6 +77,7 @@ struct Signal {
 impl Event for Signal {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga_trait_correlate"), TypeName::new("Signal"));
+    type Codec = UnitCodec;
 }
 
 /// The saga's own event.
@@ -53,6 +87,7 @@ struct Noted;
 impl Event for Noted {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga_trait_correlate"), TypeName::new("Noted"));
+    type Codec = UnitCodec;
 }
 
 /// A saga that implements exactly the required trait items — including

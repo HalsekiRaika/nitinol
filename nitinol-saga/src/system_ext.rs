@@ -8,24 +8,19 @@
 //! `nitinol-eventsource` and make that crate depend back on this one.  Declaring
 //! the trait here keeps the dependency arrow pointing `saga -> eventsource`:
 //! the trait is local, so implementing it for the foreign
-//! [`EventSourceSystem`] is allowed, and the two public entry points it needs
-//! — [`EventSourceSystem::codec`] and [`EventSourceSystem::process_system`] —
-//! already exist.
+//! [`EventSourceSystem`] is allowed, and the public entry point it needs —
+//! [`EventSourceSystem::process_system`] — already exists.
 
 use std::borrow::Borrow;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
-use nitinol_eventsource::codec::{Codec, ErasedCodec};
-use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
+use nitinol_eventsource::system::{EventSourceSystem, StoreSet, StoreUnset};
 use nitinol_eventsource::SequenceCursor;
 use nitinol_persistence::store::EventStore;
 use nitinol_runtime::ProcessSystem;
 
 use crate::id::SagaId;
-use crate::process::{
-    CodecSet, SagaManagerProps, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset,
-};
+use crate::process::{SagaManagerProps, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset};
 use crate::saga::Saga;
 
 /// Which upstream records a saga is fed: the store to poll and the position to
@@ -78,22 +73,18 @@ impl Subscription {
     }
 }
 
-/// Spawns a [`Saga`] from an [`EventSourceSystem`], resolving both of its
-/// codecs from the system's codec type.
+/// Spawns a [`Saga`] from an [`EventSourceSystem`].
 ///
 /// This is the saga counterpart of
 /// [`EventSourceSystem::spawn_aggregate`]: the caller names the saga and its
-/// own [`EventStore`], and the system supplies what it already knows — the
-/// codec for the saga's own events, the codec for the events it subscribes to,
-/// and the `ProcessSystem` to spawn into.
+/// own [`EventStore`], and the system supplies the `ProcessSystem` to spawn
+/// into.  The formats are settled already — `S::Event` and `S::SubscribedEvent`
+/// each name the codec that writes and reads them.
 ///
 /// [`SagaProps`] remains the way to spawn a saga that needs the settings this
 /// entry point does not take (a scheduler, a dead-letter subscriber, an enqueue
 /// policy, a crash-restart factory, or a decode-failure route).
 pub trait SagaSystemExt {
-    /// The codec type the system resolves every event codec from.
-    type Codec;
-
     /// Begin a saga spawn against this system.
     ///
     /// `producer` constructs the saga instance and is called again if the
@@ -114,11 +105,9 @@ pub trait SagaSystemExt {
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt, Subscription};
-    /// # #[derive(Default)] struct DocCodec;
+    /// # struct DocCodec;
     /// # #[derive(Clone)] struct OrderPlaced;
     /// # #[derive(Clone)] struct ReservationRequested;
-    /// # impl Event for OrderPlaced { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced")); }
-    /// # impl Event for ReservationRequested { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested")); }
     /// # impl Codec<OrderPlaced> for DocCodec {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
@@ -128,6 +117,14 @@ pub trait SagaSystemExt {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &ReservationRequested) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
     /// #     fn decode(_: &[u8]) -> Result<ReservationRequested, Self::Error> { Ok(ReservationRequested) }
+    /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for ReservationRequested {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested"));
+    /// #     type Codec = DocCodec;
     /// # }
     /// # struct ReservationSaga;
     /// # #[async_trait]
@@ -143,7 +140,7 @@ pub trait SagaSystemExt {
     /// # }
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// # let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
+    /// # let system = EventSourceSystem::builder(ps).build();
     /// # let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     /// # let order_id = AggregateId::new("order");
     /// # let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -154,40 +151,22 @@ pub trait SagaSystemExt {
     ///     .await;
     /// # }
     /// ```
-    fn spawn_saga<S>(
+    fn spawn_saga<S: Saga>(
         &self,
         saga_id: SagaId,
         store: Arc<dyn EventStore>,
         producer: impl Fn() -> S + Send + Sync + 'static,
-    ) -> SagaSpawn<'_, Self::Codec, S>
-    where
-        S: Saga,
-        Self::Codec: Codec<S::Event>;
+    ) -> SagaSpawn<'_, S>;
 }
 
-impl<C> SagaSystemExt for EventSourceSystem<C>
-where
-    C: Default + Send + Sync + 'static,
-{
-    type Codec = C;
-
-    fn spawn_saga<S>(
+impl SagaSystemExt for EventSourceSystem<StoreUnset> {
+    fn spawn_saga<S: Saga>(
         &self,
         saga_id: SagaId,
         store: Arc<dyn EventStore>,
         producer: impl Fn() -> S + Send + Sync + 'static,
-    ) -> SagaSpawn<'_, C, S>
-    where
-        S: Saga,
-        C: Codec<S::Event>,
-    {
-        SagaSpawn::new(
-            self.process_system(),
-            saga_id,
-            store,
-            producer,
-            self.codec::<S::Event>(),
-        )
+    ) -> SagaSpawn<'_, S> {
+        SagaSpawn::new(self.process_system(), saga_id, store, producer)
     }
 }
 
@@ -210,9 +189,6 @@ where
 /// has no default to resolve, so it keeps the store-per-spawn entry point and
 /// none of the store-less ones.
 pub trait SagaDefaultStoreExt {
-    /// The codec type the system resolves every event codec from.
-    type Codec;
-
     /// Begin a saga spawn that journals onto the system's default store.
     ///
     /// `producer` constructs the saga instance and is called again if the
@@ -233,11 +209,9 @@ pub trait SagaDefaultStoreExt {
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaDefaultStoreExt, SagaEffect, SagaId};
-    /// # #[derive(Default)] struct DocCodec;
+    /// # struct DocCodec;
     /// # #[derive(Clone)] struct OrderPlaced;
     /// # #[derive(Clone)] struct ReservationRequested;
-    /// # impl Event for OrderPlaced { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced")); }
-    /// # impl Event for ReservationRequested { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested")); }
     /// # impl Codec<OrderPlaced> for DocCodec {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
@@ -247,6 +221,14 @@ pub trait SagaDefaultStoreExt {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &ReservationRequested) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
     /// #     fn decode(_: &[u8]) -> Result<ReservationRequested, Self::Error> { Ok(ReservationRequested) }
+    /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for ReservationRequested {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested"));
+    /// #     type Codec = DocCodec;
     /// # }
     /// # struct ReservationSaga;
     /// # #[async_trait]
@@ -264,7 +246,6 @@ pub trait SagaDefaultStoreExt {
     /// # let ps = ProcessSystem::new().await;
     /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     /// let system = EventSourceSystem::builder(ps)
-    ///     .with_codec::<DocCodec>()
     ///     .with_event_store(store)
     ///     .build();
     /// let order_id = AggregateId::new("order");
@@ -290,11 +271,9 @@ pub trait SagaDefaultStoreExt {
     /// # use nitinol_persistence::{EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaDefaultStoreExt, SagaEffect, SagaId};
-    /// # #[derive(Default)] struct DocCodec;
+    /// # struct DocCodec;
     /// # #[derive(Clone)] struct OrderPlaced;
     /// # #[derive(Clone)] struct ReservationRequested;
-    /// # impl Event for OrderPlaced { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced")); }
-    /// # impl Event for ReservationRequested { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested")); }
     /// # impl Codec<OrderPlaced> for DocCodec {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
@@ -304,6 +283,14 @@ pub trait SagaDefaultStoreExt {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &ReservationRequested) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
     /// #     fn decode(_: &[u8]) -> Result<ReservationRequested, Self::Error> { Ok(ReservationRequested) }
+    /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for ReservationRequested {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested"));
+    /// #     type Codec = DocCodec;
     /// # }
     /// # struct ReservationSaga;
     /// # #[async_trait]
@@ -320,7 +307,7 @@ pub trait SagaDefaultStoreExt {
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// // no `with_event_store` — there is no default journal to spawn onto
-    /// let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
+    /// let system = EventSourceSystem::builder(ps).build();
     /// system.spawn_saga(SagaId::new("reservation"), || ReservationSaga);
     /// # }
     /// ```
@@ -328,10 +315,9 @@ pub trait SagaDefaultStoreExt {
         &self,
         saga_id: SagaId,
         producer: impl Fn() -> S + Send + Sync + 'static,
-    ) -> SagaSpawn<'_, Self::Codec, S>
+    ) -> SagaSpawn<'_, S>
     where
-        S: Saga,
-        Self::Codec: Codec<S::Event>;
+        S: Saga;
 
     /// Begin a saga spawn that journals onto `store`, overriding the system
     /// default.
@@ -345,10 +331,9 @@ pub trait SagaDefaultStoreExt {
         saga_id: SagaId,
         store: Arc<dyn EventStore>,
         producer: impl Fn() -> S + Send + Sync + 'static,
-    ) -> SagaSpawn<'_, Self::Codec, S>
+    ) -> SagaSpawn<'_, S>
     where
-        S: Saga,
-        Self::Codec: Codec<S::Event>;
+        S: Saga;
 
     /// Subscribe to the stream `key` in the system's default [`EventStore`],
     /// from its beginning.
@@ -371,18 +356,21 @@ pub trait SagaDefaultStoreExt {
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::SagaDefaultStoreExt;
-    /// # #[derive(Default)] struct DocCodec;
+    /// # struct DocCodec;
     /// # #[derive(Clone)] struct OrderPlaced;
-    /// # impl Event for OrderPlaced { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced")); }
     /// # impl Codec<OrderPlaced> for DocCodec {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
     /// #     fn decode(_: &[u8]) -> Result<OrderPlaced, Self::Error> { Ok(OrderPlaced) }
     /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// // no `with_event_store` — there is no default store to poll
-    /// let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
+    /// let system = EventSourceSystem::builder(ps).build();
     /// system.subscription(&AggregateId::new("order"));
     /// # }
     /// ```
@@ -391,8 +379,8 @@ pub trait SagaDefaultStoreExt {
         K: ?Sized + Borrow<str>;
 
     /// Return a [`SagaManagerProps`] with everything the system already knows
-    /// filled in: the store each instance journals onto, the codec for the
-    /// instances' own events, and the codec for the subscribed ones.
+    /// filled in: the store each instance journals onto, and the upstream it
+    /// polls.
     ///
     /// One default store holds the upstream stream and every correlated
     /// instance's own stream side by side, keyed by the [`SagaId`]
@@ -419,11 +407,9 @@ pub trait SagaDefaultStoreExt {
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaDefaultStoreExt, SagaEffect, SagaId, Subscription};
-    /// # #[derive(Default)] struct DocCodec;
+    /// # struct DocCodec;
     /// # #[derive(Clone)] struct OrderPlaced;
     /// # #[derive(Clone)] struct ReservationRequested;
-    /// # impl Event for OrderPlaced { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced")); }
-    /// # impl Event for ReservationRequested { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested")); }
     /// # impl Codec<OrderPlaced> for DocCodec {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
@@ -433,6 +419,14 @@ pub trait SagaDefaultStoreExt {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &ReservationRequested) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
     /// #     fn decode(_: &[u8]) -> Result<ReservationRequested, Self::Error> { Ok(ReservationRequested) }
+    /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for ReservationRequested {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested"));
+    /// #     type Codec = DocCodec;
     /// # }
     /// # struct ReservationSaga;
     /// # #[async_trait]
@@ -451,7 +445,7 @@ pub trait SagaDefaultStoreExt {
     /// # let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     /// # let order_id = AggregateId::new("order");
     /// // no `with_event_store` — the instances have no default journal
-    /// let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
+    /// let system = EventSourceSystem::builder(ps).build();
     /// system.saga_manager_props(Subscription::stream(&upstream, &order_id), || ReservationSaga);
     /// # }
     /// ```
@@ -459,26 +453,19 @@ pub trait SagaDefaultStoreExt {
         &self,
         subscription: Subscription,
         producer: impl Fn() -> S + Send + Sync + 'static,
-    ) -> SagaManagerProps<S, CodecSet<S::Event>, SubscriptionSet<S>>
+    ) -> SagaManagerProps<S, SubscriptionSet<S>>
     where
-        S: Saga,
-        Self::Codec: Codec<S::Event> + Codec<S::SubscribedEvent>;
+        S: Saga;
 }
 
-impl<C> SagaDefaultStoreExt for EventSourceSystem<C, StoreSet>
-where
-    C: Default + Send + Sync + 'static,
-{
-    type Codec = C;
-
+impl SagaDefaultStoreExt for EventSourceSystem<StoreSet> {
     fn spawn_saga<S>(
         &self,
         saga_id: SagaId,
         producer: impl Fn() -> S + Send + Sync + 'static,
-    ) -> SagaSpawn<'_, C, S>
+    ) -> SagaSpawn<'_, S>
     where
         S: Saga,
-        C: Codec<S::Event>,
     {
         self.spawn_saga_with_store(saga_id, Arc::clone(self.event_store()), producer)
     }
@@ -488,18 +475,11 @@ where
         saga_id: SagaId,
         store: Arc<dyn EventStore>,
         producer: impl Fn() -> S + Send + Sync + 'static,
-    ) -> SagaSpawn<'_, C, S>
+    ) -> SagaSpawn<'_, S>
     where
         S: Saga,
-        C: Codec<S::Event>,
     {
-        SagaSpawn::new(
-            self.process_system(),
-            saga_id,
-            store,
-            producer,
-            self.codec::<S::Event>(),
-        )
+        SagaSpawn::new(self.process_system(), saga_id, store, producer)
     }
 
     fn subscription<K>(&self, key: &K) -> Subscription
@@ -513,15 +493,13 @@ where
         &self,
         subscription: Subscription,
         producer: impl Fn() -> S + Send + Sync + 'static,
-    ) -> SagaManagerProps<S, CodecSet<S::Event>, SubscriptionSet<S>>
+    ) -> SagaManagerProps<S, SubscriptionSet<S>>
     where
         S: Saga,
-        C: Codec<S::Event> + Codec<S::SubscribedEvent>,
     {
         let (upstream_store, cursor) = subscription.into_parts();
         SagaManagerProps::<S>::new(Arc::clone(self.event_store()), producer)
-            .with_codec(self.codec::<S::Event>())
-            .with_subscription(upstream_store, self.codec::<S::SubscribedEvent>(), cursor)
+            .with_subscription(upstream_store, cursor)
     }
 }
 
@@ -531,63 +509,44 @@ where
 /// `Sub` carries the subscription state (`SubscriptionUnset` /
 /// `SubscriptionSet<S>`): [`spawn`](Self::spawn) exists only once
 /// [`subscribed_to`](Self::subscribed_to) has supplied one, so the requirement
-/// is enforced by the compiler rather than at spawn time.  The codec state
-/// [`SagaProps`] carries is not a parameter here — the system resolves both
-/// codecs, so there is no unset codec to reach `spawn` with.
+/// is enforced by the compiler rather than at spawn time.
 ///
 /// The journal store is already settled by the entry point that produced this
 /// builder, so which system state it came from no longer matters here: what is
-/// left to carry is the `ProcessSystem` to spawn into and the codec type `C` the
-/// upstream codec is resolved from.
-pub struct SagaSpawn<'a, C, S: Saga, Sub = SubscriptionUnset> {
+/// left to carry is the `ProcessSystem` to spawn into.
+pub struct SagaSpawn<'a, S: Saga, Sub = SubscriptionUnset> {
     ps: &'a ProcessSystem,
-    props: SagaProps<S, CodecSet<S::Event>, Sub>,
-    _codec: PhantomData<C>,
+    props: SagaProps<S, Sub>,
 }
 
-impl<'a, C, S: Saga> SagaSpawn<'a, C, S, SubscriptionUnset> {
+impl<'a, S: Saga> SagaSpawn<'a, S, SubscriptionUnset> {
     fn new(
         ps: &'a ProcessSystem,
         saga_id: SagaId,
         store: Arc<dyn EventStore>,
         producer: impl Fn() -> S + Send + Sync + 'static,
-        codec: Arc<dyn ErasedCodec<S::Event>>,
     ) -> Self {
         SagaSpawn {
             ps,
-            props: SagaProps::new(saga_id, store, producer).with_codec(codec),
-            _codec: PhantomData,
+            props: SagaProps::new(saga_id, store, producer),
         }
     }
-}
 
-impl<'a, C, S> SagaSpawn<'a, C, S, SubscriptionUnset>
-where
-    C: Codec<S::SubscribedEvent> + Default + Send + Sync + 'static,
-    S: Saga,
-{
     /// Feed this saga the upstream records `subscription` selects, decoded with
-    /// the codec the system resolves for [`Saga::SubscribedEvent`].
+    /// the codec [`Saga::SubscribedEvent`] names.
     ///
     /// Which of the delivered events this instance acts on is decided by
     /// [`Saga::correlate`], not here.
-    pub fn subscribed_to(
-        self,
-        subscription: Subscription,
-    ) -> SagaSpawn<'a, C, S, SubscriptionSet<S>> {
-        let upstream_codec: Arc<dyn ErasedCodec<S::SubscribedEvent>> = Arc::new(C::default());
+    pub fn subscribed_to(self, subscription: Subscription) -> SagaSpawn<'a, S, SubscriptionSet<S>> {
         let (upstream_store, cursor) = subscription.into_parts();
         SagaSpawn {
             ps: self.ps,
-            props: self
-                .props
-                .with_subscription(upstream_store, upstream_codec, cursor),
-            _codec: PhantomData,
+            props: self.props.with_subscription(upstream_store, cursor),
         }
     }
 }
 
-impl<C, S: Saga> SagaSpawn<'_, C, S, SubscriptionSet<S>> {
+impl<S: Saga> SagaSpawn<'_, S, SubscriptionSet<S>> {
     /// Spawn the saga into the system's `ProcessSystem`.
     ///
     /// Spawning without [`subscribed_to`](SagaSpawn::subscribed_to) is a
@@ -604,11 +563,9 @@ impl<C, S: Saga> SagaSpawn<'_, C, S, SubscriptionSet<S>> {
     /// # use nitinol_persistence::{EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt};
-    /// # #[derive(Default)] struct DocCodec;
+    /// # struct DocCodec;
     /// # #[derive(Clone)] struct OrderPlaced;
     /// # #[derive(Clone)] struct ReservationRequested;
-    /// # impl Event for OrderPlaced { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced")); }
-    /// # impl Event for ReservationRequested { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested")); }
     /// # impl Codec<OrderPlaced> for DocCodec {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
@@ -618,6 +575,14 @@ impl<C, S: Saga> SagaSpawn<'_, C, S, SubscriptionSet<S>> {
     /// #     type Error = std::convert::Infallible;
     /// #     fn encode(_: &ReservationRequested) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
     /// #     fn decode(_: &[u8]) -> Result<ReservationRequested, Self::Error> { Ok(ReservationRequested) }
+    /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for ReservationRequested {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested"));
+    /// #     type Codec = DocCodec;
     /// # }
     /// # struct ReservationSaga;
     /// # #[async_trait]
@@ -633,7 +598,7 @@ impl<C, S: Saga> SagaSpawn<'_, C, S, SubscriptionSet<S>> {
     /// # }
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// # let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
+    /// # let system = EventSourceSystem::builder(ps).build();
     /// # let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     /// system
     ///     .spawn_saga(SagaId::new("reservation"), saga_store, || ReservationSaga)

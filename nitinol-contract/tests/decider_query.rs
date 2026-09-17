@@ -10,9 +10,11 @@
 //!
 //! Run with: `cargo test -p nitinol-contract --test decider_query`.
 
+use std::fmt;
 use std::rc::Rc;
 
-use nitinol_contract::{Aggregate, Decider, Decision, Event, Query};
+use bytes::Bytes;
+use nitinol_contract::{Aggregate, Codec, Decider, Decision, Event, Query};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 // Fixture: a wallet that holds a balance and an optional label.
@@ -24,12 +26,77 @@ enum WalletEvent {
     Labelled { label: String },
 }
 
+/// The format `WalletEvent` names. Naming one is part of defining an event, and
+/// it costs no runtime: a codec is a pair of pure functions over bytes, so it
+/// belongs in this file as much as `apply` does.
+struct WalletEventCodec;
+
+/// A payload that is not a wallet event in this format.
+#[derive(Debug, PartialEq, Eq)]
+struct MalformedWalletEvent;
+
+impl fmt::Display for MalformedWalletEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("payload is not a wallet event")
+    }
+}
+
+impl std::error::Error for MalformedWalletEvent {}
+
+const CREDITED: u8 = 1;
+const DEBITED: u8 = 2;
+const LABELLED: u8 = 3;
+
+impl Codec<WalletEvent> for WalletEventCodec {
+    type Error = MalformedWalletEvent;
+
+    fn encode(event: &WalletEvent) -> Result<Bytes, Self::Error> {
+        let mut out = Vec::new();
+        match event {
+            WalletEvent::Credited { amount } => {
+                out.push(CREDITED);
+                out.extend_from_slice(&amount.to_be_bytes());
+            }
+            WalletEvent::Debited { amount } => {
+                out.push(DEBITED);
+                out.extend_from_slice(&amount.to_be_bytes());
+            }
+            WalletEvent::Labelled { label } => {
+                out.push(LABELLED);
+                out.extend_from_slice(label.as_bytes());
+            }
+        }
+        Ok(Bytes::from(out))
+    }
+
+    fn decode(payload: &[u8]) -> Result<WalletEvent, Self::Error> {
+        let (kind, body) = payload.split_first().ok_or(MalformedWalletEvent)?;
+        let amount = || -> Result<u64, MalformedWalletEvent> {
+            body.try_into()
+                .map(u64::from_be_bytes)
+                .map_err(|_| MalformedWalletEvent)
+        };
+        match *kind {
+            CREDITED => Ok(WalletEvent::Credited { amount: amount()? }),
+            DEBITED => Ok(WalletEvent::Debited { amount: amount()? }),
+            LABELLED => Ok(WalletEvent::Labelled {
+                label: std::str::from_utf8(body)
+                    .map_err(|_| MalformedWalletEvent)?
+                    .to_owned(),
+            }),
+            _ => Err(MalformedWalletEvent),
+        }
+    }
+}
+
 // Written by hand rather than derived: `nitinol-contract` does not depend on
 // `nitinol-macros`, and depending on it here would widen the dependency set the
 // scenario is about.
 impl Event for WalletEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("shop.wallet"), TypeName::new("WalletEvent"));
+
+    type Codec = WalletEventCodec;
 }
 
 #[derive(Debug, Default)]

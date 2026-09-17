@@ -5,11 +5,12 @@ use nitinol::eventsource::Event;
 use nitinol_eventsource::AggregateProxy;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
 
+use crate::codec::JsonCodec;
 use crate::inventory::{Inventory, Reserve};
 use crate::order::OrderPlaced;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Event)]
-#[event(family = "saga.example")]
+#[event(family = "saga.example", codec = JsonCodec)]
 pub struct ReservationRequested {
     pub sku: String,
 }

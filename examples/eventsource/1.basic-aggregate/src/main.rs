@@ -4,7 +4,7 @@
 //!
 //! 1. Create a `ProcessSystem`
 //! 2. Create an `InMemoryEventStore` and wrap it in `Arc<dyn EventStore>`
-//! 3. Build an `EventSourceSystem` with a codec and that store as its default
+//! 3. Build an `EventSourceSystem` with that store as its default
 //! 4. Spawn a `Counter` aggregate and call `ask`, `tell`, `exec`
 //!
 //! Run with:
@@ -19,7 +19,6 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
-use eventsource_basic_aggregate::codec::JsonCodec;
 use eventsource_basic_aggregate::counter::{GetCount, Increment};
 
 /// Aggregate type alias for brevity.
@@ -44,11 +43,10 @@ async fn main() {
     // 2. Create an in-memory event store.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    // 3. Wire codec and default store into the event-source system.  Every
-    //    aggregate spawned below persists onto that store unless it names
-    //    another one.
+    // 3. Wire the default store into the event-source system.  Every aggregate
+    //    spawned below persists onto that store unless it names another one.
+    //    There is no codec to wire: `Incremented` names the one that writes it.
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();
 

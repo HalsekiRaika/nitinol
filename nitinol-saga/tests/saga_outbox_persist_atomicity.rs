@@ -41,6 +41,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("atomic"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,6 +52,7 @@ struct ReservationRequested {
 impl Event for ReservationRequested {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("atomic"), TypeName::new("ReservationRequested"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -69,6 +71,7 @@ struct InventoryReserved {
 impl Event for InventoryReserved {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("atomic"), TypeName::new("InventoryReserved"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone)]
@@ -203,9 +206,7 @@ async fn wait_for_event_count(
 #[tokio::test]
 async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomically() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("atomic-order");
@@ -229,10 +230,8 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
                 handled: Arc::clone(&handled_clone),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,
@@ -364,9 +363,7 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
     }
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("user-only-order");
@@ -387,10 +384,8 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
                 captured: Arc::clone(&captured_clone),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,

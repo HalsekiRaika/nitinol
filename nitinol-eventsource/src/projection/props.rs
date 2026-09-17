@@ -7,7 +7,6 @@ use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{ProcessSystem, Props, SupervisionStrategy};
 
-use crate::codec::ErasedCodec;
 use crate::durable_stream::{DurableSubscription, SequenceCursor};
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};
 use crate::projection::process::{CatchupOrigin, ProjectorProcess};
@@ -93,16 +92,19 @@ where
     Cs: CheckpointStore + Send + Sync + 'static,
     Tx: Send + 'static,
 {
-    pub fn with_event<E>(
-        mut self,
-        codec: Arc<dyn ErasedCodec<E>>,
-    ) -> ProjectorProps<P, Cs, Tx, EventSet, O>
+    /// Subscribe this projection to the event type `E`.
+    ///
+    /// Which event types a projection follows stays an explicit statement —
+    /// that is a design decision about the projection, not something to infer.
+    /// What reads them is not: `E` names the codec that wrote it, so no codec
+    /// argument appears here and no wiring can pair an event with a format its
+    /// writer never used.
+    pub fn with_event<E>(mut self) -> ProjectorProps<P, Cs, Tx, EventSet, O>
     where
         P: Projector<E, Tx>,
         E: Event,
     {
         let handler: Arc<dyn EventTypeHandler<P, Tx>> = Arc::new(ConcreteHandler::<P, E> {
-            codec,
             _phantom: PhantomData,
         });
         self.handlers.push(handler);
@@ -222,7 +224,16 @@ where
     /// # use nitinol_runtime::ProcessSystem;
     /// # use bytes::Bytes;
     /// # #[derive(Clone, PartialEq, Debug)] struct MyEv;
-    /// # impl Event for MyEv { const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Ev")); }
+    /// # struct MyCodec;
+    /// # impl Codec<MyEv> for MyCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &MyEv) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<MyEv, Self::Error> { Ok(MyEv) }
+    /// # }
+    /// # impl Event for MyEv {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Ev"));
+    /// #     type Codec = MyCodec;
+    /// # }
     /// # struct MyProj;
     /// # impl MyProj { fn new() -> Self { MyProj } }
     /// # #[async_trait]
@@ -230,19 +241,13 @@ where
     /// #     type Error = std::convert::Infallible;
     /// #     async fn project(&mut self, _: MyEv, _: &mut ProjectionContext<'_, ()>) -> Result<(), Self::Error> { Ok(()) }
     /// # }
-    /// # struct MyCodec;
-    /// # impl Codec<MyEv> for MyCodec {
-    /// #     type Error = std::convert::Infallible;
-    /// #     fn encode(_: &MyEv) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
-    /// #     fn decode(_: &[u8]) -> Result<MyEv, Self::Error> { Ok(MyEv) }
-    /// # }
     /// # async fn bad() {
     /// let system = ProcessSystem::new().await;
     /// let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     /// let cs = Arc::new(InMemoryCheckpointStore::default());
     /// // compile error: spawn() requires OriginSet — call catchup_from_aggregate() or catchup_from_global() first
     /// ProjectorProps::new(ProjectionId::new("p"), store, cs, MyProj::new)
-    ///     .with_event::<MyEv>(Arc::new(MyCodec))
+    ///     .with_event::<MyEv>()
     ///     .spawn(&system)
     ///     .await;
     /// # }

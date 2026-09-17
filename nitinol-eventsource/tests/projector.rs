@@ -18,6 +18,8 @@ struct Counted;
 
 impl Event for Counted {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Counted"));
+
+    type Codec = UnitCodec;
 }
 
 #[derive(Clone)]
@@ -25,6 +27,8 @@ struct Labeled;
 
 impl Event for Labeled {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Labeled"));
+
+    type Codec = UnitCodec;
 }
 
 struct UnitCodec;
@@ -196,7 +200,7 @@ async fn projector_single_event_type_project_called_during_catchup() {
             last_sequence: Arc::new(AtomicUsize::new(0)),
         },
     )
-    .with_event::<Counted>(Arc::new(UnitCodec))
+    .with_event::<Counted>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -237,7 +241,7 @@ async fn projector_context_provides_correct_projection_id() {
             last_sequence: Arc::new(AtomicUsize::new(0)),
         },
     )
-    .with_event::<Counted>(Arc::new(UnitCodec))
+    .with_event::<Counted>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -285,7 +289,7 @@ async fn projector_context_provides_current_sequence() {
             last_sequence: Arc::clone(&last_seq_c),
         },
     )
-    .with_event::<Counted>(Arc::new(UnitCodec))
+    .with_event::<Counted>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -327,8 +331,8 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
             last_sequence: Arc::new(AtomicUsize::new(0)),
         },
     )
-    .with_event::<Counted>(Arc::new(UnitCodec))
-    .with_event::<Labeled>(Arc::new(UnitCodec))
+    .with_event::<Counted>()
+    .with_event::<Labeled>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -373,7 +377,7 @@ async fn projector_live_event_is_projected_after_catchup() {
             last_sequence: Arc::new(AtomicUsize::new(0)),
         },
     )
-    .with_event::<Counted>(Arc::new(UnitCodec))
+    .with_event::<Counted>()
     .catchup_from_aggregate(agg_id.clone())
     .spawn(&system)
     .await;
@@ -437,7 +441,7 @@ async fn projector_variant_some_event_type_dispatches_to_type_level_handler() {
             last_sequence: Arc::new(AtomicUsize::new(0)),
         },
     )
-    .with_event::<Counted>(Arc::new(UnitCodec))
+    .with_event::<Counted>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;

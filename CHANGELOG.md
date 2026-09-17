@@ -24,8 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so no clause depends on an interpreter agreeing with its own account of what
   it did. Wiring an interpreter up means implementing `Interpretation` and
   `Interpreter`: classify each raw outcome into `Interpreted` / `Unanswered`
-  once at your own boundary, delegate your codec to `LedgerEvent::encode` /
-  `LedgerEvent::decode`, and give `quiesce` a real synchronisation point.
+  once at your own boundary, and give `quiesce` a real synchronisation point.
+  The format needs no wiring at all — `LedgerEvent` names `LedgerCodec` as the
+  codec that writes it, so an interpreter reaches the suite's bytes through the
+  event type itself.
 
   The crate reaches no interpreter and no async runtime — neither
   `nitinol-eventsource`, `nitinol-runtime` nor `tokio` is in its dependency
@@ -121,10 +123,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SagaManagerProps::new(store, producer)`.
 
   Whether a default exists is a typestate on the system
-  (`EventSourceSystem<C, StoreUnset>` / `EventSourceSystem<C, StoreSet>`), in
-  the same style as the codec marker: the store-less forms exist only on a
-  system that was given one, so relying on a store that was never configured is
-  a compile error rather than a failure at the first spawn. The parameter
+  (`EventSourceSystem<StoreUnset>` / `EventSourceSystem<StoreSet>`): the
+  store-less forms exist only on a system that was given one, so relying on a
+  store that was never configured is a compile error rather than a failure at
+  the first spawn. The parameter
   defaults to `StoreUnset`, and a system built without `with_event_store` keeps
   exactly the previous surface — `spawn_aggregate(id, store)`,
   `aggregate_props(id, store)` and `SagaSystemExt::spawn_saga(saga_id, store,
@@ -132,12 +134,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (`nitinol-saga`): `SagaSystemExt` / `Subscription` — spawning a saga from an
   `EventSourceSystem`, symmetrically to `EventSourceSystem::spawn_aggregate`.
-  An aggregate spawn already resolved its codec from the system, while a saga
-  spawn went straight to `ProcessSystem` and had the caller hand over
-  `system.codec::<E>()` twice plus a hand-built `SequenceCursor`.
+  An aggregate spawn already went through the system, while a saga spawn went
+  straight to `ProcessSystem` and had the caller hand over a hand-built
+  `SequenceCursor`.
   `system.spawn_saga(saga_id, store, producer).subscribed_to(subscription)`
-  takes those from the system instead: the codec for the saga's own events, the
-  codec for the events it subscribes to, and the `ProcessSystem` to spawn into.
+  takes the `ProcessSystem` from the system instead.
   `Subscription::stream(&store, &key)` folds the upstream store and its start
   position into one value and defaults to the beginning of the stream, so a
   saga catches up on what was written before it was spawned;
@@ -257,6 +258,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indistinguishable here.
 
 ### Changed
+
+- **BREAKING** (`nitinol-contract`, `nitinol-eventsource`, `nitinol-saga`,
+  `nitinol-macros`, `nitinol`): an event names the codec that writes it down,
+  and codecs are no longer injected at wiring time.
+
+  `Codec<T>` moves to `nitinol-contract` — `nitinol_eventsource::codec::Codec`
+  and `nitinol::contract::Codec` both name it — and two traits gain an
+  associated type: `Event::Codec: Codec<Self>` and
+  `Snapshotable::Codec: Codec<Self::Snapshot>`. A hand-written impl adds one
+  line; a derived one adds one attribute key, `#[event(family = "...", codec =
+  MyCodec)]`, which is mandatory for the same reason `family` is — stable Rust
+  has no associated-type defaults, so an omitted `codec` would be reported as a
+  missing associated type instead of as the attribute its author left out.
+
+  Every injection point is gone with it: `EventSourceSystem::with_codec` and
+  the builder's `Unset` stage, `AggregateProps::with_codec` and its
+  `CodecSet`/`CodecUnset` typestate, the snapshot codec argument of
+  `AggregateProps::with_snapshot_persistor`, the codec argument of
+  `ProjectorProps::with_event::<E>`, `SagaProps::with_codec`,
+  `SagaManagerProps::with_codec` and their own `CodecSet`/`CodecUnset`, the
+  upstream codec argument of `with_subscription`, `EventSourceSystem::codec`,
+  and the `type Codec` of `SagaSystemExt` / `SagaDefaultStoreExt`.
+  `EventSourceSystem`, `EventSourceSystemBuilder` and `SagaSpawn` each lose a
+  type parameter as a result, and `SagaProps` / `SagaManagerProps` are left
+  with subscription state alone.
+
+  What the injection bought was the freedom to write one event type in two
+  formats, which is not a freedom a stream can survive: a codec chosen at the
+  wiring site has to agree with every other site that ever wrote or read that
+  stream, and nothing checked that it did. Naming the codec on the event makes
+  the agreement a property of the type — two aggregates spawned from one system
+  now read and write their own streams in their own formats, and a projector
+  subscribing to two event types decodes each with the codec its own type
+  named. The type list a projection follows stays explicit, because which
+  events it follows is a design statement; what reads them is not.
+
+  `ErasedCodec` and the blanket impl that promoted a `Codec<E>` into it are
+  removed — there is nothing left to erase a codec into. Classifying a codec
+  failure stays on the interpreter's side: `nitinol_eventsource::codec::encode`
+  and `::decode` call a named codec and report its failure as `CodecError`,
+  which is where `CodecError::Encode` / `Decode` are still produced.
 
 - **BREAKING** (`nitinol-eventsource`, `nitinol`): `AggregateProxy::ask` answers
   with the decision's output instead of the events it persisted. Its return

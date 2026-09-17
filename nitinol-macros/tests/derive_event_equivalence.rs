@@ -12,15 +12,46 @@
 //! namespace). This is the compatibility re-export path; the generated code
 //! itself references the canonical `::nitinol::contract::Event` and
 //! `::nitinol::persistence::{...}`.
+//!
+//! `Event` also names the codec that writes the event down, so equivalence now
+//! covers a second generated item: `#[event(codec = X)]` must produce
+//! `type Codec = X` and nothing else. Each fixture below names a codec of its
+//! own, and `codec_is_the_type_the_attribute_named` reads the association back
+//! at the type level — a derive that substituted, defaulted or inferred a codec
+//! would fail there rather than silently write the wrong format.
 
+use bytes::Bytes;
+use nitinol::contract::Codec;
 use nitinol::eventsource::Event;
 use nitinol::persistence::{EventType, Family, TypeName, Variant};
+
+/// Passes only if `E`'s associated codec *is* `C`, not merely some type that
+/// could encode `E`.
+fn codec_of<E, C>()
+where
+    E: Event<Codec = C>,
+{
+}
 
 // struct: type-level identity (variant None), default variant() inherited
 
 #[derive(Clone, Event)]
-#[event(family = "shop.orders")]
+#[event(family = "shop.orders", codec = IncrementedCodec)]
 struct Incremented;
+
+struct IncrementedCodec;
+
+impl Codec<Incremented> for IncrementedCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Incremented) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Incremented, Self::Error> {
+        Ok(Incremented)
+    }
+}
 
 /// Given a struct with `#[derive(Event)]` and an explicit family, When its
 /// `EVENT_TYPE` is read, Then it equals the hand-written
@@ -52,8 +83,22 @@ fn struct_value_variant_is_type_level_identity() {
 // struct: empty family, mirroring `Family::new("")` in event_variant.rs
 
 #[derive(Clone, Event)]
-#[event(family = "")]
+#[event(family = "", codec = EmptyFamilyCodec)]
 struct EmptyFamily;
+
+struct EmptyFamilyCodec;
+
+impl Codec<EmptyFamily> for EmptyFamilyCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &EmptyFamily) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<EmptyFamily, Self::Error> {
+        Ok(EmptyFamily)
+    }
+}
 
 /// Given a struct with an explicitly empty family, When `EVENT_TYPE` is read,
 /// Then the family is the empty `Family` (not a fallback or default) and the
@@ -75,10 +120,24 @@ fn struct_empty_family_is_preserved_verbatim() {
 // enum: const is type-level (variant None); variant() fills the active arm
 
 #[derive(Clone, Event)]
-#[event(family = "saga.upstream")]
+#[event(family = "saga.upstream", codec = OrderEventCodec)]
 enum OrderEvent {
     Placed,
     Cancelled,
+}
+
+struct OrderEventCodec;
+
+impl Codec<OrderEvent> for OrderEventCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &OrderEvent) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<OrderEvent, Self::Error> {
+        Ok(OrderEvent::Placed)
+    }
 }
 
 /// Given an enum with `#[derive(Event)]`, When its `EVENT_TYPE` const is read,
@@ -144,11 +203,25 @@ fn enum_arms_share_type_key_with_const() {
 // the tests read `variant()`, never the field values.
 #[allow(dead_code)]
 #[derive(Clone, Event)]
-#[event(family = "domain")]
+#[event(family = "domain", codec = MixedCodec)]
 enum Mixed {
     Unit,
     Tuple(u32, String),
     Struct { id: u64, name: String },
+}
+
+struct MixedCodec;
+
+impl Codec<Mixed> for MixedCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Mixed) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Mixed, Self::Error> {
+        Ok(Mixed::Unit)
+    }
 }
 
 /// Given an enum mixing unit, tuple, and struct arms, When `variant()` is
@@ -179,11 +252,32 @@ fn enum_variant_handles_all_arm_shapes() {
 
 // `inner` exists only to give the type a parameter for `split_for_impl` to pass
 // through; the tests read `EVENT_TYPE` and `variant()`, never the field value.
+//
+// `T: Default` is the fixture's own requirement, not the derive's: the derive
+// copies `codec = WrapperCodec` through verbatim and infers no bounds for it,
+// so making one codec serve `Wrapper<T>` for every `T` needs a way to build a
+// `T` on decode. Inferring that here is the job of whoever names the codec.
 #[allow(dead_code)]
 #[derive(Clone, Event)]
-#[event(family = "generic")]
-struct Wrapper<T: Clone + Send + Sync + 'static> {
+#[event(family = "generic", codec = WrapperCodec)]
+struct Wrapper<T: Clone + Default + Send + Sync + 'static> {
     inner: T,
+}
+
+struct WrapperCodec;
+
+impl<T: Clone + Default + Send + Sync + 'static> Codec<Wrapper<T>> for WrapperCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Wrapper<T>) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Wrapper<T>, Self::Error> {
+        Ok(Wrapper {
+            inner: T::default(),
+        })
+    }
 }
 
 /// Given a generic struct that satisfies the `Event` supertrait bounds on its
@@ -199,4 +293,66 @@ fn generic_struct_derive_uses_bare_type_name() {
     let value = Wrapper { inner: 1u32 };
     assert_eq!(value.variant(), <Wrapper<u32> as Event>::EVENT_TYPE);
     assert_eq!(value.variant().variant(), None);
+}
+
+// codec: the attribute value becomes the associated type, verbatim
+
+/// Given each fixture names a codec in its `#[event(...)]` attribute, When the
+/// derived `Event::Codec` is read back, Then it is exactly the type that was
+/// named — across struct, empty-family, enum, data-bearing enum and generic
+/// forms alike.
+///
+/// The check is at the type level: `codec_of` is satisfiable only by the one
+/// associated type, so a derive that substituted a different codec, defaulted
+/// to one, or inferred one from the shape of the event would fail to compile
+/// here instead of writing an unexpected format at run time.
+#[test]
+fn codec_is_the_type_the_attribute_named() {
+    codec_of::<Incremented, IncrementedCodec>();
+    codec_of::<EmptyFamily, EmptyFamilyCodec>();
+    codec_of::<OrderEvent, OrderEventCodec>();
+    codec_of::<Mixed, MixedCodec>();
+    codec_of::<Wrapper<u32>, WrapperCodec>();
+}
+
+// codec: the derive remains pure sugar
+
+/// The same event written out by hand, naming the same codec.
+#[derive(Clone)]
+struct HandWritten;
+
+impl Event for HandWritten {
+    const EVENT_TYPE: EventType =
+        EventType::new(Family::new("shop.orders"), TypeName::new("HandWritten"));
+
+    type Codec = HandWrittenCodec;
+}
+
+struct HandWrittenCodec;
+
+impl Codec<HandWritten> for HandWrittenCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &HandWritten) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<HandWritten, Self::Error> {
+        Ok(HandWritten)
+    }
+}
+
+/// Given a hand-written `impl Event` that states `type Codec` directly, When it
+/// is read the same way a derived one is, Then it satisfies the same contract —
+/// the attribute is sugar for this line and nothing the derive adds is required
+/// to make an event usable.
+#[test]
+fn a_hand_written_impl_names_its_codec_the_same_way() {
+    codec_of::<HandWritten, HandWrittenCodec>();
+
+    assert_eq!(
+        HandWritten::EVENT_TYPE,
+        EventType::new(Family::new("shop.orders"), TypeName::new("HandWritten"))
+    );
+    assert_eq!(HandWritten.variant(), HandWritten::EVENT_TYPE);
 }

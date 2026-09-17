@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use nitinol::eventsource::Event;
 use nitinol_eventsource::{Aggregate, Decider, Decision, Query};
 
+use crate::codec::JsonCodec;
+
 #[derive(Clone, Debug, Serialize, Deserialize, Event)]
-#[event(family = "saga.example")]
+#[event(family = "saga.example", codec = JsonCodec)]
 pub struct Reserved {
     pub sku: String,
 }

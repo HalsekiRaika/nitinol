@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Query};
 use nitinol_persistence::{EventType, Family, TypeName};
 
+use crate::codec::JsonCodec;
+
 /// The payslip's genesis event.
 ///
 /// It carries no payload because it has nothing to say that the stream it is
@@ -21,6 +23,8 @@ pub struct PayslipIssued;
 impl Event for PayslipIssued {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.fanout"), TypeName::new("PayslipIssued"));
+
+    type Codec = JsonCodec;
 }
 
 /// Issue the payslip this stream stands for.

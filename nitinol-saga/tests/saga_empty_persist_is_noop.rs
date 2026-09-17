@@ -51,6 +51,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("empty_persist"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,6 +64,7 @@ impl Event for ReservationRequested {
         Family::new("empty_persist"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -75,6 +77,7 @@ impl Event for InventoryReserved {
         Family::new("empty_persist"),
         TypeName::new("InventoryReserved"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -349,9 +352,7 @@ async fn append_order_placed(
 #[tokio::test]
 async fn all_empty_persist_writes_nothing_to_the_store() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("empty-persist-order");
@@ -370,10 +371,8 @@ async fn all_empty_persist_writes_nothing_to_the_store() {
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,
@@ -421,9 +420,7 @@ async fn all_empty_persist_writes_nothing_to_the_store() {
 #[tokio::test]
 async fn persist_with_no_events_but_a_tell_is_not_a_noop() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("tell-only-order");
@@ -448,10 +445,8 @@ async fn persist_with_no_events_but_a_tell_is_not_a_noop() {
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,

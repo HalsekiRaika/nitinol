@@ -37,6 +37,8 @@ struct Incremented;
 
 impl Event for Incremented {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
+
+    type Codec = TestCodec;
 }
 
 /// Pass-through codec: `Incremented` is a unit struct, so there is nothing to encode.
@@ -168,7 +170,6 @@ async fn exec_delivers_the_query_response_exactly_once() {
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let proxy = AggregateProps::<TallyCounter>::new(AggregateId::new("query-tally"), store)
-        .with_codec(Arc::new(TestCodec))
         .spawn(&system)
         .await;
 
@@ -218,7 +219,6 @@ async fn exec_delivers_query_error_as_exec_error_domain() {
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let proxy = AggregateProps::<Counter>::new(AggregateId::new("query-unlabelled"), store)
-        .with_codec(Arc::new(TestCodec))
         .spawn(&system)
         .await;
 

@@ -16,7 +16,10 @@ impl SystemEventDecodeError {
     }
 }
 
-/// Error produced when a [`crate::codec::ErasedCodec`] operation fails.
+/// Error produced when the codec a domain type named fails.
+///
+/// The codec's own error is boxed rather than surfaced, so a domain's choice of
+/// wire format does not become part of the framework's error family.
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
     #[error("encode error: {0}")]

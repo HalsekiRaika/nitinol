@@ -23,7 +23,6 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapsho
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::ProcessSystem;
 
-use eventsource_snapshot::codec::{EventCodec, SnapshotCodec};
 use eventsource_snapshot::counter::{Counter, GetCount, Increment};
 
 fn init_tracing() {
@@ -48,8 +47,7 @@ async fn main() {
     // Process 1: write 5 events
     {
         let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-            .with_codec(Arc::new(EventCodec))
-            .with_snapshot_persistor(snapshot_ref.clone(), Arc::new(SnapshotCodec))
+            .with_snapshot_persistor(snapshot_ref.clone())
             .spawn(&system)
             .await;
         for _ in 0..5 {
@@ -73,8 +71,7 @@ async fn main() {
     // Process 2: add 2 more events (seq=6,7)
     {
         let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-            .with_codec(Arc::new(EventCodec))
-            .with_snapshot_persistor(snapshot_ref.clone(), Arc::new(SnapshotCodec))
+            .with_snapshot_persistor(snapshot_ref.clone())
             .spawn(&system)
             .await;
         proxy.ask(Increment).await.expect("ask 6");
@@ -84,8 +81,7 @@ async fn main() {
 
     // Process 3: restore from snapshot (seq=5) + apply delta events (seq=6,7)
     let proxy3 = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-        .with_codec(Arc::new(EventCodec))
-        .with_snapshot_persistor(snapshot_ref.clone(), Arc::new(SnapshotCodec))
+        .with_snapshot_persistor(snapshot_ref.clone())
         .spawn(&system)
         .await;
 

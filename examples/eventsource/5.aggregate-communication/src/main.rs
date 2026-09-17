@@ -38,7 +38,6 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaDefaultStoreExt;
 
-use eventsource_aggregate_communication::codec::JsonCodec;
 use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment};
 use eventsource_aggregate_communication::saga::RelaySaga;
 
@@ -61,7 +60,6 @@ async fn main() {
     // are tenants of this one store, each under its own key.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();
 

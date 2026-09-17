@@ -9,7 +9,6 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaDefaultStoreExt;
 
-use saga_basic_saga::codec::JsonCodec;
 use saga_basic_saga::inventory::{GetReservedCount, Inventory};
 use saga_basic_saga::order::{Order, PlaceOrder};
 use saga_basic_saga::saga::ReservationSaga;
@@ -35,7 +34,6 @@ async fn main() {
     // the system hand it to every spawn below.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();
 

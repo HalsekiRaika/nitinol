@@ -117,6 +117,8 @@ struct Evt;
 
 impl Event for Evt {
     const EVENT_TYPE: EventType = EventType::new(Family::new("issue109"), TypeName::new("Evt"));
+
+    type Codec = UnitCodec;
 }
 
 /// An event type that is never registered via `with_event`, used to pin down
@@ -476,7 +478,7 @@ async fn at_least_once_failing_event_blocks_the_next_event() {
             remaining_failures: Arc::clone(&failures_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -530,7 +532,7 @@ async fn at_least_once_next_event_waits_for_the_retry_to_succeed() {
             remaining_failures: Arc::clone(&failures_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -594,7 +596,7 @@ async fn at_least_once_failed_event_survives_a_restart() {
                 remaining_failures: Arc::clone(&failures_c),
             },
         )
-        .with_event::<Evt>(Arc::new(UnitCodec))
+        .with_event::<Evt>()
         .delivery_mode(DeliveryMode::AtLeastOnce)
         .catchup_from_aggregate(agg_id.clone())
         .spawn(&system)
@@ -641,7 +643,7 @@ async fn at_least_once_failed_event_survives_a_restart() {
             remaining_failures: Arc::clone(&failures_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -691,7 +693,7 @@ async fn exactly_once_tx_project_failure_blocks_the_next_event() {
         },
     )
     .with_tx_provider(provider)
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -759,7 +761,7 @@ async fn exactly_once_tx_begin_failure_blocks_the_next_event() {
         },
     )
     .with_tx_provider(provider)
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -815,7 +817,7 @@ async fn exactly_once_tx_checkpoint_save_failure_blocks_the_next_event() {
         },
     )
     .with_tx_provider(provider)
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -871,7 +873,7 @@ async fn exactly_once_tx_commit_failure_blocks_the_next_event() {
         },
     )
     .with_tx_provider(provider)
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -931,7 +933,7 @@ async fn at_most_once_failing_event_does_not_block_the_next_event() {
             remaining_failures: Arc::clone(&failures_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtMostOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -982,7 +984,7 @@ async fn exactly_once_without_tx_project_failure_blocks_the_next_event() {
             remaining_failures: Arc::clone(&failures_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::ExactlyOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -1036,7 +1038,7 @@ async fn projector_keeps_retrying_a_permanently_failing_event() {
             remaining_failures: Arc::clone(&failures_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -1084,7 +1086,7 @@ async fn unregistered_event_type_does_not_block_the_next_event() {
             remaining_failures: budget(0),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -1133,7 +1135,7 @@ async fn already_processed_event_is_accepted_without_projecting() {
             remaining_failures: budget(0),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id.clone())
     .spawn(&system)

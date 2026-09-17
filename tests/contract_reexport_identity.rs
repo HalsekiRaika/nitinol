@@ -12,17 +12,37 @@
 //! Run with: `cargo test -p nitinol --features eventsource`.
 #![cfg(feature = "eventsource")]
 
+use bytes::Bytes;
 use nitinol::persistence::{EventType, Family, TypeName};
 
-#[derive(Clone)]
+/// One codec for every fixture value here: the file is about trait identity
+/// across the two public paths, so a format is only needed to satisfy the
+/// association at all.
+struct IdentityCodec;
+
+impl<T: Default> nitinol::contract::Codec<T> for IdentityCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_value: &T) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<T, Self::Error> {
+        Ok(T::default())
+    }
+}
+
+#[derive(Clone, Default)]
 struct ContractPathEvent;
 
 impl nitinol::contract::Event for ContractPathEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("identity"), TypeName::new("ContractPathEvent"));
+
+    type Codec = IdentityCodec;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct EventsourcePathEvent;
 
 impl nitinol::eventsource::Event for EventsourcePathEvent {
@@ -30,6 +50,8 @@ impl nitinol::eventsource::Event for EventsourcePathEvent {
         Family::new("identity"),
         TypeName::new("EventsourcePathEvent"),
     );
+
+    type Codec = IdentityCodec;
 }
 
 #[derive(Default)]
@@ -43,6 +65,7 @@ impl nitinol::contract::Aggregate for ContractPathAggregate {
 
 impl nitinol::contract::Snapshotable for ContractPathAggregate {
     type Snapshot = ();
+    type Codec = IdentityCodec;
 
     fn capture(&self) {}
 
@@ -62,6 +85,7 @@ impl nitinol::eventsource::Aggregate for EventsourcePathAggregate {
 
 impl nitinol::eventsource::Snapshotable for EventsourcePathAggregate {
     type Snapshot = ();
+    type Codec = IdentityCodec;
 
     fn capture(&self) {}
 

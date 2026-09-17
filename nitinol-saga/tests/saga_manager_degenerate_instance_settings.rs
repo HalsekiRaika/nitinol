@@ -58,6 +58,7 @@ struct Ping;
 impl Event for Ping {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.settings"), TypeName::new("Ping"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,6 +67,7 @@ struct SagaLog;
 impl Event for SagaLog {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.settings"), TypeName::new("SagaLog"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Debug)]
@@ -153,6 +155,7 @@ struct Reserved;
 impl Event for Reserved {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.settings"), TypeName::new("Reserved"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -255,9 +258,7 @@ async fn load_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<Loade
 #[tokio::test]
 async fn manager_with_dead_letter_subscriber_delivers_the_instances_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let received = Arc::new(Mutex::new(Vec::<DeadLetterEvent>::new()));
     let received_for_proc = Arc::clone(&received);
@@ -282,11 +283,9 @@ async fn manager_with_dead_letter_subscriber_delivers_the_instances_dead_letter(
             handled: Arc::clone(&handled_for_saga),
             handle_count: Arc::clone(&handle_count_for_saga),
         })
-        .with_codec(system.codec::<SagaLog>())
         .with_dead_letter_subscriber(subscriber_proxy)
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
             SequenceCursor::Stream {
                 key: "mgr-dlq-sub-upstream".to_owned(),
                 after: 0,
@@ -333,9 +332,7 @@ async fn manager_with_dead_letter_subscriber_delivers_the_instances_dead_letter(
 #[tokio::test]
 async fn manager_with_enqueue_policy_suppresses_the_instances_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "mgr-dlq-policy-upstream", 1).await;
@@ -352,11 +349,9 @@ async fn manager_with_enqueue_policy_suppresses_the_instances_dead_letter() {
             handled: Arc::clone(&handled_for_saga),
             handle_count: Arc::clone(&handle_count_for_saga),
         })
-        .with_codec(system.codec::<SagaLog>())
         .with_enqueue_policy(Arc::new(IgnoreAll))
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
             SequenceCursor::Stream {
                 key: "mgr-dlq-policy-upstream".to_owned(),
                 after: 0,
@@ -437,9 +432,7 @@ impl Saga for InertSaga {
 #[tokio::test]
 async fn manager_with_crash_restart_factory_redispatches_the_instances_pending_tell() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let mock = MockAggregateProxy::<Inventory>::new();
 
@@ -467,7 +460,6 @@ async fn manager_with_crash_restart_factory_redispatches_the_instances_pending_t
     let mock_for_factory = mock.clone();
     let _manager_proxy =
         SagaManagerProps::<InertSaga>::new(Arc::clone(&saga_store), InertSaga::default)
-            .with_codec(system.codec::<SagaLog>())
             .with_crash_restart_factory(move |_bytes: &[u8]| -> Option<TellIntent> {
                 Some(TellIntent::new::<Inventory, Reserve, _>(
                     mock_for_factory.clone(),
@@ -476,7 +468,6 @@ async fn manager_with_crash_restart_factory_redispatches_the_instances_pending_t
             })
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<Ping>(),
                 SequenceCursor::Stream {
                     key: "mgr-crash-restart-upstream".to_owned(),
                     after: 0,
@@ -532,9 +523,7 @@ async fn manager_with_crash_restart_factory_redispatches_the_instances_pending_t
 #[tokio::test]
 async fn manager_dead_letter_subscriber_receives_an_ended_instances_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let received = Arc::new(Mutex::new(Vec::<DeadLetterEvent>::new()));
     let received_for_proc = Arc::clone(&received);
@@ -554,11 +543,9 @@ async fn manager_dead_letter_subscriber_receives_an_ended_instances_dead_letter(
 
     let _manager_proxy =
         SagaManagerProps::<InertSaga>::new(Arc::clone(&saga_store), InertSaga::default)
-            .with_codec(system.codec::<SagaLog>())
             .with_dead_letter_subscriber(subscriber_proxy)
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<Ping>(),
                 SequenceCursor::Stream {
                     key: "mgr-dlq-ended-upstream".to_owned(),
                     after: 0,

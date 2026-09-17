@@ -82,6 +82,7 @@ struct Ping;
 
 impl Event for Ping {
     const EVENT_TYPE: EventType = EventType::new(Family::new("dlq_disp"), TypeName::new("Ping"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -91,6 +92,7 @@ struct Note {
 
 impl Event for Note {
     const EVENT_TYPE: EventType = EventType::new(Family::new("dlq_disp"), TypeName::new("Note"));
+    type Codec = AnyBytesCodec;
 }
 
 /// Correlation rule of [`NoteSaga`]: one instance owns every `Ping`.
@@ -213,9 +215,7 @@ fn snapshot(applied: &Arc<Mutex<Vec<Note>>>) -> Vec<Note> {
 #[tokio::test]
 async fn replay_never_hands_a_disposition_marker_to_the_domain_codec() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(NOTE_SAGA_ID);
@@ -237,10 +237,8 @@ async fn replay_never_hands_a_disposition_marker_to_the_domain_codec() {
         SagaProps::<NoteSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || NoteSaga {
             applied: Arc::clone(&applied_for_saga),
         })
-        .with_codec(Arc::new(AnyBytesCodec))
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
             SequenceCursor::Stream {
                 key: "disposition-replay-upstream".to_owned(),
                 after: 0,
@@ -284,9 +282,7 @@ async fn replay_never_hands_a_disposition_marker_to_the_domain_codec() {
 #[tokio::test]
 async fn a_disposition_marker_neither_ends_the_saga_nor_desynchronises_its_sequence() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(NOTE_SAGA_ID);
@@ -308,10 +304,8 @@ async fn a_disposition_marker_neither_ends_the_saga_nor_desynchronises_its_seque
         SagaProps::<NoteSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || NoteSaga {
             applied: Arc::clone(&applied_for_saga),
         })
-        .with_codec(Arc::new(AnyBytesCodec))
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
             SequenceCursor::Stream {
                 key: "disposition-sequence-upstream".to_owned(),
                 after: 0,

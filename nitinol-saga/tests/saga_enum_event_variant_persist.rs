@@ -36,6 +36,7 @@ impl Event for UpstreamTriggered {
         Family::new("variant.upstream"),
         TypeName::new("UpstreamTriggered"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -67,6 +68,7 @@ enum WorkflowEvent {
 impl Event for WorkflowEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("variant.saga"), TypeName::new("WorkflowEvent"));
+    type Codec = JsonCodec;
 
     fn variant(&self) -> EventType {
         let v = match self {
@@ -140,9 +142,7 @@ async fn load_saga_events(
 #[tokio::test]
 async fn saga_persist_stores_enum_event_variant_in_loaded_event() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let upstream_id = AggregateId::new("variant-upstream-agg");
@@ -158,10 +158,8 @@ async fn saga_persist_stores_enum_event_variant_in_loaded_event() {
         SagaProps::<WorkflowSaga>::new(saga_id.clone(), Arc::clone(&store), move || WorkflowSaga {
             done: Arc::clone(&done_for_saga),
         })
-        .with_codec(system.codec::<WorkflowEvent>())
         .with_subscription(
             Arc::clone(&store),
-            system.codec::<UpstreamTriggered>(),
             SequenceCursor::Stream {
                 key: upstream_id.as_str().to_owned(),
                 after: 0,

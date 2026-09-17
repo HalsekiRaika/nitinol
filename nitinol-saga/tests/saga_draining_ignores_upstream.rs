@@ -58,6 +58,7 @@ impl Event for UpstreamDrainEvent {
         Family::new("drain_guard"),
         TypeName::new("UpstreamDrainEvent"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,6 +69,7 @@ struct DrainSagaEvent {
 impl Event for DrainSagaEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("drain_guard"), TypeName::new("DrainSagaEvent"));
+    type Codec = JsonCodec;
 }
 
 // Target aggregate (receives the tell from the saga)
@@ -201,9 +203,7 @@ async fn wait_for_ended_marker(store: &Arc<dyn EventStore>, saga_id: &SagaId) ->
 #[tokio::test]
 async fn draining_saga_ignores_upstream_event_before_tell_settles() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("drain-guard-agg");
@@ -236,10 +236,8 @@ async fn draining_saga_ignores_upstream_event_before_tell_settles() {
                 handle_count: Arc::clone(&handle_count_clone),
             }
         })
-        .with_codec(system.codec::<DrainSagaEvent>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<UpstreamDrainEvent>(),
             SequenceCursor::Stream {
                 key: agg_id.as_str().to_owned(),
                 after: 0,

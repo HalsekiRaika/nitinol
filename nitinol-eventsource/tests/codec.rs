@@ -1,21 +1,29 @@
-// Unit tests for Codec<E>, ErasedCodec<E>, blanket impl, and CodecError.
-//
-// Verified behaviour:
-// - Codec<E> can be implemented with associated encode/decode functions
-// - encode → decode roundtrip preserves the value
-// - blanket impl promotes any Codec<E> to ErasedCodec<E>
-// - Arc<dyn ErasedCodec<E>> works via the blanket impl
-// - CodecError::Encode is produced when encode fails
-// - CodecError::Decode is produced when decode fails (invalid payload)
-// - CodecError implements std::error::Error
+//! `Codec<E>` and the error family the framework classifies its failures into.
+//!
+//! Verified behaviour:
+//! - `Codec<E>` can be implemented with associated `encode` / `decode` functions
+//! - `encode` → `decode` round-trip preserves the value
+//! - a failure of the codec an event names is reported as
+//!   `PersistError::Codec(CodecError::Encode(..))`, and is permanent
+//! - `CodecError` implements `std::error::Error`
+//!
+//! The classification above used to be observed on the blanket impl that
+//! promoted a `Codec<E>` into a type-erased handle. There is no such handle any
+//! more — an event names its codec and the framework calls it statically — so
+//! the same claim is now made where a caller can actually see it: the answer
+//! `ask` gives when the named codec refuses to encode.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::codec::{Codec, ErasedCodec};
-use nitinol_eventsource::error::CodecError;
+use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::error::{AskError, CodecError, PersistError, Retryability};
+use nitinol_eventsource::{Aggregate, AggregateProps, Decider, Decision, Event};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+use nitinol_runtime::ProcessSystem;
 
 // Fixtures: test event type
 
@@ -29,7 +37,9 @@ struct MyEvent {
 
 /// Codec that uses serde_json for serialisation.
 /// Works for any E that implements Serialize + DeserializeOwned.
-#[derive(Default)]
+///
+/// Never constructed: `Codec`'s methods are associated functions, so a codec is
+/// reached through its type rather than through a value.
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -46,7 +56,6 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 
 // Fixtures: AlwaysFailCodec — produces errors on every call
 
-#[derive(Default)]
 struct AlwaysFailCodec;
 
 #[derive(Debug, thiserror::Error)]
@@ -65,10 +74,6 @@ impl Codec<MyEvent> for AlwaysFailCodec {
     }
 }
 
-// Helper: type-level assertion that a value is Arc<dyn ErasedCodec<E>>
-
-fn assert_erased_codec<E: Send + Sync + 'static>(_: &Arc<dyn ErasedCodec<E>>) {}
-
 // Codec<E>: associated functions compile and return the correct types
 
 /// Codec::encode returns Ok(Bytes) for a valid event.
@@ -81,8 +86,8 @@ fn codec_encode_returns_ok_bytes_for_valid_event() {
     };
 
     // When
-    // Qualified syntax required: the blanket impl `ErasedCodec<E> for C: Codec<E>`
-    // adds an `encode` method to JsonCodec, causing E0034 without disambiguation.
+    // Qualified syntax required: `JsonCodec` implements `Codec<E>` for every
+    // serialisable `E`, so the subject has to be named.
     let result = <JsonCodec as Codec<MyEvent>>::encode(&event);
 
     // Then
@@ -156,144 +161,68 @@ fn codec_roundtrip_zero_value_event_preserved() {
     );
 }
 
-// blanket impl: Codec<E> → ErasedCodec<E>
+// A failing codec, classified where a caller can see it
 
-/// Arc::new(JsonCodec) can be coerced to Arc<dyn ErasedCodec<MyEvent>>
-/// via the blanket impl.
-#[test]
-fn codec_impl_can_be_upcast_to_arc_dyn_erased_codec() {
-    // Given / When
-    let codec: Arc<dyn ErasedCodec<MyEvent>> = Arc::new(JsonCodec);
+/// An event whose named codec refuses every encode, so the only thing the
+/// append can report is the codec's failure.
+impl Event for MyEvent {
+    const EVENT_TYPE: EventType = EventType::new(Family::new("codec"), TypeName::new("MyEvent"));
 
-    // Then: type-level assertion (compile-time proof)
-    assert_erased_codec(&codec);
+    type Codec = AlwaysFailCodec;
 }
 
-/// ErasedCodec::encode via blanket impl succeeds and returns non-empty bytes.
-#[test]
-fn erased_codec_encode_via_blanket_impl_succeeds() {
-    // Given
-    let codec: Arc<dyn ErasedCodec<MyEvent>> = Arc::new(JsonCodec);
-    let event = MyEvent {
-        value: 5,
-        name: "erased".to_string(),
-    };
+#[derive(Default)]
+struct Recorder;
 
-    // When
-    let result = codec.encode(&event);
+impl Aggregate for Recorder {
+    type Event = MyEvent;
 
-    // Then
-    assert!(
-        result.is_ok(),
-        "ErasedCodec encode must succeed via blanket impl"
-    );
-    assert!(
-        !result
-            .expect("result is Ok, as asserted immediately above")
-            .is_empty(),
-        "encoded bytes must not be empty for a non-trivial event"
-    );
+    fn apply(&mut self, _event: MyEvent) {}
 }
 
-/// ErasedCodec roundtrip via blanket impl preserves the value.
-#[test]
-fn erased_codec_roundtrip_via_blanket_impl_preserves_value() {
-    // Given
-    let codec: Arc<dyn ErasedCodec<MyEvent>> = Arc::new(JsonCodec);
-    let original = MyEvent {
-        value: 123,
-        name: "erased-roundtrip".to_string(),
-    };
+struct Record;
 
-    // When
-    let bytes = codec
-        .encode(&original)
-        .expect("ErasedCodec encode must succeed");
-    let decoded = codec
-        .decode(&bytes)
-        .expect("ErasedCodec decode must succeed");
+impl Decider<Record> for Recorder {
+    type Output = ();
+    type Rejection = std::convert::Infallible;
 
-    // Then
+    fn decide(&self, _cmd: Record) -> Decision<MyEvent, (), Self::Rejection> {
+        Decision::persist(vec![MyEvent {
+            value: 1,
+            name: String::from("unwritable"),
+        }])
+        .output(())
+    }
+}
+
+/// Given an accepted decision whose event names a codec that always fails,
+/// When the command is asked, Then the caller is told the machinery failed to
+/// record it — `Persist(Codec(Encode(..)))` — rather than being given a verdict
+/// on the command.
+#[tokio::test]
+async fn a_failing_encode_is_reported_as_a_codec_error_on_the_persist_path() {
+    let system = ProcessSystem::new().await;
+    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+
+    let proxy = AggregateProps::<Recorder>::new(AggregateId::new("codec-encode-fails"), store)
+        .spawn(&system)
+        .await;
+
+    let error = proxy
+        .ask(Record)
+        .await
+        .expect_err("an event that cannot be encoded cannot be appended");
+
+    match &error {
+        AskError::Persist(PersistError::Codec(CodecError::Encode(_))) => {}
+        other => panic!("expected Persist(Codec(Encode(..))), got {other:?}"),
+    }
+
     assert_eq!(
-        decoded, original,
-        "ErasedCodec roundtrip must preserve the event value"
+        error.retryability(),
+        Retryability::Permanent,
+        "encoding this event is deterministic, so re-issuing it fails identically"
     );
-}
-
-// CodecError: error variant wrapping
-
-/// Decode with an invalid JSON payload produces CodecError::Decode.
-#[test]
-fn erased_codec_decode_invalid_payload_produces_codec_error_decode() {
-    // Given: payload that is not valid JSON for MyEvent
-    let codec: Arc<dyn ErasedCodec<MyEvent>> = Arc::new(JsonCodec);
-    let bad_payload = b"not valid json at all";
-
-    // When
-    let result = codec.decode(bad_payload);
-
-    // Then
-    match result {
-        Err(CodecError::Decode(_)) => {}
-        Ok(_) => panic!("decode of invalid payload must not succeed"),
-        Err(CodecError::Encode(_)) => panic!("wrong error variant: expected Decode, got Encode"),
-    }
-}
-
-/// Decode of a structurally valid JSON but wrong shape produces CodecError::Decode.
-#[test]
-fn erased_codec_decode_wrong_shape_json_produces_codec_error_decode() {
-    // Given: valid JSON but missing required fields of MyEvent
-    let codec: Arc<dyn ErasedCodec<MyEvent>> = Arc::new(JsonCodec);
-    let wrong_shape = br#"{"unexpected_field": true}"#;
-
-    // When
-    let result = codec.decode(wrong_shape);
-
-    // Then
-    match result {
-        Err(CodecError::Decode(_)) => {}
-        Ok(_) => panic!("decode of wrong-shape JSON must not succeed"),
-        Err(CodecError::Encode(_)) => panic!("wrong error variant: expected Decode, got Encode"),
-    }
-}
-
-/// AlwaysFailCodec::encode error is wrapped as CodecError::Encode.
-#[test]
-fn erased_codec_encode_failure_produces_codec_error_encode() {
-    // Given
-    let codec: Arc<dyn ErasedCodec<MyEvent>> = Arc::new(AlwaysFailCodec);
-    let event = MyEvent {
-        value: 1,
-        name: "x".to_string(),
-    };
-
-    // When
-    let result = codec.encode(&event);
-
-    // Then
-    match result {
-        Err(CodecError::Encode(_)) => {}
-        Ok(_) => panic!("AlwaysFailCodec encode must not succeed"),
-        Err(CodecError::Decode(_)) => panic!("wrong error variant: expected Encode, got Decode"),
-    }
-}
-
-/// AlwaysFailCodec::decode error is wrapped as CodecError::Decode.
-#[test]
-fn erased_codec_decode_failure_produces_codec_error_decode_custom() {
-    // Given
-    let codec: Arc<dyn ErasedCodec<MyEvent>> = Arc::new(AlwaysFailCodec);
-
-    // When
-    let result = codec.decode(b"anything");
-
-    // Then
-    match result {
-        Err(CodecError::Decode(_)) => {}
-        Ok(_) => panic!("AlwaysFailCodec decode must not succeed"),
-        Err(CodecError::Encode(_)) => panic!("wrong error variant: expected Decode, got Encode"),
-    }
 }
 
 // CodecError: implements std::error::Error

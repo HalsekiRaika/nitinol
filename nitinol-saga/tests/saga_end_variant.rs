@@ -35,6 +35,7 @@ struct OrderPlaced {
 
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType = EventType::new(Family::new("end"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -45,6 +46,7 @@ struct ReservationRequested {
 impl Event for ReservationRequested {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("end"), TypeName::new("ReservationRequested"));
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`PersistThenEndSaga`]: this file drives one order
@@ -135,9 +137,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 #[tokio::test]
 async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("end-order");
@@ -158,10 +158,8 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
                 handled_first: Arc::clone(&handled_first_clone),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,

@@ -2,7 +2,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::SequenceCursor;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
@@ -24,34 +23,28 @@ use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
 use nitinol_runtime::process::{Process, ProcessProxy, Receive};
 
-/// Marker: the event codec has not yet been provided.
-pub struct CodecUnset;
-
-/// Marker: the event codec has been provided.
-pub struct CodecSet<E> {
-    pub(crate) codec: Arc<dyn ErasedCodec<E>>,
-}
-
 /// Marker: the upstream subscription has not yet been provided.
 pub struct SubscriptionUnset;
 
 /// Marker: the upstream subscription has been provided.
 pub struct SubscriptionSet<S: Saga> {
     pub(crate) upstream_store: Arc<dyn EventStore>,
-    pub(crate) upstream_codec: Arc<dyn ErasedCodec<S::SubscribedEvent>>,
     pub(crate) cursor: SequenceCursor,
+    pub(crate) _saga: std::marker::PhantomData<fn() -> S>,
 }
 
 /// Builder for a saga spawn.
 ///
-/// State parameters:
-/// - `C` — codec configuration (`CodecUnset` / `CodecSet<S::Event>`)
+/// State parameter:
 /// - `Sub` — subscription configuration (`SubscriptionUnset` / `SubscriptionSet<S>`)
-pub struct SagaProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
+///
+/// There is no codec stage: `S::Event` and `S::SubscribedEvent` each name the
+/// codec that writes and reads them, so a saga has no format of its own to be
+/// handed and no way to journal itself in one its event type never named.
+pub struct SagaProps<S: Saga, Sub = SubscriptionUnset> {
     saga_id: SagaId,
     store: Arc<dyn EventStore>,
     producer: Arc<dyn Fn() -> S + Send + Sync>,
-    codec: C,
     subscription: Sub,
     crash_restart_factory: Option<CrashRestartFactory>,
     scheduler: Option<SchedulerProxy>,
@@ -62,7 +55,7 @@ pub struct SagaProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
     initial_tell_states: HashMap<u64, TellState>,
 }
 
-impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
+impl<S: Saga> SagaProps<S, SubscriptionUnset> {
     /// Begin a saga spawn.
     ///
     /// `producer` constructs the saga instance.  Closure form is required so
@@ -78,7 +71,6 @@ impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
             saga_id,
             store,
             producer: Arc::new(producer),
-            codec: CodecUnset,
             subscription: SubscriptionUnset,
             crash_restart_factory: None,
             scheduler: None,
@@ -91,30 +83,7 @@ impl<S: Saga> SagaProps<S, CodecUnset, SubscriptionUnset> {
     }
 }
 
-impl<S: Saga, Sub> SagaProps<S, CodecUnset, Sub> {
-    /// Bind the codec used to encode and decode the saga's own events.
-    pub fn with_codec(
-        self,
-        codec: Arc<dyn ErasedCodec<S::Event>>,
-    ) -> SagaProps<S, CodecSet<S::Event>, Sub> {
-        SagaProps {
-            saga_id: self.saga_id,
-            store: self.store,
-            producer: self.producer,
-            codec: CodecSet { codec },
-            subscription: self.subscription,
-            crash_restart_factory: self.crash_restart_factory,
-            scheduler: self.scheduler,
-            enqueue_policy: self.enqueue_policy,
-            dead_letter_subscriber: self.dead_letter_subscriber,
-            decode_failure_route_fn: self.decode_failure_route_fn,
-            #[cfg(test)]
-            initial_tell_states: self.initial_tell_states,
-        }
-    }
-}
-
-impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
+impl<S: Saga> SagaProps<S, SubscriptionUnset> {
     /// Subscribe this saga instance to an upstream `EventStore`.
     ///
     /// At spawn time the saga starts a runtime child `DirectPollerProcess`
@@ -127,18 +96,16 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
     pub fn with_subscription(
         self,
         upstream_store: Arc<dyn EventStore>,
-        upstream_codec: Arc<dyn ErasedCodec<S::SubscribedEvent>>,
         cursor: SequenceCursor,
-    ) -> SagaProps<S, C, SubscriptionSet<S>> {
+    ) -> SagaProps<S, SubscriptionSet<S>> {
         SagaProps {
             saga_id: self.saga_id,
             store: self.store,
             producer: self.producer,
-            codec: self.codec,
             subscription: SubscriptionSet {
                 upstream_store,
-                upstream_codec,
                 cursor,
+                _saga: std::marker::PhantomData,
             },
             crash_restart_factory: self.crash_restart_factory,
             scheduler: self.scheduler,
@@ -151,7 +118,7 @@ impl<S: Saga, C> SagaProps<S, C, SubscriptionUnset> {
     }
 }
 
-impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
+impl<S: Saga, Sub> SagaProps<S, Sub> {
     /// Register a factory for crash-restart re-dispatch.
     pub fn with_crash_restart_factory<F>(mut self, factory: F) -> Self
     where
@@ -240,7 +207,7 @@ impl<S: Saga, C, Sub> SagaProps<S, C, Sub> {
     }
 }
 
-impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
+impl<S: Saga> SagaProps<S, SubscriptionSet<S>> {
     /// Spawn the saga process.
     ///
     /// The saga's upstream subscription is wired as a direct poller child
@@ -252,13 +219,9 @@ impl<S: Saga> SagaProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
             saga_id: self.saga_id,
             store: self.store,
             producer: self.producer,
-            codec: self.codec.codec,
             enqueue_policy: self.enqueue_policy.unwrap_or_else(default_enqueue_policy),
             upstream: Some(OwnedUpstream {
-                config: upstream_subscription::<S>(
-                    self.subscription.upstream_store,
-                    self.subscription.upstream_codec,
-                ),
+                config: upstream_subscription::<S>(self.subscription.upstream_store),
                 cursor: self.subscription.cursor,
             }),
             crash_restart_factory: self.crash_restart_factory,

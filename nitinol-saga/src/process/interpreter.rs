@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
-use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendingEvent, EventType};
 use nitinol_runtime::process::ProcessContext;
@@ -32,7 +31,6 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     pub(crate) saga_id: SagaId,
     pub(crate) sequence: &'a mut u64,
     pub(crate) store: Arc<dyn EventStore>,
-    pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
     pub(crate) retry_policy: RetryPolicy,
     pub(crate) process_ctx: &'a mut ProcessContext<SagaProcess<S>>,
     pub(crate) tell_states: &'a mut HashMap<u64, TellState>,
@@ -163,7 +161,7 @@ async fn persist_batch<S: Saga>(
     let persisted: Vec<SagaPersisted<S::Event>> =
         events.into_iter().map(SagaPersisted::Domain).collect();
 
-    let encoded_events = match encode_events::<S>(&persisted, ictx.codec.as_ref()) {
+    let encoded_events = match encode_events::<S>(&persisted) {
         Some(payloads) => payloads,
         None => return InterpretOutcome::Continue,
     };
@@ -285,13 +283,10 @@ async fn persist_batch<S: Saga>(
     InterpretOutcome::Continue
 }
 
-fn encode_events<S: Saga>(
-    events: &[SagaPersisted<S::Event>],
-    codec: &dyn ErasedCodec<S::Event>,
-) -> Option<Vec<(EventType, Bytes)>> {
+fn encode_events<S: Saga>(events: &[SagaPersisted<S::Event>]) -> Option<Vec<(EventType, Bytes)>> {
     let mut encoded = Vec::with_capacity(events.len());
     for event in events {
-        match event.encode(codec) {
+        match event.encode() {
             Ok(payload) => encoded.push((event.variant(), payload)),
             Err(e) => {
                 tracing::warn!(error = %e, "saga event encode failed; skipping persist batch");

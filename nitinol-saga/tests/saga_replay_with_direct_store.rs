@@ -27,6 +27,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("e2e.direct"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -60,6 +61,7 @@ impl Event for ReservationRequested {
         Family::new("e2e.direct"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`RecordingSaga`]: every `OrderPlaced` belongs to the
@@ -132,9 +134,7 @@ async fn wait_for_saga_event_count(
 #[tokio::test]
 async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
@@ -157,10 +157,8 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
                 done: Arc::clone(&done_for_producer),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,
@@ -224,9 +222,7 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
 #[tokio::test]
 async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
@@ -249,10 +245,8 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
                 done: Arc::clone(&done_for_producer),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,
@@ -293,9 +287,7 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
 #[tokio::test]
 async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let order_id = AggregateId::new("replay-order");
@@ -317,10 +309,8 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
                 done: Arc::clone(&done_first),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,
@@ -354,10 +344,8 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
                 done: Arc::clone(&done2_for_producer),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,

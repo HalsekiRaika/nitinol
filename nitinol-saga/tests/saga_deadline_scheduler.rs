@@ -68,6 +68,7 @@ struct Trigger {
 impl Event for Trigger {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("deadline_it"), TypeName::new("Trigger"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -78,6 +79,7 @@ struct Recorded {
 impl Event for Recorded {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("deadline_it"), TypeName::new("Recorded"));
+    type Codec = JsonCodec;
 }
 
 /// The saga's `Self::ScheduledMessage` — a typed payload that must survive the
@@ -211,9 +213,7 @@ async fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
 #[tokio::test]
 async fn schedule_fires_and_delivers_typed_message() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -239,10 +239,8 @@ async fn schedule_fires_and_delivers_typed_message() {
             fired: Arc::clone(&fired_producer),
         }
     })
-    .with_codec(system.codec::<Recorded>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<Trigger>(),
         SequenceCursor::Stream {
             key: "deadline-upstream-1".to_owned(),
             after: 0,
@@ -277,9 +275,7 @@ async fn schedule_fires_and_delivers_typed_message() {
 #[tokio::test]
 async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -305,10 +301,8 @@ async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
             fired: Arc::clone(&fired_producer),
         }
     })
-    .with_codec(system.codec::<Recorded>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<Trigger>(),
         SequenceCursor::Stream {
             key: "deadline-upstream-2".to_owned(),
             after: 0,
@@ -351,9 +345,7 @@ async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
 #[tokio::test]
 async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -392,10 +384,8 @@ async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
             fired: Arc::clone(&fired_producer),
         }
     })
-    .with_codec(system.codec::<Recorded>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<Trigger>(),
         SequenceCursor::Stream {
             key: "deadline-upstream-3".to_owned(),
             after: 0,
@@ -429,9 +419,7 @@ async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
 #[tokio::test]
 async fn cancel_schedule_prevents_the_timer_from_firing() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -468,10 +456,8 @@ async fn cancel_schedule_prevents_the_timer_from_firing() {
             fired: Arc::clone(&fired_producer),
         }
     })
-    .with_codec(system.codec::<Recorded>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<Trigger>(),
         SequenceCursor::Stream {
             key: "deadline-upstream-4".to_owned(),
             after: 0,
@@ -509,9 +495,7 @@ async fn cancel_schedule_prevents_the_timer_from_firing() {
 #[tokio::test]
 async fn replay_reregisters_unfired_schedule_and_fires_it() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -540,10 +524,8 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
                 fired: Arc::clone(&fired_1_producer),
             }
         })
-        .with_codec(system.codec::<Recorded>())
         .with_subscription(
             Arc::clone(&upstream_a),
-            system.codec::<Trigger>(),
             SequenceCursor::Stream {
                 key: "deadline-upstream-5a".to_owned(),
                 after: 0,
@@ -581,10 +563,8 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
                 fired: Arc::clone(&fired_2_producer),
             }
         })
-        .with_codec(system.codec::<Recorded>())
         .with_subscription(
             Arc::clone(&upstream_b),
-            system.codec::<Trigger>(),
             SequenceCursor::Stream {
                 key: "deadline-upstream-5b-empty".to_owned(),
                 after: 0,
@@ -711,9 +691,7 @@ impl Saga for OnceRescheduleSaga {
 #[tokio::test]
 async fn on_scheduled_reschedule_same_name_survives_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -742,10 +720,8 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
                 fires: Arc::clone(&fires_1_producer),
             }
         })
-        .with_codec(system.codec::<Recorded>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Trigger>(),
             SequenceCursor::Stream {
                 key: "deadline-upstream-arch004".to_owned(),
                 after: 0,
@@ -822,10 +798,8 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
                 fires: Arc::clone(&fires_2_producer),
             }
         })
-        .with_codec(system.codec::<Recorded>())
         .with_subscription(
             Arc::clone(&upstream_empty),
-            system.codec::<Trigger>(),
             SequenceCursor::Stream {
                 key: "deadline-upstream-arch004-empty".to_owned(),
                 after: 0,

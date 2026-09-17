@@ -29,6 +29,7 @@ impl Event for Triggered {
         Family::new("e2e.envelope.upstream"),
         TypeName::new("Triggered"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -58,6 +59,7 @@ struct DomainEvt {
 impl Event for DomainEvt {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("e2e.envelope"), TypeName::new("DomainEvt"));
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`EnvelopeSaga`]: one instance owns the upstream stream
@@ -114,9 +116,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 #[tokio::test]
 async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let upstream_id = AggregateId::new("envelope-encode-upstream");
@@ -137,10 +137,8 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
             persisted: Arc::clone(&persisted_for_saga),
             note: "persisted-by-handle".to_owned(),
         })
-        .with_codec(system.codec::<DomainEvt>())
         .with_subscription(
             Arc::clone(&store),
-            system.codec::<Triggered>(),
             SequenceCursor::Stream {
                 key: upstream_id.as_str().to_owned(),
                 after: 0,
@@ -209,9 +207,7 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
 #[tokio::test]
 async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let saga_id = SagaId::new(ENVELOPE_SAGA_ID);
@@ -257,10 +253,8 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
             persisted: Arc::clone(&persisted_for_saga),
             note: "unused-on-replay".to_owned(),
         })
-        .with_codec(system.codec::<DomainEvt>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Triggered>(),
             SequenceCursor::Stream {
                 key: "no-such-upstream".to_owned(),
                 after: 0,

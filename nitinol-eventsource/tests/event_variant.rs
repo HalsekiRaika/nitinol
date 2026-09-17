@@ -9,7 +9,9 @@
 //! These tests pin that type-level identity and the per-arm override.
 
 use bytes::Bytes;
-use nitinol_eventsource::{appending_system_event, Event, SystemEvent, SystemEventDecodeError};
+use nitinol_eventsource::{
+    appending_system_event, codec::Codec, Event, SystemEvent, SystemEventDecodeError,
+};
 use nitinol_persistence::{EventType, Family, TypeName, Variant};
 
 // Event::variant default
@@ -17,8 +19,26 @@ use nitinol_persistence::{EventType, Family, TypeName, Variant};
 #[derive(Clone)]
 struct Incremented;
 
+/// The codec `Incremented` names. These tests only read `variant()`, so the
+/// format only has to exist.
+struct UnitCodec;
+
+impl Codec<Incremented> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_: &Incremented) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_: &[u8]) -> Result<Incremented, Self::Error> {
+        Ok(Incremented)
+    }
+}
+
 impl Event for Incremented {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
+
+    type Codec = UnitCodec;
 }
 
 /// Given a struct Event that does not override `variant`, When `variant()` is
@@ -40,9 +60,33 @@ enum OrderEvent {
     Cancelled,
 }
 
+/// The codec `OrderEvent` names.
+struct OrderEventCodec;
+
+impl Codec<OrderEvent> for OrderEventCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(event: &OrderEvent) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from_static(match event {
+            OrderEvent::Placed => b"placed",
+            OrderEvent::Cancelled => b"cancelled",
+        }))
+    }
+
+    fn decode(payload: &[u8]) -> Result<OrderEvent, Self::Error> {
+        Ok(if payload == b"cancelled" {
+            OrderEvent::Cancelled
+        } else {
+            OrderEvent::Placed
+        })
+    }
+}
+
 impl Event for OrderEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
+
+    type Codec = OrderEventCodec;
 
     fn variant(&self) -> EventType {
         let variant = match self {

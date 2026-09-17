@@ -12,6 +12,7 @@ use nitinol::eventsource::Event;
 use nitinol_eventsource::AggregateProxy;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
 
+use crate::codec::JsonCodec;
 use crate::counter::{Counter, Increment, Incremented};
 
 /// The saga's own record that it has taken responsibility for one relay.
@@ -21,7 +22,7 @@ use crate::counter::{Counter, Increment, Incremented};
 /// on restart the saga replays this and re-dispatches anything the marker says
 /// was never delivered.
 #[derive(Clone, Debug, Serialize, Deserialize, Event)]
-#[event(family = "agg_comm.saga")]
+#[event(family = "agg_comm.saga", codec = JsonCodec)]
 pub struct RelayRequested;
 
 /// Relays every increment of counter A into an increment of counter B.

@@ -26,6 +26,8 @@ struct Incremented;
 
 impl Event for Incremented {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
+
+    type Codec = TestCodec;
 }
 
 // Fixtures: aggregate
@@ -128,7 +130,6 @@ async fn spawn_counter(aggregate_id: AggregateId) -> (ProcessSystem, AggregatePr
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let proxy = AggregateProps::<Counter>::new(aggregate_id, store)
-        .with_codec(Arc::new(TestCodec))
         .spawn(&system)
         .await;
     (system, proxy)
@@ -146,7 +147,6 @@ async fn ask_persists_events_to_event_store() {
     let id = AggregateId::new("agg-ask-persist");
 
     let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-        .with_codec(Arc::new(TestCodec))
         .spawn(&system)
         .await;
 
@@ -155,7 +155,6 @@ async fn ask_persists_events_to_event_store() {
 
     // Then: a fresh process for the same aggregate_id replays through the same Arc<dyn EventStore>.
     let proxy2 = AggregateProps::<Counter>::new(id, store)
-        .with_codec(Arc::new(TestCodec))
         .spawn(&system)
         .await;
 
@@ -317,6 +316,8 @@ enum CounterOp {
 impl Event for CounterOp {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("CounterOp"));
 
+    type Codec = CounterOpCodec;
+
     fn variant(&self) -> EventType {
         let v = match self {
             CounterOp::Incremented => Variant::new("Incremented"),
@@ -383,7 +384,6 @@ async fn aggregate_persist_stores_enum_event_variant_in_loaded_event() {
     let id = AggregateId::new("agg-enum-variant-persist");
 
     let proxy = AggregateProps::<CounterEnum>::new(id.clone(), Arc::clone(&store))
-        .with_codec(Arc::new(CounterOpCodec))
         .spawn(&system)
         .await;
 

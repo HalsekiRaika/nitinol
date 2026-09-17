@@ -11,18 +11,67 @@
 //! Run with: `cargo test -p nitinol --no-default-features --features contract`.
 #![cfg(feature = "contract")]
 
-use nitinol::contract::{Accepting, Aggregate, Decider, Decision, Event, Query, Snapshotable};
+use bytes::Bytes;
+use nitinol::contract::{
+    Accepting, Aggregate, Codec, Decider, Decision, Event, Query, Snapshotable,
+};
 use nitinol::persistence::{EventType, Family, TypeName, Variant};
 
 #[derive(Clone, Event)]
-#[event(family = "shop.orders")]
+#[event(family = "shop.orders", codec = PlacedCodec)]
 struct Placed;
 
+struct PlacedCodec;
+
+impl Codec<Placed> for PlacedCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Placed) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Placed, Self::Error> {
+        Ok(Placed)
+    }
+}
+
 #[derive(Clone, Event)]
-#[event(family = "shop.counter")]
+#[event(family = "shop.counter", codec = CounterEventCodec)]
 enum CounterEvent {
     Incremented,
     Decremented,
+}
+
+struct CounterEventCodec;
+
+impl Codec<CounterEvent> for CounterEventCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &CounterEvent) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<CounterEvent, Self::Error> {
+        Ok(CounterEvent::Incremented)
+    }
+}
+
+/// The snapshot value is its own format, named by `Snapshotable::Codec`.
+struct CounterSnapshotCodec;
+
+impl Codec<i64> for CounterSnapshotCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(value: &i64) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from(value.to_be_bytes().to_vec()))
+    }
+
+    fn decode(payload: &[u8]) -> Result<i64, Self::Error> {
+        let mut buf = [0u8; 8];
+        let taken = payload.len().min(8);
+        buf[..taken].copy_from_slice(&payload[..taken]);
+        Ok(i64::from_be_bytes(buf))
+    }
 }
 
 #[derive(Default)]
@@ -43,6 +92,7 @@ impl Aggregate for Counter {
 
 impl Snapshotable for Counter {
     type Snapshot = i64;
+    type Codec = CounterSnapshotCodec;
 
     fn capture(&self) -> i64 {
         self.value

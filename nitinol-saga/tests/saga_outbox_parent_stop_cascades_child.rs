@@ -132,6 +132,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("cascade_stop"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -144,6 +145,7 @@ impl Event for ReservationRequested {
         Family::new("cascade_stop"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -157,6 +159,7 @@ impl Event for InventoryReserved {
         Family::new("cascade_stop"),
         TypeName::new("InventoryReserved"),
     );
+    type Codec = JsonCodec;
 }
 
 impl Aggregate for Inventory {
@@ -267,9 +270,7 @@ async fn parent_stop_cascades_to_in_flight_outbox_executor_child() {
     const MAX_ATTEMPTS: usize = 3; // RetryPolicy::default(): 1 initial + 2 retries.
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("cascade-order");
@@ -290,10 +291,8 @@ async fn parent_stop_cascades_to_in_flight_outbox_executor_child() {
                 handled: Arc::clone(&handled_for_saga),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,

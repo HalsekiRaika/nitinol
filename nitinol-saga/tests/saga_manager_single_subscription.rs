@@ -21,7 +21,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::codec::{Codec, ErasedCodec};
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
@@ -49,6 +49,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.single"), TypeName::new("OrderPlaced"));
+    type Codec = CountingUpstreamCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,6 +62,7 @@ impl Event for ReservationRequested {
         Family::new("mgr.single"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 /// JSON codec for the upstream event type that counts every decode.  Bound to
@@ -176,9 +178,7 @@ async fn wait_for_handled(
 #[tokio::test]
 async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-single-orders");
@@ -205,10 +205,8 @@ async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            Arc::new(CountingUpstreamCodec) as Arc<dyn ErasedCodec<OrderPlaced>>,
             SequenceCursor::Stream {
                 key: upstream_key.as_str().to_owned(),
                 after: 0,

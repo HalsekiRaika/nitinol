@@ -99,6 +99,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("retry"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,6 +110,7 @@ struct ReservationRequested {
 impl Event for ReservationRequested {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("retry"), TypeName::new("ReservationRequested"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -120,6 +122,7 @@ struct InventoryReserved;
 impl Event for InventoryReserved {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("retry"), TypeName::new("InventoryReserved"));
+    type Codec = JsonCodec;
 }
 
 impl Aggregate for Inventory {
@@ -244,9 +247,7 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
     const EXPECTED_ATTEMPTS: usize = 3;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("retry-order");
@@ -267,10 +268,8 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
                 handled: Arc::clone(&handled_for_saga),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,

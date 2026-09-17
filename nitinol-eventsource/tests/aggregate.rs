@@ -1,4 +1,5 @@
-use nitinol_eventsource::{Aggregate, Event, Snapshotable};
+use bytes::Bytes;
+use nitinol_eventsource::{codec::Codec, Aggregate, Event, Snapshotable};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 // Fixtures
@@ -6,8 +7,26 @@ use nitinol_persistence::{EventType, Family, TypeName};
 #[derive(Clone)]
 struct Incremented;
 
+/// The codec `Incremented` names. Nothing here persists, so the format only has
+/// to exist.
+struct IncrementedCodec;
+
+impl Codec<Incremented> for IncrementedCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_: &Incremented) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_: &[u8]) -> Result<Incremented, Self::Error> {
+        Ok(Incremented)
+    }
+}
+
 impl Event for Incremented {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
+
+    type Codec = IncrementedCodec;
 }
 
 #[derive(Default)]
@@ -23,12 +42,31 @@ impl Aggregate for Counter {
     }
 }
 
-// Snapshot is the raw counter value (u64).
-// Encoding/decoding is handled by a Codec<u64> at the process level;
-// Snapshotable only defines the domain-level type and the pure
-// capture / restore functions.
+/// The codec `Counter` names for its snapshot. As with the event codec, these
+/// tests exercise the pure capture / restore functions only.
+struct CounterSnapshotCodec;
+
+impl Codec<u64> for CounterSnapshotCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(value: &u64) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::copy_from_slice(&value.to_be_bytes()))
+    }
+
+    fn decode(payload: &[u8]) -> Result<u64, Self::Error> {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(payload);
+        Ok(u64::from_be_bytes(buf))
+    }
+}
+
+// Snapshot is the raw counter value (u64). `Snapshotable` names the codec that
+// writes that value down and defines the pure capture / restore functions; the
+// encoding itself is never reached by the assertions below.
 impl Snapshotable for Counter {
     type Snapshot = u64;
+
+    type Codec = CounterSnapshotCodec;
 
     fn capture(&self) -> u64 {
         self.value

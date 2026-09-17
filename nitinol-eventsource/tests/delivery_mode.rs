@@ -41,6 +41,8 @@ struct Evt;
 
 impl Event for Evt {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Evt"));
+
+    type Codec = UnitCodec;
 }
 
 // Fixtures: codec
@@ -182,7 +184,7 @@ async fn at_most_once_checkpoint_advanced_even_when_project_fails() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtMostOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -238,7 +240,7 @@ async fn at_most_once_checkpoint_advanced_on_success() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtMostOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -285,7 +287,7 @@ async fn at_least_once_checkpoint_not_saved_when_project_fails() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -343,7 +345,7 @@ async fn at_least_once_checkpoint_saved_after_successful_project() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -399,7 +401,7 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
                 notify: Arc::clone(&notify_c),
             },
         )
-        .with_event::<Evt>(Arc::new(UnitCodec))
+        .with_event::<Evt>()
         .delivery_mode(DeliveryMode::AtLeastOnce)
         .catchup_from_aggregate(agg_id_c)
         .spawn(&system)
@@ -464,7 +466,7 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
             notify: Arc::clone(&notify2),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -514,7 +516,7 @@ async fn exactly_once_framework_does_not_save_checkpoint() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::ExactlyOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)

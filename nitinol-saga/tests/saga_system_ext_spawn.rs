@@ -1,11 +1,11 @@
 //! Spawning a saga through the extension trait on `EventSourceSystem`.
 //!
 //! The wiring under test is the one the caller no longer writes: both codecs
-//! are resolved from the system, the `ProcessSystem` is never handed over, and
-//! store + cursor arrive as a single subscription value.  Each test therefore
-//! observes the two codec directions (upstream record decoded into
-//! `Saga::handle`, the saga's own event encoded onto its stream) and the cursor
-//! position the subscription value carries.
+//! are resolved from the event types themselves (`Event::Codec`), the
+//! `ProcessSystem` is never handed over, and store + cursor arrive as a single
+//! subscription value.  Each test therefore observes the two codec directions
+//! (upstream record decoded into `Saga::handle`, the saga's own event encoded
+//! onto its stream) and the cursor position the subscription value carries.
 
 #[path = "common/helpers.rs"]
 mod common;
@@ -37,6 +37,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.system.ext"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,6 +50,7 @@ impl Event for ReservationRequested {
         Family::new("saga.system.ext"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`RecordingSaga`]: every order belongs to the single
@@ -143,7 +145,7 @@ async fn wait_for_handled(
 }
 
 /// SKUs of the saga's own events on its own stream, decoded with the same JSON
-/// wire format the system codec produces.
+/// wire format the codec `ReservationRequested` names produces.
 async fn persisted_skus(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<String> {
     let events: Vec<LoadedEvent> = store
         .load(LoadQuery::by_stream(saga_id))
@@ -157,9 +159,7 @@ async fn persisted_skus(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<St
         .filter(|event| event.event_type == ReservationRequested::EVENT_TYPE)
         .map(|event| {
             serde_json::from_slice::<ReservationRequested>(&event.payload)
-                .expect(
-                    "the saga's own event must be encoded with the codec resolved from the system",
-                )
+                .expect("the saga's own event must be encoded with the codec its event type names")
                 .sku
         })
         .collect()
@@ -180,11 +180,9 @@ async fn wait_for_persisted(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Ve
 }
 
 #[tokio::test]
-async fn spawn_saga_wires_both_codecs_and_the_process_system_from_the_event_source_system() {
+async fn spawn_saga_uses_the_codecs_its_events_name() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-system-ext-order");
@@ -215,22 +213,20 @@ async fn spawn_saga_wires_both_codecs_and_the_process_system_from_the_event_sour
     assert_eq!(
         handled_skus(&handled),
         vec!["SKU-EXT".to_owned()],
-        "the upstream codec resolved by the system must decode the subscribed record into handle()"
+        "the codec `OrderPlaced` names must decode the subscribed record into handle()"
     );
 
     assert_eq!(
         wait_for_persisted(&saga_store_for_assert, &saga_id).await,
         vec!["SKU-EXT".to_owned()],
-        "the saga's own codec resolved by the system must encode exactly one event onto the saga stream"
+        "the codec `ReservationRequested` names must encode exactly one event onto the saga stream"
     );
 }
 
 #[tokio::test]
 async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-system-ext-catchup-order");
@@ -265,9 +261,7 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
 #[tokio::test]
 async fn stream_subscription_after_override_skips_records_up_to_that_position() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-system-ext-resume-order");

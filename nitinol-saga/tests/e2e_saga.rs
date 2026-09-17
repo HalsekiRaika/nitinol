@@ -37,6 +37,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("e2e.saga"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,6 +48,7 @@ struct Reserved {
 impl Event for Reserved {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("e2e.saga"), TypeName::new("Reserved"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,6 +61,7 @@ impl Event for ReservationRequested {
         Family::new("e2e.saga"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -264,9 +267,7 @@ async fn wait_until_outbox_acked(
 #[tokio::test]
 async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-e2e-order");
@@ -297,10 +298,8 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
             handle_count: Arc::clone(&handle_count_for_producer),
         })
     })
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&order_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,
@@ -404,9 +403,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
 #[tokio::test]
 async fn saga_skips_events_that_correlate_to_no_instance() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory_proxy = system
@@ -438,10 +435,8 @@ async fn saga_skips_events_that_correlate_to_no_instance() {
             })
         },
     )
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: publisher_id.as_str().to_owned(),
             after: 0,

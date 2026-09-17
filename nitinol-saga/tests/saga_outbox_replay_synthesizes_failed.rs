@@ -59,6 +59,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("replay"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -69,6 +70,7 @@ struct ReservationRequested {
 impl Event for ReservationRequested {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("replay"), TypeName::new("ReservationRequested"));
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`InertSaga`]: the one instance each replay scenario
@@ -140,9 +142,7 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
     // before replay, no extra outbox event must be appended.
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(INERT_SAGA_ID);
@@ -164,10 +164,8 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
 
     let _saga_proxy =
         SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
-            .with_codec(system.codec::<ReservationRequested>())
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<OrderPlaced>(),
                 SequenceCursor::Stream {
                     key: "no-such-stream".to_owned(),
                     after: 0,
@@ -208,9 +206,7 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
 #[tokio::test]
 async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     // Each test owns its EventStore, so sharing the correlation id with the
@@ -236,10 +232,8 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
     // This simulates a full OS-process crash restart where no in-memory state survives.
     let _saga_proxy =
         SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
-            .with_codec(system.codec::<ReservationRequested>())
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<OrderPlaced>(),
                 SequenceCursor::Stream {
                     key: "no-such-stream".to_owned(),
                     after: 0,
@@ -318,9 +312,7 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
 #[tokio::test]
 async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(INERT_SAGA_ID);
@@ -335,10 +327,8 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
     // Spawn without crash-restart factory and without pre-populated PendingIntents.
     let _saga_proxy =
         SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
-            .with_codec(system.codec::<ReservationRequested>())
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<OrderPlaced>(),
                 SequenceCursor::Stream {
                     key: "no-such-stream".to_owned(),
                     after: 0,
@@ -403,9 +393,7 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
 #[tokio::test]
 async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(INERT_SAGA_ID);
@@ -418,10 +406,8 @@ async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay(
     // Spawn without crash-restart factory and without pre-populated PendingIntents.
     let _saga_proxy =
         SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
-            .with_codec(system.codec::<ReservationRequested>())
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<OrderPlaced>(),
                 SequenceCursor::Stream {
                     key: "no-such-stream".to_owned(),
                     after: 0,

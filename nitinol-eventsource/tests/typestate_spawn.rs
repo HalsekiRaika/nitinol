@@ -21,6 +21,8 @@ struct Incremented;
 
 impl Event for Incremented {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
+
+    type Codec = IncrementedCodec;
 }
 
 impl Aggregate for Counter {
@@ -72,9 +74,12 @@ impl Projector<Incremented> for NoopProjector {
     }
 }
 
-// Positive path: AggregateProps::new().with_codec().spawn()
+// Positive path: AggregateProps::new().spawn()
 
 /// The correct AggregateProps builder chain must compile and run successfully.
+///
+/// There is no codec step: `Incremented` names the codec that writes it, so
+/// `new` is followed straight by `spawn`.
 #[tokio::test]
 async fn aggregate_props_correct_chain_compiles_and_spawns() {
     // Given
@@ -83,8 +88,7 @@ async fn aggregate_props_correct_chain_compiles_and_spawns() {
 
     // When: the full required chain
     let proxy = AggregateProps::<Counter>::new(AggregateId::new("typestate-agg-ok"), store)
-        .with_codec(Arc::new(IncrementedCodec)) // transitions to CodecSet
-        .spawn(&system) // only available in CodecSet state
+        .spawn(&system)
         .await;
 
     // Then: spawn succeeds — proxy is usable
@@ -111,7 +115,7 @@ async fn projector_props_correct_chain_compiles_and_spawns() {
         checkpoint_store,
         NoopProjector::new,
     )
-    .with_event::<Incremented>(Arc::new(IncrementedCodec)) // EventUnset → EventSet
+    .with_event::<Incremented>() // EventUnset → EventSet
     .catchup_from_global() // OriginUnset → OriginSet
     .spawn(&system) // only EventSet + OriginSet
     .await;
@@ -143,8 +147,8 @@ async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
         checkpoint_store,
         NoopProjector::new,
     )
-    .with_event::<Incremented>(Arc::new(IncrementedCodec)) // first event type
-    .with_event::<Incremented>(Arc::new(IncrementedCodec)) // second call: EventSet → EventSet
+    .with_event::<Incremented>() // first event type
+    .with_event::<Incremented>() // second call: EventSet → EventSet
     .catchup_from_global()
     .spawn(&system)
     .await;
@@ -171,7 +175,7 @@ async fn projector_props_catchup_from_aggregate_enables_spawn() {
         checkpoint_store,
         NoopProjector::new,
     )
-    .with_event::<Incremented>(Arc::new(IncrementedCodec))
+    .with_event::<Incremented>()
     .catchup_from_aggregate(agg_id) // OriginUnset → OriginSet
     .spawn(&system)
     .await;

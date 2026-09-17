@@ -30,7 +30,6 @@ use nitinol_runtime::ProcessSystem;
 
 // Fixtures
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -56,6 +55,8 @@ impl Event for Incremented {
         Family::new("system.default.store"),
         TypeName::new("Incremented"),
     );
+
+    type Codec = JsonCodec;
 }
 
 impl Aggregate for Counter {
@@ -102,7 +103,6 @@ async fn store_less_spawn_aggregate_persists_onto_the_system_default_store() {
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
     let id = AggregateId::new("default-store-spawn-aggregate");
@@ -130,7 +130,6 @@ async fn store_less_aggregate_props_persists_onto_the_system_default_store() {
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
     let id = AggregateId::new("default-store-aggregate-props");
@@ -161,7 +160,6 @@ async fn spawn_aggregate_with_store_overrides_the_system_default_store() {
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
     let id = AggregateId::new("override-store-spawn-aggregate");
@@ -195,7 +193,6 @@ async fn aggregate_props_with_store_overrides_the_system_default_store() {
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
     let id = AggregateId::new("override-store-aggregate-props");

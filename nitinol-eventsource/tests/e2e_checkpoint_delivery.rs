@@ -33,6 +33,8 @@ struct Evt;
 
 impl Event for Evt {
     const EVENT_TYPE: EventType = EventType::new(Family::new("e2e.ckpt"), TypeName::new("Evt"));
+
+    type Codec = UnitCodec;
 }
 
 // Fixtures: pass-through codec
@@ -211,7 +213,7 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
                 notify: Arc::clone(&notify_c),
             },
         )
-        .with_event::<Evt>(Arc::new(UnitCodec))
+        .with_event::<Evt>()
         .delivery_mode(DeliveryMode::AtLeastOnce)
         .catchup_from_aggregate(agg_id.clone())
         .spawn(&system)
@@ -274,7 +276,7 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
             notify: Arc::clone(&notify2),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -326,7 +328,7 @@ async fn e2e_exactly_once_user_saves_checkpoint_prevents_reprocessing() {
                 notify: Arc::clone(&notify_c),
             },
         )
-        .with_event::<Evt>(Arc::new(UnitCodec))
+        .with_event::<Evt>()
         .delivery_mode(DeliveryMode::ExactlyOnce)
         .catchup_from_aggregate(agg_id.clone())
         .spawn(&system)
@@ -365,7 +367,7 @@ async fn e2e_exactly_once_user_saves_checkpoint_prevents_reprocessing() {
             notify: Arc::clone(&notify_c2),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::ExactlyOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -418,7 +420,7 @@ async fn e2e_at_most_once_failed_event_not_retried_on_restart() {
                 notify: Arc::clone(&notify_c),
             },
         )
-        .with_event::<Evt>(Arc::new(UnitCodec))
+        .with_event::<Evt>()
         .delivery_mode(DeliveryMode::AtMostOnce)
         .catchup_from_aggregate(agg_id.clone())
         .spawn(&system)
@@ -458,7 +460,7 @@ async fn e2e_at_most_once_failed_event_not_retried_on_restart() {
             notify: Arc::clone(&notify2),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtMostOnce)
     .catchup_from_aggregate(agg_id)
     .spawn(&system)

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 use nitinol_runtime::process::ProcessContext;
@@ -45,7 +44,6 @@ pub(crate) struct ReplayOutcome {
 pub(crate) async fn replay_and_redispatch<S: Saga>(
     saga_id: &SagaId,
     state: &mut S,
-    codec: &dyn ErasedCodec<S::Event>,
     store: &Arc<dyn EventStore>,
     sequence: &mut u64,
     tell_states: &mut HashMap<u64, TellState>,
@@ -54,7 +52,7 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
     enqueue_policy: &dyn EnqueuePolicy,
     ctx: &mut ProcessContext<SagaProcess<S>>,
 ) -> Result<ReplayOutcome, ()> {
-    let journal = match load_journal(saga_id, state, codec, store, *sequence).await {
+    let journal = match load_journal(saga_id, state, store, *sequence).await {
         Some(j) => j,
         // store.load() or stream iteration failed — the terminated state is
         // unknown.  Fail safe (not fail-open): return Err so on_start stops
@@ -104,7 +102,6 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
 async fn load_journal<S: Saga>(
     saga_id: &SagaId,
     state: &mut S,
-    codec: &dyn ErasedCodec<S::Event>,
     store: &Arc<dyn EventStore>,
     from_sequence: u64,
 ) -> Option<JournalState> {
@@ -131,7 +128,7 @@ async fn load_journal<S: Saga>(
                 return None;
             }
         };
-        fold_loaded::<S>(loaded, state, codec, &mut journal);
+        fold_loaded::<S>(loaded, state, &mut journal);
     }
     Some(journal)
 }
@@ -139,14 +136,9 @@ async fn load_journal<S: Saga>(
 /// Classify one loaded record and fold it, applying a domain event to the
 /// saga's state.  An undecodable record is logged and skipped, so a single
 /// poisoned payload does not abort the replay.
-fn fold_loaded<S: Saga>(
-    loaded: LoadedEvent,
-    state: &mut S,
-    codec: &dyn ErasedCodec<S::Event>,
-    journal: &mut JournalState,
-) {
+fn fold_loaded<S: Saga>(loaded: LoadedEvent, state: &mut S, journal: &mut JournalState) {
     journal.observe_sequence(loaded.sequence);
-    match SagaPersisted::classify(loaded.event_type, &loaded.payload, codec) {
+    match SagaPersisted::classify(loaded.event_type, &loaded.payload) {
         Ok(persisted) => {
             if let Some(event) = journal.fold(persisted) {
                 state.apply(event);
@@ -311,7 +303,7 @@ mod tests {
     use futures_util::TryStreamExt;
     use serde::{Deserialize, Serialize};
 
-    use nitinol_eventsource::codec::{Codec, ErasedCodec};
+    use nitinol_eventsource::codec::Codec;
     use nitinol_eventsource::test_helpers::MockAggregateProxy;
     use nitinol_eventsource::{Aggregate, Decider, Decision, Event, SequenceCursor};
     use nitinol_persistence::error::{AppendError, LoadError};
@@ -345,6 +337,8 @@ mod tests {
     impl Event for MarkerEvent {
         const EVENT_TYPE: EventType =
             EventType::new(Family::new("replay_unit_test"), TypeName::new("Marker"));
+
+        type Codec = JsonCodec;
     }
 
     #[derive(Default)]
@@ -374,6 +368,8 @@ mod tests {
     impl Event for UpstreamEvt {
         const EVENT_TYPE: EventType =
             EventType::new(Family::new("replay_unit_test"), TypeName::new("Upstream"));
+
+        type Codec = JsonCodec;
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -382,6 +378,8 @@ mod tests {
     impl Event for SagaEvt {
         const EVENT_TYPE: EventType =
             EventType::new(Family::new("replay_unit_test"), TypeName::new("SagaEvent"));
+
+        type Codec = JsonCodec;
     }
 
     /// Correlation rule of [`InertSaga`].  Its tests subscribe to an upstream
@@ -571,10 +569,8 @@ mod tests {
             InertSaga::default,
         )
         .with_initial_tell_states(initial_tell_states)
-        .with_codec(Arc::new(JsonCodec) as Arc<dyn ErasedCodec<SagaEvt>>)
         .with_subscription(
             Arc::clone(&upstream_store),
-            Arc::new(JsonCodec) as Arc<dyn ErasedCodec<UpstreamEvt>>,
             SequenceCursor::Stream {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
@@ -642,10 +638,8 @@ mod tests {
             InertSaga::default,
         )
         .with_initial_tell_states(initial_tell_states)
-        .with_codec(Arc::new(JsonCodec) as Arc<dyn ErasedCodec<SagaEvt>>)
         .with_subscription(
             Arc::clone(&upstream_store),
-            Arc::new(JsonCodec) as Arc<dyn ErasedCodec<UpstreamEvt>>,
             SequenceCursor::Stream {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
@@ -696,10 +690,8 @@ mod tests {
             InertSaga::default,
         )
         .with_initial_tell_states(initial_tell_states)
-        .with_codec(Arc::new(JsonCodec) as Arc<dyn ErasedCodec<SagaEvt>>)
         .with_subscription(
             Arc::clone(&upstream_store),
-            Arc::new(JsonCodec) as Arc<dyn ErasedCodec<UpstreamEvt>>,
             SequenceCursor::Stream {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
@@ -772,10 +764,8 @@ mod tests {
             InertSaga::default,
         )
         .with_initial_tell_states(initial_tell_states)
-        .with_codec(Arc::new(JsonCodec) as Arc<dyn ErasedCodec<SagaEvt>>)
         .with_subscription(
             Arc::clone(&upstream_store),
-            Arc::new(JsonCodec) as Arc<dyn ErasedCodec<UpstreamEvt>>,
             SequenceCursor::Stream {
                 key: "no-such-upstream".to_owned(),
                 after: 0,
@@ -911,10 +901,8 @@ mod tests {
                 handle_count: Arc::clone(&handle_count_clone),
             },
         )
-        .with_codec(Arc::new(JsonCodec) as Arc<dyn ErasedCodec<SagaEvt>>)
         .with_subscription(
             Arc::clone(&upstream_store),
-            Arc::new(JsonCodec) as Arc<dyn ErasedCodec<UpstreamEvt>>,
             SequenceCursor::Stream {
                 key: "replay-dlq-fail-upstream".to_owned(),
                 after: 0,
@@ -974,10 +962,8 @@ mod tests {
                 handle_count: Arc::clone(&handle_count_clone),
             },
         )
-        .with_codec(Arc::new(JsonCodec) as Arc<dyn ErasedCodec<SagaEvt>>)
         .with_subscription(
             Arc::clone(&upstream_store),
-            Arc::new(JsonCodec) as Arc<dyn ErasedCodec<UpstreamEvt>>,
             SequenceCursor::Stream {
                 key: "air-004-upstream".to_owned(),
                 after: 0,

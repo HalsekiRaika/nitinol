@@ -6,8 +6,10 @@
 use nitinol::eventsource::Event;
 use nitinol_eventsource::{Aggregate, Decider, Decision, Query, Snapshotable};
 
+use crate::codec::{EventCodec, SnapshotCodec};
+
 #[derive(Clone, Debug, PartialEq, Event)]
-#[event(family = "snapshot.counter")]
+#[event(family = "snapshot.counter", codec = EventCodec)]
 pub struct Incremented;
 
 #[derive(Default)]
@@ -25,6 +27,10 @@ impl Aggregate for Counter {
 
 impl Snapshotable for Counter {
     type Snapshot = u64;
+
+    /// The snapshot's own format, independent of the one that writes the
+    /// stream: a restore reaches for this, a replay for `Incremented`'s.
+    type Codec = SnapshotCodec;
 
     fn capture(&self) -> u64 {
         self.value

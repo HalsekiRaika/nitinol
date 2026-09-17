@@ -32,6 +32,8 @@ struct TickEvent;
 
 impl Event for TickEvent {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("TickEvent"));
+
+    type Codec = TickCodec;
 }
 
 struct TickCodec;
@@ -288,7 +290,7 @@ async fn tx_provider_supplies_tx_to_projection_context() {
         },
     )
     .with_tx_provider(tp)
-    .with_event::<TickEvent>(Arc::new(TickCodec))
+    .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -333,7 +335,7 @@ async fn exactly_once_with_tx_provider_saves_checkpoint_in_same_tx() {
         },
     )
     .with_tx_provider(tp)
-    .with_event::<TickEvent>(Arc::new(TickCodec))
+    .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -378,7 +380,7 @@ async fn tx_provider_commit_called_after_successful_project() {
         },
     )
     .with_tx_provider(tp)
-    .with_event::<TickEvent>(Arc::new(TickCodec))
+    .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -430,7 +432,7 @@ async fn tx_provider_rollback_called_when_project_fails() {
         },
     )
     .with_tx_provider(tp)
-    .with_event::<TickEvent>(Arc::new(TickCodec))
+    .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -519,7 +521,7 @@ async fn without_tx_provider_ctx_tx_returns_none() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<TickEvent>(Arc::new(TickCodec))
+    .with_event::<TickEvent>()
     // No with_tx_provider() call — default Tx = ()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)

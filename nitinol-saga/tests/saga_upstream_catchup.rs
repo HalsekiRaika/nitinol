@@ -25,6 +25,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.upstream"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -37,6 +38,7 @@ impl Event for ReservationRequested {
         Family::new("saga.upstream"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -45,6 +47,7 @@ struct UnrelatedEvent;
 impl Event for UnrelatedEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.upstream"), TypeName::new("Unrelated"));
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`RecordingSaga`]: every `OrderPlaced` belongs to the one
@@ -203,9 +206,7 @@ async fn wait_for_count(captured: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>
 #[tokio::test]
 async fn saga_catches_up_on_preexisting_upstream_events() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-catchup-order");
 
@@ -226,10 +227,8 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,
@@ -254,9 +253,7 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
 #[tokio::test]
 async fn saga_catchup_declines_events_that_correlate_elsewhere() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-route-order");
 
@@ -279,10 +276,8 @@ async fn saga_catchup_declines_events_that_correlate_elsewhere() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,
@@ -309,9 +304,7 @@ async fn saga_catchup_declines_events_that_correlate_elsewhere() {
 #[tokio::test]
 async fn saga_catchup_resumes_from_cursor_after_value() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-resume-order");
 
@@ -331,10 +324,8 @@ async fn saga_catchup_resumes_from_cursor_after_value() {
         captured: Arc::clone(&captured_for_producer),
         notify: Arc::clone(&notify_for_producer),
     })
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 2,
@@ -360,9 +351,7 @@ async fn saga_catchup_resumes_from_cursor_after_value() {
 #[tokio::test]
 async fn saga_receives_live_events_after_catchup_via_durable_stream() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-live-order");
 
@@ -380,10 +369,8 @@ async fn saga_receives_live_events_after_catchup_via_durable_stream() {
         captured: Arc::clone(&captured_for_producer),
         notify: Arc::clone(&notify_for_producer),
     })
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,
@@ -410,9 +397,7 @@ async fn saga_receives_live_events_after_catchup_via_durable_stream() {
 #[tokio::test]
 async fn saga_catchup_ignores_events_of_other_types() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-mixed-order");
 
@@ -432,10 +417,8 @@ async fn saga_catchup_ignores_events_of_other_types() {
         captured: Arc::clone(&captured_for_producer),
         notify: Arc::clone(&notify_for_producer),
     })
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,
@@ -461,9 +444,7 @@ async fn saga_catchup_ignores_events_of_other_types() {
 #[tokio::test]
 async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let agg_a = AggregateId::new("saga-upstream-global-a");
@@ -486,10 +467,8 @@ async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
         captured: Arc::clone(&captured_for_producer),
         notify: Arc::clone(&notify_for_producer),
     })
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Global { after: 0 },
     )
     .spawn(system.process_system())

@@ -13,7 +13,7 @@ use crate::payroll_run::PayrollRunApproved;
 use crate::payslip::{IssuePayslip, Payslip};
 
 /// The system every payslip in this example lives on.
-type PayrollSystem = EventSourceSystem<JsonCodec, StoreSet>;
+type PayrollSystem = EventSourceSystem<StoreSet>;
 
 /// A reference to the payslip that owns the stream `key`.
 ///
@@ -48,6 +48,8 @@ pub struct FanOutStarted {
 impl Event for FanOutStarted {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.fanout"), TypeName::new("FanOutStarted"));
+
+    type Codec = JsonCodec;
 }
 
 /// Delivers one issue command per payslip named by a [`PayrollRunApproved`].

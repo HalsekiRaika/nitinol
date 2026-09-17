@@ -24,7 +24,6 @@ use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEv
 use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
-use eventsource_projection::codec::JsonCodec;
 use eventsource_projection::counter::{Counter, Increment, Incremented};
 use eventsource_projection::read_model::{CountProjector, CountReadModel};
 
@@ -48,7 +47,6 @@ async fn main() {
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
 
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&event_store))
         .build();
 
@@ -77,7 +75,9 @@ async fn main() {
             },
         },
     )
-    .with_event::<Incremented>(system.codec::<Incremented>())
+    // Which event types this projection follows is stated here; how they are
+    // read is not — `Incremented` names the codec that wrote it.
+    .with_event::<Incremented>()
     .catchup_from_aggregate(agg_id)
     .spawn(system.process_system())
     .await;

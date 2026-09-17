@@ -19,7 +19,6 @@
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
-use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
 use tracing::field::{Field, Visit};
@@ -28,9 +27,8 @@ use tracing::{Level, Metadata, Subscriber};
 
 use nitinol_conformance::{
     Balance, Fault, Interpretation, Interpreted, Interpreter, Ledger, LedgerEvent, LedgerNotOpen,
-    LedgerRejection, MalformedLedgerEvent, Unanswered,
+    LedgerRejection, Unanswered,
 };
-use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{
     Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event, ExecError, Query,
 };
@@ -39,23 +37,11 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 
-// The kit's wire format, wired to this crate's codec
-
-/// Delegates to the kit's own encoding so both interpreters write bytes the
-/// kit can read back when it inspects a stream.
-pub struct LedgerCodec;
-
-impl Codec<LedgerEvent> for LedgerCodec {
-    type Error = MalformedLedgerEvent;
-
-    fn encode(event: &LedgerEvent) -> Result<Bytes, Self::Error> {
-        Ok(event.encode())
-    }
-
-    fn decode(payload: &[u8]) -> Result<LedgerEvent, Self::Error> {
-        LedgerEvent::decode(payload)
-    }
-}
+// The kit's wire format
+//
+// Neither interpreter states one: `LedgerEvent` names `LedgerCodec` itself, so
+// the activation reaches for it without being handed anything, and the direct
+// executor writes the same bytes by calling the kit's own encoding.
 
 // Capturing the records a told refusal is surfaced through
 
@@ -179,7 +165,6 @@ impl Interpretation for ActivationInterpretation {
     ) -> BoxFuture<'_, Self::Interpreter> {
         Box::pin(async move {
             let proxy = AggregateProps::<Ledger>::new(ledger.clone(), store)
-                .with_codec(Arc::new(LedgerCodec))
                 .spawn(&self.process_system)
                 .await;
             ActivationInterpreter {

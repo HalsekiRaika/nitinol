@@ -34,6 +34,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("tell-refusal"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 // Fixtures: aggregate
@@ -93,7 +95,6 @@ impl Query<GetCount> for Counter {
 
 // Fixtures: codec
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -199,7 +200,6 @@ async fn a_refused_told_command_is_reported_and_a_carried_out_one_is_not() {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("tell-refusal-reported");
     let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-        .with_codec(Arc::new(JsonCodec))
         .spawn(&ps)
         .await;
 

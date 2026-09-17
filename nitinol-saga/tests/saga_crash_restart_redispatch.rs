@@ -37,6 +37,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("crash_restart"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,6 +50,7 @@ impl Event for ReservationRequested {
         Family::new("crash_restart"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -59,6 +61,7 @@ struct Reserved {
 impl Event for Reserved {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("crash_restart"), TypeName::new("Reserved"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -166,9 +169,7 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
     let mock = MockAggregateProxy::<Inventory>::new();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(INERT_SAGA_ID);
@@ -194,10 +195,8 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
     // which simulates a crash restart (in-memory state is gone).
     let _saga_proxy =
         SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
-            .with_codec(system.codec::<ReservationRequested>())
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<OrderPlaced>(),
                 SequenceCursor::Stream {
                     key: "no-such-stream".to_owned(),
                     after: 0,

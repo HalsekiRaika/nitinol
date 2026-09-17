@@ -8,7 +8,7 @@
 //! |----------------|---------|
 //! | `runtime`      | `runtime` — actor runtime (`ProcessSystem`, `Process`, …) |
 //! | `persistence`  | `persistence` — persistence abstractions (`EventStore`, IDs, …) |
-//! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Decider`, `Decision`, `Query`, `Event`, `Snapshotable`, `#[derive(Event)]`) |
+//! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Decider`, `Decision`, `Query`, `Event`, `Codec`, `Snapshotable`, `#[derive(Event)]`) |
 //! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
 //! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
 //! | `full`         | All of the above |
@@ -41,7 +41,7 @@ pub use nitinol_persistence as persistence;
 #[cfg(feature = "contract")]
 pub mod contract {
     pub use nitinol_contract::{
-        Accepting, Aggregate, Decider, Decision, Event, Query, Snapshotable,
+        Accepting, Aggregate, Codec, Decider, Decision, Event, Query, Snapshotable,
     };
 
     /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
@@ -100,9 +100,7 @@ pub mod eventsource {
     pub use nitinol_macros::Event;
 
     pub use nitinol_eventsource::Query;
-    pub use nitinol_eventsource::{
-        AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset,
-    };
+    pub use nitinol_eventsource::{AggregateProps, AggregateProxy, AggregateTellTarget};
     pub use nitinol_eventsource::{AskError, ExecError, Retryability, TellError};
     pub use nitinol_eventsource::{
         CursorSet, CursorUnset, DurableStream, DurableStreamProxy, DurableSubscription,

@@ -28,6 +28,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("e2e.snap"), TypeName::new("Incremented"));
+
+    type Codec = EventCodec;
 }
 
 // Fixtures: Snapshotable aggregate
@@ -47,6 +49,8 @@ impl Aggregate for Counter {
 
 impl Snapshotable for Counter {
     type Snapshot = u64;
+
+    type Codec = SnapshotCodec;
 
     fn capture(&self) -> u64 {
         self.value
@@ -162,8 +166,7 @@ async fn spawn_counter(
     snapshot_ref: SnapshotPersistorProxy,
 ) -> AggregateProxy<Counter> {
     AggregateProps::<Counter>::new(id, store)
-        .with_codec(Arc::new(EventCodec))
-        .with_snapshot_persistor(snapshot_ref, Arc::new(SnapshotCodec))
+        .with_snapshot_persistor(snapshot_ref)
         .spawn(system)
         .await
 }
@@ -175,7 +178,6 @@ async fn spawn_plain_counter(
     store: Arc<dyn EventStore>,
 ) -> AggregateProxy<PlainCounter> {
     AggregateProps::<PlainCounter>::new(id, store)
-        .with_codec(Arc::new(EventCodec))
         .spawn(system)
         .await
 }

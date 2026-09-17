@@ -43,6 +43,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("conflict"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 // Fixtures: aggregate
@@ -88,7 +90,6 @@ impl Query<GetCount> for Counter {
 
 // Fixtures: codec
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -115,7 +116,6 @@ async fn spawn_writer(
     store: &Arc<dyn EventStore>,
 ) -> AggregateProxy<Counter> {
     AggregateProps::<Counter>::new(id.clone(), Arc::clone(store))
-        .with_codec(Arc::new(JsonCodec))
         .spawn(ps)
         .await
 }
@@ -392,7 +392,6 @@ async fn genesis_conflict_keeps_the_reference_on_its_activation() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
     let id = AggregateId::new("conflict-genesis-reference");
@@ -402,7 +401,6 @@ async fn genesis_conflict_keeps_the_reference_on_its_activation() {
 
     // And: someone else creates the aggregate first
     let creator = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-        .with_codec(system.codec::<Incremented>())
         .spawn(system.process_system())
         .await;
     creator.ask(Increment).await.expect("genesis append");

@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 use nitinol::eventsource::Event;
 use nitinol_eventsource::{Aggregate, Decider, Decision, Query};
 
+use crate::codec::JsonCodec;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
-#[event(family = "agg_comm.counter")]
+#[event(family = "agg_comm.counter", codec = JsonCodec)]
 pub struct Incremented;
 
 #[derive(Default)]

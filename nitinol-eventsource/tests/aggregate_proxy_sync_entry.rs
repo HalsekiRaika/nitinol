@@ -30,6 +30,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("sync-entry"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 // Fixtures: aggregate
@@ -62,7 +64,6 @@ impl Decider<Increment> for Counter {
 
 // Fixtures: codec
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -105,7 +106,6 @@ async fn synchronously_built_reference_addresses_the_same_aggregate() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
     let id = AggregateId::new("sync-entry-shared");

@@ -7,7 +7,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{shape_of, Shape};
+use common::{shape_of, JsonCodec, Shape};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,7 @@ struct StubEvent;
 impl Event for StubEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("trait_defaults"), TypeName::new("StubEvent"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,6 +34,7 @@ struct StubUpstream;
 impl Event for StubUpstream {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("trait_defaults"), TypeName::new("StubUpstream"));
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`StubSaga`]: the one instance the hooks below are

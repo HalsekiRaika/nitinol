@@ -39,6 +39,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("resolve"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 // Fixtures: aggregates
@@ -73,6 +75,8 @@ impl Aggregate for SnapshottingCounter {
 
 impl Snapshotable for SnapshottingCounter {
     type Snapshot = u64;
+
+    type Codec = JsonCodec;
 
     fn capture(&self) -> u64 {
         self.value
@@ -117,7 +121,6 @@ impl Decider<Increment> for SnapshottingCounter {
 
 // Fixtures: codec
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -190,7 +193,6 @@ async fn concurrent_resolve_produces_a_single_writer() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
     let id = AggregateId::new("resolve-single-flight");
@@ -257,7 +259,6 @@ async fn second_spawn_aggregate_addresses_the_same_aggregate() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
     let id = AggregateId::new("resolve-second-spawn");
@@ -299,7 +300,6 @@ async fn aggregate_props_spawn_addresses_the_same_aggregate() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
     let id = AggregateId::new("resolve-props-path");
@@ -338,7 +338,6 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
     let snapshot_ref = SnapshotPersistor::spawn(
@@ -350,7 +349,7 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
 
     let first = system
         .aggregate_props::<SnapshottingCounter>(id.clone())
-        .with_snapshot_persistor(snapshot_ref.clone(), system.codec::<u64>())
+        .with_snapshot_persistor(snapshot_ref.clone())
         .spawn(system.process_system())
         .await;
     first.ask(Increment).await.expect("first dispatch");
@@ -358,7 +357,7 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
     // When
     let second = system
         .aggregate_props::<SnapshottingCounter>(id.clone())
-        .with_snapshot_persistor(snapshot_ref, system.codec::<u64>())
+        .with_snapshot_persistor(snapshot_ref)
         .spawn(system.process_system())
         .await;
     second
@@ -395,13 +394,11 @@ async fn reference_survives_the_death_of_its_activation() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
     let id = AggregateId::new("resolve-self-heal");
 
     let rival = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-        .with_codec(system.codec::<Incremented>())
         .spawn(system.process_system())
         .await;
     rival

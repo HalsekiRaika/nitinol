@@ -23,6 +23,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("e2e.proj"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -49,7 +51,6 @@ impl Decider<Increment> for Counter {
     }
 }
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -122,9 +123,7 @@ async fn wait_for_checkpoint(
 #[tokio::test]
 async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let id = AggregateId::new("e2e-proj-catchup-agg");
@@ -148,7 +147,7 @@ async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Incremented>(system.codec::<Incremented>())
+    .with_event::<Incremented>()
     .catchup_from_aggregate(id)
     .spawn(system.process_system())
     .await;
@@ -164,9 +163,7 @@ async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
 #[tokio::test]
 async fn e2e_live_projection_sees_published_event_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("e2e-proj-live-agg");
@@ -185,7 +182,7 @@ async fn e2e_live_projection_sees_published_event_envelope() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Incremented>(system.codec::<Incremented>())
+    .with_event::<Incremented>()
     .catchup_from_aggregate(agg_id.clone())
     .spawn(system.process_system())
     .await;
@@ -206,9 +203,7 @@ async fn e2e_live_projection_sees_published_event_envelope() {
 #[tokio::test]
 async fn e2e_at_most_once_delivery_advances_checkpoint_before_project() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let id = AggregateId::new("e2e-proj-amo-agg");
@@ -234,7 +229,7 @@ async fn e2e_at_most_once_delivery_advances_checkpoint_before_project() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Incremented>(system.codec::<Incremented>())
+    .with_event::<Incremented>()
     .delivery_mode(DeliveryMode::AtMostOnce)
     .catchup_from_aggregate(id)
     .spawn(system.process_system())

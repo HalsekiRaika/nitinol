@@ -35,6 +35,8 @@ struct Incremented;
 
 impl Event for Incremented {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
+
+    type Codec = PassThroughCodec;
 }
 
 impl Aggregate for Counter {
@@ -105,7 +107,6 @@ async fn aggregate_props_spawns_with_arc_dyn_event_store() {
 
     // When: AggregateProps takes the store directly (no EventPersistor::spawn)
     let proxy = AggregateProps::<Counter>::new(AggregateId::new("direct-store-1"), store)
-        .with_codec(Arc::new(PassThroughCodec))
         .spawn(&system)
         .await;
 
@@ -137,7 +138,6 @@ async fn aggregate_replays_state_via_shared_arc_dyn_event_store() {
     // Write 2 events through process 1
     {
         let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-            .with_codec(Arc::new(PassThroughCodec))
             .spawn(&system)
             .await;
         proxy.ask(Increment).await.expect("ask 1 must succeed");
@@ -146,7 +146,6 @@ async fn aggregate_replays_state_via_shared_arc_dyn_event_store() {
 
     // When: spawn a fresh process for the same id with the same store
     let proxy2 = AggregateProps::<Counter>::new(id, store)
-        .with_codec(Arc::new(PassThroughCodec))
         .spawn(&system)
         .await;
 
@@ -172,12 +171,10 @@ async fn multiple_aggregate_processes_share_single_arc_dyn_event_store() {
 
     // When: spawn two aggregates that share the store
     let proxy_a = AggregateProps::<Counter>::new(AggregateId::new("share-a"), Arc::clone(&store))
-        .with_codec(Arc::new(PassThroughCodec))
         .spawn(&system)
         .await;
 
     let proxy_b = AggregateProps::<Counter>::new(AggregateId::new("share-b"), Arc::clone(&store))
-        .with_codec(Arc::new(PassThroughCodec))
         .spawn(&system)
         .await;
 

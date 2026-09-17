@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
 use nitinol_persistence::{EventType, Family, TypeName};
 
+use crate::codec::JsonCodec;
+
 /// The fact event: "this payroll run was approved for these employees".
 ///
 /// # Why the event names its own run
@@ -41,6 +43,8 @@ impl Event for PayrollRunApproved {
         Family::new("saga.fanout"),
         TypeName::new("PayrollRunApproved"),
     );
+
+    type Codec = JsonCodec;
 }
 
 /// The decision owner.

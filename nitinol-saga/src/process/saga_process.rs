@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
-use nitinol_eventsource::codec::ErasedCodec;
+use nitinol_eventsource::codec;
 use nitinol_eventsource::{appending_system_event, DurableSubscription, SequenceCursor};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
@@ -64,7 +64,6 @@ pub(crate) enum UpstreamMessage<E> {
 /// corrupt — identically.
 pub(crate) fn upstream_subscription<S: Saga>(
     store: Arc<dyn EventStore>,
-    codec: Arc<dyn ErasedCodec<S::SubscribedEvent>>,
 ) -> DurableSubscription<UpstreamMessage<S::SubscribedEvent>> {
     DurableSubscription::new(store, move |loaded: LoadedEvent| {
         if loaded.event_type.type_key()
@@ -77,7 +76,9 @@ pub(crate) fn upstream_subscription<S: Saga>(
         let raw_payload = loaded.payload.clone();
         let aggregate_id = AggregateId::new(loaded.stream_key);
         let sequence = loaded.sequence;
-        match codec.decode(&loaded.payload) {
+        match codec::decode::<<S::SubscribedEvent as nitinol_eventsource::Event>::Codec, _>(
+            &loaded.payload,
+        ) {
             Ok(event) => Some(UpstreamMessage::Decoded {
                 aggregate_id,
                 sequence,
@@ -168,7 +169,6 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) state: S,
     pub(crate) saga_id: SagaId,
     pub(crate) store: Arc<dyn EventStore>,
-    pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
     pub(crate) decode_failure_route_fn: Option<DecodeFailureRouteFn>,
     pub(crate) sequence: u64,
     pub(crate) retry_policy: RetryPolicy,
@@ -321,7 +321,6 @@ impl<S: Saga> SagaProcess<S> {
             saga_id: self.saga_id.clone(),
             sequence: &mut self.sequence,
             store: Arc::clone(&self.store),
-            codec: Arc::clone(&self.codec),
             retry_policy: self.retry_policy.clone(),
             process_ctx,
             tell_states: &mut self.tell_states,
@@ -482,7 +481,6 @@ impl<S: Saga> Process for SagaProcess<S> {
         let outcome = match replay_and_redispatch(
             &self.saga_id,
             &mut self.state,
-            self.codec.as_ref(),
             &self.store,
             &mut self.sequence,
             &mut self.tell_states,

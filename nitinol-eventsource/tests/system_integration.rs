@@ -1,13 +1,16 @@
 // Integration tests for EventSourceSystem.
 //
 // Tests verify:
-// - Builder pattern: EventSourceSystem::builder(ps).with_codec::<C>().build()
+// - Builder pattern: EventSourceSystem::builder(ps).build()
 // - spawn_aggregate creates a working AggregateProxy
 // - A second spawn_aggregate with the same id addresses the aggregate the first
 //   call resolved, rather than a second activation of it
-// - system.codec::<E>() returns a working Arc<dyn ErasedCodec<E>>
-// - system.codec() can be passed directly to ProjectorProps::with_event()
+// - ProjectorProps wired from the system projects catch-up events through the
+//   codec each event type names
 // - Snapshot save → load → state restoration via EventSourceSystem
+//
+// The system itself carries no codec: an event names the one that writes it
+// down, so there is nothing to hand the builder and nothing to ask it for.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -21,8 +24,8 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::SnapshotPersistor;
 use nitinol_eventsource::{
-    codec::Codec, codec::ErasedCodec, system::EventSourceSystem, Aggregate, Decider, Decision,
-    Event, ProjectionContext, Projector, ProjectorProps, Query, Snapshotable,
+    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
+    ProjectionContext, Projector, ProjectorProps, Query, Snapshotable,
 };
 use nitinol_persistence::store::{
     EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore,
@@ -41,6 +44,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new(""), TypeName::new("SysIntIncremented"));
+
+    type Codec = JsonCodec;
 }
 
 // Fixtures: aggregate (non-snapshotable)
@@ -75,6 +80,8 @@ impl Aggregate for CounterWithSnapshot {
 
 impl Snapshotable for CounterWithSnapshot {
     type Snapshot = u64;
+
+    type Codec = JsonCodec;
 
     fn capture(&self) -> u64 {
         self.value
@@ -131,8 +138,8 @@ impl Query<GetCount> for CounterWithSnapshot {
 /// Unit-struct codec backed by serde_json.
 /// Implements Codec<E> for any E that is Serialize + DeserializeOwned.
 ///
-/// Requires Default (so EventSourceSystem can create instances via CodecRegistry).
-#[derive(Default)]
+/// Never constructed: it is named by `Incremented` and `CounterWithSnapshot`
+/// at the type level, and every call goes through its associated functions.
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -187,17 +194,15 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 
 // Test: EventSourceSystem builder creates a system
 
-/// EventSourceSystem::builder(ps).with_codec::<C>().build() compiles and produces
-/// an EventSourceSystem that exposes process_system().
+/// EventSourceSystem::builder(ps).build() compiles and produces an
+/// EventSourceSystem that exposes process_system().
 #[tokio::test]
 async fn event_source_system_builder_produces_system() {
     // Given
     let ps = ProcessSystem::new().await;
 
     // When
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     // Then: process_system() is accessible (type-level proof)
     let _ = system.process_system();
@@ -211,9 +216,7 @@ async fn event_source_system_builder_produces_system() {
 async fn spawn_aggregate_creates_working_aggregate_proxy() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("sys-spawn-basic");
 
@@ -251,9 +254,7 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
 async fn spawn_aggregate_second_call_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("sys-replay-state");
 
@@ -304,9 +305,7 @@ async fn spawn_aggregate_second_call_addresses_the_same_aggregate() {
 async fn spawn_aggregate_sequential_increments_accumulate_state() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let proxy = system
         .spawn_aggregate::<Counter>(AggregateId::new("sys-seq"), store)
@@ -323,40 +322,16 @@ async fn spawn_aggregate_sequential_increments_accumulate_state() {
     assert_eq!(count, 3, "count must be 3 after three Increment commands");
 }
 
-// Test: system.codec() returns a usable Arc<dyn ErasedCodec<E>>
+// Test: a projector wired from the system decodes through the named codec
 
-/// system.codec::<E>() returns a codec that can encode and decode E.
+/// A `ProjectorProps` built against the system's process runtime projects the
+/// catch-up events it is asked for, decoding them through the codec
+/// `Incremented` names — `with_event::<E>()` is handed nothing.
 #[tokio::test]
-async fn system_codec_returns_usable_erased_codec() {
+async fn projector_props_decode_through_the_codec_each_event_names() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
-
-    // When
-    let codec: Arc<dyn ErasedCodec<Incremented>> = system.codec::<Incremented>();
-    let encoded = codec.encode(&Incremented).expect("encode must succeed");
-    let decoded: Incremented = codec.decode(&encoded).expect("decode must succeed");
-
-    // Then
-    assert_eq!(
-        decoded, Incremented,
-        "codec roundtrip must preserve the event"
-    );
-}
-
-// Test: system.codec() integrates with ProjectorProps::with_event
-
-/// system.codec::<E>() can be passed to ProjectorProps::with_event() to configure
-/// a projector that processes catch-up events.
-#[tokio::test]
-async fn system_codec_integrates_with_projector_props() {
-    // Given
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
@@ -383,7 +358,7 @@ async fn system_codec_integrates_with_projector_props() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    // When: use system.codec() with ProjectorProps
+    // When: wire a projector for the event type, naming no codec
     let _proxy = ProjectorProps::new(
         ProjectionId::new("sys-proj"),
         Arc::clone(&event_store),
@@ -393,7 +368,7 @@ async fn system_codec_integrates_with_projector_props() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Incremented>(system.codec::<Incremented>())
+    .with_event::<Incremented>()
     .catchup_from_aggregate(agg_id)
     .spawn(system.process_system())
     .await;
@@ -407,18 +382,17 @@ async fn system_codec_integrates_with_projector_props() {
     );
 }
 
-// Test: aggregate_props wires codec and allows manual snapshot configuration
+// Test: aggregate_props allows manual snapshot configuration
 
 /// system.aggregate_props() returns a pre-wired AggregateProps.
-/// Passing it the snapshot persistor and codec allows snapshotable aggregates
-/// to restore state from a saved snapshot.
+/// Passing it the snapshot persistor allows snapshotable aggregates to restore
+/// state from a saved snapshot, read back through the codec
+/// `CounterWithSnapshot` names.
 #[tokio::test]
 async fn snapshot_roundtrip_via_event_source_system() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshot_store = Arc::new(InMemorySnapshotStore::default());
@@ -439,10 +413,11 @@ async fn snapshot_roundtrip_via_event_source_system() {
         .await
         .expect("save snapshot must succeed");
 
-    // When: spawn a process that restores from the snapshot using the system's codec
+    // When: spawn a process that restores from the snapshot through the codec
+    // the aggregate names
     let proxy = system
         .aggregate_props::<CounterWithSnapshot>(id, event_store)
-        .with_snapshot_persistor(snapshot_ref, system.codec::<u64>())
+        .with_snapshot_persistor(snapshot_ref)
         .spawn(system.process_system())
         .await;
 

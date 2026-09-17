@@ -38,6 +38,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.tell_mock"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -50,6 +51,7 @@ impl Event for ReservationRequested {
         Family::new("saga.tell_mock"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -60,6 +62,7 @@ struct Reserved {
 impl Event for Reserved {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.tell_mock"), TypeName::new("Reserved"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -180,9 +183,7 @@ fn saga_effect_tell_constructor_returns_persist_with_single_tell_intent() {
 #[tokio::test]
 async fn saga_tell_to_mock_dispatches_command_observable_via_drain_captured() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-tell-mock-order");
@@ -202,10 +203,8 @@ async fn saga_tell_to_mock_dispatches_command_observable_via_drain_captured() {
             inventory: mock_for_saga.clone(),
             done_notify: Arc::clone(&done_for_saga),
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,

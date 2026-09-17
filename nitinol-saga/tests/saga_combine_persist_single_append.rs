@@ -41,6 +41,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("combine_atomic"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,6 +54,7 @@ impl Event for ReservationRequested {
         Family::new("combine_atomic"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,6 +67,7 @@ impl Event for InventoryReserved {
         Family::new("combine_atomic"),
         TypeName::new("InventoryReserved"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -528,9 +531,7 @@ async fn wait_for_recorded_events(
 #[tokio::test]
 async fn persist_combined_with_tell_is_written_in_one_append_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("combine-single-order");
@@ -560,10 +561,8 @@ async fn persist_combined_with_tell_is_written_in_one_append_batch() {
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,
@@ -635,9 +634,7 @@ async fn persist_combined_with_tell_is_written_in_one_append_batch() {
 #[tokio::test]
 async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("sequence-single-order");
@@ -667,10 +664,8 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,
@@ -743,9 +738,7 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
 #[tokio::test]
 async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("sequence-empty-nested-order");
@@ -775,10 +768,8 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,
@@ -852,9 +843,7 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
 #[tokio::test]
 async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("sequence-none-leaf-order");
@@ -884,10 +873,8 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,
@@ -956,9 +943,7 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
 #[tokio::test]
 async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("combine-order-order");
@@ -991,10 +976,8 @@ async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,
@@ -1054,9 +1037,7 @@ async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
 #[tokio::test]
 async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("combine-schedule-order");
@@ -1076,10 +1057,8 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: order_id.as_str().to_owned(),
             after: 0,

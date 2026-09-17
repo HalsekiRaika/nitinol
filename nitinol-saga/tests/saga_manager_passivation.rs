@@ -56,6 +56,7 @@ struct Ping {
 impl Event for Ping {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.passivation"), TypeName::new("Ping"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,6 +65,7 @@ struct Counted;
 impl Event for Counted {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.passivation"), TypeName::new("Counted"));
+    type Codec = JsonCodec;
 }
 
 // Saga under test
@@ -164,9 +166,7 @@ async fn wait_for_observed(
 #[tokio::test]
 async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-passivation-pings");
@@ -189,10 +189,8 @@ async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .with_codec(system.codec::<Counted>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
             SequenceCursor::Stream {
                 key: upstream_key.as_str().to_owned(),
                 after: 0,
@@ -254,9 +252,7 @@ async fn manager_outlives_a_system_default_idle_timeout_during_a_quiet_upstream(
         .with_default_idle_timeout(SYSTEM_IDLE_DEFAULT)
         .build()
         .await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-quiet-upstream-pings");
@@ -273,10 +269,8 @@ async fn manager_outlives_a_system_default_idle_timeout_during_a_quiet_upstream(
             observed: Arc::clone(&observed_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<Counted>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
             SequenceCursor::Stream {
                 key: upstream_key.as_str().to_owned(),
                 after: 0,

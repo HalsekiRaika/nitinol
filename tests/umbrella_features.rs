@@ -36,6 +36,7 @@ fn persistence_feature_exposes_id_types() {
 #[test]
 fn eventsource_feature_exposes_aggregate_and_projection() {
     // These types come from nitinol::eventsource re-export
+    use nitinol::contract::Codec;
     use nitinol::eventsource::{Aggregate, AggregateProps, Event, ProjectorProps};
     // EventType lives in nitinol-persistence; the eventsource feature transitively
     // enables the persistence feature, so nitinol::persistence is re-exported.
@@ -44,8 +45,24 @@ fn eventsource_feature_exposes_aggregate_and_projection() {
     // Minimal dummy types satisfying the trait bounds required by AggregateProps<A: Aggregate>.
     #[derive(Clone)]
     struct DummyEvent;
+
+    struct DummyCodec;
+    impl Codec<DummyEvent> for DummyCodec {
+        type Error = std::convert::Infallible;
+
+        fn encode(_event: &DummyEvent) -> Result<bytes::Bytes, Self::Error> {
+            Ok(bytes::Bytes::new())
+        }
+
+        fn decode(_payload: &[u8]) -> Result<DummyEvent, Self::Error> {
+            Ok(DummyEvent)
+        }
+    }
+
     impl Event for DummyEvent {
         const EVENT_TYPE: EventType = EventType::new(Family::new("dummy"), TypeName::new("event"));
+
+        type Codec = DummyCodec;
     }
 
     #[derive(Default)]
@@ -87,8 +104,6 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
         AggregateTellTarget,
         // errors
         AskError,
-        CodecSet,
-        CodecUnset,
         // durable stream
         CursorSet,
         CursorUnset,

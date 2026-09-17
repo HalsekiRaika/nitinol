@@ -27,6 +27,7 @@ impl Event for OrderPlaced {
         Family::new("saga.ctx.upstream"),
         TypeName::new("OrderPlaced"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,6 +40,7 @@ impl Event for ReservationRequested {
         Family::new("saga.ctx.upstream"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Debug, Clone)]
@@ -155,9 +157,7 @@ async fn wait_for_count(
 #[tokio::test]
 async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-upstream-order");
 
@@ -176,10 +176,8 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,
@@ -203,9 +201,7 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
 #[tokio::test]
 async fn saga_context_exposes_upstream_sequence_from_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-upstream-seq-order");
 
@@ -226,10 +222,8 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,
@@ -256,9 +250,7 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
     let started = jiff::Timestamp::now();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-now-order");
 
@@ -277,10 +269,8 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,
@@ -312,9 +302,7 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
 #[tokio::test]
 async fn saga_context_existing_accessors_remain_saga_scoped() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-saga-scope-order");
 
@@ -333,10 +321,8 @@ async fn saga_context_existing_accessors_remain_saga_scoped() {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,

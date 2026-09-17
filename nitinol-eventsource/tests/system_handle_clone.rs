@@ -25,7 +25,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::system::{
-    EventSourceSystem, EventSourceSystemBuilder, StoreSet, StoreUnset, Unset,
+    EventSourceSystem, EventSourceSystemBuilder, StoreSet, StoreUnset,
 };
 use nitinol_eventsource::{codec::Codec, Aggregate, Decider, Decision, Event, Query};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
@@ -40,6 +40,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("handle"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -76,7 +78,6 @@ impl Query<GetCount> for Counter {
     }
 }
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -104,11 +105,10 @@ async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<
 }
 
 /// A system on a fresh in-memory store, plus the store to read it back from.
-async fn counter_system() -> (EventSourceSystem<JsonCodec, StoreSet>, Arc<dyn EventStore>) {
+async fn counter_system() -> (EventSourceSystem<StoreSet>, Arc<dyn EventStore>) {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&store))
         .build();
     (system, store)
@@ -116,28 +116,23 @@ async fn counter_system() -> (EventSourceSystem<JsonCodec, StoreSet>, Arc<dyn Ev
 
 // Type-level contracts
 
-/// A codec marker that deliberately does not implement `Clone`.
-///
-/// The system holds `C` only as `PhantomData`, so a `C: Clone` requirement would
-/// be an artefact of how the impl was written rather than anything the system
-/// needs — and it would lock out every codec that is not itself `Clone`.
-struct NotCloneCodec;
-
 fn assert_clone<T: Clone>() {}
 
-/// The system type is the shared handle, in both store states, without asking
-/// anything of the codec type.
+/// The system type is the shared handle, in both store states.
+///
+/// It carries no codec type at all — each event names its own — so the store
+/// state is the only axis this has to be stated across.
 #[allow(dead_code)]
-fn _event_source_system_is_clone_without_a_clone_codec() {
-    assert_clone::<EventSourceSystem<NotCloneCodec, StoreUnset>>();
-    assert_clone::<EventSourceSystem<NotCloneCodec, StoreSet>>();
+fn _event_source_system_is_clone_in_both_store_states() {
+    assert_clone::<EventSourceSystem<StoreUnset>>();
+    assert_clone::<EventSourceSystem<StoreSet>>();
 }
 
 /// `builder(ps)` is the name of the entry point that returns a builder.
 #[allow(dead_code)]
 async fn _builder_is_the_entry_point() {
     let ps = ProcessSystem::new().await;
-    let _: EventSourceSystemBuilder<Unset, StoreUnset> = EventSourceSystem::builder(ps);
+    let _: EventSourceSystemBuilder<StoreUnset> = EventSourceSystem::builder(ps);
 }
 
 // Sharing across clones

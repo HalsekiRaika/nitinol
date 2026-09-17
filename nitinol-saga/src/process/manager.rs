@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
-use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_eventsource::{appending_system_event, DurableSubscription, SequenceCursor};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadQuery;
@@ -36,7 +35,6 @@ use crate::scheduler::SchedulerProxy;
 pub(crate) struct SagaManagerProcess<S: Saga> {
     pub(crate) store: Arc<dyn EventStore>,
     pub(crate) producer: Arc<dyn Fn() -> S + Send + Sync>,
-    pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
     pub(crate) upstream: DurableSubscription<UpstreamMessage<S::SubscribedEvent>>,
     pub(crate) cursor: SequenceCursor,
@@ -86,7 +84,6 @@ impl<S: Saga> SagaManagerProcess<S> {
             saga_id: saga_id.clone(),
             store: Arc::clone(&self.store),
             producer: Arc::clone(&self.producer),
-            codec: Arc::clone(&self.codec),
             enqueue_policy: Arc::clone(&self.enqueue_policy),
             // This manager is the subscription; an instance that opened its own
             // would decode every upstream record a second time.

@@ -32,6 +32,8 @@ struct PingEvent;
 
 impl Event for PingEvent {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("PingEvent"));
+
+    type Codec = PingCodec;
 }
 
 struct PingCodec;
@@ -132,7 +134,7 @@ async fn projector_catches_up_via_direct_arc_dyn_event_store() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<PingEvent>(Arc::new(PingCodec))
+    .with_event::<PingEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;

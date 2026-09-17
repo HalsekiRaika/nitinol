@@ -9,5 +9,5 @@ mod replay;
 pub(crate) mod saga_process;
 
 pub use self::manager_props::SagaManagerProps;
-pub use self::props::{CodecSet, CodecUnset, SagaProps, SubscriptionSet, SubscriptionUnset};
+pub use self::props::{SagaProps, SubscriptionSet, SubscriptionUnset};
 pub use self::proxy::{SagaManagerProxy, SagaProxy};

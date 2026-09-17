@@ -43,6 +43,7 @@ impl Event for UpstreamEvent {
         Family::new("persist_tell_end"),
         TypeName::new("UpstreamEvent"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,6 +56,7 @@ impl Event for SagaDomainEvent {
         Family::new("persist_tell_end"),
         TypeName::new("SagaDomainEvent"),
     );
+    type Codec = JsonCodec;
 }
 
 // Target aggregate that the saga will tell
@@ -173,9 +175,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 #[tokio::test]
 async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("persist-tell-end-agg");
@@ -200,10 +200,8 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
                 handled: Arc::clone(&handled_clone),
             }
         })
-        .with_codec(system.codec::<SagaDomainEvent>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<UpstreamEvent>(),
             SequenceCursor::Stream {
                 key: agg_id.as_str().to_owned(),
                 after: 0,

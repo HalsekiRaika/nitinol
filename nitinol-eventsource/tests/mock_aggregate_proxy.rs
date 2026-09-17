@@ -1,5 +1,7 @@
 #![cfg(feature = "test-helpers")]
 
+use bytes::Bytes;
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
 use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
 use nitinol_persistence::{EventType, Family, TypeName};
@@ -9,9 +11,29 @@ struct Reserved {
     sku: String,
 }
 
+/// The codec `Reserved` names. The mock proxy never persists, so the format
+/// only has to exist.
+struct ReservedCodec;
+
+impl Codec<Reserved> for ReservedCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(event: &Reserved) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::copy_from_slice(event.sku.as_bytes()))
+    }
+
+    fn decode(payload: &[u8]) -> Result<Reserved, Self::Error> {
+        Ok(Reserved {
+            sku: String::from_utf8_lossy(payload).into_owned(),
+        })
+    }
+}
+
 impl Event for Reserved {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mock.proxy"), TypeName::new("Reserved"));
+
+    type Codec = ReservedCodec;
 }
 
 #[derive(Default)]

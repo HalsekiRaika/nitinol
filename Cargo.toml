@@ -70,3 +70,5 @@ nitinol-sqlx = { path = "providers/nitinol-sqlx", optional = true }
 # Required by the `#[tokio::test]` attribute in umbrella integration tests.
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 nitinol-persistence = { path = "nitinol-persistence" }
+# `Codec` is stated in `Bytes`, so a test fixture that names a codec spells it.
+bytes = "1"

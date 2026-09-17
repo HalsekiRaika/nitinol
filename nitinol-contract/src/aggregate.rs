@@ -1,3 +1,4 @@
+use crate::codec::Codec;
 use crate::event::Event;
 
 /// Core trait for event-sourced aggregates.
@@ -22,12 +23,24 @@ use crate::event::Event;
 /// # Example
 ///
 /// ```rust,no_run
-/// use nitinol_contract::{Aggregate, Event};
+/// use bytes::Bytes;
+/// use nitinol_contract::{Aggregate, Codec, Event};
 /// use nitinol_persistence::{EventType, Family, TypeName};
 ///
 /// #[derive(Clone)]
 /// enum CounterEvent { Incremented }
-/// impl Event for CounterEvent { const EVENT_TYPE: EventType = EventType::new(Family::new("counter"), TypeName::new("incremented")); }
+///
+/// struct CounterEventCodec;
+/// impl Codec<CounterEvent> for CounterEventCodec {
+///     type Error = std::convert::Infallible;
+///     fn encode(_: &CounterEvent) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+///     fn decode(_: &[u8]) -> Result<CounterEvent, Self::Error> { Ok(CounterEvent::Incremented) }
+/// }
+///
+/// impl Event for CounterEvent {
+///     const EVENT_TYPE: EventType = EventType::new(Family::new("counter"), TypeName::new("incremented"));
+///     type Codec = CounterEventCodec;
+/// }
 ///
 /// #[derive(Default)]
 /// struct Counter { value: u64 }
@@ -50,9 +63,9 @@ pub trait Aggregate: Default + Send + Sync + 'static {
 
 /// Enables an aggregate to be checkpointed as a serializable snapshot value.
 ///
-/// `type Snapshot` is the pure domain value captured and restored; byte
-/// serialization is handled externally, by a `Codec<Self::Snapshot>` in
-/// `nitinol-eventsource`.
+/// `type Snapshot` is the pure domain value captured and restored, and
+/// `type Codec` is the format it is written in — named here, next to the value
+/// it writes, for the same reason [`Event::Codec`] is named on the event.
 ///
 /// # Replay acceleration
 ///
@@ -69,6 +82,13 @@ pub trait Snapshotable: Sized {
     /// The pure domain value that represents a point-in-time snapshot of this
     /// aggregate's state.
     type Snapshot;
+
+    /// The codec that writes this aggregate's snapshot down and reads it back.
+    ///
+    /// Independent of [`Event::Codec`]: a snapshot is a different value in a
+    /// different format, and an activation that restores one reaches for this
+    /// type rather than for the one that reads the stream.
+    type Codec: Codec<Self::Snapshot>;
 
     /// Capture the current state as a snapshot value.
     fn capture(&self) -> Self::Snapshot;

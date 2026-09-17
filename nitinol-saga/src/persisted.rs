@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use nitinol_eventsource::codec::ErasedCodec;
+use nitinol_eventsource::codec;
 use nitinol_eventsource::error::CodecError;
 use nitinol_eventsource::{Event, SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::EventType;
@@ -44,9 +44,9 @@ impl<E: Event> SagaPersisted<E> {
         }
     }
 
-    pub(crate) fn encode(&self, codec: &dyn ErasedCodec<E>) -> Result<Bytes, CodecError> {
+    pub(crate) fn encode(&self) -> Result<Bytes, CodecError> {
         match self {
-            SagaPersisted::Domain(event) => codec.encode(event),
+            SagaPersisted::Domain(event) => codec::encode::<E::Codec, E>(event),
             SagaPersisted::Outbox(marker) => Ok(marker.encode()),
             SagaPersisted::Schedule(marker) => Ok(marker.encode()),
             SagaPersisted::DeadLetter(event) => Ok(event.encode()),
@@ -57,7 +57,6 @@ impl<E: Event> SagaPersisted<E> {
     pub(crate) fn classify(
         event_type: EventType,
         payload: &[u8],
-        codec: &dyn ErasedCodec<E>,
     ) -> Result<Self, SagaPersistedDecodeError> {
         // Classification order: outbox → schedule → dead_letter →
         // dead_letter_disposition → domain.  The four framework families
@@ -80,7 +79,9 @@ impl<E: Event> SagaPersisted<E> {
                 .map(SagaPersisted::DeadLetterDisposition)
                 .map_err(SagaPersistedDecodeError::DeadLetterDisposition)
         } else {
-            Ok(SagaPersisted::Domain(codec.decode(payload)?))
+            Ok(SagaPersisted::Domain(codec::decode::<E::Codec, E>(
+                payload,
+            )?))
         }
     }
 }
@@ -99,11 +100,6 @@ mod tests {
         note: String,
     }
 
-    impl Event for DomainEvt {
-        const EVENT_TYPE: EventType =
-            EventType::new(Family::new("persisted_unit_test"), TypeName::new("Domain"));
-    }
-
     struct JsonCodec;
 
     impl<E: Serialize + for<'de> Deserialize<'de> + 'static> Codec<E> for JsonCodec {
@@ -118,19 +114,21 @@ mod tests {
         }
     }
 
-    fn codec() -> impl ErasedCodec<DomainEvt> {
-        JsonCodec
+    impl Event for DomainEvt {
+        const EVENT_TYPE: EventType =
+            EventType::new(Family::new("persisted_unit_test"), TypeName::new("Domain"));
+
+        type Codec = JsonCodec;
     }
 
     #[test]
     fn non_outbox_path_classifies_as_domain_and_round_trips() {
-        let codec = codec();
         let event = DomainEvt {
             note: "hello".to_owned(),
         };
         let payload = <JsonCodec as Codec<DomainEvt>>::encode(&event).expect("encode");
 
-        match SagaPersisted::classify(DomainEvt::EVENT_TYPE, &payload, &codec) {
+        match SagaPersisted::<DomainEvt>::classify(DomainEvt::EVENT_TYPE, &payload) {
             Ok(SagaPersisted::Domain(decoded)) => assert_eq!(decoded, event),
             _ => panic!("a non-outbox path must classify as Domain"),
         }
@@ -138,11 +136,10 @@ mod tests {
 
     #[test]
     fn outbox_path_classifies_as_outbox_never_domain() {
-        let codec = codec();
         let wire =
             OutboxAppender::build_tell_requested(1, 7, None, "", jiff::Timestamp::UNIX_EPOCH);
 
-        match SagaPersisted::<DomainEvt>::classify(wire.event_type, &wire.payload, &codec) {
+        match SagaPersisted::<DomainEvt>::classify(wire.event_type, &wire.payload) {
             Ok(SagaPersisted::Outbox(OutboxEvent::TellRequested(m))) => assert_eq!(m.tell_id, 7),
             _ => panic!("an outbox path must classify as Outbox"),
         }
@@ -150,12 +147,11 @@ mod tests {
 
     #[test]
     fn encode_is_transparent_for_domain_events() {
-        let codec = codec();
         let event = DomainEvt {
             note: "raw".to_owned(),
         };
         let via_envelope = SagaPersisted::Domain(event.clone())
-            .encode(&codec)
+            .encode()
             .expect("envelope encode");
         let direct = <JsonCodec as Codec<DomainEvt>>::encode(&event).expect("direct encode");
 
@@ -172,8 +168,7 @@ mod tests {
 
     #[test]
     fn undecodable_domain_payload_surfaces_a_domain_decode_error() {
-        let codec = codec();
-        match SagaPersisted::<DomainEvt>::classify(DomainEvt::EVENT_TYPE, b"not json", &codec) {
+        match SagaPersisted::<DomainEvt>::classify(DomainEvt::EVENT_TYPE, b"not json") {
             Err(SagaPersistedDecodeError::Domain(_)) => {}
             _ => panic!("a bad domain payload must surface a Domain decode error"),
         }
@@ -181,11 +176,10 @@ mod tests {
 
     #[test]
     fn undecodable_outbox_payload_surfaces_an_outbox_decode_error() {
-        let codec = codec();
         let outbox_type =
             OutboxAppender::build_tell_requested(1, 1, None, "", jiff::Timestamp::UNIX_EPOCH)
                 .event_type;
-        match SagaPersisted::<DomainEvt>::classify(outbox_type, &[], &codec) {
+        match SagaPersisted::<DomainEvt>::classify(outbox_type, &[]) {
             Err(SagaPersistedDecodeError::Outbox(_)) => {}
             _ => panic!("an outbox marker with no oneof kind must surface an Outbox decode error"),
         }
@@ -193,12 +187,7 @@ mod tests {
 
     #[test]
     fn undecodable_dead_letter_disposition_payload_surfaces_a_disposition_decode_error() {
-        let codec = codec();
-        match SagaPersisted::<DomainEvt>::classify(
-            DeadLetterDispositionEvent::EVENT_TYPE,
-            &[],
-            &codec,
-        ) {
+        match SagaPersisted::<DomainEvt>::classify(DeadLetterDispositionEvent::EVENT_TYPE, &[]) {
             Err(SagaPersistedDecodeError::DeadLetterDisposition(_)) => {}
             _ => panic!(
                 "a disposition marker with no oneof kind must surface a DeadLetterDisposition decode error"

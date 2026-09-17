@@ -745,23 +745,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "eventsource-codec-switch"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "nitinol",
- "nitinol-eventsource",
- "nitinol-persistence",
- "nitinol-runtime",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "eventsource-multiple-deciders"
 version = "0.1.0"
 dependencies = [
@@ -1714,6 +1697,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 name = "nitinol"
 version = "0.4.2"
 dependencies = [
+ "bytes",
  "nitinol-contract",
  "nitinol-eventsource",
  "nitinol-macros",
@@ -1742,6 +1726,7 @@ dependencies = [
 name = "nitinol-contract"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "nitinol-persistence",
 ]
 
@@ -1769,6 +1754,7 @@ dependencies = [
 name = "nitinol-macros"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "nitinol",
  "nitinol-persistence",
  "proc-macro2",

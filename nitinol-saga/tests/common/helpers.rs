@@ -18,7 +18,6 @@ use nitinol_saga::{SagaEffect, ScheduleSpec, TellIntent};
 
 // JsonCodec — shared across all integration tests
 
-#[derive(Default)]
 pub struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -43,6 +42,7 @@ pub struct TestTargetEvent;
 
 impl Event for TestTargetEvent {
     const EVENT_TYPE: EventType = EventType::new(Family::new("test"), TypeName::new("noop_target"));
+    type Codec = JsonCodec;
 }
 
 impl Aggregate for TestTarget {
@@ -76,7 +76,6 @@ pub async fn make_tell_effect<E>() -> SagaEffect<E> {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();
     let proxy = system
@@ -92,7 +91,6 @@ pub async fn make_tell_intent() -> TellIntent {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();
     let proxy = system

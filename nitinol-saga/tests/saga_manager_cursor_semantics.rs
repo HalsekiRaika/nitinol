@@ -49,6 +49,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.cursor"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,6 +62,7 @@ impl Event for ReservationRequested {
         Family::new("mgr.cursor"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Debug)]
@@ -302,9 +304,7 @@ fn count_ended_saga_dead_letters(events: &[LoadedEvent]) -> usize {
 #[tokio::test]
 async fn instance_handler_error_holds_the_shared_cursor() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-hold-orders");
@@ -323,10 +323,8 @@ async fn instance_handler_error_holds_the_shared_cursor() {
             seen: Arc::clone(&seen_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: upstream_key.as_str().to_owned(),
                 after: 0,
@@ -356,9 +354,7 @@ async fn instance_handler_error_holds_the_shared_cursor() {
 #[tokio::test]
 async fn uncorrelated_event_advances_the_cursor() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-selective-orders");
@@ -378,10 +374,8 @@ async fn uncorrelated_event_advances_the_cursor() {
             seen: Arc::clone(&seen_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: upstream_key.as_str().to_owned(),
                 after: 0,
@@ -408,9 +402,7 @@ async fn uncorrelated_event_advances_the_cursor() {
 #[tokio::test]
 async fn ended_instance_does_not_stall_the_shared_subscription() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-fanout-orders");
@@ -432,10 +424,8 @@ async fn ended_instance_does_not_stall_the_shared_subscription() {
             seen: Arc::clone(&seen_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: upstream_key.as_str().to_owned(),
                 after: 0,

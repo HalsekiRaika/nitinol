@@ -44,6 +44,7 @@ impl Event for OrderPlaced {
         Family::new("saga.default.store"),
         TypeName::new("OrderPlaced"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +57,7 @@ impl Event for ReservationRequested {
         Family::new("saga.default.store"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`RecordingSaga`]: every order belongs to the single
@@ -172,7 +174,7 @@ async fn persisted_skus(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<St
         .filter(|event| event.event_type == ReservationRequested::EVENT_TYPE)
         .map(|event| {
             serde_json::from_slice::<ReservationRequested>(&event.payload)
-                .expect("the saga's own event must be encoded with the system codec")
+                .expect("the saga's own event must be encoded with the codec its event type names")
                 .sku
         })
         .collect()
@@ -202,7 +204,6 @@ async fn store_less_spawn_saga_journals_onto_the_system_default_store() {
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
 
@@ -248,7 +249,6 @@ async fn system_subscription_polls_the_system_default_store() {
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
 
@@ -294,7 +294,6 @@ async fn spawn_saga_with_store_overrides_the_default_journal_store() {
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
 
@@ -347,7 +346,6 @@ async fn explicit_subscription_store_overrides_the_default_upstream_store() {
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(Arc::clone(&default_store))
         .build();
 

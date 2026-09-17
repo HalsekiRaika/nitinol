@@ -16,7 +16,6 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaDefaultStoreExt;
 
-use saga_fanout_pattern::codec::JsonCodec;
 use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
 use saga_fanout_pattern::saga::FanOutSaga;
@@ -40,7 +39,6 @@ async fn main() {
     // narrows it back down to the run's stream.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();
 

@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nitinol_eventsource::codec::ErasedCodec;
 use nitinol_persistence::store::EventStore;
 use nitinol_runtime::Props;
 
@@ -29,7 +28,6 @@ pub(crate) struct SagaInstanceSpec<S: Saga> {
     pub(crate) saga_id: SagaId,
     pub(crate) store: Arc<dyn EventStore>,
     pub(crate) producer: Arc<dyn Fn() -> S + Send + Sync>,
-    pub(crate) codec: Arc<dyn ErasedCodec<S::Event>>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
     pub(crate) upstream: Option<OwnedUpstream<S::SubscribedEvent>>,
     pub(crate) crash_restart_factory: Option<CrashRestartFactory>,
@@ -56,7 +54,6 @@ impl<S: Saga> SagaInstanceSpec<S> {
                 state: (self.producer)(),
                 saga_id: self.saga_id.clone(),
                 store: Arc::clone(&self.store),
-                codec: Arc::clone(&self.codec),
                 decode_failure_route_fn: self.decode_failure_route_fn.clone(),
                 sequence: 0,
                 retry_policy: RetryPolicy::default(),

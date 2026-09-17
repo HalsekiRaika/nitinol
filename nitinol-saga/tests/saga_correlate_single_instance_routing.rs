@@ -19,10 +19,11 @@
 //! so that an implementation which dead-letters every event it declines is
 //! rejected rather than passing on the delivery assertion alone.
 //!
-//! `CT-02`: every spawn here calls `with_subscription` with three arguments
-//! (`upstream_store`, `upstream_codec`, `cursor`).  A builder that still takes
-//! a routing argument — positionally or as a trailing `Option` — fails to
-//! compile against these call sites.
+//! `CT-02`: every spawn here calls `with_subscription` with two arguments
+//! (`upstream_store`, `cursor`) — the upstream format is named by
+//! `Saga::SubscribedEvent` itself, not handed to the builder.  A builder that
+//! still takes a routing argument — positionally or as a trailing `Option` —
+//! fails to compile against these call sites.
 
 #[path = "common/helpers.rs"]
 mod common;
@@ -68,6 +69,7 @@ impl Event for OrderPlaced {
         Family::new("saga.correlate.routing"),
         TypeName::new("OrderPlaced"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,6 +82,7 @@ impl Event for ReservationRequested {
         Family::new("saga.correlate.routing"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 /// Records every event that actually reaches `handle`.
@@ -209,7 +212,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 /// from the beginning.  No routing argument is passed — correlation lives on
 /// `CorrelationSaga`.
 async fn spawn_correlation_saga(
-    system: &EventSourceSystem<JsonCodec>,
+    system: &EventSourceSystem,
     upstream_store: &Arc<dyn EventStore>,
     agg_id: &AggregateId,
     saga_store: Arc<dyn EventStore>,
@@ -226,10 +229,8 @@ async fn spawn_correlation_saga(
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: agg_id.as_str().to_owned(),
                 after: 0,
@@ -249,9 +250,7 @@ async fn spawn_correlation_saga(
 #[tokio::test]
 async fn only_events_correlating_to_this_saga_reach_handle() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("correlate-routing-order");
@@ -292,9 +291,7 @@ async fn only_events_correlating_to_this_saga_reach_handle() {
 #[tokio::test]
 async fn correlation_mismatch_is_silent_and_writes_no_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("correlate-routing-silent-order");

@@ -1,5 +1,5 @@
 use bytes::{BufMut, Bytes, BytesMut};
-use nitinol_contract::Event;
+use nitinol_contract::{Codec, Event};
 use nitinol_persistence::{EventType, Family, TypeName, Variant};
 
 const FAMILY: Family = Family::new("conformance.ledger");
@@ -19,6 +19,8 @@ pub enum LedgerEvent {
 
 impl Event for LedgerEvent {
     const EVENT_TYPE: EventType = EventType::new(FAMILY, TYPE_NAME);
+
+    type Codec = LedgerCodec;
 
     fn variant(&self) -> EventType {
         let arm = match self {
@@ -87,6 +89,29 @@ impl LedgerEvent {
             }),
             unknown => Err(Malformation::UnknownKind(unknown).into()),
         }
+    }
+}
+
+/// The format above, as the [`Codec`] [`LedgerEvent`] names.
+///
+/// An interpreter never wires this up: it is reached through
+/// `<LedgerEvent as Event>::Codec`, which is what makes the bytes the suite
+/// reads back the same bytes the interpreter wrote, whatever machinery wrote
+/// them.
+pub struct LedgerCodec;
+
+impl Codec<LedgerEvent> for LedgerCodec {
+    type Error = MalformedLedgerEvent;
+
+    /// Infallible in fact — every value of the type has a representation — so
+    /// this always answers `Ok`; the `Result` is the trait's, for formats that
+    /// can refuse.
+    fn encode(event: &LedgerEvent) -> Result<Bytes, Self::Error> {
+        Ok(event.encode())
+    }
+
+    fn decode(payload: &[u8]) -> Result<LedgerEvent, Self::Error> {
+        LedgerEvent::decode(payload)
     }
 }
 

@@ -79,6 +79,7 @@ struct Ping {
 
 impl Event for Ping {
     const EVENT_TYPE: EventType = EventType::new(Family::new("dlq_arbiter"), TypeName::new("Ping"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,6 +90,7 @@ struct Noted {
 impl Event for Noted {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("dlq_arbiter"), TypeName::new("Noted"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Debug)]
@@ -195,9 +197,7 @@ struct Harness {
 
 async fn spawn_harness(saga_store: Arc<dyn EventStore>, upstream_name: &str) -> Harness {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new(upstream_name);
@@ -217,10 +217,8 @@ async fn spawn_harness(saga_store: Arc<dyn EventStore>, upstream_name: &str) -> 
             notify: Arc::clone(&notify_for_producer),
         }
     })
-    .with_codec(system.codec::<Noted>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<Ping>(),
         SequenceCursor::Stream {
             key: upstream_key.as_str().to_owned(),
             after: 0,

@@ -9,7 +9,7 @@
 //! | [`Decider<C>`](Decider) | Decides what a command means for the current state |
 //! | [`Decision`] | A decider's conclusion: facts and an answer, or a refusal |
 //! | [`Query<M>`](Query) | Read-only question asked of the current aggregate state |
-//! | [`Event`] | Marker for domain events |
+//! | [`Event`] | Marker for domain events; names the codec that writes them |
 //! | [`Snapshotable`] | Opt-in snapshot support for faster replay |
 //! | [`AggregateProxy`] | Identity-based reference to an aggregate; resolves a dispatch to an activation and re-resolves after one dies |
 //!
@@ -29,7 +29,6 @@
 //! 3. `eventsource-projection` – aggregate and projector (Catch-up and Live)
 //! 4. `eventsource-snapshot` – snapshot-accelerated replay
 //! 5. `eventsource-aggregate-communication` – inter-aggregate messaging, as a saga
-//! 6. `eventsource-codec-switch` – custom codec
 //!
 //! # Observing lost races
 //!
@@ -92,9 +91,7 @@ pub use self::error::SystemEventDecodeError;
 pub use self::system_event::{appending_system_event, SystemEvent};
 
 pub use self::error::{AskError, ExecError, Retryability, TellError};
-pub use self::process::{
-    AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset,
-};
+pub use self::process::{AggregateProps, AggregateProxy, AggregateTellTarget};
 pub use self::process::{SnapshotPersistor, SnapshotPersistorProxy};
 
 #[cfg(feature = "test-helpers")]

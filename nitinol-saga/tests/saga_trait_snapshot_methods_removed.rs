@@ -16,9 +16,40 @@
 
 use async_trait::async_trait;
 
+use bytes::Bytes;
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
+
+/// The format the events below name.  Nothing in this file writes to a store —
+/// the probes are called directly — but `Event` names the codec that would
+/// write it, so one is declared.
+struct UnitCodec;
+
+impl Codec<Probed> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Probed) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Probed, Self::Error> {
+        Ok(Probed)
+    }
+}
+
+impl Codec<Upstream> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Upstream) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Upstream, Self::Error> {
+        Ok(Upstream)
+    }
+}
 
 const PROBE_CAPTURE: &str = "probe-capture";
 const PROBE_RESTORE: &str = "probe-restore";
@@ -31,6 +62,7 @@ impl Event for Probed {
         Family::new("saga_trait_snapshot_methods_removed"),
         TypeName::new("Probed"),
     );
+    type Codec = UnitCodec;
 }
 
 #[derive(Clone)]
@@ -41,6 +73,7 @@ impl Event for Upstream {
         Family::new("saga_trait_snapshot_methods_removed"),
         TypeName::new("Upstream"),
     );
+    type Codec = UnitCodec;
 }
 
 /// Correlation rule of [`ProbedSaga`]: the single process instance every

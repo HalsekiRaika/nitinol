@@ -7,6 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{DurableStream, Event, EventEnvelope, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadedEvent, TypeName};
@@ -17,8 +18,26 @@ use nitinol_runtime::{ProcessSystem, SupervisionStrategy};
 #[derive(Clone)]
 struct Evt;
 
+/// The codec `Evt` names. These tests append payloads by hand and turn loaded
+/// events into envelopes themselves, so the format only has to exist.
+struct UnitCodec;
+
+impl Codec<Evt> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_: &Evt) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_: &[u8]) -> Result<Evt, Self::Error> {
+        Ok(Evt)
+    }
+}
+
 impl Event for Evt {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Evt"));
+
+    type Codec = UnitCodec;
 }
 
 const OTHER_EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("OtherEvt"));

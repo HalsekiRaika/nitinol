@@ -16,7 +16,6 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
-use eventsource_multiple_deciders::codec::JsonCodec;
 use eventsource_multiple_deciders::wallet::{Deposit, GetBalance, Wallet, Withdraw};
 
 fn init_tracing() {
@@ -35,7 +34,6 @@ async fn main() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
         .with_event_store(store)
         .build();
 

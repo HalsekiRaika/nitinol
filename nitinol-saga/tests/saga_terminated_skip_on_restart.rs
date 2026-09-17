@@ -46,6 +46,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("terminated_skip"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -58,6 +59,7 @@ impl Event for ReservationRequested {
         Family::new("terminated_skip"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 // Sagas
@@ -185,7 +187,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 
 #[allow(clippy::type_complexity)]
 async fn spawn_recording_saga(
-    system: &EventSourceSystem<JsonCodec>,
+    system: &EventSourceSystem,
     saga_store: &Arc<dyn EventStore>,
     upstream_store: &Arc<dyn EventStore>,
     upstream_key: &str,
@@ -198,10 +200,8 @@ async fn spawn_recording_saga(
             handled: Arc::clone(&handled),
         }
     })
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: upstream_key.to_owned(),
             after: 0,
@@ -219,9 +219,7 @@ async fn spawn_recording_saga(
 #[tokio::test]
 async fn non_terminated_saga_handles_routed_event() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("baseline-order");
@@ -258,9 +256,7 @@ async fn non_terminated_saga_handles_routed_event() {
 #[tokio::test]
 async fn terminated_saga_skips_subscription_and_never_handles() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("terminated-order");
@@ -302,9 +298,7 @@ async fn terminated_saga_skips_subscription_and_never_handles() {
 #[tokio::test]
 async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("respawn-order");
@@ -322,10 +316,8 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
                 handle_count: Arc::clone(&first_count_clone),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: order_id.as_str().to_owned(),
                 after: 0,

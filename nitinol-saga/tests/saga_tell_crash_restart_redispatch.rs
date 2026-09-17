@@ -44,6 +44,7 @@ impl Event for OrderPlaced {
         Family::new("tell_crash_restart"),
         TypeName::new("OrderPlaced"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +57,7 @@ impl Event for ReservationRequested {
         Family::new("tell_crash_restart"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -66,6 +68,7 @@ struct Reserved {
 impl Event for Reserved {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("tell_crash_restart"), TypeName::new("Reserved"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -240,9 +243,7 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
     let mock = MockAggregateProxy::<Inventory>::new();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(INERT_SAGA_ID);
@@ -274,10 +275,8 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
     // No PendingIntents — simulates a full OS-process crash (in-memory state gone).
     let _saga_proxy =
         SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
-            .with_codec(system.codec::<ReservationRequested>())
             .with_subscription(
                 Arc::clone(&upstream_store),
-                system.codec::<OrderPlaced>(),
                 SequenceCursor::Stream {
                     key: "no-such-stream".to_owned(),
                     after: 0,
@@ -360,9 +359,7 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     let mock_p1 = MockAggregateProxy::<Inventory>::new();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
+    let system = EventSourceSystem::builder(ps).build();
 
     let saga_store_p1: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id_p1 = SagaId::new(ACTIVE_SAGA_ID);
@@ -378,10 +375,8 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
                 inventory: mock_for_saga.clone(),
             }
         })
-        .with_codec(system.codec::<ReservationRequested>())
         .with_subscription(
             Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
             SequenceCursor::Stream {
                 key: upstream_key.to_owned(),
                 after: 0,
@@ -480,10 +475,8 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
         Arc::clone(&saga_store_p2),
         InertSaga::default,
     )
-    .with_codec(system.codec::<ReservationRequested>())
     .with_subscription(
         Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
         SequenceCursor::Stream {
             key: "no-such-upstream-p2".to_owned(),
             after: 0,

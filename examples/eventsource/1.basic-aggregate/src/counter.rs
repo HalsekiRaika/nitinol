@@ -1,7 +1,8 @@
 //! Counter aggregate — the minimal "hello world" for nitinol-eventsource.
 //!
 //! Demonstrates:
-//! - Defining an `Event` with a stable `EventType` string
+//! - Defining an `Event` with a stable `EventType` string and the codec that
+//!   writes it down
 //! - Implementing `Aggregate` with a pure `apply` function
 //! - Implementing `Decider<C>` to return a `Decision` — the facts a command
 //!   produced together with the answer it asked for
@@ -12,11 +13,16 @@ use serde::{Deserialize, Serialize};
 use nitinol::eventsource::Event;
 use nitinol_eventsource::{Aggregate, Decider, Decision, Query};
 
+use crate::codec::JsonCodec;
+
 // Events
 
 /// The single event type for the Counter aggregate.
+///
+/// The event names the format that writes it: `codec = JsonCodec` becomes
+/// `Event::Codec`, so nothing downstream has to be handed one.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
-#[event(family = "basic_aggregate.counter")]
+#[event(family = "basic_aggregate.counter", codec = JsonCodec)]
 pub struct Incremented;
 
 // Aggregate state

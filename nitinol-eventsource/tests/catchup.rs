@@ -18,6 +18,8 @@ struct Evt;
 
 impl Event for Evt {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Evt"));
+
+    type Codec = UnitCodec;
 }
 
 struct UnitCodec;
@@ -116,7 +118,7 @@ async fn catchup_all_events_processed_from_empty_checkpoint() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -168,7 +170,7 @@ async fn catchup_skips_events_before_checkpoint() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -208,7 +210,7 @@ async fn catchup_empty_store_project_never_called() {
             }
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .catchup_from_global()
     .spawn(&system)
     .await;
@@ -252,7 +254,7 @@ async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .catchup_from_global()
     .spawn(&system)
     .await;
@@ -294,7 +296,7 @@ async fn catchup_then_live_append_is_projected_via_durable_stream() {
             notify: Arc::clone(&notify_c),
         },
     )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    .with_event::<Evt>()
     .catchup_from_aggregate(agg_id.clone())
     .spawn(&system)
     .await;
