@@ -14,17 +14,28 @@ use futures_util::StreamExt;
 use jiff::Timestamp;
 use nitinol_persistence::error::LoadError;
 use nitinol_persistence::store::EventStream;
-use nitinol_persistence::{LoadQuery, LoadedEvent};
+use nitinol_persistence::{EventRegistry, LoadQuery, LoadedEvent};
 use sqlx::PgPool;
 
 use super::failure::Failure;
 use super::numbering;
 use super::timestamp::Instant;
-use crate::event_type_registry::{EventTypeRegistry, UnknownEventType};
+
+/// A stored row carries a path no collected entry answers for.
+///
+/// Restoring it as some other type would misroute it and skipping it would hide
+/// it from every reader, so the row's load fails and the path it carried is
+/// named — which is how a link that dropped a crate's declarations is told
+/// apart from a corrupt row.
+#[derive(Debug, thiserror::Error)]
+#[error("no event type was collected under the path {path:?}")]
+pub struct UnknownEventType {
+    pub path: String,
+}
 
 pub(super) fn load<'a>(
     pool: &'a PgPool,
-    event_types: &'a EventTypeRegistry,
+    event_types: &'a EventRegistry,
     query: LoadQuery,
 ) -> Result<EventStream<'a>, LoadError> {
     let conditions = Conditions::of(query)?;
@@ -109,7 +120,7 @@ struct StoredEvent {
     occurred_at: Instant,
 }
 
-fn restore(event_types: &EventTypeRegistry, row: StoredEvent) -> Result<LoadedEvent, Failure> {
+fn restore(event_types: &EventRegistry, row: StoredEvent) -> Result<LoadedEvent, Failure> {
     let Some(event_type) = event_types.resolve(&row.event_type) else {
         return Err(UnknownEventType {
             path: row.event_type,

@@ -1,6 +1,9 @@
 use bytes::Bytes;
+use linkme::distributed_slice;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::{EventType, Family, TypeName, Variant};
+use nitinol_persistence::{
+    EventRegistryEntry, EventType, Family, TypeName, Variant, EVENT_REGISTRY,
+};
 
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/nitinol.saga.outbox.rs"));
@@ -14,6 +17,36 @@ use self::proto::outbox_marker::Kind;
 
 pub(crate) const OUTBOX_MARKER: EventType =
     EventType::new(Family::new("nitinol.saga"), TypeName::new("outbox"));
+
+/// The canonical identity one outbox arm is written down as.
+const fn arm(variant: &'static str) -> EventType {
+    EventType::with_variant(
+        OUTBOX_MARKER.family(),
+        OUTBOX_MARKER.type_name(),
+        Variant::new(variant),
+    )
+}
+
+const TELL_REQUESTED: EventType = arm("tell_requested");
+const TELL_ACKED: EventType = arm("tell_acked");
+const TELL_FAILED: EventType = arm("tell_failed");
+const SCHEDULED: EventType = arm("scheduled");
+const ENDED: EventType = arm("ended");
+
+/// What a binary linking this crate collects for the outbox, so that a load of
+/// a saga's own stream restores its markers rather than failing on them.
+#[distributed_slice(EVENT_REGISTRY)]
+static OUTBOX_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
+    concat!(module_path!(), "::OutboxEvent"),
+    &[
+        OUTBOX_MARKER,
+        TELL_REQUESTED,
+        TELL_ACKED,
+        TELL_FAILED,
+        SCHEDULED,
+        ENDED,
+    ],
+);
 
 #[derive(Debug, thiserror::Error)]
 #[error("outbox marker payload carried no `oneof` kind")]
@@ -31,14 +64,13 @@ impl SystemEvent for OutboxEvent {
     const EVENT_TYPE: EventType = OUTBOX_MARKER;
 
     fn variant(&self) -> EventType {
-        let variant = match self {
-            OutboxEvent::TellRequested(_) => Variant::new("tell_requested"),
-            OutboxEvent::TellAcked(_) => Variant::new("tell_acked"),
-            OutboxEvent::TellFailed(_) => Variant::new("tell_failed"),
-            OutboxEvent::Scheduled(_) => Variant::new("scheduled"),
-            OutboxEvent::Ended(_) => Variant::new("ended"),
-        };
-        EventType::with_variant(OUTBOX_MARKER.family(), OUTBOX_MARKER.type_name(), variant)
+        match self {
+            OutboxEvent::TellRequested(_) => TELL_REQUESTED,
+            OutboxEvent::TellAcked(_) => TELL_ACKED,
+            OutboxEvent::TellFailed(_) => TELL_FAILED,
+            OutboxEvent::Scheduled(_) => SCHEDULED,
+            OutboxEvent::Ended(_) => ENDED,
+        }
     }
 
     fn encode(&self) -> Bytes {

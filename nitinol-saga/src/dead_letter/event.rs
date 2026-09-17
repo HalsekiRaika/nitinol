@@ -9,9 +9,12 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use linkme::distributed_slice;
 use nitinol_eventsource::{appending_system_event, SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName, Variant};
+use nitinol_persistence::{
+    AggregateId, EventRegistryEntry, EventType, Family, TypeName, Variant, EVENT_REGISTRY,
+};
 
 use crate::id::SagaId;
 
@@ -28,6 +31,41 @@ use self::proto::{
 /// Reserved type-level identity shared by every dead-letter event.
 pub(crate) const DEAD_LETTER_MARKER: EventType =
     EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
+
+/// The canonical identity one dead-letter arm is written down as.
+const fn arm(variant: &'static str) -> EventType {
+    EventType::with_variant(
+        DEAD_LETTER_MARKER.family(),
+        DEAD_LETTER_MARKER.type_name(),
+        Variant::new(variant),
+    )
+}
+
+const TELL_FAILED: EventType = arm("tell_failed");
+const HANDLE_FAILED: EventType = arm("handle_failed");
+const PERSIST_FAILED: EventType = arm("persist_failed");
+const ENDED_SAGA_RECEIVED_MESSAGE: EventType = arm("ended_saga_received_message");
+const DECODE_FAILED: EventType = arm("decode_failed");
+const SCHEDULED_FAILED: EventType = arm("scheduled_failed");
+const TELL_FAILED_HOOK_FAILED: EventType = arm("tell_failed_hook_failed");
+
+/// What a binary linking this crate collects for the dead-letter record, so
+/// that a load of a saga's own stream restores its failures rather than failing
+/// on them.
+#[distributed_slice(EVENT_REGISTRY)]
+static DEAD_LETTER_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
+    concat!(module_path!(), "::DeadLetterEvent"),
+    &[
+        DEAD_LETTER_MARKER,
+        TELL_FAILED,
+        HANDLE_FAILED,
+        PERSIST_FAILED,
+        ENDED_SAGA_RECEIVED_MESSAGE,
+        DECODE_FAILED,
+        SCHEDULED_FAILED,
+        TELL_FAILED_HOOK_FAILED,
+    ],
+);
 
 #[derive(Debug, thiserror::Error)]
 #[error("dead letter payload carried no `oneof` failure")]
@@ -102,22 +140,15 @@ impl SystemEvent for DeadLetterEvent {
     const EVENT_TYPE: EventType = DEAD_LETTER_MARKER;
 
     fn variant(&self) -> EventType {
-        let variant = match &self.failure {
-            SagaFailure::TellFailed { .. } => Variant::new("tell_failed"),
-            SagaFailure::HandleFailed { .. } => Variant::new("handle_failed"),
-            SagaFailure::PersistFailed { .. } => Variant::new("persist_failed"),
-            SagaFailure::EndedSagaReceivedMessage { .. } => {
-                Variant::new("ended_saga_received_message")
-            }
-            SagaFailure::DecodeFailed { .. } => Variant::new("decode_failed"),
-            SagaFailure::ScheduledFailed { .. } => Variant::new("scheduled_failed"),
-            SagaFailure::TellFailedHookFailed { .. } => Variant::new("tell_failed_hook_failed"),
-        };
-        EventType::with_variant(
-            DEAD_LETTER_MARKER.family(),
-            DEAD_LETTER_MARKER.type_name(),
-            variant,
-        )
+        match &self.failure {
+            SagaFailure::TellFailed { .. } => TELL_FAILED,
+            SagaFailure::HandleFailed { .. } => HANDLE_FAILED,
+            SagaFailure::PersistFailed { .. } => PERSIST_FAILED,
+            SagaFailure::EndedSagaReceivedMessage { .. } => ENDED_SAGA_RECEIVED_MESSAGE,
+            SagaFailure::DecodeFailed { .. } => DECODE_FAILED,
+            SagaFailure::ScheduledFailed { .. } => SCHEDULED_FAILED,
+            SagaFailure::TellFailedHookFailed { .. } => TELL_FAILED_HOOK_FAILED,
+        }
     }
 
     fn encode(&self) -> Bytes {

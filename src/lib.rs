@@ -12,7 +12,7 @@
 //! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
 //! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
 //! | `full`         | All of the above |
-//! | `postgres`     | `sqlx` — Postgres `EventStore` backend (`PostgresEventStore`, `EventTypeRegistry`) |
+//! | `postgres`     | `sqlx` — Postgres `EventStore` backend (`PostgresEventStore`) |
 //!
 //! # Example
 //!
@@ -118,3 +118,18 @@ pub use nitinol_saga as saga;
 
 #[cfg(feature = "postgres")]
 pub use nitinol_sqlx as sqlx;
+
+/// What the code `#[derive(Event)]` writes reaches, and nothing a user writes.
+///
+/// The expansion places an entry in
+/// [`persistence::EVENT_REGISTRY`](nitinol_persistence::EVENT_REGISTRY), which
+/// takes the machinery that fills that slice — and a user who derives `Event`
+/// is obliged to depend on `nitinol` and on nothing else, so the derive reaches
+/// it here rather than through a dependency the user would have to add.
+///
+/// No stability is promised for anything below.
+#[cfg(feature = "contract")]
+#[doc(hidden)]
+pub mod __private {
+    pub use linkme;
+}

@@ -20,15 +20,12 @@ use std::sync::Arc;
 
 use nitinol::persistence::store::EventStore;
 use nitinol::sqlx::sqlx::postgres::PgPoolOptions;
-use nitinol::sqlx::{EventTypeRegistry, PostgresEventStore};
+use nitinol::sqlx::PostgresEventStore;
 
 let pool = PgPoolOptions::new().connect(&std::env::var("DATABASE_URL")?).await?;
 PostgresEventStore::migrate(&pool).await?;
 
-let mut event_types = EventTypeRegistry::new();
-event_types.register(MyEvent::EVENT_TYPE);
-
-let store: Arc<dyn EventStore> = Arc::new(PostgresEventStore::new(pool, event_types));
+let store: Arc<dyn EventStore> = Arc::new(PostgresEventStore::new(pool)?);
 ```
 
 Four things the store expects of its caller.
@@ -40,11 +37,20 @@ the concurrency the pool allows.
 **Migrations are applied explicitly.** `PostgresEventStore::migrate` brings the
 database up to the schema the binary was built against. Nothing runs it for you.
 
-**Every event type is registered.** Each component of an `EventType` is a
-`&'static str`, so a path read out of a column cannot become one again without
-leaking the string it was read into. A row whose type no registry entry answers
-for fails its load rather than being passed over, and a projector that never
-sees a row never learns it is there.
+**Every event type is collected at link time, not registered by hand.** Each
+component of an `EventType` is a `&'static str`, so a path read out of a column
+cannot become one again without leaking the string it was read into.
+`#[derive(Event)]` places what your type is written down as in
+`nitinol::persistence::EVENT_REGISTRY`, and the framework places its own
+records — a saga's outbox, timers and dead letters — the same way;
+`PostgresEventStore::new` builds its registry out of what the binary linked, and
+refuses to open at all when two declarations claim one canonical path. A row
+whose type nothing collected fails its load rather than being passed over, and a
+projector that never sees a row never learns it is there.
+
+A crate the binary references nothing of may be dropped from the link, and its
+declarations go with it silently. Where you depend on a crate purely for the
+events it declares, reference something of it.
 
 **A stream key is unique across the whole store.** Aggregates and sagas are
 journalled side by side in one table, keyed by nothing but the string you append

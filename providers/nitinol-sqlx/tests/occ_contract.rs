@@ -43,10 +43,10 @@ use nitinol_persistence::LoadQuery;
 async fn a_sequence_the_stream_already_holds_is_refused_by_the_stream_key_and_changes_nothing() {
     const STREAM: &str = "sqlx.contract.conflict";
 
-    let Some(backend) = harness::postgres_backend(&[fixture::RECORDED]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let store = backend.bring_up_store().await.store;
+    let store = backend.bring_up_store().await;
     committed(
         &store,
         STREAM,
@@ -83,10 +83,10 @@ async fn a_sequence_the_stream_already_holds_is_refused_by_the_stream_key_and_ch
 async fn events_appended_to_one_stream_replay_in_the_order_they_were_appended() {
     const STREAM: &str = "sqlx.contract.replay";
 
-    let Some(backend) = harness::postgres_backend(&[fixture::RECORDED]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let store = backend.bring_up_store().await.store;
+    let store = backend.bring_up_store().await;
     committed(&store, STREAM, vec![recorded(1, b"e1")]).await;
     committed(&store, STREAM, vec![recorded(2, b"e2"), recorded(3, b"e3")]).await;
     committed(&store, STREAM, vec![recorded(4, b"e4")]).await;
@@ -133,10 +133,10 @@ async fn events_appended_to_one_stream_replay_in_the_order_they_were_appended() 
 async fn an_append_reports_the_highest_sequence_of_its_batch_as_the_stream_version() {
     const STREAM: &str = "sqlx.contract.version";
 
-    let Some(backend) = harness::postgres_backend(&[fixture::RECORDED]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let store = backend.bring_up_store().await.store;
+    let store = backend.bring_up_store().await;
 
     let genesis = committed(&store, STREAM, vec![recorded(1, b"e1")]).await;
     assert_eq!(
@@ -155,10 +155,10 @@ async fn an_append_reports_the_highest_sequence_of_its_batch_as_the_stream_versi
 async fn two_appends_racing_for_one_sequence_leave_exactly_one_winner() {
     const STREAM: &str = "sqlx.contract.race";
 
-    let Some(backend) = harness::postgres_backend(&[fixture::RECORDED]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let store = backend.bring_up_store().await.store;
+    let store = backend.bring_up_store().await;
 
     let one = tokio::spawn({
         let store = Arc::clone(&store);
@@ -204,10 +204,10 @@ async fn two_appends_racing_for_one_sequence_leave_exactly_one_winner() {
 async fn a_refused_append_consumes_no_numbering_for_the_stream_that_appends_next() {
     const REFUSED: &str = "sqlx.contract.numbering.refused";
 
-    let Some(backend) = harness::postgres_backend(&[fixture::RECORDED]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let store = backend.bring_up_store().await.store;
+    let store = backend.bring_up_store().await;
     let mut last = highest(committed(&store, REFUSED, vec![recorded(1, b"e1")]).await);
 
     conflicted(
@@ -270,10 +270,10 @@ async fn an_empty_batch_is_a_no_op_that_reports_the_stream_version_and_consumes_
     const STREAM: &str = "sqlx.contract.empty";
     const NEXT: &str = "sqlx.contract.empty.next";
 
-    let Some(backend) = harness::postgres_backend(&[fixture::RECORDED]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let store = backend.bring_up_store().await.store;
+    let store = backend.bring_up_store().await;
 
     let untouched = committed(&store, STREAM, vec![]).await;
     assert!(

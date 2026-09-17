@@ -8,19 +8,20 @@
 //! use std::sync::Arc;
 //!
 //! use nitinol_persistence::store::EventStore;
-//! use nitinol_sqlx::{sqlx::postgres::PgPoolOptions, EventTypeRegistry, PostgresEventStore};
+//! use nitinol_sqlx::{sqlx::postgres::PgPoolOptions, PostgresEventStore};
 //!
-//! # async fn wire(url: &str, my_event: nitinol_persistence::EventType) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn wire(url: &str) -> Result<(), Box<dyn std::error::Error>> {
 //! let pool = PgPoolOptions::new().connect(url).await?;
 //! PostgresEventStore::migrate(&pool).await?;
 //!
-//! let mut event_types = EventTypeRegistry::new();
-//! event_types.register(my_event);
-//!
-//! let store: Arc<dyn EventStore> = Arc::new(PostgresEventStore::new(pool, event_types));
+//! let store: Arc<dyn EventStore> = Arc::new(PostgresEventStore::new(pool)?);
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! Nothing is registered: the event types the store serves are the ones this
+//! binary linked. `#[derive(Event)]` writes that declaration for a domain type,
+//! and the framework writes it for the records it journals itself.
 //!
 //! The pool is the caller's. The concurrency the store is judged on is the
 //! concurrency the pool allows, so how many connections a deployment gives it —
@@ -36,21 +37,23 @@
 //! key share a stream: their sequence numbers collide and each refuses the
 //! other's appends.
 //!
-//! # What a registry is for
+//! # What a collected event type is for
 //!
 //! Every component of an [`EventType`](nitinol_persistence::EventType) is a
 //! `&'static str`, so a path read out of a column cannot become one again
-//! without leaking the string it was read into. [`EventTypeRegistry`] is the way
-//! out: the caller declares the finite set of types the store may serve, and a
-//! row carrying anything else fails its load rather than being passed over.
+//! without leaking the string it was read into.
+//! [`EventRegistry`](nitinol_persistence::EventRegistry) is the way out, and
+//! what it answers for is gathered by the linker out of
+//! [`EVENT_REGISTRY`](nitinol_persistence::EVENT_REGISTRY). A row carrying a
+//! path nothing collected fails its load as [`UnknownEventType`] rather than
+//! being passed over — see `EVENT_REGISTRY` for the one way collection comes up
+//! short, a crate dropped from the link.
 
-mod event_type_registry;
 #[cfg(feature = "postgres")]
 mod postgres;
 
-pub use self::event_type_registry::{EventTypeRegistry, UnknownEventType};
 #[cfg(feature = "postgres")]
-pub use self::postgres::PostgresEventStore;
+pub use self::postgres::{PostgresEventStore, UnknownEventType};
 
 /// The `sqlx` this crate links, so a caller builds the pool it is handed
 /// against the same version.

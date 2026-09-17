@@ -34,7 +34,7 @@ use nitinol_store_conformance::{verify, verify_under_concurrency};
 /// would only ever run where the reader yielded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_postgres_store_conforms_to_every_occ_clause() {
-    let Some(backend) = harness::postgres_backend(&[harness::CONFORMANCE_FACT]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
 
@@ -49,7 +49,7 @@ async fn the_postgres_store_conforms_to_every_occ_clause() {
 /// nobody.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_checkpoint_reader_observes_every_committed_event_exactly_once() {
-    let Some(backend) = harness::postgres_backend(&[harness::CONFORMANCE_FACT]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
 

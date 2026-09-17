@@ -10,9 +10,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use linkme::distributed_slice;
 use nitinol_eventsource::{appending_system_event, SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{EventType, Family, TypeName, Variant};
+use nitinol_persistence::{
+    EventRegistryEntry, EventType, Family, TypeName, Variant, EVENT_REGISTRY,
+};
 
 use crate::id::SagaId;
 use crate::scheduler::token::{ScheduleToken, TimerName};
@@ -27,6 +30,28 @@ use self::proto::{Cancelled, Fired, ScheduleMarker, Scheduled};
 /// Reserved type-level identity shared by every schedule marker.
 pub(crate) const SCHEDULE_MARKER: EventType =
     EventType::new(Family::new("nitinol.saga"), TypeName::new("schedule"));
+
+/// The canonical identity one schedule arm is written down as.
+const fn arm(variant: &'static str) -> EventType {
+    EventType::with_variant(
+        SCHEDULE_MARKER.family(),
+        SCHEDULE_MARKER.type_name(),
+        Variant::new(variant),
+    )
+}
+
+const SCHEDULED: EventType = arm("scheduled");
+const CANCELLED: EventType = arm("cancelled");
+const FIRED: EventType = arm("fired");
+
+/// What a binary linking this crate collects for the scheduler, so that a load
+/// of a saga's own stream restores its timer markers rather than failing on
+/// them.
+#[distributed_slice(EVENT_REGISTRY)]
+static SCHEDULE_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
+    concat!(module_path!(), "::ScheduleEvent"),
+    &[SCHEDULE_MARKER, SCHEDULED, CANCELLED, FIRED],
+);
 
 #[derive(Debug, thiserror::Error)]
 #[error("schedule marker payload carried no `oneof` kind")]
@@ -54,16 +79,11 @@ impl SystemEvent for ScheduleEvent {
     const EVENT_TYPE: EventType = SCHEDULE_MARKER;
 
     fn variant(&self) -> EventType {
-        let variant = match self {
-            ScheduleEvent::Scheduled { .. } => Variant::new("scheduled"),
-            ScheduleEvent::Cancelled { .. } => Variant::new("cancelled"),
-            ScheduleEvent::Fired { .. } => Variant::new("fired"),
-        };
-        EventType::with_variant(
-            SCHEDULE_MARKER.family(),
-            SCHEDULE_MARKER.type_name(),
-            variant,
-        )
+        match self {
+            ScheduleEvent::Scheduled { .. } => SCHEDULED,
+            ScheduleEvent::Cancelled { .. } => CANCELLED,
+            ScheduleEvent::Fired { .. } => FIRED,
+        }
     }
 
     fn encode(&self) -> Bytes {

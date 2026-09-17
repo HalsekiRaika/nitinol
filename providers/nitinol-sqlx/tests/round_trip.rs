@@ -8,17 +8,24 @@
 //!     Then each one carries the instant it was appended with, held at the
 //!          resolution the column has — never the moment the row was written
 //!
-//!   Scenario: an event type is restored through the registry
-//!     Given events of every shape an event type has
-//!     Then each one is restored as the registered type it was stored from
+//!   Scenario: 手動登録なしで round-trip できる
+//!     Given events of every shape an event type has, declared to the
+//!          collection and nowhere else
+//!     When a store opened with `PostgresEventStore::new(pool)` appends and
+//!          loads them
+//!     Then each one is restored as the event type it was stored from
 //!
-//!   Scenario: an event type nobody registered
+//!   Scenario: an event type nothing collected
 //!     Then the row fails its load rather than being passed over
 //! ```
 //!
-//! The registry is what makes the second scenario possible at all: every part
-//! of an `EventType` is a `&'static str`, so a value read out of a column
-//! cannot become one without leaking the string it was read into.
+//! Collection is what makes the second scenario possible at all: every part of
+//! an `EventType` is a `&'static str`, so a value read out of a column cannot
+//! become one without leaking the string it was read into. What the store
+//! serves is what its binary linked, and the store takes no registry from its
+//! caller — which is what the third scenario turns on, since an event type this
+//! file declares no entry for is appended all the same (an append writes the
+//! path it is handed and asks the collection nothing).
 //!
 //! Running any of this needs a database. Where none can be reached the clause
 //! judges nothing, which is not evidence that it holds.
@@ -31,8 +38,11 @@ mod harness;
 use fixture::{at, committed, observe, typed, OCCURRED_AT_MICROSECOND};
 use futures_util::StreamExt;
 use jiff::Timestamp;
+use linkme::distributed_slice;
 use nitinol_persistence::error::LoadError;
-use nitinol_persistence::{EventType, Family, LoadQuery, TypeName, Variant};
+use nitinol_persistence::{
+    EventRegistryEntry, EventType, Family, LoadQuery, TypeName, Variant, EVENT_REGISTRY,
+};
 use nitinol_sqlx::UnknownEventType;
 
 const BARE: EventType = EventType::new(Family::new(""), TypeName::new("Bare"));
@@ -44,14 +54,30 @@ const ARM: EventType = EventType::with_variant(
     Variant::new("Left"),
 );
 
+/// The three shapes, declared the way a `#[derive(Event)]` type declares
+/// itself — one entry per declaring type, carrying everything it is written
+/// down as.
+#[distributed_slice(EVENT_REGISTRY)]
+static SHAPES_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
+    concat!(module_path!(), "::round_trip_shapes"),
+    &[BARE, NESTED, ARM],
+);
+
+/// An event type with no entry anywhere in this binary.
+///
+/// Appending it is legal — an append writes the canonical path it is handed —
+/// and loading it is what nothing can answer for.
+const UNCOLLECTED: EventType =
+    EventType::new(Family::new("sqlx.round-trip"), TypeName::new("Uncollected"));
+
 #[tokio::test]
 async fn occurred_at_round_trips_at_the_microsecond_resolution_the_column_holds() {
     const STREAM: &str = "sqlx.round-trip.occurred-at";
 
-    let Some(backend) = harness::postgres_backend(&[fixture::RECORDED]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let store = backend.bring_up_store().await.store;
+    let store = backend.bring_up_store().await;
 
     let aligned = microseconds(OCCURRED_AT_MICROSECOND);
     let sub_microsecond = nanoseconds(i128::from(OCCURRED_AT_MICROSECOND) * 1_000 + 789);
@@ -84,13 +110,13 @@ async fn occurred_at_round_trips_at_the_microsecond_resolution_the_column_holds(
 }
 
 #[tokio::test]
-async fn every_shape_of_event_type_round_trips_through_the_registry() {
+async fn every_shape_of_event_type_round_trips_with_nothing_registered_by_hand() {
     const STREAM: &str = "sqlx.round-trip.event-type";
 
-    let Some(backend) = harness::postgres_backend(&[BARE, NESTED, ARM]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let store = backend.bring_up_store().await.store;
+    let store = backend.bring_up_store().await;
     committed(
         &store,
         STREAM,
@@ -108,23 +134,23 @@ async fn every_shape_of_event_type_round_trips_through_the_registry() {
     assert_eq!(
         round_tripped,
         vec![BARE, NESTED, ARM],
-        "an event type is restored as the registered value it was stored from, an empty family \
-         and an enum arm included"
+        "a store opened over a pool alone restores every event type its binary declared — an \
+         empty family and an enum arm included — and the declaration was a linked entry, not a \
+         registry handed to the store"
     );
 }
 
 #[tokio::test]
-async fn a_row_carrying_an_unregistered_event_type_fails_its_load_instead_of_vanishing() {
-    const STREAM: &str = "sqlx.round-trip.unregistered";
+async fn a_row_carrying_an_uncollected_event_type_fails_its_load_instead_of_vanishing() {
+    const STREAM: &str = "sqlx.round-trip.uncollected";
 
-    let Some(backend) = harness::postgres_backend(&[fixture::RECORDED]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let written = backend.bring_up_store().await;
-    committed(&written.store, STREAM, vec![fixture::recorded(1, b"e1")]).await;
+    let store = backend.bring_up_store().await;
+    committed(&store, STREAM, vec![typed(1, UNCOLLECTED, b"e1")]).await;
 
-    let blind = backend.store_on(&written.schema, &[]).await;
-    let mut rows = blind
+    let mut rows = store
         .load(LoadQuery::by_stream(STREAM))
         .await
         .expect("a load a store can answer at all opens its stream");
@@ -137,18 +163,19 @@ async fn a_row_carrying_an_unregistered_event_type_fails_its_load_instead_of_van
         Err(LoadError::Backend(failure)) => {
             let Some(unknown) = failure.downcast_ref::<UnknownEventType>() else {
                 panic!(
-                    "a row whose event type is not registered fails with the path it carried, and \
+                    "a row whose event type nothing collected fails with the path it carried, and \
                      the store reported {failure}"
                 )
             };
             assert_eq!(
                 unknown.path,
-                fixture::RECORDED.to_path().to_string(),
-                "the failure names the canonical path the row carried"
+                UNCOLLECTED.to_path().to_string(),
+                "the failure names the canonical path the row carried — which is how a link that \
+                 dropped a crate's declarations is told apart from a corrupt row"
             );
         }
         Ok(event) => panic!(
-            "a row whose event type is not registered cannot be restored, and the store served it \
+            "a row whose event type nothing collected cannot be restored, and the store served it \
              as {:?}",
             event.event_type
         ),

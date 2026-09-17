@@ -15,15 +15,24 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use jiff::Timestamp;
+use linkme::distributed_slice;
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{
-    AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+    AppendOutcome, AppendingEvent, EventRegistryEntry, EventType, Family, LoadQuery, LoadedEvent,
+    TypeName, EVENT_REGISTRY,
 };
 
 /// The event type a clause appends when it is not itself about event types.
 pub const RECORDED: EventType =
     EventType::new(Family::new("sqlx.contract"), TypeName::new("Recorded"));
+
+/// What makes `RECORDED` restorable: a store resolves what its binary linked,
+/// so an event type a clause appends has to be declared to the collection the
+/// same way a domain event is.
+#[distributed_slice(EVENT_REGISTRY)]
+static RECORDED_ENTRY: EventRegistryEntry =
+    EventRegistryEntry::new(concat!(module_path!(), "::RECORDED"), &[RECORDED]);
 
 /// The instant every event carries unless a clause supplies its own.
 pub const OCCURRED_AT_MICROSECOND: i64 = 1_700_000_000_123_456;

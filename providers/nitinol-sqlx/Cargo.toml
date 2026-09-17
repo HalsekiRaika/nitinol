@@ -35,6 +35,11 @@ time = { version = "0.3", optional = true }
 
 [dev-dependencies]
 nitinol-store-conformance = { path = "../../nitinol-store-conformance" }
+# The contract tests declare their event types the way a user's crate does —
+# by placing entries in the collection slice. `#[derive(Event)]` writes that
+# for a user, but the derive lives behind the umbrella crate, which this
+# provider cannot depend on, so the tests place their entries by hand.
+linkme = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

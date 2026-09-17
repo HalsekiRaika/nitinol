@@ -26,7 +26,10 @@ mod fixture;
 mod harness;
 
 use fixture::{committed, highest, observe, payloads, recorded, typed};
-use nitinol_persistence::{EventType, Family, LoadQuery, MaterializedPath, TypeName};
+use linkme::distributed_slice;
+use nitinol_persistence::{
+    EventRegistryEntry, EventType, Family, LoadQuery, MaterializedPath, TypeName, EVENT_REGISTRY,
+};
 
 const UNDER: EventType = EventType::new(Family::new("sqlx.prefix"), TypeName::new("Under"));
 const DEEPER: EventType = EventType::new(Family::new("sqlx.prefix.deeper"), TypeName::new("Under"));
@@ -34,16 +37,23 @@ const SIBLING: EventType = EventType::new(Family::new("sqlx.prefixed"), TypeName
 const UNDERSCORE: EventType = EventType::new(Family::new("sqlx.prefix_"), TypeName::new("Under"));
 const PERCENT: EventType = EventType::new(Family::new("sqlx.prefix%"), TypeName::new("Under"));
 
+/// The five neighbouring paths, declared to the collection so that what this
+/// clause judges is the prefix comparison rather than what a store could
+/// restore.
+#[distributed_slice(EVENT_REGISTRY)]
+static PREFIX_NEIGHBOURS: EventRegistryEntry = EventRegistryEntry::new(
+    concat!(module_path!(), "::prefix_neighbours"),
+    &[UNDER, DEEPER, SIBLING, UNDERSCORE, PERCENT],
+);
+
 #[tokio::test]
 async fn an_event_type_prefix_matches_on_segment_boundaries_only() {
     const STREAM: &str = "sqlx.query.prefix";
 
-    let Some(backend) =
-        harness::postgres_backend(&[UNDER, DEEPER, SIBLING, UNDERSCORE, PERCENT]).await
-    else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let store = backend.bring_up_store().await.store;
+    let store = backend.bring_up_store().await;
     committed(
         &store,
         STREAM,
@@ -75,10 +85,10 @@ async fn a_load_serves_only_what_its_query_asks_for() {
     const STREAM: &str = "sqlx.query.conditions";
     const OTHER: &str = "sqlx.query.conditions.other";
 
-    let Some(backend) = harness::postgres_backend(&[fixture::RECORDED]).await else {
+    let Some(backend) = harness::postgres_backend().await else {
         return;
     };
-    let store = backend.bring_up_store().await.store;
+    let store = backend.bring_up_store().await;
     let first =
         highest(committed(&store, STREAM, vec![recorded(1, b"s1"), recorded(2, b"s2")]).await);
     committed(&store, OTHER, vec![recorded(1, b"o1")]).await;

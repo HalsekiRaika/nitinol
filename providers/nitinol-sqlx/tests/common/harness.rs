@@ -29,8 +29,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_core::future::BoxFuture;
+use linkme::distributed_slice;
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol_persistence::{EventRegistryEntry, EventType, Family, TypeName, EVENT_REGISTRY};
 use nitinol_sqlx::PostgresEventStore;
 use nitinol_store_conformance::{Executor, StoreUnderTest};
 use sqlx::postgres::PgPoolOptions;
@@ -43,10 +44,19 @@ use testcontainers_modules::postgres::Postgres;
 /// The one event type the conformance suite appends.
 ///
 /// The suite keeps its own constant to itself and its reader panics on a load
-/// it cannot decode, so a store brought up without this type registered fails
-/// every clause that reads anything back.
+/// it cannot decode, so a store brought up in a binary that did not collect
+/// this type fails every clause that reads anything back.
 pub const CONFORMANCE_FACT: EventType =
     EventType::new(Family::new("occ.conformance"), TypeName::new("Fact"));
+
+/// What a hand-written event type has to place to be collected: the entry
+/// `#[derive(Event)]` writes for a domain type, written out here because this
+/// crate cannot reach the derive — it is what the umbrella crate depends on.
+#[distributed_slice(EVENT_REGISTRY)]
+static CONFORMANCE_FACT_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
+    concat!(module_path!(), "::CONFORMANCE_FACT"),
+    &[CONFORMANCE_FACT],
+);
 
 /// The image a run starts for itself, pinned by digest.
 ///
@@ -74,16 +84,6 @@ const READY_PROBE: [&str; 7] = [
 /// makes that clause a sequential run wearing a spawn.
 const POOL_CONNECTIONS: u32 = 8;
 
-/// A store holding nothing, and the schema it was given.
-///
-/// The schema is handed back so a second store can be opened over the same rows
-/// — the only way to read what one store wrote through a registry that does not
-/// know the event type it carries.
-pub struct EmptyStore {
-    pub schema: String,
-    pub store: Arc<dyn EventStore>,
-}
-
 /// The Postgres a test run reaches, and the stores it brings up over it.
 pub struct PostgresBackend {
     /// Owned for as long as the test that asked for it: dropping it removes the
@@ -91,7 +91,6 @@ pub struct PostgresBackend {
     _container: Option<ContainerAsync<Postgres>>,
     url: String,
     admin: PgPool,
-    event_types: Vec<EventType>,
 }
 
 /// How many schemas this test binary has handed out.
@@ -104,9 +103,10 @@ static SCHEMAS: AtomicU64 = AtomicU64::new(0);
 
 /// The Postgres this run has, or `None` when the environment offers none.
 ///
-/// `event_types` is what every store brought up here resolves as it loads: a
-/// row carrying anything else fails its load rather than being passed over.
-pub async fn postgres_backend(event_types: &[EventType]) -> Option<PostgresBackend> {
+/// What a store brought up here resolves as it loads is what this test binary
+/// linked, so a caller declares its event types by placing entries in the
+/// collection slice rather than by handing them over here.
+pub async fn postgres_backend() -> Option<PostgresBackend> {
     let (container, url) = match std::env::var("DATABASE_URL") {
         Ok(url) => (None, url),
         Err(_) => match container_runtime_reach() {
@@ -135,28 +135,21 @@ pub async fn postgres_backend(event_types: &[EventType]) -> Option<PostgresBacke
         _container: container,
         url,
         admin,
-        event_types: event_types.to_vec(),
     })
 }
 
 impl PostgresBackend {
     /// A store holding nothing: a schema of its own, migrated, over a pool of
     /// its own.
-    pub async fn bring_up_store(&self) -> EmptyStore {
+    pub async fn bring_up_store(&self) -> Arc<dyn EventStore> {
         let schema = self.create_schema().await;
-        let store = self.store_on(&schema, &self.event_types).await;
-        EmptyStore { schema, store }
-    }
-
-    /// Another store over the rows in `schema`, resolving `event_types` and
-    /// nothing besides.
-    pub async fn store_on(&self, schema: &str, event_types: &[EventType]) -> Arc<dyn EventStore> {
-        let pool = self.pool_on(schema).await;
+        let pool = self.pool_on(&schema).await;
         PostgresEventStore::migrate(&pool)
             .await
             .expect("the provider's migrations must apply to a database it has reached");
-        let registry = event_types.iter().copied().collect();
-        Arc::new(PostgresEventStore::new(pool, registry)) as Arc<dyn EventStore>
+        let store = PostgresEventStore::new(pool)
+            .expect("the event types this test binary linked claim distinct canonical paths");
+        Arc::new(store) as Arc<dyn EventStore>
     }
 
     /// A schema no other store in this run writes to.
@@ -199,7 +192,7 @@ impl PostgresBackend {
 
 impl StoreUnderTest for PostgresBackend {
     fn bring_up(&self) -> BoxFuture<'_, Arc<dyn EventStore>> {
-        Box::pin(async move { self.bring_up_store().await.store })
+        Box::pin(async move { self.bring_up_store().await })
     }
 }
 

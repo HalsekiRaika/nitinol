@@ -183,7 +183,9 @@ fn postgres_feature_exposes_the_sqlx_event_store() {
     use std::sync::Arc;
 
     use nitinol::persistence::store::EventStore;
-    use nitinol::sqlx::{EventTypeRegistry, PostgresEventStore};
+    use nitinol::persistence::{EventRegistry, EventRegistryError};
+    use nitinol::sqlx::sqlx::PgPool;
+    use nitinol::sqlx::PostgresEventStore;
 
     // Compile-time check: what the provider builds is what the framework plugs in.
     fn plugged_in(store: PostgresEventStore) -> Arc<dyn EventStore> {
@@ -191,10 +193,17 @@ fn postgres_feature_exposes_the_sqlx_event_store() {
     }
     let _: fn(PostgresEventStore) -> Arc<dyn EventStore> = plugged_in;
 
-    let registry = EventTypeRegistry::new();
+    // A store is opened over a pool alone: the event types it serves are the
+    // ones its binary linked, so there is no registry for a caller to pass in
+    // — and no registry for a caller to forget to pass in, which is what left
+    // a saga's own records unrestorable.
+    let _: fn(PgPool) -> Result<PostgresEventStore, EventRegistryError> = PostgresEventStore::new;
+
+    let registry = EventRegistry::from_linked()
+        .expect("a build whose linked event types claim distinct canonical paths builds one");
     assert!(
         registry.resolve("dummy.event").is_none(),
-        "a registry that was given no event types resolves none"
+        "collection answers for the event types the build linked, and nothing declares this one"
     );
 }
 

@@ -10,9 +10,9 @@ use std::num::TryFromIntError;
 
 use nitinol_persistence::error::{AppendError, LoadError};
 
+use super::load::UnknownEventType;
 use super::numbering::OutOfRange;
 use super::timestamp::InstantOutOfRange;
-use crate::event_type_registry::UnknownEventType;
 
 /// Postgres' `unique_violation`.
 const UNIQUE_VIOLATION: &str = "23505";

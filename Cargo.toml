@@ -48,7 +48,7 @@ runtime = ["dep:nitinol-runtime"]
 persistence = ["dep:nitinol-persistence"]
 # The runtime-free contract layer: the aggregate traits and `#[derive(Event)]`,
 # and nothing that would pull in Tokio.
-contract = ["dep:nitinol-contract", "dep:nitinol-macros", "persistence"]
+contract = ["dep:nitinol-contract", "dep:nitinol-macros", "dep:linkme", "persistence"]
 eventsource = ["dep:nitinol-eventsource", "dep:nitinol-macros", "contract", "runtime", "persistence"]
 saga = ["dep:nitinol-saga", "runtime", "persistence", "eventsource"]
 # A storage backend rather than a layer of the framework, so it stays out of
@@ -65,6 +65,11 @@ nitinol-eventsource = { path = "nitinol-eventsource", optional = true }
 nitinol-saga = { path = "nitinol-saga", optional = true }
 nitinol-macros = { path = "nitinol-macros", optional = true }
 nitinol-sqlx = { path = "providers/nitinol-sqlx", optional = true }
+# Reached only by the code `#[derive(Event)]` writes, through
+# `nitinol::__private::linkme`: deriving `Event` places an entry in the event
+# registry's collection slice, and a user is obliged to depend on `nitinol`
+# alone.
+linkme = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # Required by the `#[tokio::test]` attribute in umbrella integration tests.

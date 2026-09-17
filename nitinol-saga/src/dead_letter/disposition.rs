@@ -19,8 +19,11 @@
 //! [`DeadLetterQueue`]: crate::DeadLetterQueue
 
 use bytes::Bytes;
+use linkme::distributed_slice;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::{EventType, Family, TypeName, Variant};
+use nitinol_persistence::{
+    EventRegistryEntry, EventType, Family, TypeName, Variant, EVENT_REGISTRY,
+};
 
 mod proto {
     include!(concat!(
@@ -36,6 +39,27 @@ use self::proto::{DeadLetterDispositionMarker, Evicted, Processed};
 pub(crate) const DEAD_LETTER_DISPOSITION_MARKER: EventType = EventType::new(
     Family::new("nitinol.saga"),
     TypeName::new("dead_letter_disposition"),
+);
+
+/// The canonical identity one disposition arm is written down as.
+const fn arm(variant: &'static str) -> EventType {
+    EventType::with_variant(
+        DEAD_LETTER_DISPOSITION_MARKER.family(),
+        DEAD_LETTER_DISPOSITION_MARKER.type_name(),
+        Variant::new(variant),
+    )
+}
+
+const PROCESSED: EventType = arm("processed");
+const EVICTED: EventType = arm("evicted");
+
+/// What a binary linking this crate collects for the disposition marker, so
+/// that a load of a saga's own stream restores a settled dead letter rather
+/// than failing on it.
+#[distributed_slice(EVENT_REGISTRY)]
+static DEAD_LETTER_DISPOSITION_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
+    concat!(module_path!(), "::DeadLetterDispositionEvent"),
+    &[DEAD_LETTER_DISPOSITION_MARKER, PROCESSED, EVICTED],
 );
 
 #[derive(Debug, thiserror::Error)]
@@ -71,15 +95,10 @@ impl SystemEvent for DeadLetterDispositionEvent {
     const EVENT_TYPE: EventType = DEAD_LETTER_DISPOSITION_MARKER;
 
     fn variant(&self) -> EventType {
-        let variant = match self.disposition {
-            Disposition::Processed => Variant::new("processed"),
-            Disposition::Evicted => Variant::new("evicted"),
-        };
-        EventType::with_variant(
-            DEAD_LETTER_DISPOSITION_MARKER.family(),
-            DEAD_LETTER_DISPOSITION_MARKER.type_name(),
-            variant,
-        )
+        match self.disposition {
+            Disposition::Processed => PROCESSED,
+            Disposition::Evicted => EVICTED,
+        }
     }
 
     fn encode(&self) -> Bytes {

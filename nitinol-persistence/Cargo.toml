@@ -13,6 +13,10 @@ jiff = "0.2"
 futures-core = "0.3"
 async-trait = "0.1"
 thiserror = "2"
+# The event types a binary can restore are gathered by the linker rather than
+# registered by hand: `EVENT_REGISTRY` is the slice every declaration places its
+# entry in. Native targets only — `link_section` is what this rests on.
+linkme = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
