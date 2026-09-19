@@ -1,5 +1,5 @@
-//! Enums mixing unit, tuple, and struct arms must derive `Event`; the generated
-//! `variant()` match ignores payload fields via `(..)` and `{ .. }`.
+//! Enums mixing unit, tuple, and struct arms must derive `Event`; the expansion
+//! covers every arm shape and produces the one identity named after the enum.
 
 use bytes::Bytes;
 use nitinol::contract::Codec;
@@ -29,7 +29,7 @@ impl Codec<Mixed> for MixedCodec {
 
 fn main() {
     let _ = Mixed::EVENT_TYPE;
-    let _ = Mixed::Unit.variant();
-    let _ = Mixed::Tuple(1, String::new()).variant();
-    let _ = Mixed::Struct { id: 2, name: String::new() }.variant();
+    let _ = Mixed::Unit;
+    let _ = Mixed::Tuple(1, String::new());
+    let _ = Mixed::Struct { id: 2, name: String::new() };
 }

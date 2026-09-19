@@ -10,11 +10,12 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event, SystemEvent};
+use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaEffect, ScheduleSpec, TellIntent};
+use nitinol_saga::{DeadLetterEvent, SagaEffect, SagaFailure, ScheduleSpec, TellIntent};
 
 // JsonCodec — shared across all integration tests
 
@@ -138,14 +139,29 @@ pub fn shape_of<E: Clone>(effect: &SagaEffect<E>) -> Shape<E> {
     }
 }
 
-pub const OUTBOX_MARKER: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("outbox"));
+/// The framework's own family. `Family::new` refuses the reserved namespace, so
+/// a test that has to name a framework record — to find it on a stream it has
+/// loaded — goes through the same constructor the framework itself does.
+const SAGA_FAMILY: Family = reserved_family("nitinol.saga");
 
-/// Type-level identity shared by every schedule marker written on a saga's own
-/// stream.  The per-transition variant (`scheduled` / `cancelled` / `fired`) is
-/// carried alongside this type key, not in it.
-pub const SCHEDULE_MARKER: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("schedule"));
+/// The one identity every outbox marker is written down as.  Which transition a
+/// marker records (`tell_requested` / `tell_acked` / `tell_failed` /
+/// `scheduled` / `ended`) is carried by its payload's `oneof`, which
+/// [`outbox_kind_of`] reads.
+pub const OUTBOX_MARKER: EventType = EventType::new(SAGA_FAMILY, TypeName::new("outbox"));
+
+/// The one identity every schedule marker written on a saga's own stream is
+/// written down as.  The transition (`scheduled` / `cancelled` / `fired`) is
+/// carried by its payload's `oneof`, which [`schedule_kind_of`] reads.
+pub const SCHEDULE_MARKER: EventType = EventType::new(SAGA_FAMILY, TypeName::new("schedule"));
+
+/// The one identity every dead letter is written down as.
+pub const DEAD_LETTER_MARKER: EventType = EventType::new(SAGA_FAMILY, TypeName::new("dead_letter"));
+
+/// The one identity every disposition marker is written down as — a sibling of
+/// [`DEAD_LETTER_MARKER`], so selecting dead letters never selects settlements.
+pub const DISPOSITION_MARKER: EventType =
+    EventType::new(SAGA_FAMILY, TypeName::new("dead_letter_disposition"));
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct TellRequestedPayload {
@@ -247,6 +263,166 @@ pub fn decode_outbox_kind(payload: &[u8]) -> OutboxKind {
 }
 
 pub fn outbox_kind_of(event: &LoadedEvent) -> Option<OutboxKind> {
-    (event.event_type.type_key() == OUTBOX_MARKER.type_key())
-        .then(|| decode_outbox_kind(&event.payload))
+    (event.event_type == OUTBOX_MARKER).then(|| decode_outbox_kind(&event.payload))
+}
+
+// Schedule markers — mirror of `proto/schedule.proto`.
+//
+// `ScheduleEvent` is `pub(crate)` in `nitinol-saga`, so an integration test
+// reads the transition the way any other consumer of the column would: by
+// decoding the payload's `oneof`, which is where the transition lives.
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ScheduledMarkerPayload {
+    #[prost(string, tag = "1")]
+    pub saga_id: String,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    #[prost(uint64, tag = "3")]
+    pub after_nanos: u64,
+    #[prost(bytes = "vec", tag = "4")]
+    pub payload: Vec<u8>,
+    #[prost(int64, tag = "5")]
+    pub scheduled_at_unix_millis: i64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct CancelledMarkerPayload {
+    #[prost(string, tag = "1")]
+    pub saga_id: String,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    #[prost(int64, tag = "3")]
+    pub cancelled_at_unix_millis: i64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct FiredMarkerPayload {
+    #[prost(string, tag = "1")]
+    pub saga_id: String,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    #[prost(int64, tag = "3")]
+    pub fired_at_unix_millis: i64,
+}
+
+#[derive(Clone, PartialEq, prost::Oneof)]
+pub enum ScheduleKind {
+    #[prost(message, tag = "1")]
+    Scheduled(ScheduledMarkerPayload),
+    #[prost(message, tag = "2")]
+    Cancelled(CancelledMarkerPayload),
+    #[prost(message, tag = "3")]
+    Fired(FiredMarkerPayload),
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ScheduleMarkerPayload {
+    #[prost(oneof = "ScheduleKind", tags = "1, 2, 3")]
+    pub kind: Option<ScheduleKind>,
+}
+
+pub fn decode_schedule_kind(payload: &[u8]) -> ScheduleKind {
+    <ScheduleMarkerPayload as prost::Message>::decode(payload)
+        .expect("payload must be a valid prost ScheduleMarker message")
+        .kind
+        .expect("schedule marker payload must carry a oneof kind")
+}
+
+pub fn schedule_kind_of(event: &LoadedEvent) -> Option<ScheduleKind> {
+    (event.event_type == SCHEDULE_MARKER).then(|| decode_schedule_kind(&event.payload))
+}
+
+/// The transition a schedule marker records, as the name the proto gives it.
+///
+/// Test assertions read as the wire does; the string is the `oneof` field name,
+/// not a path segment.
+pub fn schedule_transition(kind: &ScheduleKind) -> &'static str {
+    match kind {
+        ScheduleKind::Scheduled(_) => "scheduled",
+        ScheduleKind::Cancelled(_) => "cancelled",
+        ScheduleKind::Fired(_) => "fired",
+    }
+}
+
+// Disposition markers — mirror of `proto/dead_letter_disposition.proto`.
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ProcessedPayload {}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct EvictedPayload {}
+
+#[derive(Clone, PartialEq, prost::Oneof)]
+pub enum DispositionKind {
+    #[prost(message, tag = "2")]
+    Processed(ProcessedPayload),
+    #[prost(message, tag = "3")]
+    Evicted(EvictedPayload),
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct DispositionMarkerPayload {
+    #[prost(uint64, tag = "1")]
+    pub dead_letter_sequence: u64,
+    #[prost(oneof = "DispositionKind", tags = "2, 3")]
+    pub disposition: Option<DispositionKind>,
+}
+
+pub fn decode_disposition(payload: &[u8]) -> DispositionMarkerPayload {
+    <DispositionMarkerPayload as prost::Message>::decode(payload)
+        .expect("payload must be a valid prost DeadLetterDispositionMarker message")
+}
+
+pub fn disposition_of(event: &LoadedEvent) -> Option<DispositionMarkerPayload> {
+    (event.event_type == DISPOSITION_MARKER).then(|| decode_disposition(&event.payload))
+}
+
+/// The settlement a disposition marker records, as the name the proto gives it.
+pub fn disposition_kind(marker: &DispositionMarkerPayload) -> &'static str {
+    match marker
+        .disposition
+        .as_ref()
+        .expect("a disposition marker carries a oneof disposition")
+    {
+        DispositionKind::Processed(_) => "processed",
+        DispositionKind::Evicted(_) => "evicted",
+    }
+}
+
+// Dead letters — read through the public record type.
+//
+// `DeadLetterEvent` is public, so a test reads the failure a record holds the
+// way any consumer does: it decodes the payload. The identity column names the
+// declaration; which failure it is belongs to the bytes.
+
+pub fn decode_dead_letter(payload: &[u8]) -> DeadLetterEvent {
+    <DeadLetterEvent as SystemEvent>::decode(payload)
+        .expect("payload must be a valid dead letter record")
+}
+
+pub fn dead_letter_of(event: &LoadedEvent) -> Option<DeadLetterEvent> {
+    (event.event_type == DEAD_LETTER_MARKER).then(|| decode_dead_letter(&event.payload))
+}
+
+/// The failure a dead letter records, as the name the proto gives its `oneof`
+/// arm — the same names the DLQ documentation uses.
+pub fn failure_kind(failure: &SagaFailure) -> &'static str {
+    match failure {
+        SagaFailure::TellFailed { .. } => "tell_failed",
+        SagaFailure::HandleFailed { .. } => "handle_failed",
+        SagaFailure::PersistFailed { .. } => "persist_failed",
+        SagaFailure::EndedSagaReceivedMessage { .. } => "ended_saga_received_message",
+        SagaFailure::DecodeFailed { .. } => "decode_failed",
+        SagaFailure::ScheduledFailed { .. } => "scheduled_failed",
+        SagaFailure::TellFailedHookFailed { .. } => "tell_failed_hook_failed",
+    }
+}
+
+/// Does `payload` record a failure of the named kind?
+///
+/// Takes the bytes rather than a loaded row so the write path — a store that
+/// inspects the `AppendingEvent` it was handed — can ask the same question.
+pub fn dead_letter_records(payload: &[u8], kind: &str) -> bool {
+    failure_kind(&decode_dead_letter(payload).failure) == kind
 }

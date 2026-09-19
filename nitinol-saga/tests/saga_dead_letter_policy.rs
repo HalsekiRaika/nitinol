@@ -16,6 +16,10 @@
 //! `EnqueueDecision::Ignore` variant — never a `SagaFailure` field — so it does
 //! not constrain the failure enum's internal shape.
 
+#[path = "common/helpers.rs"]
+mod common;
+use common::{dead_letter_of, failure_kind, DEAD_LETTER_MARKER};
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,9 +33,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{
-    AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
-};
+use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
     EnqueueDecision, EnqueuePolicy, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaProps,
@@ -129,23 +131,22 @@ impl EnqueuePolicy for IgnoreAll {
 
 // Helpers
 
-const DEAD_LETTER_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
-
 fn count_dead_letters(events: &[LoadedEvent]) -> usize {
     events
         .iter()
-        .filter(|e| e.event_type.type_key() == DEAD_LETTER_TYPE.type_key())
+        .filter(|e| e.event_type == DEAD_LETTER_MARKER)
         .count()
 }
 
-fn count_dead_letter_variant(events: &[LoadedEvent], variant: &'static str) -> usize {
+/// Dead letters on this stream recording the named failure.
+///
+/// Every dead letter carries the one dead-letter path, so which failure a
+/// record holds is read from the payload it carries.
+fn count_dead_letter_kind(events: &[LoadedEvent], kind: &'static str) -> usize {
     events
         .iter()
-        .filter(|e| {
-            e.event_type.type_key() == DEAD_LETTER_TYPE.type_key()
-                && e.event_type.variant() == Some(Variant::new(variant))
-        })
+        .filter_map(dead_letter_of)
+        .filter(|record| failure_kind(&record.failure) == kind)
         .count()
 }
 
@@ -187,7 +188,7 @@ async fn wait_for_handle_failed(
     let deadline = Instant::now() + timeout;
     loop {
         let events = load_saga_events(store, saga_id).await;
-        if count_dead_letter_variant(&events, "handle_failed") >= 1 {
+        if count_dead_letter_kind(&events, "handle_failed") >= 1 {
             return true;
         }
         if Instant::now() >= deadline {
@@ -247,7 +248,7 @@ async fn default_policy_enqueues_the_failure() {
         count_dead_letters(&events)
     );
     assert_eq!(
-        count_dead_letter_variant(&events, "handle_failed"),
+        count_dead_letter_kind(&events, "handle_failed"),
         1,
         "default policy must enqueue exactly one `handle_failed` dead letter"
     );

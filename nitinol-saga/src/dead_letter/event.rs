@@ -1,9 +1,9 @@
 //! `DeadLetterEvent` — the `SystemEvent` persisted for each saga failure.
 //!
 //! Modelled one-for-one on the `ScheduleEvent` / `OutboxEvent` canonical
-//! examples: a reserved type-level [`EventType`] (`nitinol.saga.dead_letter`,
-//! variant `None`) whose per-arm `variant()` writes the failure kind on the
-//! wire, with a prost `oneof` codec that owns its own serialization.
+//! examples: one reserved [`EventType`] (`nitinol.saga.dead_letter`) every dead
+//! letter is written down as, with a prost `oneof` codec that owns its own
+//! serialization and carries which failure the record holds.
 
 use std::borrow::Borrow;
 use std::sync::Arc;
@@ -11,12 +11,12 @@ use std::sync::Arc;
 use bytes::Bytes;
 use linkme::distributed_slice;
 use nitinol_eventsource::{appending_system_event, SystemEvent, SystemEventDecodeError};
+use nitinol_persistence::__private::{reserved_event_registry_entry, reserved_family};
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{
-    AggregateId, EventRegistryEntry, EventType, Family, TypeName, Variant, EVENT_REGISTRY,
-};
+use nitinol_persistence::{AggregateId, EventRegistryEntry, EventType, TypeName, EVENT_REGISTRY};
 
 use crate::id::SagaId;
+use crate::observability::report_system_event;
 
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/nitinol.saga.dead_letter.rs"));
@@ -28,43 +28,32 @@ use self::proto::{
     ScheduledFailed, SourceContext as ProtoSourceContext, TellFailed, TellFailedHookFailed,
 };
 
-/// Reserved type-level identity shared by every dead-letter event.
-pub(crate) const DEAD_LETTER_MARKER: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
+/// The one identity every dead letter is written down as.
+pub(crate) const DEAD_LETTER_MARKER: EventType = EventType::new(
+    reserved_family("nitinol.saga"),
+    TypeName::new("dead_letter"),
+);
 
-/// The canonical identity one dead-letter arm is written down as.
-const fn arm(variant: &'static str) -> EventType {
-    EventType::with_variant(
-        DEAD_LETTER_MARKER.family(),
-        DEAD_LETTER_MARKER.type_name(),
-        Variant::new(variant),
-    )
-}
-
-const TELL_FAILED: EventType = arm("tell_failed");
-const HANDLE_FAILED: EventType = arm("handle_failed");
-const PERSIST_FAILED: EventType = arm("persist_failed");
-const ENDED_SAGA_RECEIVED_MESSAGE: EventType = arm("ended_saga_received_message");
-const DECODE_FAILED: EventType = arm("decode_failed");
-const SCHEDULED_FAILED: EventType = arm("scheduled_failed");
-const TELL_FAILED_HOOK_FAILED: EventType = arm("tell_failed_hook_failed");
+/// The failures a dead letter records — the DLQ's whole arm set.
+///
+/// A stored row names the declaration, so which failure it is lives in the
+/// payload's `oneof`; these are the names that `oneof` is reported under, and
+/// the ones the DLQ documentation uses.
+const TELL_FAILED_ARM: &str = "tell_failed";
+const HANDLE_FAILED_ARM: &str = "handle_failed";
+const PERSIST_FAILED_ARM: &str = "persist_failed";
+const ENDED_SAGA_RECEIVED_MESSAGE_ARM: &str = "ended_saga_received_message";
+const DECODE_FAILED_ARM: &str = "decode_failed";
+const SCHEDULED_FAILED_ARM: &str = "scheduled_failed";
+const TELL_FAILED_HOOK_FAILED_ARM: &str = "tell_failed_hook_failed";
 
 /// What a binary linking this crate collects for the dead-letter record, so
 /// that a load of a saga's own stream restores its failures rather than failing
 /// on them.
 #[distributed_slice(EVENT_REGISTRY)]
-static DEAD_LETTER_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
+static DEAD_LETTER_ENTRY: EventRegistryEntry = reserved_event_registry_entry(
     concat!(module_path!(), "::DeadLetterEvent"),
-    &[
-        DEAD_LETTER_MARKER,
-        TELL_FAILED,
-        HANDLE_FAILED,
-        PERSIST_FAILED,
-        ENDED_SAGA_RECEIVED_MESSAGE,
-        DECODE_FAILED,
-        SCHEDULED_FAILED,
-        TELL_FAILED_HOOK_FAILED,
-    ],
+    &[DEAD_LETTER_MARKER],
 );
 
 #[derive(Debug, thiserror::Error)]
@@ -136,20 +125,24 @@ pub struct DeadLetterEvent {
     pub source: SourceContext,
 }
 
-impl SystemEvent for DeadLetterEvent {
-    const EVENT_TYPE: EventType = DEAD_LETTER_MARKER;
-
-    fn variant(&self) -> EventType {
-        match &self.failure {
-            SagaFailure::TellFailed { .. } => TELL_FAILED,
-            SagaFailure::HandleFailed { .. } => HANDLE_FAILED,
-            SagaFailure::PersistFailed { .. } => PERSIST_FAILED,
-            SagaFailure::EndedSagaReceivedMessage { .. } => ENDED_SAGA_RECEIVED_MESSAGE,
-            SagaFailure::DecodeFailed { .. } => DECODE_FAILED,
-            SagaFailure::ScheduledFailed { .. } => SCHEDULED_FAILED,
-            SagaFailure::TellFailedHookFailed { .. } => TELL_FAILED_HOOK_FAILED,
+impl SagaFailure {
+    /// The failure this is, as the name its payload's `oneof` arm is reported
+    /// under.
+    pub(crate) const fn arm(&self) -> &'static str {
+        match self {
+            SagaFailure::TellFailed { .. } => TELL_FAILED_ARM,
+            SagaFailure::HandleFailed { .. } => HANDLE_FAILED_ARM,
+            SagaFailure::PersistFailed { .. } => PERSIST_FAILED_ARM,
+            SagaFailure::EndedSagaReceivedMessage { .. } => ENDED_SAGA_RECEIVED_MESSAGE_ARM,
+            SagaFailure::DecodeFailed { .. } => DECODE_FAILED_ARM,
+            SagaFailure::ScheduledFailed { .. } => SCHEDULED_FAILED_ARM,
+            SagaFailure::TellFailedHookFailed { .. } => TELL_FAILED_HOOK_FAILED_ARM,
         }
     }
+}
+
+impl SystemEvent for DeadLetterEvent {
+    const EVENT_TYPE: EventType = DEAD_LETTER_MARKER;
 
     fn encode(&self) -> Bytes {
         let failure = match &self.failure {
@@ -244,15 +237,13 @@ impl SystemEvent for DeadLetterEvent {
     }
 }
 
-/// Type-level classification: does `event_type` belong to the dead-letter
-/// family (`nitinol.saga.dead_letter` and its per-arm variants)?
+/// Is `event_type` the dead-letter record's own declaration?
 ///
 /// `nitinol.saga.dead_letter` is a sibling of `nitinol.saga.outbox` and
-/// `nitinol.saga.schedule`, so the classifications never overlap.
+/// `nitinol.saga.schedule`, and a declaration answers for its own path alone,
+/// so the classifications never overlap.
 pub(crate) fn is_dead_letter_event_type(event_type: EventType) -> bool {
-    event_type
-        .to_path()
-        .is_within(&DEAD_LETTER_MARKER.to_path())
+    event_type == DEAD_LETTER_MARKER
 }
 
 /// Append a single dead-letter event at `*sequence + 1`, advancing `*sequence`
@@ -273,6 +264,14 @@ pub(crate) async fn append_dead_letter(
         return false;
     }
     *sequence = candidate;
+    // A dead letter's position on the saga stream is its identity — it is what
+    // an operator settles it by — so that is the context the record carries.
+    report_system_event!(
+        DeadLetterEvent::EVENT_TYPE,
+        event.failure.arm(),
+        saga_id.as_str(),
+        sequence = candidate,
+    );
     true
 }
 
@@ -298,17 +297,16 @@ mod tests {
     }
 
     #[test]
-    fn dead_letter_reserves_a_single_type_level_event_type() {
+    fn dead_letter_reserves_a_single_event_type() {
         assert_eq!(DeadLetterEvent::EVENT_TYPE, DEAD_LETTER_MARKER);
         assert_eq!(DEAD_LETTER_MARKER.to_string(), "nitinol.saga.dead_letter");
-        assert!(
-            DEAD_LETTER_MARKER.variant().is_none(),
-            "the reserved dead letter type is type-level (variant None)"
-        );
     }
 
+    /// The arm a dead letter reports is the name of the `oneof` its payload
+    /// carries. The column no longer distinguishes them, so this is the whole
+    /// of what an operator has to tell one failure from another.
     #[test]
-    fn each_failure_writes_its_per_arm_variant_on_the_wire() {
+    fn each_failure_reports_the_arm_its_payload_carries() {
         let cases = [
             (
                 SagaFailure::TellFailed {
@@ -355,9 +353,7 @@ mod tests {
             ),
         ];
         for (failure, expected) in cases {
-            let e = event(failure);
-            assert_eq!(e.variant().variant(), Some(Variant::new(expected)));
-            assert_eq!(e.variant().type_key(), DEAD_LETTER_MARKER.type_key());
+            assert_eq!(event(failure).failure.arm(), expected);
         }
     }
 
@@ -406,19 +402,14 @@ mod tests {
     }
 
     #[test]
-    fn is_dead_letter_event_type_accepts_reserved_type_and_variants_but_not_siblings() {
+    fn is_dead_letter_event_type_accepts_the_declaration_but_not_its_siblings() {
         assert!(is_dead_letter_event_type(DEAD_LETTER_MARKER));
-        assert!(is_dead_letter_event_type(EventType::with_variant(
-            DEAD_LETTER_MARKER.family(),
-            DEAD_LETTER_MARKER.type_name(),
-            Variant::new("handle_failed"),
-        )));
         assert!(!is_dead_letter_event_type(EventType::new(
-            Family::new("nitinol.saga"),
+            reserved_family("nitinol.saga"),
             TypeName::new("outbox"),
         )));
         assert!(!is_dead_letter_event_type(EventType::new(
-            Family::new("nitinol.saga"),
+            reserved_family("nitinol.saga"),
             TypeName::new("schedule"),
         )));
     }

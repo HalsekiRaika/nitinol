@@ -6,52 +6,27 @@
 //!
 //! | space | what carries the name | how the law is enforced |
 //! |---|---|---|
-//! | stream keys | [`AggregateId`](crate::AggregateId), [`ProjectionId`](crate::ProjectionId), `nitinol_saga::SagaId` — runtime strings | the constructor panics |
-//! | event types | the `family` of an [`EventType`](crate::EventType) — a compile-time literal | `#[derive(Event)]` refuses to expand |
+//! | stream keys | [`AggregateId`](crate::AggregateId), [`ProjectionId`](crate::ProjectionId), `nitinol_saga::SagaId` — runtime strings | [`reject_reserved_id`] panics |
+//! | event types | the `family` of an [`EventType`](crate::EventType) — a compile-time literal | [`Family::new`](crate::Family::new) panics while the constant holding it is evaluated |
 //!
 //! The two differ only in *when* the name is known, and therefore in what a
 //! rejection can be.  The law itself — the root, and the boundary that decides
-//! membership — is this module, and both enforcement points read it from here
-//! rather than restating it.
+//! membership — lives next to [`Family`] in
+//! [`crate::event_type`](crate::event_type), because `Family::new` is the
+//! compile-time enforcement point that needs it in the same evaluation.  This
+//! module re-exports [`RESERVED_NAMESPACE`] and [`is_within_reserved_namespace`]
+//! so callers can keep reaching them through `nitinol_persistence::reserved`,
+//! and it owns the runtime-string enforcement point, [`reject_reserved_id`].
 //!
-//! # Boundary
+//! # The framework's own records
 //!
-//! `nitinol` is reserved as a **path root**, on the same `.`-delimited segment
-//! boundary [`MaterializedPath::is_within`](crate::MaterializedPath::is_within)
-//! already uses for event types.  `nitinol.saga` is inside the namespace;
-//! `nitinolx` is an unrelated name that merely begins with the same letters and
-//! stays available to applications.
-//!
-//! # Hand-written `impl Event`
-//!
-//! A `family` written by hand — through [`Family::new`](crate::Family) in a
-//! manual `impl Event` rather than through the derive — is **not** checked.
-//! The framework's own record types are built that way, so the check cannot
-//! live in `Family::new` itself.  For hand-written implementations the reserved
-//! namespace is a documented contract: do not name a family inside `nitinol`.
+//! The framework persists records under the names it reserved, so it needs a
+//! way past the refusal.  That way is
+//! `nitinol_persistence::__private::{reserved_family, reserved_event_registry_entry}`
+//! — `__private` because it is not a user surface: it exists so the records
+//! nitinol writes can carry the names nitinol reserved, and for nothing else.
 
-/// The path root the framework reserves for its own streams and event
-/// families.
-///
-/// Public because it is the name application code must avoid, and the one a
-/// rejection names back.
-pub const RESERVED_NAMESPACE: &str = "nitinol";
-
-/// Is `path` the reserved root itself, or a name beneath it?
-///
-/// Membership is decided on `.`-delimited segment boundaries, so `nitinol.saga`
-/// is within the namespace while `nitinolx` and `nitinol-1` are not.  The empty
-/// string is outside it: an empty family is an explicit, supported value on the
-/// event-type side.
-pub fn is_within_reserved_namespace(path: &str) -> bool {
-    if path == RESERVED_NAMESPACE {
-        return true;
-    }
-    match path.strip_prefix(RESERVED_NAMESPACE) {
-        Some(rest) => rest.starts_with('.'),
-        None => false,
-    }
-}
+pub use crate::event_type::{is_within_reserved_namespace, RESERVED_NAMESPACE};
 
 /// Panic when `id` names something inside the reserved namespace.
 ///
@@ -75,32 +50,9 @@ pub fn reject_reserved_id(kind: &str, id: &str) {
 mod tests {
     use super::*;
 
-    /// The boundary is a segment boundary, not a string prefix — the one thing
-    /// a naive `starts_with` implementation would get wrong, in both
-    /// directions.
-    #[test]
-    fn membership_is_decided_on_segment_boundaries() {
-        for inside in ["nitinol", "nitinol.saga", "nitinol.saga.dead_letter"] {
-            assert!(
-                is_within_reserved_namespace(inside),
-                "{inside:?} must be inside the reserved namespace"
-            );
-        }
-        for outside in [
-            "nitinolx",
-            "nitinol-1",
-            "nitinol_saga",
-            "my.nitinol",
-            "order-7",
-            "",
-        ] {
-            assert!(
-                !is_within_reserved_namespace(outside),
-                "{outside:?} must not be inside the reserved namespace"
-            );
-        }
-    }
-
+    /// Segment-boundary membership itself is covered next to its definition
+    /// in `crate::event_type`; this module only owns `reject_reserved_id`, so
+    /// its test covers that runtime-string enforcement point.
     #[test]
     fn the_rejection_names_the_namespace_and_the_offending_value() {
         let panicked = std::panic::catch_unwind(|| reject_reserved_id("id", "nitinol.saga"))

@@ -12,7 +12,10 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{decode_outbox_kind, JsonCodec, OutboxKind, OUTBOX_MARKER, SCHEDULE_MARKER};
+use common::{
+    decode_outbox_kind, decode_schedule_kind, JsonCodec, OutboxKind, ScheduleKind, OUTBOX_MARKER,
+    SCHEDULE_MARKER,
+};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,7 +31,7 @@ use nitinol_eventsource::{
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
-    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName, Variant,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TimerName};
@@ -150,8 +153,7 @@ fn is_domain_event(event: &RecordedEvent) -> bool {
 }
 
 fn outbox_kind(event: &RecordedEvent) -> Option<OutboxKind> {
-    (event.event_type.type_key() == OUTBOX_MARKER.type_key())
-        .then(|| decode_outbox_kind(&event.payload))
+    (event.event_type == OUTBOX_MARKER).then(|| decode_outbox_kind(&event.payload))
 }
 
 fn is_tell_requested(event: &RecordedEvent) -> bool {
@@ -171,8 +173,11 @@ fn tell_targets(batch: &[RecordedEvent]) -> Vec<String> {
 }
 
 fn is_scheduled_marker(event: &RecordedEvent) -> bool {
-    event.event_type.type_key() == SCHEDULE_MARKER.type_key()
-        && event.event_type.variant() == Some(Variant::new("scheduled"))
+    event.event_type == SCHEDULE_MARKER
+        && matches!(
+            decode_schedule_kind(&event.payload),
+            ScheduleKind::Scheduled(_)
+        )
 }
 
 fn describe(batches: &[Vec<RecordedEvent>]) -> Vec<Vec<String>> {

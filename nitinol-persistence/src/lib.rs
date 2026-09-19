@@ -32,9 +32,9 @@
 //! stream-key space and the event-type space — a single law with two
 //! enforcement points, because the two spaces learn a name at different times.
 //! An identifier inside it is refused when it is constructed; an event `family`
-//! inside it is refused by `#[derive(Event)]` when it is expanded.  See
-//! [`reserved`] for the boundary rule, the constant, and what a hand-written
-//! `impl Event` is expected to honour on its own.
+//! inside it is refused by [`Family::new`] while the constant holding it is
+//! evaluated.  See [`reserved`] for the boundary rule, the constant, and the
+//! way the framework's own records get the names they reserved.
 //!
 //! # Restoring an event type
 //!
@@ -59,9 +59,24 @@ mod materialized_path;
 mod query;
 mod snapshot;
 
+/// The way the framework's own records carry the names the framework reserved,
+/// and nothing a user writes.
+///
+/// [`Family::new`] and [`EventRegistryEntry::new`] refuse the `nitinol`
+/// namespace, which is the point of reserving it. The framework persists
+/// records under exactly those names, so it needs constructors that waive the
+/// namespace rule — and only that rule.
+///
+/// No stability is promised for anything below.
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::event_registry::reserved_event_registry_entry;
+    pub use crate::event_type::reserved_family;
+}
+
 pub use event::{AppendingEvent, LoadedEvent};
 pub use event_registry::{EventRegistry, EventRegistryEntry, EventRegistryError, EVENT_REGISTRY};
-pub use event_type::{EventType, Family, ParsedEventType, TypeKey, TypeName, Variant};
+pub use event_type::{EventType, Family, ParsedEventType, TypeName};
 pub use id::{AggregateId, ProjectionId};
 pub use materialized_path::{MaterializedPath, MaterializedPathParseError};
 pub use query::{AppendOutcome, LoadQuery};

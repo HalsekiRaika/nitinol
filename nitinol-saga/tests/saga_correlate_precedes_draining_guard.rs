@@ -32,7 +32,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::JsonCodec;
+use common::{dead_letter_of, failure_kind, JsonCodec, DEAD_LETTER_MARKER};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -51,7 +51,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -59,9 +59,6 @@ use nitinol_saga::{
 };
 
 const OWN_SAGA_ID: &str = "correlate-drain-order-saga";
-
-const DEAD_LETTER_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
 
 // Domain types
 
@@ -211,12 +208,18 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
+/// Rows recording that an ended saga was handed a message.
+///
+/// Every dead letter carries the one dead-letter path, so which failure a
+/// record holds is read from the payload it carries.
 fn ended_saga_dead_letters(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
     events
         .iter()
         .filter(|e| {
-            e.event_type.type_key() == DEAD_LETTER_TYPE.type_key()
-                && e.event_type.variant() == Some(Variant::new("ended_saga_received_message"))
+            e.event_type == DEAD_LETTER_MARKER
+                && dead_letter_of(e).is_some_and(|record| {
+                    failure_kind(&record.failure) == "ended_saga_received_message"
+                })
         })
         .collect()
 }

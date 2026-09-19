@@ -126,8 +126,8 @@ async fn e2e_ask_persists_the_fact_its_decision_stated() {
         "ask(Increment) must persist exactly one event"
     );
     assert_eq!(
-        loaded[0].event_type.type_key(),
-        Incremented::EVENT_TYPE.type_key(),
+        loaded[0].event_type,
+        Incremented::EVENT_TYPE,
         "the persisted event must be the Incremented the decision stated"
     );
 

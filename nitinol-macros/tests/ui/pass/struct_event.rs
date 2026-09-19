@@ -1,5 +1,5 @@
 //! A unit struct with an explicit family must derive `Event` cleanly and expose
-//! the type-level `EVENT_TYPE` const plus the inherited default `variant()`.
+//! the `EVENT_TYPE` const naming the one path its rows carry.
 //!
 //! `Event` also names the codec that writes the event down, so the attribute
 //! carries a `codec = ...` alongside the family and the derive emits the
@@ -29,5 +29,4 @@ impl Codec<Placed> for PlacedCodec {
 
 fn main() {
     let _ = Placed::EVENT_TYPE;
-    let _ = Placed.variant();
 }

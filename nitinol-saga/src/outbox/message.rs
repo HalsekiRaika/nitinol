@@ -1,9 +1,8 @@
 use bytes::Bytes;
 use linkme::distributed_slice;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::{
-    EventRegistryEntry, EventType, Family, TypeName, Variant, EVENT_REGISTRY,
-};
+use nitinol_persistence::__private::{reserved_event_registry_entry, reserved_family};
+use nitinol_persistence::{EventRegistryEntry, EventType, TypeName, EVENT_REGISTRY};
 
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/nitinol.saga.outbox.rs"));
@@ -15,38 +14,25 @@ pub(crate) use self::proto::{
 
 use self::proto::outbox_marker::Kind;
 
+/// The one identity every outbox marker is written down as.
 pub(crate) const OUTBOX_MARKER: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("outbox"));
+    EventType::new(reserved_family("nitinol.saga"), TypeName::new("outbox"));
 
-/// The canonical identity one outbox arm is written down as.
-const fn arm(variant: &'static str) -> EventType {
-    EventType::with_variant(
-        OUTBOX_MARKER.family(),
-        OUTBOX_MARKER.type_name(),
-        Variant::new(variant),
-    )
-}
-
-const TELL_REQUESTED: EventType = arm("tell_requested");
-const TELL_ACKED: EventType = arm("tell_acked");
-const TELL_FAILED: EventType = arm("tell_failed");
-const SCHEDULED: EventType = arm("scheduled");
-const ENDED: EventType = arm("ended");
+/// The transitions an outbox marker records — the outbox's whole arm set.
+///
+/// A stored row names the declaration, so the transition lives in the payload's
+/// `oneof`; these are the names that `oneof` is reported under.
+pub(crate) const TELL_REQUESTED_ARM: &str = "tell_requested";
+const TELL_ACKED_ARM: &str = "tell_acked";
+const TELL_FAILED_ARM: &str = "tell_failed";
+const SCHEDULED_ARM: &str = "scheduled";
+const ENDED_ARM: &str = "ended";
 
 /// What a binary linking this crate collects for the outbox, so that a load of
 /// a saga's own stream restores its markers rather than failing on them.
 #[distributed_slice(EVENT_REGISTRY)]
-static OUTBOX_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
-    concat!(module_path!(), "::OutboxEvent"),
-    &[
-        OUTBOX_MARKER,
-        TELL_REQUESTED,
-        TELL_ACKED,
-        TELL_FAILED,
-        SCHEDULED,
-        ENDED,
-    ],
-);
+static OUTBOX_ENTRY: EventRegistryEntry =
+    reserved_event_registry_entry(concat!(module_path!(), "::OutboxEvent"), &[OUTBOX_MARKER]);
 
 #[derive(Debug, thiserror::Error)]
 #[error("outbox marker payload carried no `oneof` kind")]
@@ -60,18 +46,22 @@ pub(crate) enum OutboxEvent {
     Ended(Ended),
 }
 
-impl SystemEvent for OutboxEvent {
-    const EVENT_TYPE: EventType = OUTBOX_MARKER;
-
-    fn variant(&self) -> EventType {
+impl OutboxEvent {
+    /// The transition this marker records, as the name its payload's `oneof`
+    /// arm is reported under.
+    pub(crate) const fn arm(&self) -> &'static str {
         match self {
-            OutboxEvent::TellRequested(_) => TELL_REQUESTED,
-            OutboxEvent::TellAcked(_) => TELL_ACKED,
-            OutboxEvent::TellFailed(_) => TELL_FAILED,
-            OutboxEvent::Scheduled(_) => SCHEDULED,
-            OutboxEvent::Ended(_) => ENDED,
+            OutboxEvent::TellRequested(_) => TELL_REQUESTED_ARM,
+            OutboxEvent::TellAcked(_) => TELL_ACKED_ARM,
+            OutboxEvent::TellFailed(_) => TELL_FAILED_ARM,
+            OutboxEvent::Scheduled(_) => SCHEDULED_ARM,
+            OutboxEvent::Ended(_) => ENDED_ARM,
         }
     }
+}
+
+impl SystemEvent for OutboxEvent {
+    const EVENT_TYPE: EventType = OUTBOX_MARKER;
 
     fn encode(&self) -> Bytes {
         let kind = match self {
@@ -99,14 +89,18 @@ impl SystemEvent for OutboxEvent {
     }
 }
 
+/// Is `event_type` the outbox marker's own declaration?
+///
+/// A declaration answers for its own path and for no path beneath it, so this
+/// is an identity test rather than a prefix one.
 pub(crate) fn is_outbox_event_type(event_type: EventType) -> bool {
-    event_type.to_path().is_within(&OUTBOX_MARKER.to_path())
+    event_type == OUTBOX_MARKER
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nitinol_persistence::{Family, TypeName, Variant};
+    use nitinol_persistence::{Family, TypeName};
 
     fn tell_requested(tell_id: u64, crash_restart: Option<Vec<u8>>) -> OutboxEvent {
         OutboxEvent::TellRequested(TellRequested {
@@ -120,14 +114,13 @@ mod tests {
     fn outbox_event_reserves_a_single_event_type() {
         assert_eq!(OutboxEvent::EVENT_TYPE, OUTBOX_MARKER);
         assert_eq!(OUTBOX_MARKER.to_string(), "nitinol.saga.outbox");
-        assert!(
-            OUTBOX_MARKER.variant().is_none(),
-            "the reserved outbox type is type-level (variant None)"
-        );
     }
 
+    /// The arm a marker reports is the name of the `oneof` its payload carries.
+    /// The column no longer distinguishes them, so this is the whole of what an
+    /// operator has to tell one outbox marker from another.
     #[test]
-    fn each_marker_writes_its_per_arm_variant_on_the_wire() {
+    fn each_marker_reports_the_transition_its_payload_carries() {
         let cases = [
             (tell_requested(1, None), "tell_requested"),
             (
@@ -142,10 +135,10 @@ mod tests {
                 OutboxEvent::Scheduled(Scheduled { at_unix_seconds: 0 }),
                 "scheduled",
             ),
+            (OutboxEvent::Ended(Ended {}), "ended"),
         ];
         for (marker, expected) in &cases {
-            assert_eq!(marker.variant().variant(), Some(Variant::new(expected)));
-            assert_eq!(marker.variant().type_key(), OUTBOX_MARKER.type_key());
+            assert_eq!(marker.arm(), *expected);
         }
     }
 
@@ -222,14 +215,16 @@ mod tests {
     }
 
     #[test]
-    fn is_outbox_event_type_accepts_reserved_type_and_its_per_arm_variants() {
+    fn is_outbox_event_type_accepts_the_declaration_and_nothing_beneath_it() {
         assert!(is_outbox_event_type(OUTBOX_MARKER));
-        let with_variant = EventType::with_variant(
-            OUTBOX_MARKER.family(),
-            OUTBOX_MARKER.type_name(),
-            Variant::new("tell_requested"),
+        assert!(
+            !is_outbox_event_type(EventType::new(
+                nitinol_persistence::__private::reserved_family("nitinol.saga.outbox"),
+                TypeName::new("tell_requested"),
+            )),
+            "no row carries a path beneath the outbox declaration, so nothing may be classified \
+             as one"
         );
-        assert!(is_outbox_event_type(with_variant));
     }
 
     #[test]

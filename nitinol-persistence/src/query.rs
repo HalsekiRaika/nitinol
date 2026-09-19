@@ -28,11 +28,10 @@ impl LoadQuery {
 
     /// Build a query targeting a specific [`EventType`].
     ///
-    /// Uses the event type's Materialized Path as a prefix: a struct event
-    /// (`variant = None`) matches exactly itself; an enum-arm event matches
-    /// only that arm; a type-level query (`variant = None`) for a family that
-    /// stores per-arm variants will match all arms under that type name, since
-    /// the type path is an ancestor prefix of every arm path.
+    /// Uses the event type's Materialized Path as the prefix.  A canonical path
+    /// is a family and a type name with nothing after it, so a declaration has
+    /// no descendant path of its own: this selects the rows of that event type
+    /// and no others.
     pub fn by_event_type(et: EventType) -> Self {
         Self {
             event_type_prefix: Some(et.to_path()),

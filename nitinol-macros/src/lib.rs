@@ -1,16 +1,20 @@
 //! Derive macros for the `nitinol` event-sourcing framework.
 //!
 //! `#[derive(Event)]` is pure sugar for the hand-written `impl Event` pattern:
-//! it generates the type-level `EVENT_TYPE` const, the associated `Codec`, and,
-//! for enums, a per-arm `variant()` match. It provides no macro-specific
-//! behaviour — hand-written implementations remain equally valid.
+//! it generates the `EVENT_TYPE` const and the associated `Codec`. It provides
+//! no macro-specific behaviour — hand-written implementations remain equally
+//! valid.
+//!
+//! An enum is named after the enum, not after whichever arm a value happens to
+//! hold: a row carries the declaration's path, and which arm it holds is
+//! carried by the payload the named codec wrote.
 //!
 //! Alongside the impl it places one
 //! `nitinol::persistence::EventRegistryEntry` in
-//! `nitinol::persistence::EVENT_REGISTRY`, carrying the type-level identity and
-//! every arm — every canonical path a stored row of this type can carry. That
-//! is what lets a store restore the type with nothing registered by hand, and a
-//! hand-written `impl Event` places the same entry itself.
+//! `nitinol::persistence::EVENT_REGISTRY`, carrying the one canonical path a
+//! stored row of this type can carry. That is what lets a store restore the
+//! type with nothing registered by hand, and a hand-written `impl Event` places
+//! the same entry itself.
 //!
 //! The family segment cannot be recovered from a type's module path by a
 //! proc-macro derive, so it is supplied explicitly via `#[event(family = "...")]`.
@@ -29,22 +33,30 @@
 //!
 //! `nitinol` is reserved for the framework's own records in both the stream-key
 //! and the event-type space (see `nitinol_persistence::reserved`).  Here the
-//! family is a literal known at expansion time, so the derive refuses it
-//! outright: a family inside the reserved namespace is a compile error, not a
-//! runtime surprise.  A hand-written `impl Event` bypasses this derive and so
-//! is bound by the same rule as documentation only.
+//! family is a literal known at expansion time, so the derive reads the same
+//! central rule (`nitinol_persistence::is_within_reserved_namespace`) and
+//! refuses it before expansion: a family inside the reserved namespace is a
+//! compile error reported at the derive site, not a runtime surprise.
+//!
+//! A hand-written `impl Event` bypasses this derive, but not the rule: it still
+//! has to build its `EventType` through `Family::new` and its registry entry
+//! through `EventRegistryEntry::new`, and both panic while the constant holding
+//! them is evaluated if the family names the reserved namespace — a compile
+//! error of a different shape, not a documentation-only convention. The one way
+//! past either enforcement point is `nitinol_persistence::__private`, reserved
+//! for the framework's own records and not a user surface.
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Lit, LitStr, Type};
+use syn::{parse_macro_input, Data, DeriveInput, Lit, LitStr, Type};
 
 use nitinol_persistence::{is_within_reserved_namespace, RESERVED_NAMESPACE};
 
 /// Derives `nitinol::contract::Event` for a struct or enum.
 ///
-/// Requires `#[event(family = "...", codec = ...)]`. Structs inherit the
-/// trait's default `variant()`; enums additionally get a `variant()` that maps
-/// each arm to its identifier.
+/// Requires `#[event(family = "...", codec = ...)]`. A struct and an enum get
+/// the same shape of identity: the attribute's family, and the type's own
+/// identifier.
 #[proc_macro_derive(Event, attributes(event))]
 pub fn derive_event(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -58,69 +70,25 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let ident = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    let type_level = quote! {
+    // A union has no `Codec` a caller could name and no identity to derive from
+    // its shape, so it is refused rather than expanded over.
+    if let Data::Union(_) = &input.data {
+        return Err(syn::Error::new_spanned(
+            ident,
+            "#[derive(Event)] does not support unions",
+        ));
+    }
+
+    let event_type = quote! {
         ::nitinol::persistence::EventType::new(
             ::nitinol::persistence::Family::new(#family),
             ::nitinol::persistence::TypeName::new(stringify!(#ident)),
         )
     };
 
-    // One spelling of an arm's identity, used both by `variant()` and by the
-    // registry entry: they are the same path, and a row carries it.
-    let arm_level = |arm_ident: &syn::Ident| {
-        quote! {
-            ::nitinol::persistence::EventType::with_variant(
-                ::nitinol::persistence::Family::new(#family),
-                ::nitinol::persistence::TypeName::new(stringify!(#ident)),
-                ::nitinol::persistence::Variant::new(stringify!(#arm_ident)),
-            )
-        }
-    };
-
-    // `None` for a struct, which inherits the trait's default `variant()`.
-    let arms: Option<Vec<&syn::Variant>> = match &input.data {
-        Data::Struct(_) => None,
-        Data::Enum(data) => Some(data.variants.iter().collect()),
-        Data::Union(_) => {
-            return Err(syn::Error::new_spanned(
-                ident,
-                "#[derive(Event)] does not support unions",
-            ));
-        }
-    };
-
-    let variant_fn = match &arms {
-        None => quote! {},
-        Some(arms) => {
-            let matched = arms.iter().map(|variant| {
-                let arm_ident = &variant.ident;
-                let binding = match &variant.fields {
-                    Fields::Unit => quote!(),
-                    Fields::Unnamed(_) => quote!((..)),
-                    Fields::Named(_) => quote!({ .. }),
-                };
-                let arm_level = arm_level(arm_ident);
-                quote! {
-                    Self::#arm_ident #binding => #arm_level,
-                }
-            });
-            quote! {
-                fn variant(&self) -> ::nitinol::persistence::EventType {
-                    match self {
-                        #(#matched)*
-                    }
-                }
-            }
-        }
-    };
-
-    // Every canonical path this type is written down as, placed where the
-    // linker gathers it: the type-level identity a hand-written `SystemEvent`
-    // journals under, and each arm, which is what a row of an enum carries.
-    let declared = arms
-        .iter()
-        .flatten()
-        .map(|variant| arm_level(&variant.ident));
+    // The canonical path this type is written down as, placed where the linker
+    // gathers it. One declaration, one path: a row of an enum carries this too,
+    // and which arm it holds is the payload's to say.
     let entry = format_ident!("_NITINOL_EVENT_REGISTRY_{}", ident);
     let registry_entry = quote! {
         #[::nitinol::__private::linkme::distributed_slice(::nitinol::persistence::EVENT_REGISTRY)]
@@ -130,17 +98,15 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         static #entry: ::nitinol::persistence::EventRegistryEntry =
             ::nitinol::persistence::EventRegistryEntry::new(
                 concat!(module_path!(), "::", stringify!(#ident)),
-                &[#type_level #(, #declared)*],
+                &[#event_type],
             );
     };
 
     Ok(quote! {
         impl #impl_generics ::nitinol::contract::Event for #ident #ty_generics #where_clause {
-            const EVENT_TYPE: ::nitinol::persistence::EventType = #type_level;
+            const EVENT_TYPE: ::nitinol::persistence::EventType = #event_type;
 
             type Codec = #codec;
-
-            #variant_fn
         }
 
         #registry_entry

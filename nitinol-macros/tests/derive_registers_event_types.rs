@@ -2,16 +2,24 @@
 //!
 //! ```gherkin
 //!   Scenario: 手動登録なしで round-trip できる (the half that needs no database)
-//!     Given #[derive(Event)] types — a struct, and an enum with every arm
+//!     Given #[derive(Event)] types — a struct, and an enum
 //!     When a registry is built from what this binary linked
-//!     Then every canonical path resolves, with nothing registered by hand
+//!     Then each type's canonical path resolves, with nothing registered by hand
+//!
+//!   Scenario: one declaration, one path
+//!     Given an enum whose arms carry different payloads
+//!     Then the registry answers for the enum and for no path beneath it
 //! ```
 //!
 //! The derive is still pure sugar for the hand-written `impl Event` — what it
-//! now writes alongside that impl is the entry a hand-written impl places for
+//! writes alongside that impl is the entry a hand-written impl places for
 //! itself. `derive_event_equivalence.rs` pins the impl; this file pins the
 //! entry, and it is a file of its own because the slice is one per binary: what
 //! the registry answers for here has to be exactly what this file derives.
+//!
+//! A row carries the path of the type that wrote it, so a type is written down
+//! once. Which arm of an enum a row holds is the payload's to say, and the
+//! codec that reads the payload is the one the declaration named.
 //!
 //! The generated entry is reached through the umbrella crate, as the rest of
 //! the expansion is, so deriving `Event` obliges a user to depend on `nitinol`
@@ -68,12 +76,10 @@ impl Codec<Unfamilied> for UnfamiliedCodec {
     }
 }
 
-// enum: every arm is written down under a path of its own, so every arm has to
-// be collected — a store restores rows by the path they carry, and a row
-// carries an arm's path, never the type-level one.
+// enum: one declaration, written down under one path.
 
 // Arm payloads exist only so the derive has tuple/struct shapes to expand over;
-// the tests read the arm's path, never the field values.
+// the tests read the declaration's path, never the field values.
 #[allow(dead_code)]
 #[derive(Clone, Event)]
 #[event(family = "shop.registry", codec = SettledCodec)]
@@ -122,31 +128,25 @@ fn a_derived_event_with_no_family_is_collected_under_its_type_name_alone() {
 }
 
 #[test]
-fn every_arm_of_a_derived_enum_is_collected_not_only_its_type_level_identity() {
+fn a_derived_enum_is_collected_once_under_the_path_its_rows_carry() {
     let registry = collected();
-
-    for arm in [
-        Settled::Paid { amount: 1 },
-        Settled::Refunded(1),
-        Settled::Cancelled,
-    ] {
-        let written_as = arm.variant();
-        let path = written_as.to_path().to_string();
-        assert_eq!(
-            registry.resolve(&path),
-            Some(written_as),
-            "an arm is stored under {path:?} — what `variant()` returns is what the column holds \
-             — so an entry that collected only the type-level identity leaves every row of that \
-             arm unrestorable"
-        );
-    }
 
     assert_eq!(
         registry.resolve("shop.registry.Settled"),
         Some(Settled::EVENT_TYPE),
-        "the type-level identity is collected as well as the arms: a hand-written `SystemEvent` \
-         journals it under exactly that path"
+        "every row of this enum carries `shop.registry.Settled`, and that is the path the entry \
+         has to answer for"
     );
+
+    for arm in ["Paid", "Refunded", "Cancelled"] {
+        assert_eq!(
+            registry.resolve(&format!("shop.registry.Settled.{arm}")),
+            None,
+            "an arm is not a declaration: nothing writes `shop.registry.Settled.{arm}` into the \
+             column, so nothing may answer for it either — a second entry there would be a second \
+             identity for one type"
+        );
+    }
 }
 
 #[test]

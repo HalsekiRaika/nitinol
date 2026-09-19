@@ -284,7 +284,7 @@ fn count_ended_saga_dead_letters(events: &[LoadedEvent]) -> usize {
     events
         .iter()
         .filter(|e| {
-            e.event_type.type_key() == <DeadLetterEvent as SystemEvent>::EVENT_TYPE.type_key()
+            e.event_type == <DeadLetterEvent as SystemEvent>::EVENT_TYPE
                 && matches!(
                     <DeadLetterEvent as SystemEvent>::decode(&e.payload),
                     Ok(DeadLetterEvent {

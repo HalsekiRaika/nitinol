@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-saga`): a structured `tracing` record at every point the saga
+  writes a framework record of its own, carrying `event_type` (the canonical
+  path the row was written under), `arm` (which arm of that declaration the
+  record holds, from the family's own fixed set) and `stream_id`, plus the
+  context of the write — a tell id, a timer, the sequence a dead letter
+  occupies.
+
+  The `event_type` column now names the declaration and nothing finer, so the
+  arm a framework record holds is no longer legible from a stored row. Shipping
+  the records in the same release as that change is what keeps arm-level
+  visibility from having a gap: an operator reads `tell_requested` against
+  `tell_failed`, or `scheduled` against `fired`, in the place they already
+  watch. Each record is emitted after its append succeeds — one claiming a
+  write that never happened would be worse than none.
+
+  A user's own events are not reported. The framework reports what it wrote
+  itself, so a deployment's records do not grow with every domain event a saga
+  persists; arm-level measurement of a user's events is the user's to add.
+  Nothing is added to the dependency tree: `tracing` was already a dependency
+  of the crate.
+
 - (`nitinol-conformance`): a conformance suite that makes the laws of the
   contract (L-1 to L-9) executable for *any* interpreter.
   `nitinol_conformance::verify(&my_interpretation).await` drives one clause per
@@ -259,6 +280,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (`nitinol-persistence`, `nitinol-contract`,
+  `nitinol-eventsource`, `nitinol-saga`, `nitinol-macros`, `nitinol`): the
+  `event_type` column holds one grammar, and every declaration is written down
+  under exactly one path.
+
+  An `EventType` is a `Family` and a `TypeName`, and nothing else. A `TypeName`
+  is a single segment by construction, so a canonical path decomposes
+  structurally and without ambiguity: the last segment is the type name, and
+  every segment before it is the family. Which arm of an enum event a row holds
+  is carried by the payload — the codec the declaration names is what reads it
+  back — so the column names the declaration and the payload names the case.
+
+  What this fixes is a grammar that had two readings of one string. A row of a
+  struct event `C` in family `a.b` and a row of arm `C` of enum `b` in family
+  `a` were both written down as `a.b.C`, and nothing in the path said which of
+  the two a reader was holding. A registry refused to serve such a pair, so the
+  collision surfaced as a build failure rather than as a misrouted row — but it
+  surfaced at all only because two declarations could reach one path. They no
+  longer can; the collision class is gone from the type level, and the only
+  collision left is the one a reader could never disentangle anyway: two types
+  declaring one family and one type name between them.
+
+  **Journal migration.** Every row an enum event or a framework record wrote
+  carries a path that no declaration answers for any more — `a.b.OrderEvent.
+  Placed` where the declaration is now `a.b.OrderEvent`, and
+  `nitinol.saga.outbox.tell_requested` where the record is now
+  `nitinol.saga.outbox`. Such a row fails its load as an unknown event type
+  rather than being restored, so an existing journal has to have its
+  `event_type` column rewritten to the declaring type's path before it is read
+  by this version. The payloads are untouched: which arm a framework record
+  holds was already in its `oneof`, and a user's enum arm was already in
+  whatever its codec wrote.
+
+  `LoadQuery::by_event_type` is unchanged in shape and narrower in effect: a
+  declaration has no descendant path of its own, so it now selects the rows of
+  that event type and no others. `by_event_type_prefix` is unchanged — a family
+  prefix still selects every declaration beneath it, on segment boundaries.
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-macros`): the `nitinol`
+  reserved namespace is refused by `Family::new` and `EventRegistryEntry::new`,
+  not by the derive alone.
+
+  Both constructors run inside the initializer of a `const`/`static`, so a
+  reserved family is a compile error rather than a condition a running
+  deployment discovers — and a hand-written `impl Event` is now bound by the
+  same rule the derive already enforced, where before it was documentation. The
+  root and the boundary rule stay defined once, beside `Family`;
+  `is_within_reserved_namespace` is a `const fn` so both enforcement points can
+  read it from there.
+
+  The framework's own records reach the names the framework reserved through
+  `nitinol_persistence::__private::{reserved_family,
+  reserved_event_registry_entry}`, which waive the namespace rule and nothing
+  else: a malformed family is still malformed. `__private` because it is not a
+  user surface.
+
 - **BREAKING** (`nitinol-contract`, `nitinol-eventsource`, `nitinol-saga`,
   `nitinol-macros`, `nitinol`): an event names the codec that writes it down,
   and codecs are no longer injected at wiring time.
@@ -451,6 +528,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `type State = ...;` line; no other change is required.
 
 ### Removed
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-contract`,
+  `nitinol-eventsource`): removed every part of the event identity that named
+  an enum arm — `Variant`, `TypeKey`, `EventType::{with_variant, variant,
+  type_key}`, `ParsedEventType::variant` with its
+  `from_struct_path` / `try_from_enum_arm_path` pair (one
+  `ParsedEventType::from_path` replaces both, because a path now has one
+  reading), `Event::variant` and `SystemEvent::variant`.
+
+  A row carries the path of the type that wrote it, so there is no second
+  identity for an arm to occupy. `#[derive(Event)]` no longer generates a
+  `variant()` match and places one registry entry rather than one per arm; a
+  hand-written `impl Event` or `SystemEvent` loses the method with it.
+  Dispatch that compared `type_key()` — the projector's handler lookup and the
+  saga's upstream subscription filter — compares the event type itself, which
+  is the same comparison now that an identity has no third component.
+
+  Replacing `event.variant()` at a write site means naming the declaration:
+  `<E as Event>::EVENT_TYPE`, which is what `appending_system_event` and both
+  persist paths now write into the column.
 
 - **BREAKING** (`nitinol-eventsource`, `nitinol`): removed the effectful
   decision contract — `nitinol_eventsource::Decider`, the `Effect<E>` ADT

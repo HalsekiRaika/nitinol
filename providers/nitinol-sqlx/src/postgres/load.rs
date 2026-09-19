@@ -48,6 +48,11 @@ pub(super) fn load<'a>(
     // followed by a separator. Comparing the leading characters rather than
     // matching a pattern is what keeps `_` and `%` — both legal in a family —
     // from behaving as wildcards.
+    //
+    // A stored path is a family and a type name with nothing after it, so the
+    // second clause reaches a declaration only from a family above it. The
+    // first is what a query for one declaration lands on: it has no descendant
+    // of its own for the second clause to gather.
     let rows = sqlx::query_as::<_, StoredEvent>(
         r#"
         SELECT persistence_id, sequence_number, global_sequence, event_type, payload, occurred_at

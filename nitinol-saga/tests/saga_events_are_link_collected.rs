@@ -16,27 +16,39 @@
 //!
 //! A path missing from this list is not covered by this clause; a path in the
 //! list that the saga never writes would make the clause pass on a record no
-//! reader ever sees. Both are pinned against the per-arm `variant()` matches in
+//! reader ever sees. Both are pinned against the declarations in
 //! `outbox/message.rs`, `scheduler/event.rs`, `dead_letter/event.rs` and
 //! `dead_letter/disposition.rs`.
+//!
+//! Each of those is one declaration written down as one path. Which arm of it a
+//! row holds is carried by the payload's `oneof`, so no path beneath a marker
+//! is ever written — and `no_path_beneath_a_marker_is_collected` pins that a
+//! registry answers for none.
 
 use nitinol_persistence::EventRegistry;
 use nitinol_saga::SagaId;
 
-/// Every canonical path the saga writes onto a saga's own stream: each marker's
-/// type-level identity, and each arm of it.
+/// Every canonical path the saga writes onto a saga's own stream: one per
+/// framework record it declares.
 const JOURNALLED_PATHS: &[&str] = &[
     "nitinol.saga.outbox",
+    "nitinol.saga.schedule",
+    "nitinol.saga.dead_letter",
+    "nitinol.saga.dead_letter_disposition",
+];
+
+/// Paths the saga wrote before arms were removed from the grammar, and writes
+/// no longer. A registry that still answered for one of them would be serving
+/// an identity no declaration owns.
+const PATHS_NO_DECLARATION_OWNS: &[&str] = &[
     "nitinol.saga.outbox.tell_requested",
     "nitinol.saga.outbox.tell_acked",
     "nitinol.saga.outbox.tell_failed",
     "nitinol.saga.outbox.scheduled",
     "nitinol.saga.outbox.ended",
-    "nitinol.saga.schedule",
     "nitinol.saga.schedule.scheduled",
     "nitinol.saga.schedule.cancelled",
     "nitinol.saga.schedule.fired",
-    "nitinol.saga.dead_letter",
     "nitinol.saga.dead_letter.tell_failed",
     "nitinol.saga.dead_letter.handle_failed",
     "nitinol.saga.dead_letter.persist_failed",
@@ -44,7 +56,6 @@ const JOURNALLED_PATHS: &[&str] = &[
     "nitinol.saga.dead_letter.decode_failed",
     "nitinol.saga.dead_letter.scheduled_failed",
     "nitinol.saga.dead_letter.tell_failed_hook_failed",
-    "nitinol.saga.dead_letter_disposition",
     "nitinol.saga.dead_letter_disposition.processed",
     "nitinol.saga.dead_letter_disposition.evicted",
 ];
@@ -88,9 +99,30 @@ fn a_collected_saga_path_resolves_to_the_event_type_that_is_written_under_it() {
         assert_eq!(
             restored.to_path().to_string(),
             *path,
-            "a path resolves to the event type stored under it, not to a neighbour: an arm \
-             restored as its type-level identity, or as another arm, is a record handed to the \
-             wrong reader"
+            "a path resolves to the event type stored under it, not to a neighbour: a marker \
+             restored as a sibling declaration is a record handed to the wrong reader"
         );
     }
+}
+
+#[test]
+fn no_path_beneath_a_marker_is_collected() {
+    let _ = SagaId::new("saga.collection.probe");
+
+    let registry = EventRegistry::from_linked().expect(
+        "a binary linking nitinol-saga and nothing that collides with it builds a registry",
+    );
+
+    let claimed: Vec<&str> = PATHS_NO_DECLARATION_OWNS
+        .iter()
+        .copied()
+        .filter(|path| registry.resolve(path).is_some())
+        .collect();
+
+    assert!(
+        claimed.is_empty(),
+        "a framework record is one declaration written down as one path, and the arm it holds is \
+         carried by its payload; a registry answering for these would give a second identity to a \
+         record that has one: {claimed:?}"
+    );
 }

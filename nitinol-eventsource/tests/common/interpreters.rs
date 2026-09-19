@@ -323,7 +323,7 @@ impl DirectInterpreter {
             sequence += 1;
             appending.push(AppendingEvent {
                 sequence,
-                event_type: event.variant(),
+                event_type: <LedgerEvent as Event>::EVENT_TYPE,
                 payload: event.encode(),
                 occurred_at: jiff::Timestamp::now(),
             });

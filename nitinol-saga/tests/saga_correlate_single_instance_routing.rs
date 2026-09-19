@@ -27,7 +27,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::JsonCodec;
+use common::{JsonCodec, DEAD_LETTER_MARKER};
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -54,10 +54,6 @@ use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 
 const OWN_SAGA_ID: &str = "correlate-routing-own";
 const FOREIGN_SAGA_ID: &str = "correlate-routing-foreign";
-
-/// Type-level identity of a dead-letter event, as observed on the wire.
-const DEAD_LETTER_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -319,7 +315,7 @@ async fn correlation_mismatch_is_silent_and_writes_no_dead_letter() {
     let events = load_saga_events(&saga_store, &SagaId::new(OWN_SAGA_ID)).await;
     let dead_letters = events
         .iter()
-        .filter(|e| e.event_type.type_key() == DEAD_LETTER_TYPE.type_key())
+        .filter(|e| e.event_type == DEAD_LETTER_MARKER)
         .map(|e| e.event_type.to_string())
         .collect::<Vec<_>>();
 

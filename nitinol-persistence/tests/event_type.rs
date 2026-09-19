@@ -1,28 +1,32 @@
-//! Contract tests for the restructured [`EventType`].
+//! Contract tests for [`EventType`] — the one grammar a journal's `event_type`
+//! column is written in.
 //!
-//! `EventType` is redefined from a single `&'static str` into three components
-//! — `Family` / `TypeName` / `Variant` — with structured equality, a
-//! variant-free type-key, hierarchical family matching, and a `Display` impl
-//! that renders the one-way canonical `family.TypeName[.variant]` path.
-//! These tests pin the public contract the framework and future tooling rely on.
+//! An `EventType` is a `Family` and a `TypeName`, and nothing else. A `TypeName`
+//! is a single segment by construction, so the canonical path decomposes
+//! structurally and without ambiguity: **the last segment is the `TypeName`, and
+//! every segment before it is the `family`**. That is what makes the column's
+//! grammar unique — one path, one reading, one type.
 //!
 //! # Round-trip via `MaterializedPath`
 //!
-//! `EventType` uses `&'static str` for all components and is therefore `Copy`
+//! `EventType` uses `&'static str` for both components and is therefore `Copy`
 //! and `const`-constructable, but cannot implement `FromStr` (runtime strings
-//! cannot be borrowed as `&'static str`).  The parse boundary is
+//! cannot be borrowed as `&'static str`). The parse boundary is
 //! [`MaterializedPath`]: `event_type.to_path().to_string()` produces the
 //! canonical wire string, which `str::parse::<MaterializedPath>()` recovers
-//! without loss.  See [`event_type_round_trips_as_materialized_path`] for the
-//! pinned contract test.
+//! without loss, and [`ParsedEventType::from_path`] decomposes back into owned
+//! components.
+//!
+//! Families used here stay outside the `nitinol` reserved namespace: the
+//! namespace is framework-owned and [`Family::new`] refuses it, so a test about
+//! segment boundaries has to pick a name a user could actually declare.
+//! `reserved_namespace.rs` owns the refusal itself.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
-use nitinol_persistence::{
-    EventType, Family, MaterializedPath, ParsedEventType, TypeName, Variant,
-};
+use nitinol_persistence::{EventType, Family, MaterializedPath, ParsedEventType, TypeName};
 
 fn hash_of<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -30,30 +34,35 @@ fn hash_of<T: Hash>(value: &T) -> u64 {
     hasher.finish()
 }
 
-// Component newtypes: Family / TypeName / Variant
+/// Every shape a canonical path has: a deep family, a one-segment family, and
+/// no family at all.
+fn every_shape() -> [EventType; 3] {
+    [
+        EventType::new(
+            Family::new("shop.order.outbox"),
+            TypeName::new("TellRequested"),
+        ),
+        EventType::new(Family::new("shop"), TypeName::new("Opened")),
+        EventType::new(Family::new(""), TypeName::new("Incremented")),
+    ]
+}
+
+// Component newtypes: Family / TypeName
 
 /// Given a Family created from a str, When as_str is read, Then the original
 /// str is returned unchanged.
 #[test]
 fn family_as_str_round_trips_the_source_string() {
-    let family = Family::new("nitinol.saga.outbox");
-    assert_eq!(family.as_str(), "nitinol.saga.outbox");
+    let family = Family::new("shop.order.outbox");
+    assert_eq!(family.as_str(), "shop.order.outbox");
 }
 
 /// Given a TypeName created from a str, When as_str is read, Then the original
 /// str is returned unchanged.
 #[test]
 fn type_name_as_str_round_trips_the_source_string() {
-    let type_name = TypeName::new("tell_requested");
-    assert_eq!(type_name.as_str(), "tell_requested");
-}
-
-/// Given a Variant created from a str, When as_str is read, Then the original
-/// str is returned unchanged.
-#[test]
-fn variant_as_str_round_trips_the_source_string() {
-    let variant = Variant::new("Reserved");
-    assert_eq!(variant.as_str(), "Reserved");
+    let type_name = TypeName::new("TellRequested");
+    assert_eq!(type_name.as_str(), "TellRequested");
 }
 
 // Family::is_within — hierarchical prefix match on segment boundaries
@@ -62,8 +71,8 @@ fn variant_as_str_round_trips_the_source_string() {
 /// is reported as within that ancestor.
 #[test]
 fn family_is_within_true_for_descendant_on_segment_boundary() {
-    let child = Family::new("nitinol.saga.outbox");
-    let ancestor = Family::new("nitinol.saga");
+    let child = Family::new("shop.order.outbox");
+    let ancestor = Family::new("shop.order");
     assert!(child.is_within(ancestor));
 }
 
@@ -71,17 +80,17 @@ fn family_is_within_true_for_descendant_on_segment_boundary() {
 /// within (a family contains itself).
 #[test]
 fn family_is_within_true_for_exact_match() {
-    let family = Family::new("nitinol.saga");
+    let family = Family::new("shop.order");
     assert!(family.is_within(family));
 }
 
 /// Given a family that shares a raw string prefix but crosses no segment
-/// boundary, When compared, Then it is reported as NOT within (`nitinol.sagax`
-/// is not under `nitinol.saga`).
+/// boundary, When compared, Then it is reported as NOT within (`shop.orderx`
+/// is not under `shop.order`).
 #[test]
 fn family_is_within_false_for_raw_prefix_without_segment_boundary() {
-    let sibling = Family::new("nitinol.sagax");
-    let ancestor = Family::new("nitinol.saga");
+    let sibling = Family::new("shop.orderx");
+    let ancestor = Family::new("shop.order");
     assert!(!sibling.is_within(ancestor));
 }
 
@@ -89,8 +98,8 @@ fn family_is_within_false_for_raw_prefix_without_segment_boundary() {
 /// family is NOT within the deeper one (direction matters).
 #[test]
 fn family_is_within_false_when_ancestor_is_deeper() {
-    let shallow = Family::new("nitinol.saga");
-    let deeper = Family::new("nitinol.saga.outbox");
+    let shallow = Family::new("shop.order");
+    let deeper = Family::new("shop.order.outbox");
     assert!(!shallow.is_within(deeper));
 }
 
@@ -98,217 +107,152 @@ fn family_is_within_false_when_ancestor_is_deeper() {
 /// other.
 #[test]
 fn family_is_within_false_for_unrelated_families() {
-    let a = Family::new("nitinol.saga");
-    let b = Family::new("nitinol.projection");
+    let a = Family::new("shop.order");
+    let b = Family::new("shop.projection");
     assert!(!a.is_within(b));
 }
 
 // EventType construction and accessors
 
-/// Given an EventType built with `new`, When its components are read, Then
-/// family/type_name match and variant is None (struct events).
+/// Given an EventType, When its components are read, Then family and type_name
+/// are exactly the two it was built from — an event type carries no third
+/// component for a stored row to disagree with.
 #[test]
-fn new_sets_components_and_leaves_variant_none() {
+fn an_event_type_is_its_family_and_its_type_name() {
     let et = EventType::new(
-        Family::new("nitinol.saga.outbox"),
-        TypeName::new("tell_requested"),
+        Family::new("shop.order.outbox"),
+        TypeName::new("TellRequested"),
     );
 
-    assert_eq!(et.family(), Family::new("nitinol.saga.outbox"));
-    assert_eq!(et.type_name(), TypeName::new("tell_requested"));
-    assert_eq!(et.variant(), None);
+    assert_eq!(et.family(), Family::new("shop.order.outbox"));
+    assert_eq!(et.type_name(), TypeName::new("TellRequested"));
 }
 
-/// Given an EventType built with `with_variant`, When its components are read,
-/// Then variant is Some with the supplied value (enum arm events).
-#[test]
-fn with_variant_sets_variant_some() {
-    let et = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    );
+// The grammar: last segment is the TypeName, everything before it is the family
 
-    assert_eq!(et.family(), Family::new("saga.upstream"));
-    assert_eq!(et.type_name(), TypeName::new("OrderEvent"));
-    assert_eq!(et.variant(), Some(Variant::new("OrderPlaced")));
+/// Given an event type of any shape, When it is projected to its canonical
+/// path, Then the path holds the family's segments followed by exactly one more
+/// — the type name.
+///
+/// This is the whole of the grammar: a path carries no segment beyond the type
+/// name, so a reader splitting on the last segment recovers the one declaration
+/// the path was written for.
+#[test]
+fn a_canonical_path_is_the_family_segments_followed_by_the_type_name_alone() {
+    for et in every_shape() {
+        let rendered = et.to_path().to_string();
+        let segments: Vec<&str> = rendered.split('.').collect();
+
+        let family = et.family().as_str();
+        let expected_family_segments = if family.is_empty() {
+            Vec::new()
+        } else {
+            family.split('.').collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            segments.len(),
+            expected_family_segments.len() + 1,
+            "a canonical path holds the family's segments and the type name, and {rendered:?} \
+             holds a different number — a further segment would leave the path readable as more \
+             than one declaration"
+        );
+        assert_eq!(
+            &segments[..expected_family_segments.len()],
+            &expected_family_segments[..],
+            "the leading segments of {rendered:?} are the family"
+        );
+        assert_eq!(
+            segments[segments.len() - 1],
+            et.type_name().as_str(),
+            "the last segment of {rendered:?} is the type name"
+        );
+    }
 }
 
-// type_key — variant-free identity for decode routing / registry keys
-
-/// Given two EventTypes sharing family+type_name but differing in variant
-/// (Some vs None), When their type-keys are compared, Then the keys are equal
-/// (variant is excluded from the key).
+/// Given two event types whose canonical paths are equal, When they are
+/// compared, Then they are the same event type.
+///
+/// One path answers for one declaration. A family that swallows what another
+/// declaration reads as its type name would break this, and it is what the
+/// registry's collision check refuses at build time.
 #[test]
-fn type_key_ignores_variant_for_some_vs_none() {
-    let without = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
-    let with = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    );
+fn one_canonical_path_decomposes_into_one_pair_of_components() {
+    let declared = EventType::new(Family::new("a.b"), TypeName::new("C"));
 
-    assert_eq!(without.type_key(), with.type_key());
-}
+    let path: MaterializedPath = declared
+        .to_path()
+        .to_string()
+        .parse()
+        .expect("a canonical path re-parses");
+    let parsed = ParsedEventType::from_path(path);
 
-/// Given two EventTypes sharing family+type_name but differing in their Some
-/// variant, When their type-keys are compared, Then the keys are equal.
-#[test]
-fn type_key_ignores_differing_some_variants() {
-    let placed = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    );
-    let cancelled = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderCancelled"),
-    );
-
-    assert_eq!(placed.type_key(), cancelled.type_key());
-}
-
-/// Given two EventTypes differing in type_name, When their type-keys are
-/// compared, Then the keys differ.
-#[test]
-fn type_key_differs_when_type_name_differs() {
-    let a = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
-    let b = EventType::new(Family::new("saga.upstream"), TypeName::new("PaymentEvent"));
-
-    assert_ne!(a.type_key(), b.type_key());
-}
-
-/// Given two EventTypes differing in family, When their type-keys are compared,
-/// Then the keys differ.
-#[test]
-fn type_key_differs_when_family_differs() {
-    let a = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
-    let b = EventType::new(Family::new("saga.downstream"), TypeName::new("OrderEvent"));
-
-    assert_ne!(a.type_key(), b.type_key());
-}
-
-/// Given a decode registry keyed by type-key, When a value-level variant is
-/// looked up, Then it resolves to the type-registered entry regardless of
-/// variant.
-#[test]
-fn type_key_usable_as_registry_lookup_key() {
-    let registered = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
-    let mut registry: HashMap<_, &str> = HashMap::new();
-    registry.insert(registered.type_key(), "OrderDecoder");
-
-    let loaded_variant = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    );
-
+    assert_eq!(parsed.family, "a.b");
+    assert_eq!(parsed.type_name, "C");
     assert_eq!(
-        registry.get(&loaded_variant.type_key()),
-        Some(&"OrderDecoder")
+        parsed,
+        ParsedEventType::from(declared),
+        "decomposing the path a declaration is written down as recovers that declaration's own \
+         components, with no second reading to choose between"
     );
 }
 
-// Eq / Hash — all three components participate
+// Eq / Hash — both components participate
 
 /// Given two EventTypes with identical components, When compared, Then they are
 /// equal and hash equally.
 #[test]
-fn equality_holds_when_all_three_components_match() {
-    let a = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    );
-    let b = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    );
+fn equality_holds_when_both_components_match() {
+    let a = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
+    let b = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
 
     assert_eq!(a, b);
     assert_eq!(hash_of(&a), hash_of(&b));
 }
 
-/// Given two EventTypes identical except one has variant None and the other
-/// Some, When compared, Then they are NOT equal (variant is part of identity).
+/// Given two EventTypes differing in type_name, When compared, Then they are
+/// not equal.
 #[test]
-fn inequality_holds_when_variant_presence_differs() {
-    let without = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
-    let with = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    );
+fn inequality_holds_when_type_name_differs() {
+    let a = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
+    let b = EventType::new(Family::new("saga.upstream"), TypeName::new("PaymentEvent"));
 
-    assert_ne!(without, with);
+    assert_ne!(a, b);
 }
 
-/// Given two EventTypes differing only in their Some variant, When compared,
-/// Then they are NOT equal.
+/// Given two EventTypes differing in family, When compared, Then they are not
+/// equal.
 #[test]
-fn inequality_holds_when_some_variants_differ() {
-    let placed = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    );
-    let cancelled = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderCancelled"),
-    );
+fn inequality_holds_when_family_differs() {
+    let a = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
+    let b = EventType::new(Family::new("saga.downstream"), TypeName::new("OrderEvent"));
 
-    assert_ne!(placed, cancelled);
+    assert_ne!(a, b);
 }
 
-/// Given variant-distinguished EventTypes, When inserted into a HashSet, Then
-/// each is a distinct member (Hash mirrors Eq over all three components).
+/// Given distinct EventTypes, When inserted into a HashSet, Then each is a
+/// distinct member (Hash mirrors Eq over both components).
 #[test]
-fn hash_set_distinguishes_variants() {
+fn hash_set_distinguishes_event_types() {
     let mut set = HashSet::new();
-    set.insert(EventType::new(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-    ));
-    set.insert(EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    ));
-    set.insert(EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderCancelled"),
-    ));
+    for et in every_shape() {
+        set.insert(et);
+    }
 
     assert_eq!(set.len(), 3);
 }
 
-// Display — one-way `family.type_name[.variant]`
+// Display — `family.TypeName`, one way
 
-/// Given a struct EventType (variant None) with a non-empty family, When
-/// formatted, Then it renders `family.type_name`.
+/// Given an EventType with a non-empty family, When formatted, Then it renders
+/// `family.TypeName`.
 #[test]
-fn display_renders_family_and_type_name_without_variant() {
+fn display_renders_family_and_type_name() {
     let et = EventType::new(
-        Family::new("nitinol.saga.outbox"),
-        TypeName::new("tell_requested"),
+        Family::new("shop.order.outbox"),
+        TypeName::new("TellRequested"),
     );
-    assert_eq!(et.to_string(), "nitinol.saga.outbox.tell_requested");
-}
-
-/// Given an enum-arm EventType (variant Some) with a non-empty family, When
-/// formatted, Then it appends `.variant`.
-#[test]
-fn display_appends_variant_when_present() {
-    let et = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    );
-    assert_eq!(et.to_string(), "saga.upstream.OrderEvent.OrderPlaced");
+    assert_eq!(et.to_string(), "shop.order.outbox.TellRequested");
 }
 
 /// Given an EventType with an empty family, When formatted, Then the family
@@ -319,40 +263,17 @@ fn display_omits_prefix_for_empty_family() {
     assert_eq!(et.to_string(), "Incremented");
 }
 
-/// Given an EventType with an empty family and a variant, When formatted, Then
-/// only the family prefix is dropped; the variant suffix remains.
-#[test]
-fn display_omits_prefix_for_empty_family_but_keeps_variant() {
-    let et = EventType::with_variant(
-        Family::new(""),
-        TypeName::new("Order"),
-        Variant::new("Placed"),
-    );
-    assert_eq!(et.to_string(), "Order.Placed");
-}
-
 // const usability & Copy — required for `const EVENT_TYPE` definitions
 
-const CONST_STRUCT_EVENT: EventType = EventType::new(
-    Family::new("nitinol.saga.outbox"),
-    TypeName::new("scheduled"),
-);
-const CONST_VARIANT_EVENT: EventType = EventType::with_variant(
-    Family::new("saga.upstream"),
-    TypeName::new("OrderEvent"),
-    Variant::new("OrderPlaced"),
-);
+const CONST_EVENT: EventType =
+    EventType::new(Family::new("shop.order.outbox"), TypeName::new("Scheduled"));
 
-/// Given EventTypes built in const context, When used at runtime, Then their
-/// const constructors produced the expected components (const fn contract).
+/// Given an EventType built in const context, When used at runtime, Then its
+/// const constructor produced the expected components (const fn contract).
 #[test]
 fn const_constructors_are_usable_in_const_context() {
-    assert_eq!(CONST_STRUCT_EVENT.type_name(), TypeName::new("scheduled"));
-    assert_eq!(CONST_STRUCT_EVENT.variant(), None);
-    assert_eq!(
-        CONST_VARIANT_EVENT.variant(),
-        Some(Variant::new("OrderPlaced"))
-    );
+    assert_eq!(CONST_EVENT.type_name(), TypeName::new("Scheduled"));
+    assert_eq!(CONST_EVENT.family(), Family::new("shop.order.outbox"));
 }
 
 /// Given an EventType is Copy, When passed by value twice, Then the original
@@ -366,12 +287,13 @@ fn event_type_is_copy() {
     assert_eq!(original.type_name(), TypeName::new("OrderEvent"));
 }
 
-// Round-trip via MaterializedPath
-
 // Component constructor invariants — invalid inputs must be rejected
 
-/// Given a TypeName containing a dot, When constructed, Then it panics because
-/// TypeName must be a single path segment (no sub-segments).
+/// Given a TypeName containing a dot, When constructed, Then it panics.
+///
+/// A dotted type name is what would make the grammar ambiguous: the reader
+/// splits on the last segment, so a type name spanning two segments could be
+/// read as a deeper family and a shorter name.
 #[test]
 #[should_panic]
 fn type_name_with_dot_panics() {
@@ -384,22 +306,6 @@ fn type_name_with_dot_panics() {
 #[should_panic]
 fn type_name_empty_panics() {
     let _ = TypeName::new("");
-}
-
-/// Given a Variant containing a dot, When constructed, Then it panics because
-/// Variant must be a single path segment (no sub-segments).
-#[test]
-#[should_panic]
-fn variant_with_dot_panics() {
-    let _ = Variant::new("A.B");
-}
-
-/// Given an empty Variant, When constructed, Then it panics because an empty
-/// segment would break the round-trip contract.
-#[test]
-#[should_panic]
-fn variant_empty_panics() {
-    let _ = Variant::new("");
 }
 
 /// Given a Family with consecutive dots (empty segment), When constructed, Then
@@ -430,168 +336,61 @@ fn family_with_trailing_dot_panics() {
 
 /// Pinned contract: EventType round-trips as a Materialized Path.
 ///
-/// `EventType` uses `&'static str` components for `Copy`/`const` semantics and
-/// cannot implement `FromStr` directly.  The parse boundary is
-/// [`MaterializedPath`]:
-///
 /// - **Serialise**: `event_type.to_path().to_string()` → canonical wire string.
 /// - **Parse**: `wire.parse::<MaterializedPath>()` → owned path.
 /// - **Round-trip**: reparsed path equals the projected path (Eq).
-///
-/// Covers both struct events (variant None) and enum-arm events (variant Some).
 #[test]
 fn event_type_round_trips_as_materialized_path() {
-    let cases: &[EventType] = &[
-        EventType::new(
-            Family::new("nitinol.saga.outbox"),
-            TypeName::new("tell_requested"),
-        ),
-        EventType::with_variant(
-            Family::new("saga.upstream"),
-            TypeName::new("OrderEvent"),
-            Variant::new("OrderPlaced"),
-        ),
-        EventType::new(Family::new(""), TypeName::new("Bare")),
-    ];
-    for &et in cases {
+    for et in every_shape() {
         let path = et.to_path();
         let wire = path.to_string();
         // wire string must equal Display rendering
-        assert_eq!(wire, et.to_string(), "wire != Display for {:?}", et);
+        assert_eq!(wire, et.to_string(), "wire != Display for {et:?}");
         // re-parsing the wire string recovers the same MaterializedPath
         let reparsed = wire
             .parse::<MaterializedPath>()
             .unwrap_or_else(|_| panic!("must re-parse `{wire}`"));
-        assert_eq!(reparsed, path, "round-trip failed for {:?}", et);
+        assert_eq!(reparsed, path, "round-trip failed for {et:?}");
     }
 }
 
 // ParsedEventType — component-level round-trip
 
-/// Given a struct EventType with a non-empty family, When its canonical wire
-/// string is parsed back via `ParsedEventType::from_struct_path`, Then the
-/// recovered Family, TypeName, and Variant components match the original.
+/// Given an EventType of any shape, When its canonical wire string is parsed
+/// back via `ParsedEventType::from_path`, Then the recovered components equal
+/// the ones the EventType was declared with.
 #[test]
-fn parsed_event_type_round_trips_struct_event_with_family() {
-    let et = EventType::new(
-        Family::new("nitinol.saga.outbox"),
-        TypeName::new("tell_requested"),
-    );
-    let expected = ParsedEventType::from(et);
+fn parsed_event_type_round_trips_every_shape() {
+    for et in every_shape() {
+        let expected = ParsedEventType::from(et);
 
-    let wire = et.to_path().to_string();
-    let path: MaterializedPath = wire.parse().expect("canonical wire string must parse");
-    let parsed = ParsedEventType::from_struct_path(path);
+        let wire = et.to_path().to_string();
+        let path: MaterializedPath = wire.parse().expect("canonical wire string must parse");
+        let parsed = ParsedEventType::from_path(path);
 
-    assert_eq!(parsed, expected);
-    assert_eq!(parsed.family, "nitinol.saga.outbox");
-    assert_eq!(parsed.type_name, "tell_requested");
-    assert_eq!(parsed.variant, None);
+        assert_eq!(parsed, expected, "component round-trip failed for {wire:?}");
+        assert_eq!(parsed.family, et.family().as_str());
+        assert_eq!(parsed.type_name, et.type_name().as_str());
+    }
 }
 
-/// Given an enum-arm EventType with a non-empty family, When its canonical wire
-/// string is parsed back via `ParsedEventType::try_from_enum_arm_path`, Then
-/// the recovered Family, TypeName, and Variant components match the original.
+/// Given a single-segment path (an event type with no family), When it is
+/// decomposed, Then the family is empty and the one segment is the type name.
 #[test]
-fn parsed_event_type_round_trips_enum_arm_event_with_family() {
-    let et = EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    );
-    let expected = ParsedEventType::from(et);
+fn a_single_segment_path_decomposes_to_an_empty_family() {
+    let path: MaterializedPath = "Bare".parse().expect("a single segment parses");
+    let parsed = ParsedEventType::from_path(path);
 
-    let wire = et.to_path().to_string();
-    let path: MaterializedPath = wire.parse().expect("canonical wire string must parse");
-    let parsed = ParsedEventType::try_from_enum_arm_path(path)
-        .expect("enum-arm path has at least 2 segments");
-
-    assert_eq!(parsed, expected);
-    assert_eq!(parsed.family, "saga.upstream");
-    assert_eq!(parsed.type_name, "OrderEvent");
-    assert_eq!(parsed.variant, Some("OrderPlaced".to_owned()));
-}
-
-/// Given a struct EventType with an empty family (top-level event), When its
-/// canonical wire string is parsed back, Then the recovered family is empty
-/// and type_name matches the original.
-#[test]
-fn parsed_event_type_round_trips_struct_event_with_empty_family() {
-    let et = EventType::new(Family::new(""), TypeName::new("Incremented"));
-    let expected = ParsedEventType::from(et);
-
-    let wire = et.to_path().to_string();
-    let path: MaterializedPath = wire.parse().expect("canonical wire string must parse");
-    let parsed = ParsedEventType::from_struct_path(path);
-
-    assert_eq!(parsed, expected);
     assert_eq!(parsed.family, "");
-    assert_eq!(parsed.type_name, "Incremented");
-    assert_eq!(parsed.variant, None);
-}
-
-/// Given an enum-arm EventType with an empty family (top-level event with
-/// variant), When its canonical wire string is parsed back, Then the recovered
-/// family is empty and type_name / variant match the original.
-#[test]
-fn parsed_event_type_round_trips_enum_arm_event_with_empty_family() {
-    let et = EventType::with_variant(
-        Family::new(""),
-        TypeName::new("Order"),
-        Variant::new("Placed"),
-    );
-    let expected = ParsedEventType::from(et);
-
-    let wire = et.to_path().to_string();
-    let path: MaterializedPath = wire.parse().expect("canonical wire string must parse");
-    let parsed = ParsedEventType::try_from_enum_arm_path(path)
-        .expect("enum-arm path has at least 2 segments");
-
-    assert_eq!(parsed, expected);
-    assert_eq!(parsed.family, "");
-    assert_eq!(parsed.type_name, "Order");
-    assert_eq!(parsed.variant, Some("Placed".to_owned()));
-}
-
-/// Given a struct event's canonical wire path, When `try_from_enum_arm_path`
-/// is called with only a single segment, Then it returns `None` (cannot
-/// hold both type_name and variant).
-#[test]
-fn try_from_enum_arm_path_returns_none_for_single_segment() {
-    let et = EventType::new(Family::new(""), TypeName::new("BareEvent"));
-    let path = et.to_path();
-    // Single-segment path cannot carry both type_name and variant.
-    assert!(ParsedEventType::try_from_enum_arm_path(path).is_none());
+    assert_eq!(parsed.type_name, "Bare");
 }
 
 /// Given a ParsedEventType, When formatted, Then its Display matches the
 /// original EventType's Display (canonical string form is identical).
 #[test]
 fn parsed_event_type_display_matches_event_type_display() {
-    let cases: &[EventType] = &[
-        EventType::new(
-            Family::new("nitinol.saga.outbox"),
-            TypeName::new("scheduled"),
-        ),
-        EventType::with_variant(
-            Family::new("saga.upstream"),
-            TypeName::new("OrderEvent"),
-            Variant::new("OrderPlaced"),
-        ),
-        EventType::new(Family::new(""), TypeName::new("Bare")),
-        EventType::with_variant(
-            Family::new(""),
-            TypeName::new("Order"),
-            Variant::new("Placed"),
-        ),
-    ];
-    for &et in cases {
+    for et in every_shape() {
         let parsed = ParsedEventType::from(et);
-        assert_eq!(
-            parsed.to_string(),
-            et.to_string(),
-            "Display mismatch for {:?}",
-            et
-        );
+        assert_eq!(parsed.to_string(), et.to_string(), "Display mismatch");
     }
 }

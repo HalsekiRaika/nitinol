@@ -1,11 +1,12 @@
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use nitinol_eventsource::appending_system_event;
+use nitinol_eventsource::{appending_system_event, SystemEvent};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
 
 use crate::id::SagaId;
+use crate::observability::report_system_event;
 use crate::outbox::message::{Ended, OutboxEvent, TellAcked, TellFailed, TellRequested};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,11 +47,18 @@ impl OutboxAppender {
         sequence: u64,
     ) -> bool {
         let now = jiff::Timestamp::now();
-        let event = appending_system_event(sequence, &OutboxEvent::Ended(Ended {}), now);
+        let marker = OutboxEvent::Ended(Ended {});
+        let event = appending_system_event(sequence, &marker, now);
         if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
             tracing::warn!(error = %e, "saga outbox ended marker append failed");
             return false;
         }
+        report_system_event!(
+            OutboxEvent::EVENT_TYPE,
+            marker.arm(),
+            saga_id.as_str(),
+            sequence = sequence,
+        );
         true
     }
 
@@ -62,22 +70,21 @@ impl OutboxAppender {
         tell_id: u64,
     ) -> bool {
         let now = jiff::Timestamp::now();
-        let event = match outcome {
-            TellOutcome::Acked => appending_system_event(
-                sequence,
-                &OutboxEvent::TellAcked(TellAcked { tell_id }),
-                now,
-            ),
-            TellOutcome::Failed => appending_system_event(
-                sequence,
-                &OutboxEvent::TellFailed(TellFailed { tell_id }),
-                now,
-            ),
+        let marker = match outcome {
+            TellOutcome::Acked => OutboxEvent::TellAcked(TellAcked { tell_id }),
+            TellOutcome::Failed => OutboxEvent::TellFailed(TellFailed { tell_id }),
         };
+        let event = appending_system_event(sequence, &marker, now);
         if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
             tracing::warn!(error = %e, ?outcome, "saga outbox terminal marker append failed");
             return false;
         }
+        report_system_event!(
+            OutboxEvent::EVENT_TYPE,
+            marker.arm(),
+            saga_id.as_str(),
+            tell_id = tell_id,
+        );
         true
     }
 }
@@ -90,7 +97,6 @@ mod tests {
 
     use async_trait::async_trait;
     use futures_core::Stream;
-    use nitinol_eventsource::SystemEvent;
     use nitinol_persistence::error::{AppendError, LoadError};
     use nitinol_persistence::store::EventStream;
     use nitinol_persistence::AppendOutcome;

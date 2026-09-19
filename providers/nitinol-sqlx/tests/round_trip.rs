@@ -41,27 +41,29 @@ use jiff::Timestamp;
 use linkme::distributed_slice;
 use nitinol_persistence::error::LoadError;
 use nitinol_persistence::{
-    EventRegistryEntry, EventType, Family, LoadQuery, TypeName, Variant, EVENT_REGISTRY,
+    EventRegistryEntry, EventType, Family, LoadQuery, TypeName, EVENT_REGISTRY,
 };
 use nitinol_sqlx::UnknownEventType;
 
 const BARE: EventType = EventType::new(Family::new(""), TypeName::new("Bare"));
 const NESTED: EventType =
     EventType::new(Family::new("sqlx.round-trip.deep"), TypeName::new("Nested"));
-const ARM: EventType = EventType::with_variant(
-    Family::new("sqlx.round-trip"),
-    TypeName::new("Choice"),
-    Variant::new("Left"),
-);
+const CHOICE: EventType = EventType::new(Family::new("sqlx.round-trip"), TypeName::new("Choice"));
 
-/// The three shapes, declared the way a `#[derive(Event)]` type declares
-/// itself — one entry per declaring type, carrying everything it is written
-/// down as.
+/// The three shapes a canonical path has — no family, a deep family, a shallow
+/// one — each declared the way a `#[derive(Event)]` type declares itself: one
+/// entry per declaring type, carrying the one path it is written down as.
 #[distributed_slice(EVENT_REGISTRY)]
-static SHAPES_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
-    concat!(module_path!(), "::round_trip_shapes"),
-    &[BARE, NESTED, ARM],
-);
+static BARE_ENTRY: EventRegistryEntry =
+    EventRegistryEntry::new(concat!(module_path!(), "::Bare"), &[BARE]);
+
+#[distributed_slice(EVENT_REGISTRY)]
+static NESTED_ENTRY: EventRegistryEntry =
+    EventRegistryEntry::new(concat!(module_path!(), "::Nested"), &[NESTED]);
+
+#[distributed_slice(EVENT_REGISTRY)]
+static CHOICE_ENTRY: EventRegistryEntry =
+    EventRegistryEntry::new(concat!(module_path!(), "::Choice"), &[CHOICE]);
 
 /// An event type with no entry anywhere in this binary.
 ///
@@ -123,7 +125,7 @@ async fn every_shape_of_event_type_round_trips_with_nothing_registered_by_hand()
         vec![
             typed(1, BARE, b"bare"),
             typed(2, NESTED, b"nested"),
-            typed(3, ARM, b"arm"),
+            typed(3, CHOICE, b"choice"),
         ],
     )
     .await;
@@ -133,9 +135,9 @@ async fn every_shape_of_event_type_round_trips_with_nothing_registered_by_hand()
     let round_tripped: Vec<EventType> = served.iter().map(|event| event.event_type).collect();
     assert_eq!(
         round_tripped,
-        vec![BARE, NESTED, ARM],
+        vec![BARE, NESTED, CHOICE],
         "a store opened over a pool alone restores every event type its binary declared — an \
-         empty family and an enum arm included — and the declaration was a linked entry, not a \
+         empty family and a deep one included — and the declaration was a linked entry, not a \
          registry handed to the store"
     );
 }

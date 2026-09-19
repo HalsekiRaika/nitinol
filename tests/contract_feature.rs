@@ -15,7 +15,7 @@ use bytes::Bytes;
 use nitinol::contract::{
     Accepting, Aggregate, Codec, Decider, Decision, Event, Query, Snapshotable,
 };
-use nitinol::persistence::{EventType, Family, TypeName, Variant};
+use nitinol::persistence::{EventType, Family, TypeName};
 
 #[derive(Clone, Event)]
 #[event(family = "shop.orders", codec = PlacedCodec)]
@@ -131,38 +131,31 @@ impl Query<CurrentValue> for Counter {
 }
 
 /// Given a struct deriving `Event` in a `contract`-only build, When its
-/// `EVENT_TYPE` is read and `variant()` is called, Then the derive resolves the
-/// trait through the contract path and the value-level identity falls back to
-/// the trait's default (type-level, variant `None`).
+/// `EVENT_TYPE` is read, Then the derive resolved the trait through the
+/// contract path and wrote the identity the attribute named.
 #[test]
 fn derived_struct_event_is_usable_through_the_contract_facade() {
     assert_eq!(
         Placed::EVENT_TYPE,
         EventType::new(Family::new("shop.orders"), TypeName::new("Placed")),
     );
-    assert_eq!(Placed.variant(), Placed::EVENT_TYPE);
-    assert_eq!(Placed.variant().variant(), None);
 }
 
-/// Given an enum deriving `Event` in a `contract`-only build, When `variant()`
-/// is called on an arm, Then the generated match names that arm — proving the
-/// generated `::nitinol::persistence::{EventType, Family, TypeName, Variant}`
+/// Given an enum deriving `Event` in a `contract`-only build, When its
+/// `EVENT_TYPE` is read, Then it is the identity named after the enum — proving
+/// the generated `::nitinol::persistence::{EventType, Family, TypeName}`
 /// references resolve without the `eventsource` feature.
 #[test]
-fn derived_enum_event_names_the_active_arm() {
+fn derived_enum_event_is_usable_through_the_contract_facade() {
     assert_eq!(
-        CounterEvent::Incremented.variant(),
-        EventType::with_variant(
-            Family::new("shop.counter"),
-            TypeName::new("CounterEvent"),
-            Variant::new("Incremented"),
-        ),
+        CounterEvent::EVENT_TYPE,
+        EventType::new(Family::new("shop.counter"), TypeName::new("CounterEvent")),
     );
     assert_eq!(
-        CounterEvent::Decremented.variant().variant(),
-        Some(Variant::new("Decremented")),
+        CounterEvent::EVENT_TYPE.to_path().to_string(),
+        "shop.counter.CounterEvent",
+        "every arm of the enum is written down under this one path"
     );
-    assert_eq!(CounterEvent::EVENT_TYPE.variant(), None);
 }
 
 /// Given an aggregate implemented against `nitinol::contract::Aggregate`, When

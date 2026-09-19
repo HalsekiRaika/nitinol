@@ -5,7 +5,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use nitinol_eventsource::codec;
-use nitinol_eventsource::{appending_system_event, DurableSubscription, SequenceCursor};
+use nitinol_eventsource::{
+    appending_system_event, DurableSubscription, SequenceCursor, SystemEvent,
+};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, LoadedEvent};
@@ -13,13 +15,14 @@ use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
 
 use crate::context::SagaContext;
 use crate::dead_letter::{
-    enqueue_dead_letter, DlqChildSpawn, EnqueueOutcome, EnqueuePolicy, RecordDisposition,
-    SagaFailure, SourceContext,
+    enqueue_dead_letter, DeadLetterDispositionEvent, DlqChildSpawn, EnqueueOutcome, EnqueuePolicy,
+    RecordDisposition, SagaFailure, SourceContext,
 };
 use crate::effect::TellIntent;
 use crate::error::SagaUpstreamHandlerError;
 use crate::id::SagaId;
 use crate::journal::ActiveSchedule;
+use crate::observability::report_system_event;
 use crate::outbox::{OutboxAppender, RetryPolicy, TellOutcome};
 use crate::process::interpreter::{run_saga_effect, InterpretOutcome, InterpreterCtx};
 use crate::process::replay::replay_and_redispatch;
@@ -66,9 +69,7 @@ pub(crate) fn upstream_subscription<S: Saga>(
     store: Arc<dyn EventStore>,
 ) -> DurableSubscription<UpstreamMessage<S::SubscribedEvent>> {
     DurableSubscription::new(store, move |loaded: LoadedEvent| {
-        if loaded.event_type.type_key()
-            != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE.type_key()
-        {
+        if loaded.event_type != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE {
             return None;
         }
         // Capture the raw payload before decoding so the draining branch can
@@ -986,6 +987,12 @@ impl<S: Saga> Receive<RecordDisposition> for SagaProcess<S> {
                 // Advance only on success, so a refused marker leaves no gap
                 // for the saga's own next append to fall into.
                 self.sequence = candidate;
+                report_system_event!(
+                    DeadLetterDispositionEvent::EVENT_TYPE,
+                    msg.marker.arm(),
+                    self.saga_id.as_str(),
+                    dead_letter_sequence = msg.marker.dead_letter_sequence,
+                );
                 Ok(Ok(()))
             }
             Err(e) => {

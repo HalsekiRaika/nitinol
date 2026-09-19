@@ -30,6 +30,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 
 use crate::id::SagaId;
+use crate::observability::report_system_event;
 
 use super::disposition::{DeadLetterDispositionEvent, Disposition, DEAD_LETTER_DISPOSITION_MARKER};
 use super::event::{is_dead_letter_event_type, DeadLetterEvent, DEAD_LETTER_MARKER};
@@ -313,6 +314,12 @@ impl DeadLetterQueue {
                         )],
                     )
                     .await?;
+                report_system_event!(
+                    DeadLetterDispositionEvent::EVENT_TYPE,
+                    marker.arm(),
+                    self.saga_id.as_str(),
+                    dead_letter_sequence = marker.dead_letter_sequence,
+                );
             }
         }
         Ok(())

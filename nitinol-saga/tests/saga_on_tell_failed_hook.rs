@@ -29,8 +29,8 @@
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    encode_outbox_tell_failed, encode_outbox_tell_requested, outbox_kind_of, JsonCodec, OutboxKind,
-    OUTBOX_MARKER,
+    dead_letter_of, dead_letter_records, encode_outbox_tell_failed, encode_outbox_tell_requested,
+    failure_kind, outbox_kind_of, JsonCodec, OutboxKind, DEAD_LETTER_MARKER, OUTBOX_MARKER,
 };
 
 use std::convert::Infallible;
@@ -51,8 +51,7 @@ use nitinol_eventsource::{
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
-    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent,
-    TypeName, Variant,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
@@ -75,9 +74,6 @@ const COMPENSATION_NOTE: &str = "compensated";
 /// Timer the hook registers so that a second reader of
 /// `SagaContext::failed_tell_ids` runs after the failure was consumed.
 const RECHECK_TIMER: &str = "on-tell-failed-recheck";
-
-const DEAD_LETTER_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
 
 // Domain types
 
@@ -478,8 +474,7 @@ struct RejectTellFailedDeadLetterStore {
 }
 
 fn is_tell_failed_dead_letter(event: &AppendingEvent) -> bool {
-    event.event_type.type_key() == DEAD_LETTER_TYPE.type_key()
-        && event.event_type.variant() == Some(Variant::new("tell_failed"))
+    event.event_type == DEAD_LETTER_MARKER && dead_letter_records(&event.payload, "tell_failed")
 }
 
 #[async_trait]
@@ -553,13 +548,15 @@ async fn append_raw(
         .expect("append must succeed");
 }
 
-fn count_dead_letters(events: &[LoadedEvent], variant: &'static str) -> usize {
+/// Dead letters on this stream recording the named failure.
+///
+/// Every dead letter carries the one dead-letter path, so which failure a
+/// record holds is read from the payload it carries.
+fn count_dead_letters(events: &[LoadedEvent], kind: &'static str) -> usize {
     events
         .iter()
-        .filter(|e| {
-            e.event_type.type_key() == DEAD_LETTER_TYPE.type_key()
-                && e.event_type.variant() == Some(Variant::new(variant))
-        })
+        .filter_map(dead_letter_of)
+        .filter(|record| failure_kind(&record.failure) == kind)
         .count()
 }
 
@@ -573,7 +570,7 @@ fn count_terminal_tell_failed_markers(events: &[LoadedEvent]) -> usize {
 fn saga_log_notes(events: &[LoadedEvent]) -> Vec<String> {
     events
         .iter()
-        .filter(|e| e.event_type.type_key() == SagaLog::EVENT_TYPE.type_key())
+        .filter(|e| e.event_type == SagaLog::EVENT_TYPE)
         .map(|e| {
             serde_json::from_slice::<SagaLog>(&e.payload)
                 .expect("a SagaLog payload must decode as raw codec output")
@@ -592,13 +589,13 @@ fn event_types(events: &[LoadedEvent]) -> Vec<String> {
 async fn wait_for_dead_letter(
     store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
-    variant: &'static str,
+    kind: &'static str,
     timeout: Duration,
 ) -> Vec<LoadedEvent> {
     let deadline = Instant::now() + timeout;
     loop {
         let events = load_saga_events(store, saga_id).await;
-        if count_dead_letters(&events, variant) >= 1 || Instant::now() >= deadline {
+        if count_dead_letters(&events, kind) >= 1 || Instant::now() >= deadline {
             return events;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

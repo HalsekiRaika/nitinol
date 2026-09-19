@@ -34,13 +34,14 @@ pub(crate) enum SagaPersistedDecodeError {
 }
 
 impl<E: Event> SagaPersisted<E> {
-    pub(crate) fn variant(&self) -> EventType {
+    /// The canonical path a row of this envelope's content carries.
+    pub(crate) fn event_type(&self) -> EventType {
         match self {
-            SagaPersisted::Domain(event) => event.variant(),
-            SagaPersisted::Outbox(marker) => marker.variant(),
-            SagaPersisted::Schedule(marker) => marker.variant(),
-            SagaPersisted::DeadLetter(event) => event.variant(),
-            SagaPersisted::DeadLetterDisposition(marker) => marker.variant(),
+            SagaPersisted::Domain(_) => E::EVENT_TYPE,
+            SagaPersisted::Outbox(_) => OutboxEvent::EVENT_TYPE,
+            SagaPersisted::Schedule(_) => ScheduleEvent::EVENT_TYPE,
+            SagaPersisted::DeadLetter(_) => DeadLetterEvent::EVENT_TYPE,
+            SagaPersisted::DeadLetterDisposition(_) => DeadLetterDispositionEvent::EVENT_TYPE,
         }
     }
 
@@ -59,7 +60,7 @@ impl<E: Event> SagaPersisted<E> {
         payload: &[u8],
     ) -> Result<Self, SagaPersistedDecodeError> {
         // Classification order: outbox → schedule → dead_letter →
-        // dead_letter_disposition → domain.  The four framework families
+        // dead_letter_disposition → domain.  The four framework declarations
         // (`nitinol.saga.{outbox,schedule,dead_letter,dead_letter_disposition}`)
         // are siblings, so a user event type can match none of them and the
         // order between them carries no meaning.  The domain branch must stay
@@ -160,7 +161,7 @@ mod tests {
             "the envelope must return the inner codec bytes verbatim (no double-encode)"
         );
         assert_eq!(
-            SagaPersisted::Domain(event).variant(),
+            SagaPersisted::Domain(event).event_type(),
             DomainEvt::EVENT_TYPE,
             "the envelope must expose the inner event's own wire identity"
         );

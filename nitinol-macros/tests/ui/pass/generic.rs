@@ -33,5 +33,5 @@ impl<T: Clone + Default + Send + Sync + 'static> Codec<Wrapper<T>> for WrapperCo
 
 fn main() {
     let _ = <Wrapper<u32> as Event>::EVENT_TYPE;
-    let _ = Wrapper { inner: 1u32 }.variant();
+    let _ = Wrapper { inner: 1u32 };
 }

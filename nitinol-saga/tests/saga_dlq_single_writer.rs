@@ -18,7 +18,10 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::JsonCodec;
+use common::{
+    dead_letter_of, disposition_kind, disposition_of, failure_kind, JsonCodec, DEAD_LETTER_MARKER,
+    DISPOSITION_MARKER,
+};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,8 +38,7 @@ use nitinol_eventsource::{appending_system_event, Event, SequenceCursor, SystemE
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
-    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent,
-    TypeName, Variant,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -44,18 +46,6 @@ use nitinol_saga::{
     SagaContext, SagaEffect, SagaFailure, SagaId, SagaManagerProps, SagaManagerProxy,
     SourceContext,
 };
-
-// Wire identities observed here.
-
-/// Type-level identity of a dead letter.
-const DEAD_LETTER_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
-
-/// Type-level identity of a disposition marker.
-const DISPOSITION_TYPE: EventType = EventType::new(
-    Family::new("nitinol.saga"),
-    TypeName::new("dead_letter_disposition"),
-);
 
 /// The one correlation id every `Ping` routes to, so "the resident instance"
 /// is a single well-known stream in every test below.
@@ -155,10 +145,7 @@ struct RejectDispositionStore {
 }
 
 fn is_disposition_marker(event: &AppendingEvent) -> bool {
-    event
-        .event_type
-        .to_path()
-        .is_within(&DISPOSITION_TYPE.to_path())
+    event.event_type == DISPOSITION_MARKER
 }
 
 #[async_trait]
@@ -334,17 +321,28 @@ async fn load_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<Loade
 fn of_type(events: &[LoadedEvent], event_type: EventType) -> Vec<&LoadedEvent> {
     events
         .iter()
-        .filter(|e| e.event_type.type_key() == event_type.type_key())
+        .filter(|e| e.event_type == event_type)
         .collect()
 }
 
-fn count_variant(events: &[LoadedEvent], event_type: EventType, variant: &'static str) -> usize {
+/// Dead letters on this stream recording the named failure.
+///
+/// Every dead letter carries the one dead-letter path, so which failure a
+/// record holds is read from the payload it carries.
+fn count_dead_letter_kind(events: &[LoadedEvent], kind: &'static str) -> usize {
     events
         .iter()
-        .filter(|e| {
-            e.event_type.type_key() == event_type.type_key()
-                && e.event_type.variant() == Some(Variant::new(variant))
-        })
+        .filter_map(dead_letter_of)
+        .filter(|record| failure_kind(&record.failure) == kind)
+        .count()
+}
+
+/// Disposition markers on this stream recording the named settlement.
+fn count_disposition(events: &[LoadedEvent], kind: &'static str) -> usize {
+    events
+        .iter()
+        .filter_map(disposition_of)
+        .filter(|marker| disposition_kind(marker) == kind)
         .count()
 }
 
@@ -409,7 +407,7 @@ async fn resident_saga_keeps_appending_after_an_operator_settles_its_dead_letter
         .wait_for_stream(
             &saga_id,
             "handle() failing must enqueue a dead letter",
-            |events| count_variant(events, DEAD_LETTER_TYPE, "handle_failed") == 1,
+            |events| count_dead_letter_kind(events, "handle_failed") == 1,
         )
         .await;
 
@@ -435,17 +433,17 @@ async fn resident_saga_keeps_appending_after_an_operator_settles_its_dead_letter
 
     let after_settle = harness.stream_of(&saga_id).await;
     assert_eq!(
-        count_variant(&after_settle, DISPOSITION_TYPE, "processed"),
+        count_disposition(&after_settle, "processed"),
         1,
         "settling must append exactly one `processed` marker — no second writer may \
          add another"
     );
     assert_eq!(
-        of_type(&after_settle, DEAD_LETTER_TYPE).len(),
+        of_type(&after_settle, DEAD_LETTER_MARKER).len(),
         1,
         "settling is a logical delete: the original dead letter record must survive"
     );
-    DeadLetterEvent::decode(&of_type(&after_settle, DEAD_LETTER_TYPE)[0].payload)
+    DeadLetterEvent::decode(&of_type(&after_settle, DEAD_LETTER_MARKER)[0].payload)
         .expect("the retained dead letter must still decode after being settled");
 
     // The saga must still own its stream's sequence.
@@ -463,7 +461,7 @@ async fn resident_saga_keeps_appending_after_an_operator_settles_its_dead_letter
              a dead letter on the same stream",
             |events| {
                 !of_type(events, Noted::EVENT_TYPE).is_empty()
-                    || count_variant(events, DEAD_LETTER_TYPE, "persist_failed") > 0
+                    || count_dead_letter_kind(events, "persist_failed") > 0
             },
         )
         .await;
@@ -482,7 +480,7 @@ async fn resident_saga_keeps_appending_after_an_operator_settles_its_dead_letter
          letter is not a saga failure"
     );
     assert_eq!(
-        count_variant(&after_business, DEAD_LETTER_TYPE, "persist_failed"),
+        count_dead_letter_kind(&after_business, "persist_failed"),
         0,
         "the saga must record no `persist_failed`: there is no sequence for the \
          operator's marker to have contended for"
@@ -532,12 +530,12 @@ async fn dormant_saga_dead_letter_is_settled_by_the_manager_itself() {
 
     let events = harness.stream_of(&dormant_id).await;
     assert_eq!(
-        count_variant(&events, DISPOSITION_TYPE, "evicted"),
+        count_disposition(&events, "evicted"),
         1,
         "evicting a dormant saga's dead letter must append exactly one `evicted` marker"
     );
     assert_eq!(
-        of_type(&events, DEAD_LETTER_TYPE).len(),
+        of_type(&events, DEAD_LETTER_MARKER).len(),
         1,
         "evict is a logical delete: the original dead letter record must survive"
     );
@@ -572,7 +570,7 @@ async fn a_refused_disposition_is_reported_to_the_operator_without_stopping_the_
         .wait_for_stream(
             &saga_id,
             "handle() failing must enqueue a dead letter",
-            |events| count_variant(events, DEAD_LETTER_TYPE, "handle_failed") == 1,
+            |events| count_dead_letter_kind(events, "handle_failed") == 1,
         )
         .await;
 
@@ -585,11 +583,7 @@ async fn a_refused_disposition_is_reported_to_the_operator_without_stopping_the_
     );
 
     assert_eq!(
-        count_variant(
-            &harness.stream_of(&saga_id).await,
-            DISPOSITION_TYPE,
-            "processed"
-        ),
+        count_disposition(&harness.stream_of(&saga_id).await, "processed"),
         0,
         "a refused settle must leave no marker behind"
     );
@@ -644,7 +638,7 @@ async fn the_arbitrated_queue_still_refuses_a_sequence_that_is_not_a_dead_letter
         .wait_for_stream(
             &saga_id,
             "handle() failing must enqueue a dead letter",
-            |events| count_variant(events, DEAD_LETTER_TYPE, "handle_failed") == 1,
+            |events| count_dead_letter_kind(events, "handle_failed") == 1,
         )
         .await;
 

@@ -14,12 +14,16 @@
 //! - `nitinol_saga::spawn_scheduler(&ProcessSystem) -> SchedulerProxy`
 //!   (system-wide resident scheduler) and
 //!   `SagaProps::with_scheduler(SchedulerProxy)` to inject it.
-//! - Schedule events are appended to the saga stream with an `EventType` whose
-//!   type key is `nitinol.saga.schedule` and whose per-arm variant is
-//!   `scheduled` / `cancelled` / `fired`.
+//! - Schedule events are appended to the saga stream under the event type
+//!   `nitinol.saga.schedule`; which transition a marker records
+//!   (`scheduled` / `cancelled` / `fired`) is carried by its payload's `oneof`.
 //!
 //! If a name differs in the implementation, only the wiring lines below need to
 //! be reconciled — the asserted behaviour is the requirement.
+
+#[path = "common/helpers.rs"]
+mod common;
+use common::{schedule_kind_of, schedule_transition};
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,9 +35,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{
-    AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
-};
+use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TimerName};
 
@@ -143,19 +145,22 @@ impl Saga for TimerSaga {
 
 // Helpers
 
-/// Type-level identity of a schedule event: family `nitinol.saga`,
-/// type name `schedule`.  Per-arm variants (`scheduled` / `cancelled` /
-/// `fired`) share this type key.
-const SCHEDULE_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("schedule"));
-
-fn count_schedule_variant(events: &[LoadedEvent], variant: &'static str) -> usize {
+/// The transitions recorded on this stream, in the order they were written.
+///
+/// Every schedule marker carries the one `nitinol.saga.schedule` path, so which
+/// transition a marker records is read from its payload.
+fn schedule_transitions(events: &[LoadedEvent]) -> Vec<&'static str> {
     events
         .iter()
-        .filter(|e| {
-            e.event_type.type_key() == SCHEDULE_TYPE.type_key()
-                && e.event_type.variant() == Some(Variant::new(variant))
-        })
+        .filter_map(schedule_kind_of)
+        .map(|kind| schedule_transition(&kind))
+        .collect()
+}
+
+fn count_schedule_transition(events: &[LoadedEvent], transition: &'static str) -> usize {
+    schedule_transitions(events)
+        .into_iter()
+        .filter(|recorded| *recorded == transition)
         .count()
 }
 
@@ -324,17 +329,17 @@ async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
 
     let events = load_saga_events(&saga_store, &saga_id).await;
     assert_eq!(
-        count_schedule_variant(&events, "scheduled"),
+        count_schedule_transition(&events, "scheduled"),
         1,
         "scheduling must append exactly one `nitinol.saga.schedule.scheduled` marker"
     );
     assert_eq!(
-        count_schedule_variant(&events, "fired"),
+        count_schedule_transition(&events, "fired"),
         1,
         "firing must append exactly one `nitinol.saga.schedule.fired` marker"
     );
     assert_eq!(
-        count_schedule_variant(&events, "cancelled"),
+        count_schedule_transition(&events, "cancelled"),
         0,
         "no cancellation occurred, so no `cancelled` marker may be written"
     );
@@ -478,12 +483,12 @@ async fn cancel_schedule_prevents_the_timer_from_firing() {
 
     let events = load_saga_events(&saga_store, &saga_id).await;
     assert_eq!(
-        count_schedule_variant(&events, "cancelled"),
+        count_schedule_transition(&events, "cancelled"),
         1,
         "cancel_schedule must append exactly one `nitinol.saga.schedule.cancelled` marker"
     );
     assert_eq!(
-        count_schedule_variant(&events, "fired"),
+        count_schedule_transition(&events, "fired"),
         0,
         "a cancelled schedule must not produce a `fired` marker"
     );
@@ -541,7 +546,7 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
     let mut scheduled_seen = false;
     for _ in 0..200 {
         let events = load_saga_events(&store_for_wait, &id_for_wait).await;
-        if count_schedule_variant(&events, "scheduled") >= 1 {
+        if count_schedule_transition(&events, "scheduled") >= 1 {
             scheduled_seen = true;
             break;
         }
@@ -747,43 +752,21 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
     // The key invariant: Fired appears before the second Scheduled in the stream.
     let events = load_saga_events(&saga_store, &saga_id).await;
     assert_eq!(
-        count_schedule_variant(&events, "scheduled"),
+        count_schedule_transition(&events, "scheduled"),
         2,
         "must have exactly 2 scheduled markers (initial + re-schedule)"
     );
     assert_eq!(
-        count_schedule_variant(&events, "fired"),
+        count_schedule_transition(&events, "fired"),
         1,
         "first fire must produce exactly 1 fired marker"
     );
 
     // Verify event ordering: Fired must come BEFORE the second Scheduled.
-    let schedule_positions: Vec<(usize, &str)> = events
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.event_type.type_key() == SCHEDULE_TYPE.type_key())
-        .map(|(i, e)| {
-            let variant = e.event_type.variant().map(|v| v.as_str()).unwrap_or("");
-            (i, variant)
-        })
-        .collect();
-    // positions should be: (_, "scheduled"), (_, "fired"), (_, "scheduled")
     assert_eq!(
-        schedule_positions.len(),
-        3,
-        "must have 3 schedule-family events"
-    );
-    assert_eq!(
-        schedule_positions[0].1, "scheduled",
-        "first schedule event must be 'scheduled'"
-    );
-    assert_eq!(
-        schedule_positions[1].1, "fired",
-        "Fired must precede the re-scheduled Scheduled"
-    );
-    assert_eq!(
-        schedule_positions[2].1, "scheduled",
-        "re-scheduled event must follow Fired"
+        schedule_transitions(&events),
+        vec!["scheduled", "fired", "scheduled"],
+        "the stream must hold the re-schedule after the fire it followed, and nothing between"
     );
 
     // Incarnation #2: shares the same store but subscribes to an empty

@@ -823,7 +823,7 @@ async fn seed(store: &Arc<dyn EventStore>, ledger: &AggregateId, facts: &[Ledger
         .enumerate()
         .map(|(index, fact)| AppendingEvent {
             sequence: index as u64 + 1,
-            event_type: fact.variant(),
+            event_type: LedgerEvent::EVENT_TYPE,
             payload: fact.encode(),
             occurred_at: Timestamp::now(),
         })

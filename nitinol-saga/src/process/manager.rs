@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
-use nitinol_eventsource::{appending_system_event, DurableSubscription, SequenceCursor};
+use nitinol_eventsource::{
+    appending_system_event, DurableSubscription, SequenceCursor, SystemEvent,
+};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadQuery;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Terminated};
@@ -25,6 +27,7 @@ use crate::dead_letter::{
 };
 use crate::error::SagaUpstreamHandlerError;
 use crate::id::SagaId;
+use crate::observability::report_system_event;
 use crate::process::instance::SagaInstanceSpec;
 use crate::process::saga_process::{
     CrashRestartFactory, DecodeFailureRouteFn, SagaProcess, UpstreamMessage,
@@ -149,6 +152,12 @@ impl<S: Saga> SagaManagerProcess<S> {
                 )],
             )
             .await?;
+        report_system_event!(
+            DeadLetterDispositionEvent::EVENT_TYPE,
+            marker.arm(),
+            saga_id.as_str(),
+            dead_letter_sequence = marker.dead_letter_sequence,
+        );
         Ok(())
     }
 

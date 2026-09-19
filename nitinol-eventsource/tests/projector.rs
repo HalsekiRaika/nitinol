@@ -8,9 +8,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName, Variant,
-};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Clone)]
@@ -392,37 +390,39 @@ async fn projector_live_event_is_projected_after_catchup() {
     );
 }
 
-/// Regression: ProjectorProcess dispatches via type_key(), so a LoadedEvent
-/// whose EventType carries variant=Some must reach the handler registered for
-/// the type-level EVENT_TYPE (variant=None).
+/// Given a stream holding a row of a neighbouring declaration ahead of a row of
+/// the registered one, When the projector catches up, Then only the registered
+/// declaration reaches `project`.
 ///
-/// If process.rs reverted to full `==` instead of `.type_key() ==`, this test
-/// would time out because project() would never be called.
+/// `Counted.Created` is a declaration of family `Counted` — a path beneath
+/// `Counted::EVENT_TYPE`, and a different type. Dispatch is identity: a row
+/// answers to the one declaration whose path it carries, so a handler selected
+/// by prefix or by a family-only key would project a payload its codec cannot
+/// read.
+///
+/// The neighbouring row is appended *first* so the assertion is settled rather
+/// than timed: by the time `project` has run for the registered row at sequence
+/// 2, the projector has already passed over sequence 1.
 #[tokio::test]
-async fn projector_variant_some_event_type_dispatches_to_type_level_handler() {
+async fn projector_dispatches_on_the_declaration_a_row_carries_and_not_its_descendants() {
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
-    let agg_id = AggregateId::new("proj-variant-dispatch-agg");
+    let agg_id = AggregateId::new("proj-identity-dispatch-agg");
 
-    // Append an event whose EventType has variant=Some but the same family/type_name
-    // as Counted::EVENT_TYPE (which has variant=None).
     event_store
         .append(
             agg_id.as_str(),
             vec![AppendingEvent {
                 sequence: 1,
-                event_type: EventType::with_variant(
-                    Family::new(""),
-                    TypeName::new("Counted"),
-                    Variant::new("Created"),
-                ),
+                event_type: EventType::new(Family::new("Counted"), TypeName::new("Created")),
                 payload: Bytes::new(),
                 occurred_at: jiff::Timestamp::now(),
             }],
         )
         .await
         .expect("append must succeed");
+    append_counted(&event_store, &agg_id, 2).await;
 
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
@@ -430,7 +430,7 @@ async fn projector_variant_some_event_type_dispatches_to_type_level_handler() {
     let notify_c = Arc::clone(&notify);
 
     let _proxy = ProjectorProps::new(
-        ProjectionId::new("proj-variant-dispatch"),
+        ProjectionId::new("proj-identity-dispatch"),
         Arc::clone(&event_store) as Arc<dyn EventStore>,
         Arc::clone(&checkpoint_store),
         move || TrackingProjector {
@@ -450,6 +450,7 @@ async fn projector_variant_some_event_type_dispatches_to_type_level_handler() {
     assert_eq!(
         count.load(Ordering::SeqCst),
         1,
-        "project(Counted) must be called even when the stored EventType carries variant=Some"
+        "project(Counted) must run for the row carrying `Counted` and for no other declaration — \
+         the row of `Counted.Created` the projector had already passed over is not a Counted"
     );
 }

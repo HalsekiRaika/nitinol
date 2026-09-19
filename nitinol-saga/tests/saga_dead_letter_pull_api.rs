@@ -9,13 +9,20 @@
 //!
 //! Wire contract pinned here:
 //!
-//! | operation        | appended event type                             |
-//! |------------------|-------------------------------------------------|
-//! | `mark_processed` | `nitinol.saga.dead_letter_disposition.processed` |
-//! | `evict`          | `nitinol.saga.dead_letter_disposition.evicted`   |
+//! | operation        | appended event type                       | payload |
+//! |------------------|-------------------------------------------|---------|
+//! | `mark_processed` | `nitinol.saga.dead_letter_disposition`    | `processed` |
+//! | `evict`          | `nitinol.saga.dead_letter_disposition`    | `evicted`   |
+//!
+//! Both settlements are written down under the one disposition event type; the
+//! settlement each marker records is carried by its payload.
 //!
 //! `evict` is a **logical** delete: the marker is appended, the original
 //! `DeadLetterEvent` record stays in the store untouched.
+
+#[path = "common/helpers.rs"]
+mod common;
+use common::{disposition_kind, disposition_of, DEAD_LETTER_MARKER, DISPOSITION_MARKER};
 
 use std::sync::Arc;
 
@@ -25,27 +32,18 @@ use futures_util::TryStreamExt;
 use nitinol_eventsource::{appending_system_event, SystemEvent};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_saga::{
     DeadLetterEntry, DeadLetterEvent, DeadLetterQuery, DeadLetterQueue, DeadLetterQueueError,
     SagaFailure, SagaId, SourceContext,
 };
 
-// Wire identities observed in this file.
-
-/// Type-level identity of a dead letter — the record the pull API lists.
-const DEAD_LETTER_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
-
-/// Type-level identity of a disposition marker — the record `mark_processed`
-/// and `evict` append.  A **sibling** of `nitinol.saga.dead_letter`, never a
-/// descendant of it: the existing dead-letter family prefix must keep matching
-/// exactly the records it matched before this API existed.
-const DISPOSITION_TYPE: EventType = EventType::new(
-    Family::new("nitinol.saga"),
-    TypeName::new("dead_letter_disposition"),
-);
+// Wire identities observed in this file: `DEAD_LETTER_MARKER` is the record the
+// pull API lists, and `DISPOSITION_MARKER` is the record `mark_processed` and
+// `evict` append — a **sibling** of the dead-letter identity, never a
+// descendant of it, so the dead-letter prefix keeps matching exactly the
+// records it matched before this API existed.
 
 /// A user event type that is not a dead letter, used to prove
 /// `mark_processed` / `evict` refuse a sequence that holds something else.
@@ -112,17 +110,19 @@ async fn load_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<Loade
 fn of_type(events: &[LoadedEvent], event_type: EventType) -> Vec<&LoadedEvent> {
     events
         .iter()
-        .filter(|e| e.event_type.type_key() == event_type.type_key())
+        .filter(|e| e.event_type == event_type)
         .collect()
 }
 
-fn count_variant(events: &[LoadedEvent], event_type: EventType, variant: &'static str) -> usize {
+/// Disposition markers on this stream recording the named settlement.
+///
+/// Every marker carries the one disposition path, so which settlement a marker
+/// records is read from the payload it carries.
+fn count_disposition(events: &[LoadedEvent], kind: &'static str) -> usize {
     events
         .iter()
-        .filter(|e| {
-            e.event_type.type_key() == event_type.type_key()
-                && e.event_type.variant() == Some(Variant::new(variant))
-        })
+        .filter_map(disposition_of)
+        .filter(|marker| disposition_kind(marker) == kind)
         .count()
 }
 
@@ -245,28 +245,32 @@ async fn mark_processed_and_evict_append_sibling_family_markers_to_the_store() {
     let events = load_stream(&store, &saga_id).await;
 
     assert_eq!(
-        count_variant(&events, DISPOSITION_TYPE, "processed"),
+        count_disposition(&events, "processed"),
         1,
         "mark_processed must append exactly one `dead_letter_disposition.processed`"
     );
     assert_eq!(
-        count_variant(&events, DISPOSITION_TYPE, "evicted"),
+        count_disposition(&events, "evicted"),
         1,
         "evict must append exactly one `dead_letter_disposition.evicted`"
     );
 
-    let dispositions = of_type(&events, DISPOSITION_TYPE);
+    let dispositions = of_type(&events, DISPOSITION_MARKER);
     assert_eq!(
         dispositions.len(),
         2,
         "exactly the two markers may be appended"
     );
     for marker in &dispositions {
+        assert_eq!(
+            marker.event_type, DISPOSITION_MARKER,
+            "a settlement is written down under the disposition identity"
+        );
         assert!(
             !marker
                 .event_type
                 .to_path()
-                .is_within(&DEAD_LETTER_TYPE.to_path()),
+                .is_within(&DEAD_LETTER_MARKER.to_path()),
             "a disposition marker ({}) must not fall under the \
              `nitinol.saga.dead_letter` prefix — that prefix is what the push \
              subscriber and the dead-letter query select on",
@@ -275,7 +279,7 @@ async fn mark_processed_and_evict_append_sibling_family_markers_to_the_store() {
     }
 
     assert_eq!(
-        of_type(&events, DEAD_LETTER_TYPE).len(),
+        of_type(&events, DEAD_LETTER_MARKER).len(),
         2,
         "appending markers must not add to — or remove from — the dead letters"
     );
@@ -300,7 +304,7 @@ async fn marking_and_evicting_leave_the_original_dead_letter_records_intact() {
     seed_handle_failure(&store, &saga_id, 3).await;
 
     let before: Vec<(u64, EventType, Bytes)> =
-        of_type(&load_stream(&store, &saga_id).await, DEAD_LETTER_TYPE)
+        of_type(&load_stream(&store, &saga_id).await, DEAD_LETTER_MARKER)
             .into_iter()
             .map(|e| (e.sequence, e.event_type, e.payload.clone()))
             .collect();
@@ -311,7 +315,7 @@ async fn marking_and_evicting_leave_the_original_dead_letter_records_intact() {
     queue.evict(2).await.expect("evict");
 
     let events = load_stream(&store, &saga_id).await;
-    let after: Vec<(u64, EventType, Bytes)> = of_type(&events, DEAD_LETTER_TYPE)
+    let after: Vec<(u64, EventType, Bytes)> = of_type(&events, DEAD_LETTER_MARKER)
         .into_iter()
         .map(|e| (e.sequence, e.event_type, e.payload.clone()))
         .collect();
@@ -321,7 +325,7 @@ async fn marking_and_evicting_leave_the_original_dead_letter_records_intact() {
         "every dead letter record must survive a disposition marker unchanged — \
          evict is a logical delete (marker append), never a physical one"
     );
-    for record in of_type(&events, DEAD_LETTER_TYPE) {
+    for record in of_type(&events, DEAD_LETTER_MARKER) {
         DeadLetterEvent::decode(&record.payload)
             .expect("a retained dead letter must still decode after being marked");
     }
@@ -559,7 +563,7 @@ async fn each_queue_sees_only_its_own_saga_stream() {
         "saga B's dead letter at the same sequence must be untouched by A's marker"
     );
     assert_eq!(
-        of_type(&load_stream(&store, &saga_b).await, DISPOSITION_TYPE).len(),
+        of_type(&load_stream(&store, &saga_b).await, DISPOSITION_MARKER).len(),
         0,
         "no marker may be written onto saga B's stream"
     );

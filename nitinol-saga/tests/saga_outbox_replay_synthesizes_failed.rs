@@ -44,7 +44,7 @@ use nitinol_eventsource::SystemEvent;
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -287,20 +287,14 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
         .iter()
         .find(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))))
         .expect("the synthetic TellFailed marker must be present");
-    // Outbox markers carry a per-arm variant on the wire. The
-    // synthetic TellFailed must write the `tell_failed` variant so the marker is
-    // queryable by Materialized Path, while its variant-free `type_key` still
-    // equals `OUTBOX_MARKER`'s so `classify`/routing keeps decoding it.
+    // The synthetic marker is written down the way every other outbox marker
+    // is: under the reserved outbox identity, with the transition carried by
+    // its payload. A marker under any other path would fail its load rather
+    // than be classified.
     assert_eq!(
-        failed_marker.event_type.variant(),
-        Some(Variant::new("tell_failed")),
-        "the synthetic TellFailed must carry the per-arm `tell_failed` variant on the wire"
-    );
-    assert_eq!(
-        failed_marker.event_type.type_key(),
-        OUTBOX_MARKER.type_key(),
-        "the marker's variant-free type_key must still match the reserved outbox key \
-         so decode-registry routing keeps recovering the kind from the payload"
+        failed_marker.event_type, OUTBOX_MARKER,
+        "the synthetic TellFailed carries the reserved outbox identity, which is what \
+         classify/routing recovers the kind from the payload of"
     );
 }
 
@@ -339,16 +333,14 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
 
     // Wait for the replay path to append both the synthetic TellFailed and the
     // DLQ dead-letter event.
-    let dead_letter_type_key = DeadLetterEvent::EVENT_TYPE.type_key();
+    let dead_letter_type = DeadLetterEvent::EVENT_TYPE;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let events = loop {
         let events = load_saga_events(&saga_store, &saga_id).await;
         let has_failed = events
             .iter()
             .any(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellFailed(_))));
-        let has_dead_letter = events
-            .iter()
-            .any(|e| e.event_type.type_key() == dead_letter_type_key);
+        let has_dead_letter = events.iter().any(|e| e.event_type == dead_letter_type);
         if has_failed && has_dead_letter {
             break events;
         }
@@ -366,7 +358,7 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
 
     let dead_letter_event = events
         .iter()
-        .find(|e| e.event_type.type_key() == dead_letter_type_key)
+        .find(|e| e.event_type == dead_letter_type)
         .expect("DeadLetterEvent must be present in the saga stream");
 
     let decoded = DeadLetterEvent::decode(&dead_letter_event.payload)
@@ -443,10 +435,8 @@ async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay(
 
     // No DLQ entry must be written for a legacy stream that lacks a target field —
     // emitting TellFailed with an empty target would be invalid.
-    let dead_letter_type_key = DeadLetterEvent::EVENT_TYPE.type_key();
-    let has_dead_letter = events
-        .iter()
-        .any(|e| e.event_type.type_key() == dead_letter_type_key);
+    let dead_letter_type = DeadLetterEvent::EVENT_TYPE;
+    let has_dead_letter = events.iter().any(|e| e.event_type == dead_letter_type);
     assert!(
         !has_dead_letter,
         "replay must NOT write a DLQ entry for a legacy TellRequested without a target field \

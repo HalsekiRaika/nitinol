@@ -4,12 +4,14 @@ use std::fmt;
 use linkme::distributed_slice;
 
 use crate::event_type::EventType;
+use crate::reserved::is_within_reserved_namespace;
 
-/// Every canonical path one declaration is written down as.
+/// The canonical path one declaration is written down as.
 ///
-/// A declaration is a single type: its type-level identity, and — when it is an
-/// enum — each arm of it, since a stored row carries the arm's path and never
-/// the type-level one.
+/// A declaration is a single type, and a row of it carries that type's one
+/// path — which arm of an enum the row holds is the payload's to say. The entry
+/// therefore carries one event type; the slice shape is what lets a subsystem
+/// declare the several types it owns from one place.
 ///
 /// `declared_by` names the declaring type well enough for a caller to go and
 /// find it. Nothing resolves against it; it is what a collision is reported
@@ -22,12 +24,54 @@ pub struct EventRegistryEntry {
 }
 
 impl EventRegistryEntry {
+    /// An entry for declarations outside the `nitinol` reserved namespace.
+    ///
+    /// A declaration reaches the `event_type` column through its entry as much
+    /// as through its `EVENT_TYPE`, so the namespace is refused here too —
+    /// while the `static` holding the entry is evaluated, which is a compile
+    /// error rather than a condition a running deployment discovers.
     pub const fn new(declared_by: &'static str, event_types: &'static [EventType]) -> Self {
+        let mut nth = 0;
+        while nth < event_types.len() {
+            if is_within_reserved_namespace(event_types[nth].family().as_str()) {
+                panic!(
+                    "an entry claiming an event type within the `nitinol` reserved namespace \
+                     belongs to framework-owned records; name the family outside it"
+                );
+            }
+            nth += 1;
+        }
         Self {
             declared_by,
             event_types,
         }
     }
+
+    /// The same entry without the namespace refusal, for the framework's own
+    /// records.
+    const fn reserved(declared_by: &'static str, event_types: &'static [EventType]) -> Self {
+        Self {
+            declared_by,
+            event_types,
+        }
+    }
+}
+
+/// Build an [`EventRegistryEntry`] claiming event types inside the `nitinol`
+/// reserved namespace.
+///
+/// The counterpart of
+/// [`reserved_family`](crate::event_type::reserved_family): a framework record
+/// is collected the way a user declaration is, and this is what lets its entry
+/// name the family [`EventRegistryEntry::new`] refuses.
+///
+/// Reachable only through `nitinol_persistence::__private`; it is not a user
+/// surface.
+pub const fn reserved_event_registry_entry(
+    declared_by: &'static str,
+    event_types: &'static [EventType],
+) -> EventRegistryEntry {
+    EventRegistryEntry::reserved(declared_by, event_types)
 }
 
 /// Where every declaration in a binary places its entry.
@@ -91,12 +135,12 @@ impl EventRegistry {
     /// The registry of `entries`, whatever gathered them.
     ///
     /// One canonical path answers for one event type, so an entry claiming a
-    /// path another entry already claimed fails the build outright: a struct
-    /// event `C` in family `a.b` and arm `C` of type `b` in family `a` are both
-    /// written down as `a.b.C`, and serving one of them would restore the
-    /// other's rows as the wrong type. A declaration collected twice fails the
-    /// same way — which of the two copies the linker placed last would
-    /// otherwise decide what the registry answers.
+    /// path another entry already claimed fails the build outright: two types
+    /// declaring one family and one type name between them are written down as
+    /// the same string, and serving one of them would restore the other's rows
+    /// as the wrong type. A declaration collected twice fails the same way —
+    /// which of the two copies the linker placed last would otherwise decide
+    /// what the registry answers.
     pub fn from_entries<'a, I>(entries: I) -> Result<Self, EventRegistryError>
     where
         I: IntoIterator<Item = &'a EventRegistryEntry>,

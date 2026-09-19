@@ -392,7 +392,7 @@ impl<A: Aggregate> AggregateProcess<A> {
                 .map_err(PersistError::Codec)?;
             appending.push(AppendingEvent {
                 sequence: next_sequence,
-                event_type: event.variant(),
+                event_type: <A::Event as Event>::EVENT_TYPE,
                 payload,
                 occurred_at: jiff::Timestamp::now(),
             });

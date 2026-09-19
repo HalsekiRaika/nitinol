@@ -25,14 +25,12 @@ use crate::error::SystemEventDecodeError;
 /// enum to make replay classification exhaustively checked at compile time.
 #[doc(hidden)]
 pub trait SystemEvent: Sized {
-    const EVENT_TYPE: EventType;
-
-    /// Value-level identity of this event, consistent with [`crate::Event`].
+    /// The one identity every row of this record carries.
     ///
-    /// Required (no default) so an enum `SystemEvent` cannot silently fall back
-    /// to `variant = None` and drop its per-arm identity from the wire. A
-    /// struct implementor writes the one-liner `Self::EVENT_TYPE`.
-    fn variant(&self) -> EventType;
+    /// An enum implementor is written down under this one path too: which case
+    /// a value holds is carried by the bytes [`Self::encode`] writes, and
+    /// [`Self::decode`] is what reads it back.
+    const EVENT_TYPE: EventType;
 
     fn encode(&self) -> Bytes;
 
@@ -52,7 +50,7 @@ pub fn appending_system_event<E: SystemEvent>(
 ) -> AppendingEvent {
     AppendingEvent {
         sequence,
-        event_type: event.variant(),
+        event_type: E::EVENT_TYPE,
         payload: event.encode(),
         occurred_at,
     }

@@ -7,7 +7,9 @@ mod process;
 mod timers;
 mod token;
 
-pub(crate) use self::event::{append_schedule_marker, is_schedule_event_type, ScheduleEvent};
+pub(crate) use self::event::{
+    append_schedule_marker, is_schedule_event_type, ScheduleEvent, SCHEDULED_ARM,
+};
 pub(crate) use self::process::DispatchFn;
 pub(crate) use self::timers::Timers;
 

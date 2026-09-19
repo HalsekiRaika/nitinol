@@ -1,6 +1,5 @@
-//! A unit-arm enum must derive `Event`, generating the type-level `EVENT_TYPE`
-//! const, a per-arm `variant()` match, and the associated `Codec` named by the
-//! attribute.
+//! A unit-arm enum must derive `Event`, generating the `EVENT_TYPE` const named
+//! after the enum and the associated `Codec` named by the attribute.
 
 use bytes::Bytes;
 use nitinol::contract::Codec;
@@ -29,6 +28,6 @@ impl Codec<OrderEvent> for OrderEventCodec {
 
 fn main() {
     let _ = OrderEvent::EVENT_TYPE;
-    let _ = OrderEvent::Placed.variant();
-    let _ = OrderEvent::Cancelled.variant();
+    let _ = OrderEvent::Placed;
+    let _ = OrderEvent::Cancelled;
 }

@@ -2,28 +2,27 @@
 //! an operator settles a dead letter.
 //!
 //! Modelled on the outbox lifecycle markers (`TellRequested → TellAcked /
-//! TellFailed`): a reserved type-level [`EventType`] whose per-arm `variant()`
-//! writes the disposition on the wire, with a prost `oneof` codec that owns its
-//! own serialization.
+//! TellFailed`): one reserved [`EventType`] every disposition marker is written
+//! down as, with a prost `oneof` codec that owns its own serialization and
+//! carries which settlement the marker records.
 //!
-//! # Why a sibling family rather than a dead-letter variant
+//! # Why a sibling declaration rather than a dead-letter arm
 //!
 //! [`DEAD_LETTER_DISPOSITION_MARKER`] is `nitinol.saga.dead_letter_disposition`
-//! — a sibling of `nitinol.saga.dead_letter`, never a descendant of it.  The
-//! dead-letter family's Materialized Path is what the push subscriber selects
-//! and decodes on, so a marker placed *inside* that family would be handed to
+//! — a sibling of `nitinol.saga.dead_letter`, never the same declaration.  A
+//! dead letter is selected and decoded by the path it carries, so a settlement
+//! written under the dead letter's own path would be handed to
 //! [`DeadLetterEvent::decode`](crate::DeadLetterEvent) as if it were a failure
-//! record.  Keeping the families apart leaves the existing prefix matching
-//! exactly the records it matched before this marker existed.
+//! record.  Keeping the two declarations apart leaves the push subscriber
+//! matching exactly the records it matched before this marker existed.
 //!
 //! [`DeadLetterQueue`]: crate::DeadLetterQueue
 
 use bytes::Bytes;
 use linkme::distributed_slice;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::{
-    EventRegistryEntry, EventType, Family, TypeName, Variant, EVENT_REGISTRY,
-};
+use nitinol_persistence::__private::{reserved_event_registry_entry, reserved_family};
+use nitinol_persistence::{EventRegistryEntry, EventType, TypeName, EVENT_REGISTRY};
 
 mod proto {
     include!(concat!(
@@ -35,31 +34,26 @@ mod proto {
 use self::proto::dead_letter_disposition_marker::Disposition as ProtoDisposition;
 use self::proto::{DeadLetterDispositionMarker, Evicted, Processed};
 
-/// Reserved type-level identity shared by every disposition marker.
+/// The one identity every disposition marker is written down as.
 pub(crate) const DEAD_LETTER_DISPOSITION_MARKER: EventType = EventType::new(
-    Family::new("nitinol.saga"),
+    reserved_family("nitinol.saga"),
     TypeName::new("dead_letter_disposition"),
 );
 
-/// The canonical identity one disposition arm is written down as.
-const fn arm(variant: &'static str) -> EventType {
-    EventType::with_variant(
-        DEAD_LETTER_DISPOSITION_MARKER.family(),
-        DEAD_LETTER_DISPOSITION_MARKER.type_name(),
-        Variant::new(variant),
-    )
-}
-
-const PROCESSED: EventType = arm("processed");
-const EVICTED: EventType = arm("evicted");
+/// The settlements a disposition marker records — the marker's whole arm set.
+///
+/// A stored row names the declaration, so the settlement lives in the payload's
+/// `oneof`; these are the names that `oneof` is reported under.
+const PROCESSED_ARM: &str = "processed";
+const EVICTED_ARM: &str = "evicted";
 
 /// What a binary linking this crate collects for the disposition marker, so
 /// that a load of a saga's own stream restores a settled dead letter rather
 /// than failing on it.
 #[distributed_slice(EVENT_REGISTRY)]
-static DEAD_LETTER_DISPOSITION_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
+static DEAD_LETTER_DISPOSITION_ENTRY: EventRegistryEntry = reserved_event_registry_entry(
     concat!(module_path!(), "::DeadLetterDispositionEvent"),
-    &[DEAD_LETTER_DISPOSITION_MARKER, PROCESSED, EVICTED],
+    &[DEAD_LETTER_DISPOSITION_MARKER],
 );
 
 #[derive(Debug, thiserror::Error)]
@@ -70,8 +64,8 @@ struct MissingDisposition;
 ///
 /// Both arms remove the dead letter from
 /// [`DeadLetterQueue::list`](crate::DeadLetterQueue::list); they differ in what
-/// they record about *why*, which is why each writes its own wire variant
-/// instead of collapsing into one "settled" marker.
+/// they record about *why*, which is why each writes its own `oneof` arm
+/// instead of collapsing into one "settled" payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Disposition {
     /// The dead letter was handed downstream and dealt with.
@@ -91,15 +85,19 @@ pub(crate) struct DeadLetterDispositionEvent {
     pub(crate) disposition: Disposition,
 }
 
-impl SystemEvent for DeadLetterDispositionEvent {
-    const EVENT_TYPE: EventType = DEAD_LETTER_DISPOSITION_MARKER;
-
-    fn variant(&self) -> EventType {
+impl DeadLetterDispositionEvent {
+    /// The settlement this marker records, as the name its payload's `oneof`
+    /// arm is reported under.
+    pub(crate) const fn arm(&self) -> &'static str {
         match self.disposition {
-            Disposition::Processed => PROCESSED,
-            Disposition::Evicted => EVICTED,
+            Disposition::Processed => PROCESSED_ARM,
+            Disposition::Evicted => EVICTED_ARM,
         }
     }
+}
+
+impl SystemEvent for DeadLetterDispositionEvent {
+    const EVENT_TYPE: EventType = DEAD_LETTER_DISPOSITION_MARKER;
 
     fn encode(&self) -> Bytes {
         let disposition = match self.disposition {
@@ -131,12 +129,9 @@ impl SystemEvent for DeadLetterDispositionEvent {
     }
 }
 
-/// Type-level classification: does `event_type` belong to the disposition
-/// family (`nitinol.saga.dead_letter_disposition` and its per-arm variants)?
+/// Is `event_type` the disposition marker's own declaration?
 pub(crate) fn is_dead_letter_disposition_event_type(event_type: EventType) -> bool {
-    event_type
-        .to_path()
-        .is_within(&DEAD_LETTER_DISPOSITION_MARKER.to_path())
+    event_type == DEAD_LETTER_DISPOSITION_MARKER
 }
 
 #[cfg(test)]
@@ -146,7 +141,7 @@ mod tests {
     use crate::dead_letter::event::DEAD_LETTER_MARKER;
 
     #[test]
-    fn disposition_reserves_a_single_type_level_event_type() {
+    fn disposition_reserves_a_single_event_type() {
         assert_eq!(
             DeadLetterDispositionEvent::EVENT_TYPE,
             DEAD_LETTER_DISPOSITION_MARKER
@@ -155,14 +150,13 @@ mod tests {
             DEAD_LETTER_DISPOSITION_MARKER.to_string(),
             "nitinol.saga.dead_letter_disposition"
         );
-        assert!(
-            DEAD_LETTER_DISPOSITION_MARKER.variant().is_none(),
-            "the reserved disposition type is type-level (variant None)"
-        );
     }
 
+    /// The arm a marker reports is the name of the `oneof` its payload carries.
+    /// The column no longer distinguishes them, so this is the whole of what an
+    /// operator has to tell one settlement from another.
     #[test]
-    fn each_disposition_writes_its_per_arm_variant_on_the_wire() {
+    fn each_disposition_reports_the_arm_its_payload_carries() {
         for (disposition, expected) in [
             (Disposition::Processed, "processed"),
             (Disposition::Evicted, "evicted"),
@@ -171,11 +165,7 @@ mod tests {
                 dead_letter_sequence: 3,
                 disposition,
             };
-            assert_eq!(marker.variant().variant(), Some(Variant::new(expected)));
-            assert_eq!(
-                marker.variant().type_key(),
-                DEAD_LETTER_DISPOSITION_MARKER.type_key()
-            );
+            assert_eq!(marker.arm(), expected);
         }
     }
 
@@ -222,32 +212,27 @@ mod tests {
     }
 
     /// The classification that keeps the push path blind to these markers: the
-    /// disposition family is a sibling of the dead-letter family, so neither
-    /// prefix selects the other's records.
+    /// disposition marker is a sibling declaration of the dead letter, so
+    /// neither selects the other's records.
     #[test]
-    fn the_disposition_family_and_the_dead_letter_family_are_disjoint_siblings() {
-        let processed = EventType::with_variant(
-            DEAD_LETTER_DISPOSITION_MARKER.family(),
-            DEAD_LETTER_DISPOSITION_MARKER.type_name(),
-            Variant::new("processed"),
-        );
-
+    fn the_disposition_marker_and_the_dead_letter_are_disjoint_siblings() {
         assert!(is_dead_letter_disposition_event_type(
             DEAD_LETTER_DISPOSITION_MARKER
         ));
-        assert!(is_dead_letter_disposition_event_type(processed));
 
         assert!(
-            !processed.to_path().is_within(&DEAD_LETTER_MARKER.to_path()),
-            "a disposition marker must not fall under the dead-letter prefix — \
-             that prefix is what the push subscriber decodes on"
+            !DEAD_LETTER_DISPOSITION_MARKER
+                .to_path()
+                .is_within(&DEAD_LETTER_MARKER.to_path()),
+            "a disposition marker must not fall under the dead-letter path — \
+             that path is what the push subscriber decodes on"
         );
         assert!(
             !is_dead_letter_disposition_event_type(DEAD_LETTER_MARKER),
             "a dead letter must not be mistaken for its own disposition marker"
         );
         assert!(!is_dead_letter_disposition_event_type(EventType::new(
-            Family::new("nitinol.saga"),
+            reserved_family("nitinol.saga"),
             TypeName::new("outbox"),
         )));
     }

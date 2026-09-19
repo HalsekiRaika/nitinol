@@ -100,10 +100,10 @@
 //!   kind of delete an event log has.  Reprocessing is deliberately not part of
 //!   it: a [`DeadLetterEntry`] carries the recovery material (the failure's raw
 //!   payload plus its [`SourceContext`] coordinates) and acting on it is the
-//!   downstream application's decision.  The marker family is a *sibling* of
-//!   `nitinol.saga.dead_letter` rather than a variant inside it, so settling a
+//!   downstream application's decision.  The marker is a *sibling* declaration
+//!   of `nitinol.saga.dead_letter` rather than an arm of it, so settling a
 //!   dead letter changes what `list` returns and leaves the push path — which
-//!   selects on the dead-letter prefix — untouched.
+//!   selects on the dead letter's own path — untouched.
 //! - One writer per stream, dispositions included: a marker lands on the saga's
 //!   *own* stream, whose next sequence a resident instance holds in memory, so
 //!   an operator cannot append it beside a running saga.  Obtain the queue from
@@ -237,6 +237,7 @@ mod effect;
 mod error;
 mod id;
 mod journal;
+mod observability;
 mod outbox;
 mod persisted;
 mod process;

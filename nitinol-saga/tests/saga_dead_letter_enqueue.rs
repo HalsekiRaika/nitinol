@@ -1,9 +1,10 @@
 //! Saga DLQ: each saga failure kind, when it occurs, must be
 //! enqueued as a `SagaPersisted::DeadLetter(DeadLetterEvent)` on the saga's
 //! **own** EventStore stream, written on the wire under the reserved
-//! type key `nitinol.saga.dead_letter` with a per-failure-kind variant:
+//! type `nitinol.saga.dead_letter`, with the failure kind carried by the
+//! payload the record holds:
 //!
-//! | SagaFailure                | variant (wire)                  | timing        |
+//! | SagaFailure                | payload `oneof` arm             | timing        |
 //! |----------------------------|---------------------------------|---------------|
 //! | HandleFailed               | `handle_failed`                 | immediate     |
 //! | ScheduledFailed            | `scheduled_failed`              | immediate     |
@@ -20,6 +21,10 @@
 //!
 //! The default enqueue policy (all failures enqueued) is assumed here; the
 //! policy override is covered in `saga_dead_letter_policy.rs`.
+
+#[path = "common/helpers.rs"]
+mod common;
+use common::{dead_letter_of, failure_kind, outbox_kind_of, OutboxKind};
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,8 +46,7 @@ use nitinol_eventsource::{
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
-    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent,
-    TypeName, Variant,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
@@ -101,17 +105,6 @@ impl std::fmt::Display for SagaBoom {
 
 impl std::error::Error for SagaBoom {}
 
-// DLQ wire contract: reserved type key + per-arm variant.
-
-/// Type-level identity of a dead-letter event: family `nitinol.saga`, type
-/// name `dead_letter`.  Every per-failure-kind variant shares this type key.
-const DEAD_LETTER_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
-
-/// Type-level identity of an outbox marker — used to observe the `tell_failed`
-/// outbox marker that precedes a TellFailed dead letter.
-const OUTBOX_TYPE: EventType = EventType::new(Family::new("nitinol.saga"), TypeName::new("outbox"));
-
 // Correlation rules.  Each saga type below drives exactly one process instance,
 // so its rule is a single constant that both `Saga::correlate` and the spawn
 // site naming that instance refer to.
@@ -130,21 +123,33 @@ const DECODE_FAIL_SAGA_ID: &str = "dlq-decode-saga";
 /// `SagaProps::with_decode_failure_route`.
 const UPSTREAM_DECODE_TEST_SAGA_ID: &str = "dlq-upstream-decode-saga";
 
-fn count_variant(events: &[LoadedEvent], type_key: EventType, variant: &'static str) -> usize {
+/// Dead letters on this stream recording the named failure.
+///
+/// Every dead letter carries the one `nitinol.saga.dead_letter` path, so which
+/// failure a record holds is read from the payload it carries.
+fn count_dead_letter_kind(events: &[LoadedEvent], kind: &'static str) -> usize {
+    dead_letters(events)
+        .filter(|record| failure_kind(&record.failure) == kind)
+        .count()
+}
+
+fn dead_letters(
+    events: &[LoadedEvent],
+) -> impl Iterator<Item = nitinol_saga::DeadLetterEvent> + '_ {
+    events.iter().filter_map(dead_letter_of)
+}
+
+/// Terminal `tell_failed` outbox markers on this stream.
+fn count_outbox_tell_failed(events: &[LoadedEvent]) -> usize {
     events
         .iter()
-        .filter(|e| {
-            e.event_type.type_key() == type_key.type_key()
-                && e.event_type.variant() == Some(Variant::new(variant))
-        })
+        .filter_map(outbox_kind_of)
+        .filter(|kind| matches!(kind, OutboxKind::TellFailed(_)))
         .count()
 }
 
 fn count_domain(events: &[LoadedEvent], event_type: EventType) -> usize {
-    events
-        .iter()
-        .filter(|e| e.event_type.type_key() == event_type.type_key())
-        .count()
+    events.iter().filter(|e| e.event_type == event_type).count()
 }
 
 // Store helpers
@@ -199,24 +204,24 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-/// Poll the saga stream until at least one dead letter with `variant` is
+/// Poll the saga stream until at least one dead letter recording `kind` is
 /// present, or the timeout elapses.  Returns the full stream snapshot so the
 /// caller can make additional assertions.
 async fn wait_for_dead_letter(
     store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
-    variant: &'static str,
+    kind: &'static str,
     timeout: Duration,
 ) -> Vec<LoadedEvent> {
     let deadline = Instant::now() + timeout;
     loop {
         let events = load_saga_events(store, saga_id).await;
-        if count_variant(&events, DEAD_LETTER_TYPE, variant) >= 1 {
+        if count_dead_letter_kind(&events, kind) >= 1 {
             return events;
         }
         if Instant::now() >= deadline {
             panic!(
-                "timed out waiting for a `nitinol.saga.dead_letter.{variant}` event; \
+                "timed out waiting for a `nitinol.saga.dead_letter` record of {kind:?}; \
                  saga stream held: {:?}",
                 events
                     .iter()
@@ -302,7 +307,7 @@ async fn handle_error_enqueues_a_handle_failed_dead_letter() {
     .await;
 
     assert_eq!(
-        count_variant(&events, DEAD_LETTER_TYPE, "handle_failed"),
+        count_dead_letter_kind(&events, "handle_failed"),
         1,
         "a single handle failure must enqueue exactly one `handle_failed` dead letter"
     );
@@ -390,7 +395,7 @@ async fn on_scheduled_error_enqueues_a_scheduled_failed_dead_letter() {
     .await;
 
     assert!(
-        count_variant(&events, DEAD_LETTER_TYPE, "scheduled_failed") >= 1,
+        count_dead_letter_kind(&events, "scheduled_failed") >= 1,
         "a failing on_scheduled must enqueue a `scheduled_failed` dead letter"
     );
 }
@@ -501,8 +506,6 @@ impl Saga for TellFailSaga {
 /// aggregate's stream key, not an internal tell_id.
 #[tokio::test]
 async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_retry() {
-    use nitinol_eventsource::SystemEvent;
-    use nitinol_saga::DeadLetterEvent;
     use nitinol_saga::SagaFailure;
 
     let ps = ProcessSystem::new().await;
@@ -544,12 +547,12 @@ async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_ret
         wait_for_dead_letter(&saga_store, &saga_id, "tell_failed", Duration::from_secs(8)).await;
 
     assert_eq!(
-        count_variant(&events, DEAD_LETTER_TYPE, "tell_failed"),
+        count_dead_letter_kind(&events, "tell_failed"),
         1,
         "an exhausted tell must enqueue exactly one `tell_failed` dead letter"
     );
     assert_eq!(
-        count_variant(&events, OUTBOX_TYPE, "tell_failed"),
+        count_outbox_tell_failed(&events),
         1,
         "the DLQ entry must coexist with the terminal outbox `tell_failed` marker, \
          confirming enqueue happens after staged retry is exhausted"
@@ -557,15 +560,9 @@ async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_ret
 
     // Verify `target` is the target aggregate's stream key — not an
     // internal tell_id numeric placeholder.
-    let tell_failed_event = events
-        .iter()
-        .find(|e| {
-            e.event_type.type_key() == DEAD_LETTER_TYPE.type_key()
-                && e.event_type.variant() == Some(Variant::new("tell_failed"))
-        })
+    let decoded = dead_letters(&events)
+        .find(|record| matches!(record.failure, SagaFailure::TellFailed { .. }))
         .expect("tell_failed dead letter must exist");
-    let decoded = DeadLetterEvent::decode(&tell_failed_event.payload)
-        .expect("tell_failed dead letter must decode");
     match decoded.failure {
         SagaFailure::TellFailed { target, .. } => {
             assert_eq!(
@@ -683,8 +680,7 @@ impl Saga for EndOnFirstSaga {
 /// a second time.
 #[tokio::test]
 async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_letter() {
-    use nitinol_eventsource::SystemEvent;
-    use nitinol_saga::{DeadLetterEvent, SagaFailure};
+    use nitinol_saga::SagaFailure;
 
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
@@ -752,7 +748,7 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
     drain_unblock.notify_one();
 
     assert!(
-        count_variant(&events, DEAD_LETTER_TYPE, "ended_saga_received_message") >= 1,
+        count_dead_letter_kind(&events, "ended_saga_received_message") >= 1,
         "an upstream message delivered after the saga ended must enqueue an \
          `ended_saga_received_message` dead letter"
     );
@@ -769,15 +765,9 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
 
     // The dead letter must carry the raw wire payload of the dropped
     // upstream message, not an empty placeholder.
-    let ended_event = events
-        .iter()
-        .find(|e| {
-            e.event_type.type_key() == DEAD_LETTER_TYPE.type_key()
-                && e.event_type.variant() == Some(Variant::new("ended_saga_received_message"))
-        })
+    let decoded = dead_letters(&events)
+        .find(|record| matches!(record.failure, SagaFailure::EndedSagaReceivedMessage { .. }))
         .expect("ended_saga_received_message dead letter must exist");
-    let decoded = DeadLetterEvent::decode(&ended_event.payload)
-        .expect("ended_saga_received_message dead letter must decode");
     match decoded.failure {
         SagaFailure::EndedSagaReceivedMessage { message } => {
             assert_eq!(
@@ -909,7 +899,7 @@ async fn persist_retry_recovers_domain_event_without_dead_letter() {
     let events = load_saga_events(&saga_store, &saga_id).await;
 
     assert_eq!(
-        count_variant(&events, DEAD_LETTER_TYPE, "persist_failed"),
+        count_dead_letter_kind(&events, "persist_failed"),
         0,
         "a persist failure recovered on the first retry must NOT enqueue a \
          `persist_failed` dead letter (DLQ only after staged retry is exhausted)"
@@ -971,7 +961,7 @@ async fn persist_failure_enqueues_a_persist_failed_dead_letter() {
     .await;
 
     assert_eq!(
-        count_variant(&events, DEAD_LETTER_TYPE, "persist_failed"),
+        count_dead_letter_kind(&events, "persist_failed"),
         1,
         "exhausting all staged persist retries must enqueue exactly one \
          `persist_failed` dead letter"
@@ -1086,7 +1076,7 @@ async fn decode_failure_in_scheduled_payload_enqueues_a_decode_failed_dead_lette
     .await;
 
     assert!(
-        count_variant(&events, DEAD_LETTER_TYPE, "decode_failed") >= 1,
+        count_dead_letter_kind(&events, "decode_failed") >= 1,
         "a scheduled-payload decode failure must enqueue a `decode_failed` dead letter"
     );
 }
@@ -1163,7 +1153,7 @@ async fn upstream_message_decode_failure_enqueues_a_decode_failed_dead_letter() 
     .await;
 
     assert!(
-        count_variant(&events, DEAD_LETTER_TYPE, "decode_failed") >= 1,
+        count_dead_letter_kind(&events, "decode_failed") >= 1,
         "an upstream message with an invalid payload must enqueue a `decode_failed` dead letter"
     );
 }
@@ -1243,7 +1233,7 @@ async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_le
     .await;
 
     assert!(
-        count_variant(&events_a, DEAD_LETTER_TYPE, "decode_failed") >= 1,
+        count_dead_letter_kind(&events_a, "decode_failed") >= 1,
         "saga-A (routing target) must record a `decode_failed` dead letter \
          for the corrupt upstream event"
     );
@@ -1254,7 +1244,7 @@ async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_le
     // Saga B must NOT record a DLQ entry.
     let events_b = load_saga_events(&saga_b_store, &saga_id_b).await;
     assert_eq!(
-        count_variant(&events_b, DEAD_LETTER_TYPE, "decode_failed"),
+        count_dead_letter_kind(&events_b, "decode_failed"),
         0,
         "saga-B must NOT record a `decode_failed` dead letter — its \
          decode_failure_route_fn routes this failure to saga-A, which is not \

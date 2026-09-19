@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
+use nitinol_eventsource::SystemEvent;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendingEvent, EventType};
 use nitinol_runtime::process::ProcessContext;
@@ -15,7 +16,8 @@ use crate::dead_letter::{
 };
 use crate::effect::{ScheduleSpec, TellIntent};
 use crate::id::SagaId;
-use crate::outbox::{OutboxAppender, RetryPolicy};
+use crate::observability::report_system_event;
+use crate::outbox::{OutboxAppender, OutboxEvent, RetryPolicy, TELL_REQUESTED_ARM};
 use crate::persisted::SagaPersisted;
 use crate::process::outbox_executor::spawn_outbox_executor;
 use crate::process::saga_process::{
@@ -23,7 +25,7 @@ use crate::process::saga_process::{
 };
 use crate::saga::Saga;
 use crate::scheduler::{append_schedule_marker, ScheduleEvent, SchedulerProxy, Timers};
-use crate::scheduler::{ScheduleToken, TimerName};
+use crate::scheduler::{ScheduleToken, TimerName, SCHEDULED_ARM};
 use crate::SagaEffect;
 
 pub(crate) struct InterpreterCtx<'a, S: Saga> {
@@ -253,7 +255,26 @@ async fn persist_batch<S: Saga>(
         }
     }
 
+    // The schedule markers of this batch are durable now, so what they record
+    // can be reported. The timers themselves are registered further below,
+    // after every marker has landed.
+    for reg in &registrations {
+        report_system_event!(
+            ScheduleEvent::EVENT_TYPE,
+            SCHEDULED_ARM,
+            ictx.saga_id.as_str(),
+            timer = reg.name.as_str(),
+        );
+    }
+
     for (intent, tell_id) in tells.into_iter().zip(tell_ids) {
+        report_system_event!(
+            OutboxEvent::EVENT_TYPE,
+            TELL_REQUESTED_ARM,
+            ictx.saga_id.as_str(),
+            tell_id = tell_id,
+            target = intent.target_id.as_str(),
+        );
         ictx.tell_states
             .insert(tell_id, TellState::Pending(intent.clone()));
         let policy = ictx.retry_policy.clone();
@@ -287,7 +308,7 @@ fn encode_events<S: Saga>(events: &[SagaPersisted<S::Event>]) -> Option<Vec<(Eve
     let mut encoded = Vec::with_capacity(events.len());
     for event in events {
         match event.encode() {
-            Ok(payload) => encoded.push((event.variant(), payload)),
+            Ok(payload) => encoded.push((event.event_type(), payload)),
             Err(e) => {
                 tracing::warn!(error = %e, "saga event encode failed; skipping persist batch");
                 return None;

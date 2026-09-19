@@ -16,8 +16,8 @@
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    encode_outbox_ended, encode_outbox_tell_requested, outbox_kind_of, JsonCodec, OutboxKind,
-    OUTBOX_MARKER,
+    dead_letter_of, encode_outbox_ended, encode_outbox_tell_requested, failure_kind,
+    outbox_kind_of, JsonCodec, OutboxKind, DEAD_LETTER_MARKER, OUTBOX_MARKER,
 };
 
 use std::convert::Infallible;
@@ -36,9 +36,7 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{
-    AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
-};
+use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::{ProcessSystem, Props};
 use nitinol_saga::{
@@ -181,23 +179,22 @@ impl Decider<Reserve> for Inventory {
 
 // Helpers
 
-const DEAD_LETTER_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
-
 fn count_dead_letters(events: &[LoadedEvent]) -> usize {
     events
         .iter()
-        .filter(|e| e.event_type.type_key() == DEAD_LETTER_TYPE.type_key())
+        .filter(|e| e.event_type == DEAD_LETTER_MARKER)
         .count()
 }
 
-fn count_dead_letter_variant(events: &[LoadedEvent], variant: &'static str) -> usize {
+/// Dead letters recording the named failure.
+///
+/// Every dead letter carries the one dead-letter path, so which failure a
+/// record holds is read from the payload it carries.
+fn count_dead_letter_kind(events: &[LoadedEvent], kind: &'static str) -> usize {
     events
         .iter()
-        .filter(|e| {
-            e.event_type.type_key() == DEAD_LETTER_TYPE.type_key()
-                && e.event_type.variant() == Some(Variant::new(variant))
-        })
+        .filter_map(dead_letter_of)
+        .filter(|record| failure_kind(&record.failure) == kind)
         .count()
 }
 
@@ -385,7 +382,7 @@ async fn manager_with_enqueue_policy_suppresses_the_instances_dead_letter() {
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        count_dead_letter_variant(&events, "handle_failed"),
+        count_dead_letter_kind(&events, "handle_failed"),
         0,
         "no `handle_failed` dead letter may survive an `Ignore` decision"
     );
@@ -576,7 +573,7 @@ async fn manager_dead_letter_subscriber_receives_an_ended_instances_dead_letter(
 
     let events = load_stream(&saga_store, &saga_id).await;
     assert_eq!(
-        count_dead_letter_variant(&events, "ended_saga_received_message"),
+        count_dead_letter_kind(&events, "ended_saga_received_message"),
         1,
         "exactly one dead letter must be recorded for the single record the ended \
          instance received; stream held: {:?}",

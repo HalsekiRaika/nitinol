@@ -21,7 +21,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::JsonCodec;
+use common::{dead_letter_of, failure_kind, JsonCodec};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
@@ -42,9 +42,6 @@ use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
 const UPSTREAM_KEY: &str = "decode-route-none-upstream";
 const DECLINING_SAGA_ID: &str = "decode-route-none-declining";
 const WITNESS_SAGA_ID: &str = "decode-route-none-witness";
-
-const DEAD_LETTER_TYPE: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("dead_letter"));
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Ping {
@@ -124,13 +121,15 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
+/// Dead letters on this stream recording a decode failure.
+///
+/// Every dead letter carries the one dead-letter path, so which failure a
+/// record holds is read from the payload it carries.
 fn decode_failed_count(events: &[LoadedEvent]) -> usize {
     events
         .iter()
-        .filter(|e| {
-            e.event_type.type_key() == DEAD_LETTER_TYPE.type_key()
-                && e.event_type.variant() == Some(Variant::new("decode_failed"))
-        })
+        .filter_map(dead_letter_of)
+        .filter(|record| failure_kind(&record.failure) == "decode_failed")
         .count()
 }
 

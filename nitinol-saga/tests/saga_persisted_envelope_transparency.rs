@@ -1,6 +1,6 @@
 #[path = "common/helpers.rs"]
 mod common;
-use common::{encode_outbox_tell_acked, JsonCodec};
+use common::{encode_outbox_tell_acked, JsonCodec, OUTBOX_MARKER};
 
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName, Variant,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
@@ -161,7 +161,7 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
         let events = load_saga_events(&store, &saga_id).await;
         if let Some(ev) = events
             .into_iter()
-            .find(|e| e.event_type.type_key() == DomainEvt::EVENT_TYPE.type_key())
+            .find(|e| e.event_type == DomainEvt::EVENT_TYPE)
         {
             break ev;
         }
@@ -223,14 +223,11 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
         occurred_at: jiff::Timestamp::now(),
     };
 
-    let outbox_type = EventType::with_variant(
-        Family::new("nitinol.saga"),
-        TypeName::new("outbox"),
-        Variant::new("tell_acked"),
-    );
+    // The marker is seeded the way the framework writes it: under the outbox
+    // identity, with the transition carried by the payload.
     let outbox_event = AppendingEvent {
         sequence: 2,
-        event_type: outbox_type,
+        event_type: OUTBOX_MARKER,
         payload: encode_outbox_tell_acked(99),
         occurred_at: jiff::Timestamp::now(),
     };

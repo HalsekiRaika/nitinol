@@ -7,6 +7,11 @@ use crate::codec::Codec;
 /// `Clone` is required because `ask` returns the persisted events as a `Vec<E>`
 /// while simultaneously moving them into `Aggregate::apply`.
 pub trait Event: Clone + Send + Sync + 'static {
+    /// The one identity every row of this event carries.
+    ///
+    /// An enum event is written down under this one path too: which arm a value
+    /// holds is carried by the payload [`Self::Codec`] writes, so the column
+    /// names the declaration and the payload names the case.
     const EVENT_TYPE: EventType;
 
     /// The codec that writes this event down and reads it back.
@@ -17,12 +22,4 @@ pub trait Event: Clone + Send + Sync + 'static {
     /// lets an interpreter resolve the codec from the event type alone, with
     /// nothing to inject and nothing to keep in step.
     type Codec: Codec<Self>;
-
-    /// Value-level identity of this event.
-    ///
-    /// Defaults to the type-level [`Self::EVENT_TYPE`] (variant `None`). Enum
-    /// events override this to fill in the active arm's variant.
-    fn variant(&self) -> EventType {
-        Self::EVENT_TYPE
-    }
 }

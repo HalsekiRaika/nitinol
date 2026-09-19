@@ -1,11 +1,11 @@
 //! Behavioral equivalence tests for `#[derive(Event)]`.
 //!
-//! The derive is pure sugar: its expansion must be
-//! *functionally equivalent* to the hand-written `impl Event` pattern pinned in
-//! `nitinol-eventsource/tests/event_variant.rs`. The hand-written naming rule is
-//! "type name = type identifier, variant = arm identifier"; these tests assert
-//! the derived `EVENT_TYPE` const and per-arm `variant()` values reproduce that
-//! rule exactly.
+//! The derive is pure sugar: its expansion must be *functionally equivalent* to
+//! the hand-written `impl Event` pattern. The naming rule is "family = the
+//! attribute's family, type name = the type identifier", and it is the whole of
+//! what a derived identity is — an enum is named after the enum, not after
+//! whichever arm a value happens to hold, because the arm is the payload's to
+//! say.
 //!
 //! Both the `Event` trait and the `Event` derive are reached through the single
 //! umbrella path `nitinol::eventsource::Event` (trait namespace vs. macro
@@ -13,7 +13,7 @@
 //! itself references the canonical `::nitinol::contract::Event` and
 //! `::nitinol::persistence::{...}`.
 //!
-//! `Event` also names the codec that writes the event down, so equivalence now
+//! `Event` also names the codec that writes the event down, so equivalence
 //! covers a second generated item: `#[event(codec = X)]` must produce
 //! `type Codec = X` and nothing else. Each fixture below names a codec of its
 //! own, and `codec_is_the_type_the_attribute_named` reads the association back
@@ -23,7 +23,7 @@
 use bytes::Bytes;
 use nitinol::contract::Codec;
 use nitinol::eventsource::Event;
-use nitinol::persistence::{EventType, Family, TypeName, Variant};
+use nitinol::persistence::{EventType, Family, TypeName};
 
 /// Passes only if `E`'s associated codec *is* `C`, not merely some type that
 /// could encode `E`.
@@ -33,7 +33,7 @@ where
 {
 }
 
-// struct: type-level identity (variant None), default variant() inherited
+// struct: family + type identifier
 
 #[derive(Clone, Event)]
 #[event(family = "shop.orders", codec = IncrementedCodec)]
@@ -66,21 +66,9 @@ fn struct_event_type_matches_handwritten_const() {
         Incremented::EVENT_TYPE.type_name(),
         TypeName::new("Incremented")
     );
-    assert_eq!(Incremented::EVENT_TYPE.variant(), None);
 }
 
-/// Given a struct event (no per-arm override), When `variant()` is called on a
-/// value, Then it returns the type-level `EVENT_TYPE` (variant `None`),
-/// matching the trait's default `variant()`.
-#[test]
-fn struct_value_variant_is_type_level_identity() {
-    let event = Incremented;
-
-    assert_eq!(event.variant(), Incremented::EVENT_TYPE);
-    assert_eq!(event.variant().variant(), None);
-}
-
-// struct: empty family, mirroring `Family::new("")` in event_variant.rs
+// struct: empty family
 
 #[derive(Clone, Event)]
 #[event(family = "", codec = EmptyFamilyCodec)]
@@ -110,15 +98,17 @@ fn struct_empty_family_is_preserved_verbatim() {
         EmptyFamily::EVENT_TYPE.type_name(),
         TypeName::new("EmptyFamily")
     );
-    assert_eq!(EmptyFamily::EVENT_TYPE.variant(), None);
 
     // Display omits the empty family prefix (persistence contract), proving the
     // derived const carries a genuinely empty family.
     assert_eq!(format!("{}", EmptyFamily::EVENT_TYPE), "EmptyFamily");
 }
 
-// enum: const is type-level (variant None); variant() fills the active arm
+// enum: one identity, named after the enum
 
+// The arms exist so the derive has more than one to expand over; the tests read
+// the declaration's identity, never a value.
+#[allow(dead_code)]
 #[derive(Clone, Event)]
 #[event(family = "saga.upstream", codec = OrderEventCodec)]
 enum OrderEvent {
@@ -141,66 +131,24 @@ impl Codec<OrderEvent> for OrderEventCodec {
 }
 
 /// Given an enum with `#[derive(Event)]`, When its `EVENT_TYPE` const is read,
-/// Then it is the type-level identity (variant `None`) named after the enum.
+/// Then it is the identity named after the enum — the same shape a struct gets,
+/// because which arm a value holds is the payload's business.
 #[test]
-fn enum_const_event_type_is_type_level() {
+fn enum_event_type_is_named_after_the_enum() {
     let expected = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
 
     assert_eq!(OrderEvent::EVENT_TYPE, expected);
-    assert_eq!(OrderEvent::EVENT_TYPE.variant(), None);
-}
-
-/// Given an enum with `#[derive(Event)]`, When `variant()` is called on each
-/// arm, Then it returns the arm-specific EventType whose variant equals the arm
-/// identifier — identical to the hand-written match in event_variant.rs.
-#[test]
-fn enum_variant_returns_arm_identifier() {
     assert_eq!(
-        OrderEvent::Placed.variant(),
-        EventType::with_variant(
-            Family::new("saga.upstream"),
-            TypeName::new("OrderEvent"),
-            Variant::new("Placed"),
-        ),
-    );
-    assert_eq!(
-        OrderEvent::Cancelled.variant(),
-        EventType::with_variant(
-            Family::new("saga.upstream"),
-            TypeName::new("OrderEvent"),
-            Variant::new("Cancelled"),
-        ),
-    );
-
-    assert_eq!(
-        OrderEvent::Placed.variant().variant(),
-        Some(Variant::new("Placed"))
-    );
-    assert_eq!(
-        OrderEvent::Cancelled.variant().variant(),
-        Some(Variant::new("Cancelled"))
+        OrderEvent::EVENT_TYPE.to_path().to_string(),
+        "saga.upstream.OrderEvent",
+        "a row of any arm carries this path, so the enum is written down once"
     );
 }
 
-/// Given an enum event whose arms carry `Some(variant)` identities, When
-/// `type_key()` is taken, Then every arm shares the variant-free key of the
-/// type-level `EVENT_TYPE` (so value-level events route to the type handler).
-#[test]
-fn enum_arms_share_type_key_with_const() {
-    assert_eq!(
-        OrderEvent::Placed.variant().type_key(),
-        OrderEvent::EVENT_TYPE.type_key()
-    );
-    assert_eq!(
-        OrderEvent::Cancelled.variant().type_key(),
-        OrderEvent::EVENT_TYPE.type_key()
-    );
-}
-
-// enum: unit / tuple / struct arms all match; arm fields are ignored
+// enum: unit / tuple / struct arms all expand; arm fields are ignored
 
 // Arm payloads exist only so the derive has tuple/struct shapes to expand over;
-// the tests read `variant()`, never the field values.
+// the tests read the identity, never the field values.
 #[allow(dead_code)]
 #[derive(Clone, Event)]
 #[event(family = "domain", codec = MixedCodec)]
@@ -224,34 +172,21 @@ impl Codec<Mixed> for MixedCodec {
     }
 }
 
-/// Given an enum mixing unit, tuple, and struct arms, When `variant()` is
-/// called, Then every arm form matches and its variant is the arm identifier
-/// (the derive must ignore payload fields via `(..)` / `{ .. }`).
+/// Given an enum mixing unit, tuple, and struct arms, When the derive is
+/// applied, Then it expands over every arm shape and produces the one identity
+/// named after the enum.
 #[test]
-fn enum_variant_handles_all_arm_shapes() {
-    let unit = Mixed::Unit;
-    let tuple = Mixed::Tuple(7, String::from("x"));
-    let structured = Mixed::Struct {
-        id: 9,
-        name: String::from("y"),
-    };
-
-    assert_eq!(unit.variant().variant(), Some(Variant::new("Unit")));
-    assert_eq!(tuple.variant().variant(), Some(Variant::new("Tuple")));
-    assert_eq!(structured.variant().variant(), Some(Variant::new("Struct")));
-
-    assert_eq!(unit.variant().type_key(), Mixed::EVENT_TYPE.type_key());
-    assert_eq!(tuple.variant().type_key(), Mixed::EVENT_TYPE.type_key());
+fn enum_with_every_arm_shape_derives_one_identity() {
     assert_eq!(
-        structured.variant().type_key(),
-        Mixed::EVENT_TYPE.type_key()
+        Mixed::EVENT_TYPE,
+        EventType::new(Family::new("domain"), TypeName::new("Mixed"))
     );
 }
 
 // generics: split_for_impl passes type params / where-clause through
 
 // `inner` exists only to give the type a parameter for `split_for_impl` to pass
-// through; the tests read `EVENT_TYPE` and `variant()`, never the field value.
+// through; the tests read `EVENT_TYPE`, never the field value.
 //
 // `T: Default` is the fixture's own requirement, not the derive's: the derive
 // copies `codec = WrapperCodec` through verbatim and infers no bounds for it,
@@ -282,17 +217,13 @@ impl<T: Clone + Default + Send + Sync + 'static> Codec<Wrapper<T>> for WrapperCo
 
 /// Given a generic struct that satisfies the `Event` supertrait bounds on its
 /// type parameter, When the derive is applied, Then `EVENT_TYPE` uses the bare
-/// type identifier (no generics in the name) and `variant()` works on a value.
+/// type identifier (no generics in the name).
 #[test]
 fn generic_struct_derive_uses_bare_type_name() {
     assert_eq!(
         <Wrapper<u32> as Event>::EVENT_TYPE,
         EventType::new(Family::new("generic"), TypeName::new("Wrapper")),
     );
-
-    let value = Wrapper { inner: 1u32 };
-    assert_eq!(value.variant(), <Wrapper<u32> as Event>::EVENT_TYPE);
-    assert_eq!(value.variant().variant(), None);
 }
 
 // codec: the attribute value becomes the associated type, verbatim
@@ -344,8 +275,8 @@ impl Codec<HandWritten> for HandWrittenCodec {
 
 /// Given a hand-written `impl Event` that states `type Codec` directly, When it
 /// is read the same way a derived one is, Then it satisfies the same contract —
-/// the attribute is sugar for this line and nothing the derive adds is required
-/// to make an event usable.
+/// the attribute is sugar for these two lines and nothing the derive adds is
+/// required to make an event usable.
 #[test]
 fn a_hand_written_impl_names_its_codec_the_same_way() {
     codec_of::<HandWritten, HandWrittenCodec>();
@@ -354,5 +285,4 @@ fn a_hand_written_impl_names_its_codec_the_same_way() {
         HandWritten::EVENT_TYPE,
         EventType::new(Family::new("shop.orders"), TypeName::new("HandWritten"))
     );
-    assert_eq!(HandWritten.variant(), HandWritten::EVENT_TYPE);
 }

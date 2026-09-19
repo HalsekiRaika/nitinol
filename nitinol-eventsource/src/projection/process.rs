@@ -77,7 +77,7 @@ where
         let handler = match self
             .handlers
             .iter()
-            .find(|h| h.event_type().type_key() == loaded.event_type.type_key())
+            .find(|h| h.event_type() == loaded.event_type)
         {
             Some(h) => Arc::clone(h),
             None => {

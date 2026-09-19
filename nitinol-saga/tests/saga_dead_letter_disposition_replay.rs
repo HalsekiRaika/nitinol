@@ -319,7 +319,7 @@ async fn a_disposition_marker_neither_ends_the_saga_nor_desynchronises_its_seque
         let events = load_stream(&saga_store, &saga_id).await;
         if let Some(event) = events
             .into_iter()
-            .find(|e| e.event_type.type_key() == Note::EVENT_TYPE.type_key())
+            .find(|e| e.event_type == Note::EVENT_TYPE)
         {
             break event;
         }

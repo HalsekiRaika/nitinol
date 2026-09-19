@@ -2,7 +2,7 @@ mod message;
 mod payload;
 mod retry_policy;
 
-pub(crate) use self::message::{is_outbox_event_type, OutboxEvent};
+pub(crate) use self::message::{is_outbox_event_type, OutboxEvent, TELL_REQUESTED_ARM};
 // The marker payload structs are an internal detail of `OutboxEvent`'s codec in
 // production, but tests need them to build fold inputs without a store.
 #[cfg(test)]

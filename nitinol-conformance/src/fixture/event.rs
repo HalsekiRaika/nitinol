@@ -1,6 +1,6 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use nitinol_contract::{Codec, Event};
-use nitinol_persistence::{EventType, Family, TypeName, Variant};
+use nitinol_persistence::{EventType, Family, TypeName};
 
 const FAMILY: Family = Family::new("conformance.ledger");
 const TYPE_NAME: TypeName = TypeName::new("fact");
@@ -21,15 +21,6 @@ impl Event for LedgerEvent {
     const EVENT_TYPE: EventType = EventType::new(FAMILY, TYPE_NAME);
 
     type Codec = LedgerCodec;
-
-    fn variant(&self) -> EventType {
-        let arm = match self {
-            Self::Opened { .. } => Variant::new("Opened"),
-            Self::Credited { .. } => Variant::new("Credited"),
-            Self::Debited { .. } => Variant::new("Debited"),
-        };
-        EventType::with_variant(FAMILY, TYPE_NAME, arm)
-    }
 }
 
 /// The leading byte each kind of fact is written under.

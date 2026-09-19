@@ -26,5 +26,4 @@ impl Codec<Shipped> for ShippedCodec {
 
 fn main() {
     let _ = Shipped::EVENT_TYPE;
-    let _ = Shipped.variant();
 }

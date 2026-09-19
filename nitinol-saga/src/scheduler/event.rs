@@ -1,9 +1,9 @@
 //! `ScheduleEvent` — the `SystemEvent` persisted for each timer transition.
 //!
-//! Modelled one-for-one on the `OutboxEvent` canonical example: a reserved
-//! type-level [`EventType`] (`nitinol.saga.schedule`, variant `None`) whose
-//! per-arm `variant()` writes `scheduled` / `cancelled` / `fired` on the wire,
-//! with a prost `oneof` codec that owns its own serialization.
+//! Modelled one-for-one on the `OutboxEvent` canonical example: one reserved
+//! [`EventType`] (`nitinol.saga.schedule`) every timer marker is written down
+//! as, with a prost `oneof` codec that owns its own serialization and carries
+//! which transition — `scheduled` / `cancelled` / `fired` — the marker records.
 
 use std::borrow::Borrow;
 use std::sync::Arc;
@@ -12,12 +12,12 @@ use std::time::Duration;
 use bytes::Bytes;
 use linkme::distributed_slice;
 use nitinol_eventsource::{appending_system_event, SystemEvent, SystemEventDecodeError};
+use nitinol_persistence::__private::{reserved_event_registry_entry, reserved_family};
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{
-    EventRegistryEntry, EventType, Family, TypeName, Variant, EVENT_REGISTRY,
-};
+use nitinol_persistence::{EventRegistryEntry, EventType, TypeName, EVENT_REGISTRY};
 
 use crate::id::SagaId;
+use crate::observability::report_system_event;
 use crate::scheduler::token::{ScheduleToken, TimerName};
 
 mod proto {
@@ -27,30 +27,25 @@ mod proto {
 use self::proto::schedule_marker::Kind;
 use self::proto::{Cancelled, Fired, ScheduleMarker, Scheduled};
 
-/// Reserved type-level identity shared by every schedule marker.
+/// The one identity every schedule marker is written down as.
 pub(crate) const SCHEDULE_MARKER: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("schedule"));
+    EventType::new(reserved_family("nitinol.saga"), TypeName::new("schedule"));
 
-/// The canonical identity one schedule arm is written down as.
-const fn arm(variant: &'static str) -> EventType {
-    EventType::with_variant(
-        SCHEDULE_MARKER.family(),
-        SCHEDULE_MARKER.type_name(),
-        Variant::new(variant),
-    )
-}
-
-const SCHEDULED: EventType = arm("scheduled");
-const CANCELLED: EventType = arm("cancelled");
-const FIRED: EventType = arm("fired");
+/// The transitions a schedule marker records — the scheduler's whole arm set.
+///
+/// A stored row names the declaration, so the transition lives in the payload's
+/// `oneof`; these are the names that `oneof` is reported under.
+pub(crate) const SCHEDULED_ARM: &str = "scheduled";
+const CANCELLED_ARM: &str = "cancelled";
+const FIRED_ARM: &str = "fired";
 
 /// What a binary linking this crate collects for the scheduler, so that a load
 /// of a saga's own stream restores its timer markers rather than failing on
 /// them.
 #[distributed_slice(EVENT_REGISTRY)]
-static SCHEDULE_ENTRY: EventRegistryEntry = EventRegistryEntry::new(
+static SCHEDULE_ENTRY: EventRegistryEntry = reserved_event_registry_entry(
     concat!(module_path!(), "::ScheduleEvent"),
-    &[SCHEDULE_MARKER, SCHEDULED, CANCELLED, FIRED],
+    &[SCHEDULE_MARKER],
 );
 
 #[derive(Debug, thiserror::Error)]
@@ -75,16 +70,29 @@ pub(crate) enum ScheduleEvent {
     },
 }
 
-impl SystemEvent for ScheduleEvent {
-    const EVENT_TYPE: EventType = SCHEDULE_MARKER;
-
-    fn variant(&self) -> EventType {
+impl ScheduleEvent {
+    /// The transition this marker records, as the name its payload's `oneof`
+    /// arm is reported under.
+    pub(crate) const fn arm(&self) -> &'static str {
         match self {
-            ScheduleEvent::Scheduled { .. } => SCHEDULED,
-            ScheduleEvent::Cancelled { .. } => CANCELLED,
-            ScheduleEvent::Fired { .. } => FIRED,
+            ScheduleEvent::Scheduled { .. } => SCHEDULED_ARM,
+            ScheduleEvent::Cancelled { .. } => CANCELLED_ARM,
+            ScheduleEvent::Fired { .. } => FIRED_ARM,
         }
     }
+
+    /// The timer this marker is about.
+    fn timer(&self) -> &TimerName {
+        match self {
+            ScheduleEvent::Scheduled { token, .. }
+            | ScheduleEvent::Cancelled { token, .. }
+            | ScheduleEvent::Fired { token, .. } => &token.name,
+        }
+    }
+}
+
+impl SystemEvent for ScheduleEvent {
+    const EVENT_TYPE: EventType = SCHEDULE_MARKER;
 
     fn encode(&self) -> Bytes {
         let kind = match self {
@@ -153,13 +161,13 @@ fn token_of(saga_id: String, name: String) -> ScheduleToken {
     }
 }
 
-/// Type-level classification: does `event_type` belong to the schedule marker
-/// family (`nitinol.saga.schedule` and its per-arm variants)?
+/// Is `event_type` the schedule marker's own declaration?
 ///
-/// `nitinol.saga.schedule` is a sibling of `nitinol.saga.outbox`, so the two
-/// classifications never overlap on segment boundaries.
+/// `nitinol.saga.schedule` is a sibling of `nitinol.saga.outbox`, and a
+/// declaration answers for its own path alone, so the classifications never
+/// overlap.
 pub(crate) fn is_schedule_event_type(event_type: EventType) -> bool {
-    event_type.to_path().is_within(&SCHEDULE_MARKER.to_path())
+    event_type == SCHEDULE_MARKER
 }
 
 /// Append a single schedule marker at `*sequence + 1`, advancing `*sequence`
@@ -180,6 +188,12 @@ pub(crate) async fn append_schedule_marker(
         return false;
     }
     *sequence = candidate;
+    report_system_event!(
+        ScheduleEvent::EVENT_TYPE,
+        event.arm(),
+        saga_id.as_str(),
+        timer = event.timer().as_str(),
+    );
     true
 }
 
@@ -195,17 +209,16 @@ mod tests {
     }
 
     #[test]
-    fn schedule_event_reserves_a_single_type_level_event_type() {
+    fn schedule_event_reserves_a_single_event_type() {
         assert_eq!(ScheduleEvent::EVENT_TYPE, SCHEDULE_MARKER);
         assert_eq!(SCHEDULE_MARKER.to_string(), "nitinol.saga.schedule");
-        assert!(
-            SCHEDULE_MARKER.variant().is_none(),
-            "the reserved schedule type is type-level (variant None)"
-        );
     }
 
+    /// The arm a marker reports is the name of the `oneof` its payload carries.
+    /// The column no longer distinguishes them, so this is the whole of what an
+    /// operator has to tell one timer marker from another.
     #[test]
-    fn each_arm_writes_its_per_arm_variant_on_the_wire() {
+    fn each_marker_reports_the_transition_its_payload_carries() {
         let cases = [
             (
                 ScheduleEvent::Scheduled {
@@ -232,8 +245,7 @@ mod tests {
             ),
         ];
         for (event, expected) in cases {
-            assert_eq!(event.variant().variant(), Some(Variant::new(expected)));
-            assert_eq!(event.variant().type_key(), SCHEDULE_MARKER.type_key());
+            assert_eq!(event.arm(), expected);
         }
     }
 
@@ -332,16 +344,12 @@ mod tests {
     }
 
     #[test]
-    fn is_schedule_event_type_accepts_reserved_type_and_variants_but_not_outbox() {
+    fn is_schedule_event_type_accepts_the_declaration_but_not_its_siblings() {
         assert!(is_schedule_event_type(SCHEDULE_MARKER));
-        assert!(is_schedule_event_type(EventType::with_variant(
-            SCHEDULE_MARKER.family(),
-            SCHEDULE_MARKER.type_name(),
-            Variant::new("scheduled"),
-        )));
-        // Sibling outbox family must not be classified as a schedule event.
+        // A sibling declaration of the same family must not be classified as a
+        // schedule marker.
         assert!(!is_schedule_event_type(EventType::new(
-            Family::new("nitinol.saga"),
+            reserved_family("nitinol.saga"),
             TypeName::new("outbox"),
         )));
     }

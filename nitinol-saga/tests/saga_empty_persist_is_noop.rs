@@ -163,8 +163,7 @@ fn is_domain_event(event: &RecordedEvent) -> bool {
 }
 
 fn outbox_kind(event: &RecordedEvent) -> Option<OutboxKind> {
-    (event.event_type.type_key() == OUTBOX_MARKER.type_key())
-        .then(|| decode_outbox_kind(&event.payload))
+    (event.event_type == OUTBOX_MARKER).then(|| decode_outbox_kind(&event.payload))
 }
 
 fn is_tell_requested(event: &RecordedEvent) -> bool {
