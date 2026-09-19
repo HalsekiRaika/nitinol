@@ -20,14 +20,20 @@
 //! ```
 //!
 //! These clauses judge the validation a registry is built through, which is
-//! the whole of what `EventRegistry::from_linked` adds to the entries the
-//! linker collected. Nothing here reaches the linker: entries are handed over
-//! by hand so a clause about a collision can live beside a clause that requires
-//! none, which entries placed in the process-wide slice could not.
+//! the whole of what the process-wide registry adds to the entries the linker
+//! collected. Nothing here reaches the linker: entries are handed over by hand
+//! so a clause about a collision can live beside a clause that requires none,
+//! which entries placed in the process-wide slice could not.
+//!
+//! Handing entries over is what `__private::event_registry_from_entries` is
+//! for, and it is `__private` because it is not a user surface: the validation
+//! it runs is the framework's defence layer, reachable here so the layer can be
+//! judged on its own and reachable by a conformance suite for the same reason.
 //!
 //! A declaration is written down as one canonical path, so an entry carries one
 //! event type.
 
+use nitinol_persistence::__private::event_registry_from_entries;
 use nitinol_persistence::{EventRegistry, EventRegistryEntry, EventType, Family, TypeName};
 
 // Every shape an event type has: no family, a deep family, a one-segment family.
@@ -47,7 +53,7 @@ static CHOICE_ENTRY: EventRegistryEntry =
     EventRegistryEntry::new("event_registry::Choice", &[CHOICE]);
 
 fn shapes() -> Result<EventRegistry, nitinol_persistence::EventRegistryError> {
-    EventRegistry::from_entries([&BARE_ENTRY, &NESTED_ENTRY, &CHOICE_ENTRY])
+    event_registry_from_entries([&BARE_ENTRY, &NESTED_ENTRY, &CHOICE_ENTRY])
 }
 
 #[test]
@@ -108,7 +114,7 @@ fn a_deeper_family_and_a_shorter_one_claim_paths_of_their_own() {
          share a path"
     );
 
-    let registry = EventRegistry::from_entries([&STRUCT_C_ENTRY, &TYPE_B_ENTRY])
+    let registry = event_registry_from_entries([&STRUCT_C_ENTRY, &TYPE_B_ENTRY])
         .expect("declarations the grammar keeps apart build a registry together");
 
     assert_eq!(registry.resolve("a.b.C"), Some(STRUCT_C_OF_A_B));
@@ -129,7 +135,7 @@ static SECOND_ENTRY: EventRegistryEntry = EventRegistryEntry::new(SECOND_DECLARE
 
 #[test]
 fn a_canonical_path_two_declarations_claim_fails_the_build_and_names_both() {
-    let Err(refusal) = EventRegistry::from_entries([&FIRST_ENTRY, &SECOND_ENTRY]) else {
+    let Err(refusal) = event_registry_from_entries([&FIRST_ENTRY, &SECOND_ENTRY]) else {
         panic!(
             "one canonical path cannot answer for two event types, and the build was accepted — \
              whichever of them lost would have its rows restored as the other"
@@ -150,10 +156,10 @@ fn a_canonical_path_two_declarations_claim_fails_the_build_and_names_both() {
 
 #[test]
 fn the_refusal_does_not_depend_on_the_order_the_entries_arrived_in() {
-    let forwards = EventRegistry::from_entries([&FIRST_ENTRY, &SECOND_ENTRY])
+    let forwards = event_registry_from_entries([&FIRST_ENTRY, &SECOND_ENTRY])
         .expect_err("a canonical path claimed twice fails the build")
         .to_string();
-    let backwards = EventRegistry::from_entries([&SECOND_ENTRY, &FIRST_ENTRY])
+    let backwards = event_registry_from_entries([&SECOND_ENTRY, &FIRST_ENTRY])
         .expect_err("a canonical path claimed twice fails the build")
         .to_string();
 
@@ -183,7 +189,7 @@ static RIGHT_SECOND: EventRegistryEntry =
 #[test]
 fn every_path_more_than_one_declaration_claims_is_named_not_only_the_first() {
     let Err(refusal) =
-        EventRegistry::from_entries([&LEFT_FIRST, &RIGHT_FIRST, &LEFT_SECOND, &RIGHT_SECOND])
+        event_registry_from_entries([&LEFT_FIRST, &RIGHT_FIRST, &LEFT_SECOND, &RIGHT_SECOND])
     else {
         panic!("two contested paths cannot both be served")
     };
@@ -209,7 +215,7 @@ static SECOND_LINK: EventRegistryEntry = EventRegistryEntry::new(TWICE_DECLARER,
 
 #[test]
 fn one_declaration_reaching_the_registry_twice_fails_the_build() {
-    let Err(refusal) = EventRegistry::from_entries([&FIRST_LINK, &SECOND_LINK]) else {
+    let Err(refusal) = event_registry_from_entries([&FIRST_LINK, &SECOND_LINK]) else {
         panic!(
             "a declaration collected twice is a duplicate registration, and the build was accepted"
         )

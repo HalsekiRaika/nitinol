@@ -9,11 +9,9 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use linkme::distributed_slice;
 use nitinol_eventsource::{appending_system_event, SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::__private::{reserved_event_registry_entry, reserved_family};
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{AggregateId, EventRegistryEntry, EventType, TypeName, EVENT_REGISTRY};
+use nitinol_persistence::{reserved_event, AggregateId, EventType};
 
 use crate::id::SagaId;
 use crate::observability::report_system_event;
@@ -28,33 +26,33 @@ use self::proto::{
     ScheduledFailed, SourceContext as ProtoSourceContext, TellFailed, TellFailedHookFailed,
 };
 
-/// The one identity every dead letter is written down as.
-pub(crate) const DEAD_LETTER_MARKER: EventType = EventType::new(
-    reserved_family("nitinol.saga"),
-    TypeName::new("dead_letter"),
-);
+reserved_event! {
+    /// The one identity every dead letter is written down as.
+    ///
+    /// What a binary linking this crate collects for the dead-letter record, so
+    /// that a load of a saga's own stream restores its failures rather than
+    /// failing on them.
+    pub(crate) const DEAD_LETTER_MARKER {
+        family = "nitinol.saga",
+        type_name = "dead_letter",
+        declared_by = DeadLetterEvent,
+    }
 
-/// The failures a dead letter records — the DLQ's whole arm set.
-///
-/// A stored row names the declaration, so which failure it is lives in the
-/// payload's `oneof`; these are the names that `oneof` is reported under, and
-/// the ones the DLQ documentation uses.
-const TELL_FAILED_ARM: &str = "tell_failed";
-const HANDLE_FAILED_ARM: &str = "handle_failed";
-const PERSIST_FAILED_ARM: &str = "persist_failed";
-const ENDED_SAGA_RECEIVED_MESSAGE_ARM: &str = "ended_saga_received_message";
-const DECODE_FAILED_ARM: &str = "decode_failed";
-const SCHEDULED_FAILED_ARM: &str = "scheduled_failed";
-const TELL_FAILED_HOOK_FAILED_ARM: &str = "tell_failed_hook_failed";
-
-/// What a binary linking this crate collects for the dead-letter record, so
-/// that a load of a saga's own stream restores its failures rather than failing
-/// on them.
-#[distributed_slice(EVENT_REGISTRY)]
-static DEAD_LETTER_ENTRY: EventRegistryEntry = reserved_event_registry_entry(
-    concat!(module_path!(), "::DeadLetterEvent"),
-    &[DEAD_LETTER_MARKER],
-);
+    // The failures a dead letter records — the DLQ's whole arm set. A stored
+    // row names the declaration, so which failure it is lives in the
+    // payload's `oneof`; these are the names that `oneof` is reported under,
+    // and the ones the DLQ documentation uses. `arm()` lands on `SagaFailure`,
+    // not `DeadLetterEvent`: the failure detail is what has a wire shape, the
+    // envelope around it does not.
+    arm_type = SagaFailure;
+    SagaFailure::TellFailed { .. } => TELL_FAILED_ARM = "tell_failed",
+    SagaFailure::HandleFailed { .. } => HANDLE_FAILED_ARM = "handle_failed",
+    SagaFailure::PersistFailed { .. } => PERSIST_FAILED_ARM = "persist_failed",
+    SagaFailure::EndedSagaReceivedMessage { .. } => ENDED_SAGA_RECEIVED_MESSAGE_ARM = "ended_saga_received_message",
+    SagaFailure::DecodeFailed { .. } => DECODE_FAILED_ARM = "decode_failed",
+    SagaFailure::ScheduledFailed { .. } => SCHEDULED_FAILED_ARM = "scheduled_failed",
+    SagaFailure::TellFailedHookFailed { .. } => TELL_FAILED_HOOK_FAILED_ARM = "tell_failed_hook_failed",
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("dead letter payload carried no `oneof` failure")]
@@ -123,22 +121,6 @@ pub struct DeadLetterEvent {
     pub failure: SagaFailure,
     pub occurred_at_unix_millis: i64,
     pub source: SourceContext,
-}
-
-impl SagaFailure {
-    /// The failure this is, as the name its payload's `oneof` arm is reported
-    /// under.
-    pub(crate) const fn arm(&self) -> &'static str {
-        match self {
-            SagaFailure::TellFailed { .. } => TELL_FAILED_ARM,
-            SagaFailure::HandleFailed { .. } => HANDLE_FAILED_ARM,
-            SagaFailure::PersistFailed { .. } => PERSIST_FAILED_ARM,
-            SagaFailure::EndedSagaReceivedMessage { .. } => ENDED_SAGA_RECEIVED_MESSAGE_ARM,
-            SagaFailure::DecodeFailed { .. } => DECODE_FAILED_ARM,
-            SagaFailure::ScheduledFailed { .. } => SCHEDULED_FAILED_ARM,
-            SagaFailure::TellFailedHookFailed { .. } => TELL_FAILED_HOOK_FAILED_ARM,
-        }
-    }
 }
 
 impl SystemEvent for DeadLetterEvent {
@@ -278,6 +260,9 @@ pub(crate) async fn append_dead_letter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use nitinol_persistence::__private::reserved_family;
+    use nitinol_persistence::TypeName;
 
     fn source() -> SourceContext {
         SourceContext {

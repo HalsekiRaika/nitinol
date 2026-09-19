@@ -10,11 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use linkme::distributed_slice;
 use nitinol_eventsource::{appending_system_event, SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::__private::{reserved_event_registry_entry, reserved_family};
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{EventRegistryEntry, EventType, TypeName, EVENT_REGISTRY};
+use nitinol_persistence::{reserved_event, EventType};
 
 use crate::id::SagaId;
 use crate::observability::report_system_event;
@@ -27,26 +25,26 @@ mod proto {
 use self::proto::schedule_marker::Kind;
 use self::proto::{Cancelled, Fired, ScheduleMarker, Scheduled};
 
-/// The one identity every schedule marker is written down as.
-pub(crate) const SCHEDULE_MARKER: EventType =
-    EventType::new(reserved_family("nitinol.saga"), TypeName::new("schedule"));
+reserved_event! {
+    /// The one identity every schedule marker is written down as.
+    ///
+    /// What a binary linking this crate collects for the scheduler, so that a
+    /// load of a saga's own stream restores its timer markers rather than
+    /// failing on them.
+    pub(crate) const SCHEDULE_MARKER {
+        family = "nitinol.saga",
+        type_name = "schedule",
+        declared_by = ScheduleEvent,
+    }
 
-/// The transitions a schedule marker records — the scheduler's whole arm set.
-///
-/// A stored row names the declaration, so the transition lives in the payload's
-/// `oneof`; these are the names that `oneof` is reported under.
-pub(crate) const SCHEDULED_ARM: &str = "scheduled";
-const CANCELLED_ARM: &str = "cancelled";
-const FIRED_ARM: &str = "fired";
-
-/// What a binary linking this crate collects for the scheduler, so that a load
-/// of a saga's own stream restores its timer markers rather than failing on
-/// them.
-#[distributed_slice(EVENT_REGISTRY)]
-static SCHEDULE_ENTRY: EventRegistryEntry = reserved_event_registry_entry(
-    concat!(module_path!(), "::ScheduleEvent"),
-    &[SCHEDULE_MARKER],
-);
+    // The transitions a schedule marker records — the scheduler's whole arm
+    // set. A stored row names the declaration, so the transition lives in the
+    // payload's `oneof`; these are the names that `oneof` is reported under.
+    arm_type = ScheduleEvent;
+    ScheduleEvent::Scheduled { .. } => pub(crate) SCHEDULED_ARM = "scheduled",
+    ScheduleEvent::Cancelled { .. } => CANCELLED_ARM = "cancelled",
+    ScheduleEvent::Fired { .. } => FIRED_ARM = "fired",
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("schedule marker payload carried no `oneof` kind")]
@@ -71,16 +69,6 @@ pub(crate) enum ScheduleEvent {
 }
 
 impl ScheduleEvent {
-    /// The transition this marker records, as the name its payload's `oneof`
-    /// arm is reported under.
-    pub(crate) const fn arm(&self) -> &'static str {
-        match self {
-            ScheduleEvent::Scheduled { .. } => SCHEDULED_ARM,
-            ScheduleEvent::Cancelled { .. } => CANCELLED_ARM,
-            ScheduleEvent::Fired { .. } => FIRED_ARM,
-        }
-    }
-
     /// The timer this marker is about.
     fn timer(&self) -> &TimerName {
         match self {
@@ -200,6 +188,9 @@ pub(crate) async fn append_schedule_marker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use nitinol_persistence::__private::reserved_family;
+    use nitinol_persistence::TypeName;
 
     fn token() -> ScheduleToken {
         ScheduleToken {

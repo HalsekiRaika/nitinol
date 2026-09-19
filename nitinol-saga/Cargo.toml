@@ -13,11 +13,6 @@ bytes = "1"
 futures-core = "0.3"
 futures-util = "0.3"
 jiff = "0.2"
-# The saga's own records are journalled like any other event, so their event
-# types are placed in the same collection slice a user's `#[derive(Event)]`
-# types are — otherwise a load of a saga's stream has nothing to restore them
-# from.
-linkme = "0.3"
 prost = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

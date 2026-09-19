@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-macros`, `nitinol-persistence`): a declaration now claims its
+  canonical path with an exported symbol, so two declarations claiming one path
+  fail the build instead of reaching a deployment.
+
+  `#[derive(Event)]` writes one symbol per declaring type, named
+  `_nitinol_event_` followed by the path itself. Within a crate the second
+  declaration is `error: symbol ... is already defined`, reported at the derive
+  that wrote it; across crates it is the linker's duplicate-symbol error. The
+  encoding is injective — `shop.registry.sub.Leaf` and `shop.registry_sub.Leaf`
+  are two symbols, not one — and stays inside the character set a linker
+  accepts: a byte that is not ASCII alphanumeric, `_` or `.` is written as `..`
+  and two hex digits, which no path produces on its own. The symbol carries the
+  path and nothing else, so what a linker error and a debugger have to show
+  stays short.
+
+  The registry's own refusal is unchanged and is not redundant: link-time
+  detection has holes (static libraries linked together need not report a
+  duplicate), and an entry placed by hand rather than derived carries no symbol
+  at all. The derive's rustdoc carries both messages and the two layers.
+
 - (`nitinol-saga`): a structured `tracing` record at every point the saga
   writes a framework record of its own, carrying `event_type` (the canonical
   path the row was written under), `arm` (which arm of that declaration the
@@ -280,6 +300,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- (`nitinol-persistence`, `nitinol-saga`): the framework's own records are
+  declared through one macro rather than four hand-written pieces each.
+
+  `nitinol_persistence::reserved_event!` writes the `EventType` constant, the
+  registry entry that puts the record in `EVENT_REGISTRY`, the symbol that
+  claims its canonical path, and — for a record whose payload is a `oneof` —
+  the arm name constants and the `arm()` that reports which one a value holds.
+  The saga's outbox, timer, dead-letter and dead-letter-disposition records go
+  through it, so the reserved constructors, the `#[distributed_slice]`
+  placement, and the hand-written `arm()` match are no longer spelled at each
+  declaration — and a framework record can no longer be given an identity
+  without being collected under it. Every reserved path and every arm name is
+  what it was; no stored row changes. `nitinol-saga` no longer depends on
+  `linkme` directly.
+
 - **BREAKING** (`nitinol-persistence`, `nitinol-contract`,
   `nitinol-eventsource`, `nitinol-saga`, `nitinol-macros`, `nitinol`): the
   `event_type` column holds one grammar, and every declaration is written down
@@ -528,6 +563,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `type State = ...;` line; no other change is required.
 
 ### Removed
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-sqlx`): removed
+  `EventRegistry::from_linked` and `EventRegistry::from_entries` from the
+  public API. Building the registry a store serves its loads out of is the
+  framework's own business: it is built once for the process, out of what the
+  binary linked, and a store refers to it rather than constructing one.
+  `EventRegistry::resolve`, `EventRegistryEntry` and `EVENT_REGISTRY` are
+  unchanged, and a declaration still places its entry exactly as before.
+
+  A caller that held a registry of its own has nothing to replace it with and
+  needs nothing: `PostgresEventStore::new(pool)` takes the same argument and
+  still refuses to open when two declarations claim one canonical path.
+  `EventRegistryError` is now `Clone`, which is how a store reports a refusal
+  it was handed by reference.
+
+  Both names are reachable inside the framework through
+  `nitinol_persistence::__private`, where the conformance suites judge the
+  validation on its own; nothing there is a user surface or carries a stability
+  promise.
 
 - **BREAKING** (`nitinol-persistence`, `nitinol-contract`,
   `nitinol-eventsource`): removed every part of the event identity that named

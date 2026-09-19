@@ -1,8 +1,6 @@
 use bytes::Bytes;
-use linkme::distributed_slice;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::__private::{reserved_event_registry_entry, reserved_family};
-use nitinol_persistence::{EventRegistryEntry, EventType, TypeName, EVENT_REGISTRY};
+use nitinol_persistence::{reserved_event, EventType};
 
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/nitinol.saga.outbox.rs"));
@@ -14,25 +12,27 @@ pub(crate) use self::proto::{
 
 use self::proto::outbox_marker::Kind;
 
-/// The one identity every outbox marker is written down as.
-pub(crate) const OUTBOX_MARKER: EventType =
-    EventType::new(reserved_family("nitinol.saga"), TypeName::new("outbox"));
+reserved_event! {
+    /// The one identity every outbox marker is written down as.
+    ///
+    /// What a binary linking this crate collects for the outbox, so that a load
+    /// of a saga's own stream restores its markers rather than failing on them.
+    pub(crate) const OUTBOX_MARKER {
+        family = "nitinol.saga",
+        type_name = "outbox",
+        declared_by = OutboxEvent,
+    }
 
-/// The transitions an outbox marker records — the outbox's whole arm set.
-///
-/// A stored row names the declaration, so the transition lives in the payload's
-/// `oneof`; these are the names that `oneof` is reported under.
-pub(crate) const TELL_REQUESTED_ARM: &str = "tell_requested";
-const TELL_ACKED_ARM: &str = "tell_acked";
-const TELL_FAILED_ARM: &str = "tell_failed";
-const SCHEDULED_ARM: &str = "scheduled";
-const ENDED_ARM: &str = "ended";
-
-/// What a binary linking this crate collects for the outbox, so that a load of
-/// a saga's own stream restores its markers rather than failing on them.
-#[distributed_slice(EVENT_REGISTRY)]
-static OUTBOX_ENTRY: EventRegistryEntry =
-    reserved_event_registry_entry(concat!(module_path!(), "::OutboxEvent"), &[OUTBOX_MARKER]);
+    // The transitions an outbox marker records — the outbox's whole arm set. A
+    // stored row names the declaration, so the transition lives in the
+    // payload's `oneof`; these are the names that `oneof` is reported under.
+    arm_type = OutboxEvent;
+    OutboxEvent::TellRequested(_) => pub(crate) TELL_REQUESTED_ARM = "tell_requested",
+    OutboxEvent::TellAcked(_) => TELL_ACKED_ARM = "tell_acked",
+    OutboxEvent::TellFailed(_) => TELL_FAILED_ARM = "tell_failed",
+    OutboxEvent::Scheduled(_) => SCHEDULED_ARM = "scheduled",
+    OutboxEvent::Ended(_) => ENDED_ARM = "ended",
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("outbox marker payload carried no `oneof` kind")]
@@ -44,20 +44,6 @@ pub(crate) enum OutboxEvent {
     TellFailed(TellFailed),
     Scheduled(Scheduled),
     Ended(Ended),
-}
-
-impl OutboxEvent {
-    /// The transition this marker records, as the name its payload's `oneof`
-    /// arm is reported under.
-    pub(crate) const fn arm(&self) -> &'static str {
-        match self {
-            OutboxEvent::TellRequested(_) => TELL_REQUESTED_ARM,
-            OutboxEvent::TellAcked(_) => TELL_ACKED_ARM,
-            OutboxEvent::TellFailed(_) => TELL_FAILED_ARM,
-            OutboxEvent::Scheduled(_) => SCHEDULED_ARM,
-            OutboxEvent::Ended(_) => ENDED_ARM,
-        }
-    }
 }
 
 impl SystemEvent for OutboxEvent {

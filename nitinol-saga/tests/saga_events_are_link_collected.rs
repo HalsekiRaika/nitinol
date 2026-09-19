@@ -25,7 +25,7 @@
 //! is ever written — and `no_path_beneath_a_marker_is_collected` pins that a
 //! registry answers for none.
 
-use nitinol_persistence::EventRegistry;
+use nitinol_persistence::__private::linked_event_registry;
 use nitinol_saga::SagaId;
 
 /// Every canonical path the saga writes onto a saga's own stream: one per
@@ -67,7 +67,7 @@ fn every_event_type_a_saga_journals_is_collected_from_the_crate_that_declares_it
     // unlinked crate and pass for the wrong reason.
     let _ = SagaId::new("saga.collection.probe");
 
-    let registry = EventRegistry::from_linked().expect(
+    let registry = linked_event_registry().expect(
         "a binary linking nitinol-saga and nothing that collides with it builds a registry",
     );
 
@@ -88,7 +88,7 @@ fn every_event_type_a_saga_journals_is_collected_from_the_crate_that_declares_it
 fn a_collected_saga_path_resolves_to_the_event_type_that_is_written_under_it() {
     let _ = SagaId::new("saga.collection.probe");
 
-    let registry = EventRegistry::from_linked().expect(
+    let registry = linked_event_registry().expect(
         "a binary linking nitinol-saga and nothing that collides with it builds a registry",
     );
 
@@ -109,7 +109,7 @@ fn a_collected_saga_path_resolves_to_the_event_type_that_is_written_under_it() {
 fn no_path_beneath_a_marker_is_collected() {
     let _ = SagaId::new("saga.collection.probe");
 
-    let registry = EventRegistry::from_linked().expect(
+    let registry = linked_event_registry().expect(
         "a binary linking nitinol-saga and nothing that collides with it builds a registry",
     );
 

@@ -182,8 +182,9 @@ fn eventsource_error_facade_exposes_user_facing_types() {
 fn postgres_feature_exposes_the_sqlx_event_store() {
     use std::sync::Arc;
 
+    use nitinol::persistence::__private::linked_event_registry;
     use nitinol::persistence::store::EventStore;
-    use nitinol::persistence::{EventRegistry, EventRegistryError};
+    use nitinol::persistence::EventRegistryError;
     use nitinol::sqlx::sqlx::PgPool;
     use nitinol::sqlx::PostgresEventStore;
 
@@ -199,7 +200,7 @@ fn postgres_feature_exposes_the_sqlx_event_store() {
     // a saga's own records unrestorable.
     let _: fn(PgPool) -> Result<PostgresEventStore, EventRegistryError> = PostgresEventStore::new;
 
-    let registry = EventRegistry::from_linked()
+    let registry = linked_event_registry()
         .expect("a build whose linked event types claim distinct canonical paths builds one");
     assert!(
         registry.resolve("dummy.event").is_none(),

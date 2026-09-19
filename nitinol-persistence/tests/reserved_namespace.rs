@@ -14,10 +14,12 @@
 //!
 //! [`MaterializedPath::is_within`]: nitinol_persistence::MaterializedPath::is_within
 
-use nitinol_persistence::__private::{reserved_event_registry_entry, reserved_family};
+use nitinol_persistence::__private::{
+    event_registry_from_entries, reserved_event_registry_entry, reserved_family,
+};
 use nitinol_persistence::{
-    is_within_reserved_namespace, AggregateId, EventRegistry, EventRegistryEntry, EventType,
-    Family, ProjectionId, TypeName, RESERVED_NAMESPACE,
+    is_within_reserved_namespace, AggregateId, EventRegistryEntry, EventType, Family, ProjectionId,
+    TypeName, RESERVED_NAMESPACE,
 };
 
 /// Names inside the reserved namespace, and names outside it that a naive
@@ -199,7 +201,7 @@ fn event_registry_entry_new_refuses_an_event_type_of_a_reserved_family() {
 fn event_registry_entry_new_accepts_an_event_type_outside_the_namespace() {
     let entry = EventRegistryEntry::new("reserved_namespace::Opened", OPENED_CLAIM);
 
-    let registry = EventRegistry::from_entries([&entry])
+    let registry = event_registry_from_entries([&entry])
         .expect("an entry outside the reserved namespace builds a registry");
     assert_eq!(registry.resolve("shop.order.Opened"), Some(OPENED));
 }
@@ -232,7 +234,7 @@ fn the_framework_constructor_still_enforces_the_shape_of_a_family() {
 
 #[test]
 fn an_entry_built_by_the_framework_constructor_resolves_in_a_registry() {
-    let registry = EventRegistry::from_entries([&FRAMEWORK_ENTRY])
+    let registry = event_registry_from_entries([&FRAMEWORK_ENTRY])
         .expect("a framework entry claiming one canonical path builds a registry");
 
     assert_eq!(

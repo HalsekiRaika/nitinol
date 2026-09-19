@@ -42,9 +42,13 @@ component of an `EventType` is a `&'static str`, so a path read out of a column
 cannot become one again without leaking the string it was read into.
 `#[derive(Event)]` places what your type is written down as in
 `nitinol::persistence::EVENT_REGISTRY`, and the framework places its own
-records — a saga's outbox, timers and dead letters — the same way;
-`PostgresEventStore::new` builds its registry out of what the binary linked, and
-refuses to open at all when two declarations claim one canonical path. A row
+records — a saga's outbox, timers and dead letters — the same way. The registry
+a load is served out of is built once for the process, out of what the binary
+linked; there is none to construct and none to hand over.
+`PostgresEventStore::new` refuses to open at all when two declarations claim one
+canonical path — though a collision that reaches it is one the build already
+had a chance to refuse, since a declaration carries a symbol named after its
+canonical path and a second claim on that path is a duplicate definition. A row
 whose type nothing collected fails its load rather than being passed over, and a
 projector that never sees a row never learns it is there.
 

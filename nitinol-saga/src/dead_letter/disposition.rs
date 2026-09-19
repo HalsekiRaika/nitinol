@@ -19,10 +19,8 @@
 //! [`DeadLetterQueue`]: crate::DeadLetterQueue
 
 use bytes::Bytes;
-use linkme::distributed_slice;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::__private::{reserved_event_registry_entry, reserved_family};
-use nitinol_persistence::{EventRegistryEntry, EventType, TypeName, EVENT_REGISTRY};
+use nitinol_persistence::{reserved_event, EventType};
 
 mod proto {
     include!(concat!(
@@ -34,27 +32,27 @@ mod proto {
 use self::proto::dead_letter_disposition_marker::Disposition as ProtoDisposition;
 use self::proto::{DeadLetterDispositionMarker, Evicted, Processed};
 
-/// The one identity every disposition marker is written down as.
-pub(crate) const DEAD_LETTER_DISPOSITION_MARKER: EventType = EventType::new(
-    reserved_family("nitinol.saga"),
-    TypeName::new("dead_letter_disposition"),
-);
+reserved_event! {
+    /// The one identity every disposition marker is written down as.
+    ///
+    /// What a binary linking this crate collects for the disposition marker, so
+    /// that a load of a saga's own stream restores a settled dead letter rather
+    /// than failing on it.
+    pub(crate) const DEAD_LETTER_DISPOSITION_MARKER {
+        family = "nitinol.saga",
+        type_name = "dead_letter_disposition",
+        declared_by = DeadLetterDispositionEvent,
+    }
 
-/// The settlements a disposition marker records — the marker's whole arm set.
-///
-/// A stored row names the declaration, so the settlement lives in the payload's
-/// `oneof`; these are the names that `oneof` is reported under.
-const PROCESSED_ARM: &str = "processed";
-const EVICTED_ARM: &str = "evicted";
-
-/// What a binary linking this crate collects for the disposition marker, so
-/// that a load of a saga's own stream restores a settled dead letter rather
-/// than failing on it.
-#[distributed_slice(EVENT_REGISTRY)]
-static DEAD_LETTER_DISPOSITION_ENTRY: EventRegistryEntry = reserved_event_registry_entry(
-    concat!(module_path!(), "::DeadLetterDispositionEvent"),
-    &[DEAD_LETTER_DISPOSITION_MARKER],
-);
+    // The settlements a disposition marker records — the marker's whole arm
+    // set. A stored row names the declaration, so the settlement lives in the
+    // payload's `oneof`; these are the names that `oneof` is reported under.
+    // The settlement lives on the `disposition` field, so each pattern looks
+    // into it rather than matching the marker itself.
+    arm_type = DeadLetterDispositionEvent;
+    DeadLetterDispositionEvent { disposition: Disposition::Processed, .. } => PROCESSED_ARM = "processed",
+    DeadLetterDispositionEvent { disposition: Disposition::Evicted, .. } => EVICTED_ARM = "evicted",
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("dead letter disposition payload carried no `oneof` disposition")]
@@ -83,17 +81,6 @@ pub(crate) struct DeadLetterDispositionEvent {
     /// reference.
     pub(crate) dead_letter_sequence: u64,
     pub(crate) disposition: Disposition,
-}
-
-impl DeadLetterDispositionEvent {
-    /// The settlement this marker records, as the name its payload's `oneof`
-    /// arm is reported under.
-    pub(crate) const fn arm(&self) -> &'static str {
-        match self.disposition {
-            Disposition::Processed => PROCESSED_ARM,
-            Disposition::Evicted => EVICTED_ARM,
-        }
-    }
 }
 
 impl SystemEvent for DeadLetterDispositionEvent {
@@ -137,6 +124,9 @@ pub(crate) fn is_dead_letter_disposition_event_type(event_type: EventType) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use nitinol_persistence::__private::reserved_family;
+    use nitinol_persistence::TypeName;
 
     use crate::dead_letter::event::DEAD_LETTER_MARKER;
 

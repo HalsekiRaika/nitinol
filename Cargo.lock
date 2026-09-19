@@ -1818,7 +1818,6 @@ dependencies = [
  "futures-core",
  "futures-util",
  "jiff",
- "linkme",
  "nitinol-eventsource",
  "nitinol-persistence",
  "nitinol-runtime",

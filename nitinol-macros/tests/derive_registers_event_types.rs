@@ -9,6 +9,11 @@
 //!   Scenario: one declaration, one path
 //!     Given an enum whose arms carry different payloads
 //!     Then the registry answers for the enum and for no path beneath it
+//!
+//!   Scenario: two families that differ only where a dot is
+//!     Given `shop.registry.sub.Leaf` and `shop.registry_sub.Leaf`
+//!     When a registry is built from what this binary linked
+//!     Then both resolve, each to its own event type
 //! ```
 //!
 //! The derive is still pure sugar for the hand-written `impl Event` — what it
@@ -24,15 +29,22 @@
 //! The generated entry is reached through the umbrella crate, as the rest of
 //! the expansion is, so deriving `Event` obliges a user to depend on `nitinol`
 //! and on nothing else.
+//!
+//! The last clause is about the symbol the derive names a declaration by, which
+//! this file judges the only way a Rust test can: a symbol two declarations
+//! share is a duplicate definition, so a derive that folded the two families
+//! below onto one name would leave this binary unable to link at all. What the
+//! clause then reads back is that the two are still told apart afterwards.
 
 use bytes::Bytes;
 use nitinol::contract::Codec;
 use nitinol::eventsource::Event;
+use nitinol::persistence::__private::linked_event_registry;
 use nitinol::persistence::EventRegistry;
 
 /// The registry a binary that registered nothing by hand still has.
-fn collected() -> EventRegistry {
-    EventRegistry::from_linked()
+fn collected() -> &'static EventRegistry {
+    linked_event_registry()
         .expect("the event types this binary derives claim distinct canonical paths")
 }
 
@@ -147,6 +159,83 @@ fn a_derived_enum_is_collected_once_under_the_path_its_rows_carry() {
              identity for one type"
         );
     }
+}
+
+// Two families a `.` apart, carrying one type name between them. The paths
+// `shop.registry.sub.Leaf` and `shop.registry_sub.Leaf` are distinct, and `_`
+// is an ordinary character in a family — so a derive that wrote a declaration's
+// symbol down with the dots replaced would name both of these the same thing.
+
+mod dotted_family {
+    use bytes::Bytes;
+    use nitinol::contract::Codec;
+    use nitinol::eventsource::Event;
+
+    #[derive(Clone, Event)]
+    #[event(family = "shop.registry.sub", codec = LeafCodec)]
+    pub struct Leaf;
+
+    pub struct LeafCodec;
+
+    impl Codec<Leaf> for LeafCodec {
+        type Error = std::convert::Infallible;
+
+        fn encode(_event: &Leaf) -> Result<Bytes, Self::Error> {
+            Ok(Bytes::new())
+        }
+
+        fn decode(_payload: &[u8]) -> Result<Leaf, Self::Error> {
+            Ok(Leaf)
+        }
+    }
+}
+
+mod underscored_family {
+    use bytes::Bytes;
+    use nitinol::contract::Codec;
+    use nitinol::eventsource::Event;
+
+    #[derive(Clone, Event)]
+    #[event(family = "shop.registry_sub", codec = LeafCodec)]
+    pub struct Leaf;
+
+    pub struct LeafCodec;
+
+    impl Codec<Leaf> for LeafCodec {
+        type Error = std::convert::Infallible;
+
+        fn encode(_event: &Leaf) -> Result<Bytes, Self::Error> {
+            Ok(Bytes::new())
+        }
+
+        fn decode(_payload: &[u8]) -> Result<Leaf, Self::Error> {
+            Ok(Leaf)
+        }
+    }
+}
+
+#[test]
+fn two_families_a_dot_apart_are_collected_as_the_two_declarations_they_are() {
+    let registry = collected();
+
+    assert_ne!(
+        dotted_family::Leaf::EVENT_TYPE,
+        underscored_family::Leaf::EVENT_TYPE,
+        "`shop.registry.sub` and `shop.registry_sub` are two families, and a row carrying one of \
+         these paths is restorable as one type only"
+    );
+    assert_eq!(
+        registry.resolve("shop.registry.sub.Leaf"),
+        Some(dotted_family::Leaf::EVENT_TYPE),
+        "a family's dots are part of the path a row carries, and the declaration written under \
+         that path is the one that answers for it"
+    );
+    assert_eq!(
+        registry.resolve("shop.registry_sub.Leaf"),
+        Some(underscored_family::Leaf::EVENT_TYPE),
+        "an underscore is an ordinary character of a family, and the declaration carrying it is \
+         its own — not a spelling of the dotted one"
+    );
 }
 
 #[test]

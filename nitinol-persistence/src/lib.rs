@@ -43,9 +43,19 @@
 //! without leaking the string it was read into. [`EventRegistry`] is the way
 //! back, and what it answers for is collected by the linker rather than
 //! registered by hand: a declaration places an [`EventRegistryEntry`] in
-//! [`EVENT_REGISTRY`], and [`EventRegistry::from_linked`] builds a registry out
-//! of what the binary linked. See [`EVENT_REGISTRY`] for what link-time
-//! collection does not reach.
+//! [`EVENT_REGISTRY`], and the framework builds one registry per process out of
+//! what the binary linked. There is nothing to construct and nothing to hand a
+//! store. See [`EVENT_REGISTRY`] for what link-time collection does not reach.
+//!
+//! # One declaration per canonical path
+//!
+//! Two declarations claiming one path are refused twice over: each carries an
+//! exported symbol named after its path, so the second is a definition rustc
+//! refuses within a crate and the linker refuses across crates — and the
+//! registry the process builds refuses the entries as well. The second layer
+//! is not a spare: link-time detection has holes (static libraries linked
+//! together need not report a duplicate), and an entry placed by hand rather
+//! than derived carries no symbol at all.
 
 pub mod error;
 pub mod reserved;
@@ -53,6 +63,7 @@ pub mod store;
 
 mod event;
 mod event_registry;
+mod event_symbol;
 mod event_type;
 mod id;
 mod materialized_path;
@@ -68,9 +79,20 @@ mod snapshot;
 /// namespace rule — and only that rule.
 ///
 /// No stability is promised for anything below.
+///
+/// Building the registry is here for the same reason: what a store serves its
+/// loads out of is the framework's own business, and the constructors below are
+/// how the framework and the suites that judge its validation reach it.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::event_registry::reserved_event_registry_entry;
+    pub use linkme;
+
+    pub use crate::event_registry::{
+        event_registry_from_entries, linked_event_registry, reserved_event_registry_entry,
+    };
+    pub use crate::event_symbol::{
+        is_verbatim_event_symbol, is_verbatim_event_symbol_byte, EVENT_UNIQUENESS_SYMBOL_PREFIX,
+    };
     pub use crate::event_type::reserved_family;
 }
 
