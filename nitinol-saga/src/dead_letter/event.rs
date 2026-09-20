@@ -264,6 +264,8 @@ mod tests {
     use nitinol_persistence::__private::reserved_family;
     use nitinol_persistence::TypeName;
 
+    use crate::dead_letter::disposition::DEAD_LETTER_DISPOSITION_MARKER;
+
     fn source() -> SourceContext {
         SourceContext {
             aggregate_id: AggregateId::new("order-1"),
@@ -397,6 +399,22 @@ mod tests {
             reserved_family("nitinol.saga"),
             TypeName::new("schedule"),
         )));
+    }
+
+    /// `DeadLetterQueue::list` selects dead letters by the dead-letter path as a
+    /// prefix, so a disposition marker sitting anywhere under that path would be
+    /// loaded as a dead letter and handed to [`DeadLetterEvent::decode`], which
+    /// only ever fails.  Separation is what keeps settling a dead letter from
+    /// breaking the listing that surfaces the rest.
+    #[test]
+    fn the_disposition_marker_and_the_dead_letter_are_disjoint_siblings() {
+        assert!(
+            !DEAD_LETTER_DISPOSITION_MARKER
+                .to_path()
+                .is_within(&DEAD_LETTER_MARKER.to_path()),
+            "the disposition marker must not fall under the dead-letter prefix; \
+             `{DEAD_LETTER_DISPOSITION_MARKER}` is within `{DEAD_LETTER_MARKER}`"
+        );
     }
 
     #[test]

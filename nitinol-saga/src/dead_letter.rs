@@ -47,7 +47,7 @@ pub use self::queue::{DeadLetterEntry, DeadLetterQuery, DeadLetterQueue, DeadLet
 
 pub(crate) use self::disposition::DeadLetterDispositionEvent;
 // `Disposition` is an internal detail of the marker's codec in production, but
-// the journal tests need it to build fold inputs without a store.
+// the journal and envelope tests need it to build markers without a store.
 #[cfg(test)]
 pub(crate) use self::disposition::Disposition;
 pub(crate) use self::policy::default_enqueue_policy;

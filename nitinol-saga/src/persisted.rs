@@ -52,6 +52,14 @@ impl<E: Event> SagaPersisted<E> {
         }
     }
 
+    /// Read a stored row back as the content its declaration names.
+    ///
+    /// The four framework declarations
+    /// (`nitinol.saga.{outbox,schedule,dead_letter,dead_letter_disposition}`)
+    /// are siblings, so a row matches at most one of them and the order between
+    /// those arms carries no meaning.  Every other path belongs to the domain
+    /// and is handed to the user's own codec untouched — that catch-all is what
+    /// keeps the envelope transparent to event types this crate never declared.
     pub(crate) fn classify(
         event_type: EventType,
         payload: &[u8],
@@ -81,7 +89,10 @@ mod tests {
     use nitinol_persistence::{Family, TypeName};
     use serde::{Deserialize, Serialize};
 
+    use crate::dead_letter::{Disposition, SagaFailure, SourceContext};
+    use crate::id::SagaId;
     use crate::outbox::OutboxAppender;
+    use crate::scheduler::{ScheduleToken, TimerName};
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
     struct DomainEvt {
@@ -130,6 +141,60 @@ mod tests {
         match SagaPersisted::<DomainEvt>::classify(wire.event_type, &wire.payload) {
             Ok(SagaPersisted::Outbox(OutboxEvent::TellRequested(m))) => assert_eq!(m.tell_id, 7),
             _ => panic!("an outbox path must classify as Outbox"),
+        }
+    }
+
+    #[test]
+    fn schedule_path_classifies_as_schedule_never_domain() {
+        let marker = ScheduleEvent::Fired {
+            token: ScheduleToken {
+                saga_id: SagaId::new("saga-1"),
+                name: TimerName::new("reminder"),
+            },
+            fired_at_unix_millis: 1_700_000_000_000,
+        };
+
+        match SagaPersisted::<DomainEvt>::classify(ScheduleEvent::EVENT_TYPE, &marker.encode()) {
+            Ok(SagaPersisted::Schedule(ScheduleEvent::Fired { token, .. })) => {
+                assert_eq!(token.name, TimerName::new("reminder"));
+            }
+            _ => panic!("a schedule path must classify as Schedule"),
+        }
+    }
+
+    #[test]
+    fn dead_letter_path_classifies_as_dead_letter_never_domain() {
+        let record = DeadLetterEvent {
+            seq: 3,
+            saga_id: SagaId::new("saga-1"),
+            failure: SagaFailure::HandleFailed {
+                error: "boom".to_owned(),
+            },
+            occurred_at_unix_millis: 1_700_000_000_000,
+            source: SourceContext::without_upstream(),
+        };
+
+        match SagaPersisted::<DomainEvt>::classify(DeadLetterEvent::EVENT_TYPE, &record.encode()) {
+            Ok(SagaPersisted::DeadLetter(decoded)) => assert_eq!(decoded.seq, 3),
+            _ => panic!("a dead-letter path must classify as DeadLetter"),
+        }
+    }
+
+    #[test]
+    fn dead_letter_disposition_path_classifies_as_disposition_never_dead_letter() {
+        let marker = DeadLetterDispositionEvent {
+            dead_letter_sequence: 3,
+            disposition: Disposition::Evicted,
+        };
+
+        match SagaPersisted::<DomainEvt>::classify(
+            DeadLetterDispositionEvent::EVENT_TYPE,
+            &marker.encode(),
+        ) {
+            Ok(SagaPersisted::DeadLetterDisposition(decoded)) => {
+                assert_eq!(decoded.dead_letter_sequence, 3);
+            }
+            _ => panic!("a disposition path must classify as DeadLetterDisposition"),
         }
     }
 
