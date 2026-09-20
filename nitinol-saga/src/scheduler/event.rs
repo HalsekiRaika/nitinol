@@ -149,15 +149,6 @@ fn token_of(saga_id: String, name: String) -> ScheduleToken {
     }
 }
 
-/// Is `event_type` the schedule marker's own declaration?
-///
-/// `nitinol.saga.schedule` is a sibling of `nitinol.saga.outbox`, and a
-/// declaration answers for its own path alone, so the classifications never
-/// overlap.
-pub(crate) fn is_schedule_event_type(event_type: EventType) -> bool {
-    event_type == SCHEDULE_MARKER
-}
-
 /// Append a single schedule marker at `*sequence + 1`, advancing `*sequence`
 /// only on success.  Mirrors the terminal-append discipline used for outbox
 /// markers (`OutboxAppender::append_terminal`): a failed store append leaves
@@ -188,9 +179,6 @@ pub(crate) async fn append_schedule_marker(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use nitinol_persistence::__private::reserved_family;
-    use nitinol_persistence::TypeName;
 
     fn token() -> ScheduleToken {
         ScheduleToken {
@@ -332,17 +320,6 @@ mod tests {
             ScheduleEvent::decode(&fired.encode()),
             Ok(ScheduleEvent::Fired { .. })
         ));
-    }
-
-    #[test]
-    fn is_schedule_event_type_accepts_the_declaration_but_not_its_siblings() {
-        assert!(is_schedule_event_type(SCHEDULE_MARKER));
-        // A sibling declaration of the same family must not be classified as a
-        // schedule marker.
-        assert!(!is_schedule_event_type(EventType::new(
-            reserved_family("nitinol.saga"),
-            TypeName::new("outbox"),
-        )));
     }
 
     #[test]

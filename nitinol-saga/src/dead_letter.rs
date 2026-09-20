@@ -45,14 +45,11 @@ pub use self::event::{DeadLetterEvent, SagaFailure, SourceContext};
 pub use self::policy::{EnqueueDecision, EnqueuePolicy};
 pub use self::queue::{DeadLetterEntry, DeadLetterQuery, DeadLetterQueue, DeadLetterQueueError};
 
-pub(crate) use self::disposition::{
-    is_dead_letter_disposition_event_type, DeadLetterDispositionEvent,
-};
+pub(crate) use self::disposition::DeadLetterDispositionEvent;
 // `Disposition` is an internal detail of the marker's codec in production, but
 // the journal tests need it to build fold inputs without a store.
 #[cfg(test)]
 pub(crate) use self::disposition::Disposition;
-pub(crate) use self::event::is_dead_letter_event_type;
 pub(crate) use self::policy::default_enqueue_policy;
 pub(crate) use self::settle::{
     DispositionArbiter, RecordDisposition, SettleDeadLetter, SettleError,

@@ -314,7 +314,7 @@ mod tests {
 
     use nitinol_eventsource::SystemEvent;
 
-    use crate::outbox::{is_outbox_event_type, OutboxAppender, OutboxEvent};
+    use crate::outbox::{OutboxAppender, OutboxEvent};
     use crate::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
     struct JsonCodec;
@@ -540,10 +540,12 @@ mod tests {
     fn count_outbox(events: &[LoadedEvent], pred: impl Fn(&OutboxEvent) -> bool) -> usize {
         events
             .iter()
-            .filter(|e| {
-                is_outbox_event_type(e.event_type)
-                    && matches!(OutboxEvent::decode(&e.payload), Ok(ref m) if pred(m))
+            .filter(|e| OutboxEvent::EVENT_TYPE == e.event_type)
+            .map(|e| {
+                OutboxEvent::decode(e.payload.as_ref())
+                    .expect("an outbox row must carry a decodable outbox payload")
             })
+            .filter(|e| pred(e))
             .count()
     }
 

@@ -116,19 +116,9 @@ impl SystemEvent for DeadLetterDispositionEvent {
     }
 }
 
-/// Is `event_type` the disposition marker's own declaration?
-pub(crate) fn is_dead_letter_disposition_event_type(event_type: EventType) -> bool {
-    event_type == DEAD_LETTER_DISPOSITION_MARKER
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use nitinol_persistence::__private::reserved_family;
-    use nitinol_persistence::TypeName;
-
-    use crate::dead_letter::event::DEAD_LETTER_MARKER;
 
     #[test]
     fn disposition_reserves_a_single_event_type() {
@@ -199,31 +189,5 @@ mod tests {
     #[test]
     fn decode_reports_error_for_payload_missing_oneof_disposition() {
         assert!(DeadLetterDispositionEvent::decode(&[]).is_err());
-    }
-
-    /// The classification that keeps the push path blind to these markers: the
-    /// disposition marker is a sibling declaration of the dead letter, so
-    /// neither selects the other's records.
-    #[test]
-    fn the_disposition_marker_and_the_dead_letter_are_disjoint_siblings() {
-        assert!(is_dead_letter_disposition_event_type(
-            DEAD_LETTER_DISPOSITION_MARKER
-        ));
-
-        assert!(
-            !DEAD_LETTER_DISPOSITION_MARKER
-                .to_path()
-                .is_within(&DEAD_LETTER_MARKER.to_path()),
-            "a disposition marker must not fall under the dead-letter path — \
-             that path is what the push subscriber decodes on"
-        );
-        assert!(
-            !is_dead_letter_disposition_event_type(DEAD_LETTER_MARKER),
-            "a dead letter must not be mistaken for its own disposition marker"
-        );
-        assert!(!is_dead_letter_disposition_event_type(EventType::new(
-            reserved_family("nitinol.saga"),
-            TypeName::new("outbox"),
-        )));
     }
 }

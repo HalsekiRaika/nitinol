@@ -4,12 +4,9 @@ use nitinol_eventsource::error::CodecError;
 use nitinol_eventsource::{Event, SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::EventType;
 
-use crate::dead_letter::{
-    is_dead_letter_disposition_event_type, is_dead_letter_event_type, DeadLetterDispositionEvent,
-    DeadLetterEvent,
-};
-use crate::outbox::{is_outbox_event_type, OutboxEvent};
-use crate::scheduler::{is_schedule_event_type, ScheduleEvent};
+use crate::dead_letter::{DeadLetterDispositionEvent, DeadLetterEvent};
+use crate::outbox::OutboxEvent;
+use crate::scheduler::ScheduleEvent;
 
 pub(crate) enum SagaPersisted<E> {
     Domain(E),
@@ -59,30 +56,20 @@ impl<E: Event> SagaPersisted<E> {
         event_type: EventType,
         payload: &[u8],
     ) -> Result<Self, SagaPersistedDecodeError> {
-        // Classification order: outbox → schedule → dead_letter →
-        // dead_letter_disposition → domain.  The four framework declarations
-        // (`nitinol.saga.{outbox,schedule,dead_letter,dead_letter_disposition}`)
-        // are siblings, so a user event type can match none of them and the
-        // order between them carries no meaning.  The domain branch must stay
-        // last to preserve envelope transparency.
-        if is_outbox_event_type(event_type) {
-            Ok(SagaPersisted::Outbox(OutboxEvent::decode(payload)?))
-        } else if is_schedule_event_type(event_type) {
-            ScheduleEvent::decode(payload)
+        match event_type {
+            OutboxEvent::EVENT_TYPE => Ok(SagaPersisted::Outbox(OutboxEvent::decode(payload)?)),
+            ScheduleEvent::EVENT_TYPE => ScheduleEvent::decode(payload)
                 .map(SagaPersisted::Schedule)
-                .map_err(SagaPersistedDecodeError::Schedule)
-        } else if is_dead_letter_event_type(event_type) {
-            DeadLetterEvent::decode(payload)
+                .map_err(SagaPersistedDecodeError::Schedule),
+            DeadLetterEvent::EVENT_TYPE => DeadLetterEvent::decode(payload)
                 .map(SagaPersisted::DeadLetter)
-                .map_err(SagaPersistedDecodeError::DeadLetter)
-        } else if is_dead_letter_disposition_event_type(event_type) {
-            DeadLetterDispositionEvent::decode(payload)
+                .map_err(SagaPersistedDecodeError::DeadLetter),
+            DeadLetterDispositionEvent::EVENT_TYPE => DeadLetterDispositionEvent::decode(payload)
                 .map(SagaPersisted::DeadLetterDisposition)
-                .map_err(SagaPersistedDecodeError::DeadLetterDisposition)
-        } else {
-            Ok(SagaPersisted::Domain(codec::decode::<E::Codec, E>(
+                .map_err(SagaPersistedDecodeError::DeadLetterDisposition),
+            _ => Ok(SagaPersisted::Domain(codec::decode::<E::Codec, E>(
                 payload,
-            )?))
+            )?)),
         }
     }
 }
