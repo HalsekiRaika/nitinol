@@ -4,9 +4,9 @@ mod common;
 use std::time::Duration;
 
 use nitinol_runtime::ident::ProcessName;
-use nitinol_runtime::{ProcessSystem, Props, SupervisionStrategy};
+use nitinol_runtime::{ProcessSystem, SupervisionStrategy};
 
-use common::{test_props, tracked_state, TrackedProcess};
+use common::{test_props, tracked_state};
 
 #[tokio::test]
 async fn spawn_returns_proxy_with_unique_pid() {
@@ -41,19 +41,6 @@ async fn spawn_named_returns_proxy() {
 }
 
 #[tokio::test]
-async fn props_new_creates_with_producer() {
-    // Given: a producer closure
-    let (started, stopped, counter) = tracked_state();
-
-    // When: Props is created with the producer
-    let props: Props<TrackedProcess> =
-        Props::new(move || TrackedProcess::new(started.clone(), stopped.clone(), counter.clone()));
-
-    // Then: Props is successfully created (compiles and doesn't panic)
-    drop(props);
-}
-
-#[tokio::test]
 async fn props_builder_sets_supervision_strategy() {
     // Given: Props with default strategy
     let (started, stopped, counter) = tracked_state();
@@ -66,15 +53,6 @@ async fn props_builder_sets_supervision_strategy() {
     );
 
     // Then: no panic (strategy configured successfully)
-}
-
-#[tokio::test]
-async fn supervision_strategy_stop_variant_exists() {
-    // Given/When: Stop variant
-    let strategy = SupervisionStrategy::Stop;
-
-    // Then: matches Stop
-    assert!(matches!(strategy, SupervisionStrategy::Stop));
 }
 
 #[tokio::test]

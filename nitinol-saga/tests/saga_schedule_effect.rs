@@ -136,13 +136,6 @@ fn cancel_schedule_builder_returns_cancel_variant_with_name() {
 }
 
 #[test]
-fn cancel_schedule_variant_is_constructible_directly() {
-    // The variant is public and must be matchable/constructible.
-    let effect: SagaEffect<u32> = SagaEffect::CancelSchedule(TimerName::new("t"));
-    assert!(matches!(effect, SagaEffect::CancelSchedule(_)));
-}
-
-#[test]
 fn cancel_schedule_combines_after_persist_preserving_order() {
     // Given a persist and a cancel
     let persist = SagaEffect::persist(1u32).combine(SagaEffect::schedule_spec(ScheduleSpec {

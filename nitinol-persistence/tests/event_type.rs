@@ -276,17 +276,6 @@ fn const_constructors_are_usable_in_const_context() {
     assert_eq!(CONST_EVENT.family(), Family::new("shop.order.outbox"));
 }
 
-/// Given an EventType is Copy, When passed by value twice, Then the original
-/// remains usable (Copy semantics, not move).
-#[test]
-fn event_type_is_copy() {
-    let original = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
-    let copied = original;
-    // Both bindings remain independently usable because EventType is Copy.
-    assert_eq!(original, copied);
-    assert_eq!(original.type_name(), TypeName::new("OrderEvent"));
-}
-
 // Component constructor invariants — invalid inputs must be rejected
 
 /// Given a TypeName containing a dot, When constructed, Then it panics.

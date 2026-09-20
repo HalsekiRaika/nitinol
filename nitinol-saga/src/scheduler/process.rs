@@ -110,6 +110,75 @@ impl SchedulerProcess {
             generations: HashMap::new(),
         }
     }
+
+    /// Place a single-shot timer for `token` in the slot it must fire from,
+    /// superseding any earlier registration under the same token.
+    fn insert(&mut self, token: ScheduleToken, after: Duration, dispatch: DispatchFn) {
+        // Bump the generation so any earlier wheel entry for this token becomes stale.
+        let generation = self.generations.get(&token).map(|g| g + 1).unwrap_or(1);
+        self.generations.insert(token.clone(), generation);
+
+        // Convert `after` to a number of ticks using ceiling division so the
+        // timer never fires before the deadline (minimum 1 tick).
+        let ticks_until = duration_to_ticks(after);
+
+        // Target slot: `(current_tick + ticks_until) % WHEEL_SIZE`.
+        // Decompose into modular parts to avoid u64 overflow when `ticks_until`
+        // is saturated to `u64::MAX` (pathological duration such as Duration::MAX).
+        let wheel = WHEEL_SIZE as u64;
+        let slot = (((self.current_tick % wheel) + (ticks_until % wheel)) % wheel) as usize;
+
+        // remaining_rounds: how many full wheel revolutions before the entry
+        // may fire.  The formula `(ticks_until - 1) / WHEEL_SIZE` ensures the
+        // entry fires exactly `ticks_until` ticks from now (off-by-one
+        // correction for the "advance before drain" tick loop design).
+        let remaining_rounds = ticks_until.saturating_sub(1) / WHEEL_SIZE as u64;
+
+        self.wheel[slot].push(WheelEntry {
+            token,
+            generation,
+            remaining_rounds,
+            dispatch,
+        });
+    }
+
+    /// Advance the wheel by one tick and hand back the dispatches that came due.
+    ///
+    /// All bookkeeping is finished before the caller runs any dispatch.  A
+    /// dispatch only sends messages to other processes and cannot re-enter the
+    /// scheduler while its own `recv` holds `&mut self`, so it can never observe
+    /// the wheel mid-tick.
+    fn advance(&mut self) -> Vec<DispatchFn> {
+        self.current_tick += 1;
+        let slot = (self.current_tick % WHEEL_SIZE as u64) as usize;
+
+        // Drain the slot; entries not yet ready are re-queued in the same slot
+        // for the next revolution.
+        let entries = std::mem::take(&mut self.wheel[slot]);
+        let mut to_requeue: Vec<WheelEntry> = Vec::new();
+        let mut due: Vec<DispatchFn> = Vec::new();
+
+        for mut entry in entries {
+            // Discard stale entries: cancelled tokens or superseded registrations.
+            if self.generations.get(&entry.token) != Some(&entry.generation) {
+                continue;
+            }
+
+            if entry.remaining_rounds > 0 {
+                entry.remaining_rounds -= 1;
+                to_requeue.push(entry);
+            } else {
+                // Remove from the authoritative table before firing — prevents a
+                // stale duplicate from firing the same registration twice.
+                self.generations.remove(&entry.token);
+                due.push(entry.dispatch);
+            }
+        }
+
+        self.wheel[slot].extend(to_requeue);
+
+        due
+    }
 }
 
 impl Process for SchedulerProcess {
@@ -150,33 +219,7 @@ impl Receive<RegisterTimer> for SchedulerProcess {
         msg: RegisterTimer,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
-        // Bump the generation so any earlier wheel entry for this token becomes stale.
-        let generation = self.generations.get(&msg.token).map(|g| g + 1).unwrap_or(1);
-        self.generations.insert(msg.token.clone(), generation);
-
-        // Convert `after` to a number of ticks using ceiling division so the
-        // timer never fires before the deadline (minimum 1 tick).
-        let ticks_until = duration_to_ticks(msg.after);
-
-        // Target slot: `(current_tick + ticks_until) % WHEEL_SIZE`.
-        // Decompose into modular parts to avoid u64 overflow when `ticks_until`
-        // is saturated to `u64::MAX` (pathological duration such as Duration::MAX).
-        let wheel = WHEEL_SIZE as u64;
-        let slot = (((self.current_tick % wheel) + (ticks_until % wheel)) % wheel) as usize;
-
-        // remaining_rounds: how many full wheel revolutions before the entry
-        // may fire.  The formula `(ticks_until - 1) / WHEEL_SIZE` ensures the
-        // entry fires exactly `ticks_until` ticks from now (off-by-one
-        // correction for the "advance before drain" tick loop design).
-        let remaining_rounds = ticks_until.saturating_sub(1) / WHEEL_SIZE as u64;
-
-        self.wheel[slot].push(WheelEntry {
-            token: msg.token,
-            generation,
-            remaining_rounds,
-            dispatch: msg.dispatch,
-        });
-
+        self.insert(msg.token, msg.after, msg.dispatch);
         Ok(())
     }
 }
@@ -221,34 +264,9 @@ impl Receive<WheelTick> for SchedulerProcess {
         _: WheelTick,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
-        // Advance the wheel pointer.
-        self.current_tick += 1;
-        let slot = (self.current_tick % WHEEL_SIZE as u64) as usize;
-
-        // Drain the slot; entries not yet ready are re-queued in the same slot
-        // for the next revolution.
-        let entries = std::mem::take(&mut self.wheel[slot]);
-        let mut to_requeue: Vec<WheelEntry> = Vec::new();
-
-        for mut entry in entries {
-            // Discard stale entries: cancelled tokens or superseded registrations.
-            if self.generations.get(&entry.token) != Some(&entry.generation) {
-                continue;
-            }
-
-            if entry.remaining_rounds > 0 {
-                entry.remaining_rounds -= 1;
-                to_requeue.push(entry);
-            } else {
-                // Fire: remove from the authoritative table first (best-effort
-                // once — prevents a stale duplicate from firing the same
-                // registration twice).
-                self.generations.remove(&entry.token);
-                (entry.dispatch)().await;
-            }
+        for dispatch in self.advance() {
+            dispatch().await;
         }
-
-        self.wheel[slot].extend(to_requeue);
 
         // Re-arm the next tick.
         ctx.pipe_to_self(async { tokio::time::sleep(TICK_INTERVAL).await }, |_| {
@@ -318,6 +336,29 @@ pub async fn spawn_scheduler(system: &ProcessSystem) -> SchedulerProxy {
 mod tests {
     use super::*;
 
+    use crate::scheduler::token::TimerName;
+
+    /// A token in a namespace of its own, so wheel tests never collide.
+    fn token(name: &str) -> ScheduleToken {
+        ScheduleToken {
+            saga_id: SagaId::new("wheel-test"),
+            name: TimerName::new(name),
+        }
+    }
+
+    /// A dispatch that does nothing: these tests observe *when* the wheel hands
+    /// a dispatch back, never what the dispatch does.
+    fn noop_dispatch() -> DispatchFn {
+        Arc::new(|| -> BoxFuture<'static, ()> { Box::pin(async {}) })
+    }
+
+    /// Drive the wheel until it hands back at least one dispatch and report the
+    /// tick that happened on.  `limit` bounds the search, so a *late* firing
+    /// surfaces as a larger tick (or `None`) instead of hanging the test.
+    fn tick_until_fire(wheel: &mut SchedulerProcess, limit: u64) -> Option<u64> {
+        (1..=limit).find(|_| !wheel.advance().is_empty())
+    }
+
     /// Regression tests for `duration_to_ticks`.
     ///
     /// The contract: a timer registered with `after` must NOT fire before
@@ -378,61 +419,61 @@ mod tests {
             "Duration::MAX must saturate to u64::MAX"
         );
 
-        // Slot calculation with current_tick > 0 must not panic.
-        let current_tick: u64 = 1;
-        let wheel = WHEEL_SIZE as u64;
-        let slot = (((current_tick % wheel) + (ticks_until % wheel)) % wheel) as usize;
-        assert!(slot < WHEEL_SIZE, "slot must be within wheel bounds");
+        // Registering a `u64::MAX`-tick timer while `current_tick > 0` is the
+        // state that used to overflow, so drive the wheel one tick first.
+        let mut wheel = SchedulerProcess::new();
+        assert!(wheel.advance().is_empty(), "an empty wheel fires nothing");
 
-        // remaining_rounds uses saturating_sub, so no overflow.
-        let remaining_rounds = ticks_until.saturating_sub(1) / WHEEL_SIZE as u64;
+        wheel.insert(token("max"), Duration::MAX, noop_dispatch());
+
         assert!(
-            remaining_rounds > 0,
-            "remaining_rounds must be non-zero for u64::MAX ticks"
+            wheel.advance().is_empty(),
+            "a Duration::MAX timer must not fire on the tick after it is registered"
         );
     }
 
-    /// Verify the slot/rounds formula: an entry inserted `ticks_until` ticks
-    /// before the first visit to its slot fires exactly at tick `ticks_until`.
+    /// The wheel's slot and `remaining_rounds` arithmetic must fire a timer
+    /// registered for `ticks_until` ticks on **exactly** tick `ticks_until` —
+    /// not earlier (the deadline would be violated) and not later (a lost
+    /// revolution).
     ///
-    /// This test exercises the core arithmetic without spawning a real process,
-    /// by simulating the wheel advance loop directly.
+    /// The cases straddle the wheel-revolution boundary, where an off-by-one in
+    /// either formula costs a whole revolution.  Driven through
+    /// [`SchedulerProcess::insert`] / [`SchedulerProcess::advance`], so changing
+    /// either production formula turns this test red.
     #[test]
     fn wheel_slot_and_rounds_formula_is_correct() {
-        // Pairs of (ticks_until, expected_fire_tick) to verify.
-        let cases: &[(u64, u64)] = &[
-            (1, 1),
-            (WHEEL_SIZE as u64 - 1, WHEEL_SIZE as u64 - 1),
-            (WHEEL_SIZE as u64, WHEEL_SIZE as u64),
-            (WHEEL_SIZE as u64 + 1, WHEEL_SIZE as u64 + 1),
-            (2 * WHEEL_SIZE as u64, 2 * WHEEL_SIZE as u64),
-            (360_000, 360_000), // 1-hour timer at 10 ms/tick
+        let wheel_size = WHEEL_SIZE as u64;
+        let tick_ms = u64::try_from(TICK_INTERVAL.as_millis())
+            .expect("tick interval in milliseconds must fit in u64");
+
+        let cases: &[u64] = &[
+            1,
+            wheel_size - 1,
+            wheel_size,
+            wheel_size + 1,
+            2 * wheel_size,
+            360_000, // 1-hour timer at 10 ms/tick
         ];
 
-        for &(ticks_until, expected_fire) in cases {
-            let inserted_at: u64 = 0;
-            let wheel = WHEEL_SIZE as u64;
-            let slot = (((inserted_at % wheel) + (ticks_until % wheel)) % wheel) as usize;
-            let remaining_rounds = ticks_until.saturating_sub(1) / WHEEL_SIZE as u64;
+        for &ticks_until in cases {
+            let mut wheel = SchedulerProcess::new();
+            // A whole number of tick intervals, so `ticks_until` is exactly what
+            // `duration_to_ticks` yields and the expected tick needs no rounding.
+            wheel.insert(
+                token("formula"),
+                Duration::from_millis(ticks_until * tick_ms),
+                noop_dispatch(),
+            );
 
-            // Simulate wheel advancement: find when remaining_rounds reaches 0
-            // and the slot is visited.
-            let mut current_tick: u64 = 0;
-            let mut rounds = remaining_rounds;
-            let fire_tick = loop {
-                current_tick += 1;
-                if (current_tick % WHEEL_SIZE as u64) as usize == slot {
-                    if rounds == 0 {
-                        break current_tick;
-                    }
-                    rounds -= 1;
-                }
-            };
+            // Searching one full revolution past the deadline exposes a late
+            // firing as a concrete tick number rather than a hang.
+            let fired_at = tick_until_fire(&mut wheel, ticks_until + wheel_size);
 
             assert_eq!(
-                fire_tick, expected_fire,
-                "ticks_until={ticks_until}: expected fire at tick {expected_fire}, \
-                 got {fire_tick} (slot={slot}, rounds={remaining_rounds})"
+                fired_at,
+                Some(ticks_until),
+                "a timer registered for {ticks_until} ticks must fire on tick {ticks_until}"
             );
         }
     }

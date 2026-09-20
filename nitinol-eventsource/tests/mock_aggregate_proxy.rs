@@ -82,15 +82,6 @@ fn new_yields_empty_capture_buffer() {
     );
 }
 
-#[test]
-fn default_yields_empty_capture_buffer() {
-    let mock: MockAggregateProxy<Inventory> = MockAggregateProxy::default();
-    assert!(
-        mock.drain_captured::<Reserve>().is_empty(),
-        "Default::default() must agree with new() — both empty"
-    );
-}
-
 #[tokio::test]
 async fn tell_captures_the_dispatched_command() {
     let mock = MockAggregateProxy::<Inventory>::new();

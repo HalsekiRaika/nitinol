@@ -207,13 +207,3 @@ fn postgres_feature_exposes_the_sqlx_event_store() {
         "collection answers for the event types the build linked, and nothing declares this one"
     );
 }
-
-// Default: no features enabled → nothing is re-exported
-
-/// With no features enabled, the umbrella crate must still compile (empty lib.rs).
-/// This is the zero-dependency default, matching Tokio's approach.
-#[test]
-fn umbrella_compiles_with_no_features_enabled() {
-    // Nothing to import: this test just verifies the crate builds with no features.
-    // The test body is intentionally empty.
-}

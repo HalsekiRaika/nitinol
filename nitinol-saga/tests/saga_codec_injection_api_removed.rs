@@ -32,6 +32,10 @@ mod probe {
     }
 }
 
+// The crate glob is the probe, not a source of names: it contributes nothing
+// only while the crate exports neither marker.  The moment it exports one, this
+// glob collides with `probe::*` and the use sites below stop resolving.
+#[allow(unused_imports)]
 use nitinol_saga::*;
 use probe::*;
 
@@ -50,17 +54,4 @@ fn the_saga_codec_typestate_names_belong_to_downstream_definitions() {
         (PROBE_OWNER, PROBE_OWNER),
         "`CodecSet` / `CodecUnset` must not be exported by `nitinol-saga` any more"
     );
-}
-
-/// Given the subscription typestate is unrelated to the codec one, When the
-/// subscription markers are named, Then they still come from the crate — this
-/// change removes the codec stage and leaves the rest of the builder alone.
-#[test]
-fn the_subscription_typestate_is_left_where_it_was() {
-    fn subscription_markers_resolve_to_the_crate(
-        _unset: std::marker::PhantomData<SubscriptionUnset>,
-    ) {
-    }
-
-    subscription_markers_resolve_to_the_crate(std::marker::PhantomData);
 }

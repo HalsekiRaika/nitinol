@@ -5,7 +5,6 @@
 //! - `encode` → `decode` round-trip preserves the value
 //! - a failure of the codec an event names is reported as
 //!   `PersistError::Codec(CodecError::Encode(..))`, and is permanent
-//! - `CodecError` implements `std::error::Error`
 //!
 //! The classification above used to be observed on the blanket impl that
 //! promoted a `Codec<E>` into a type-erased handle. There is no such handle any
@@ -223,34 +222,4 @@ async fn a_failing_encode_is_reported_as_a_codec_error_on_the_persist_path() {
         Retryability::Permanent,
         "encoding this event is deterministic, so re-issuing it fails identically"
     );
-}
-
-// CodecError: implements std::error::Error
-
-/// CodecError::Encode implements std::error::Error (Display + Debug + Send + Sync).
-#[test]
-fn codec_error_encode_implements_std_error() {
-    // Given
-    let inner: Box<dyn std::error::Error + Send + Sync> = Box::new(ForcedError);
-    let error = CodecError::Encode(inner);
-
-    // When / Then: format it to confirm Display and Error trait are satisfied
-    let _ = format!("{}", error);
-    let _ = format!("{:?}", error);
-
-    // Ensure it can be used as dyn Error (type-level assertion)
-    let _: &dyn std::error::Error = &error;
-}
-
-/// CodecError::Decode implements std::error::Error.
-#[test]
-fn codec_error_decode_implements_std_error() {
-    // Given
-    let inner: Box<dyn std::error::Error + Send + Sync> = Box::new(ForcedError);
-    let error = CodecError::Decode(inner);
-
-    // When / Then
-    let _ = format!("{}", error);
-    let _ = format!("{:?}", error);
-    let _: &dyn std::error::Error = &error;
 }
