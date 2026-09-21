@@ -315,7 +315,7 @@ async fn dead_letter_stream_survives_system_default_idle_timeout() {
     );
 }
 
-/// The `$dead-letter` actor process is NOT affected by the system default idle timeout;
+/// The `$dead-letter` process is NOT affected by the system default idle timeout;
 /// it remains registered and alive after the system default timeout period elapses.
 #[tokio::test]
 async fn dead_letter_process_survives_system_default_idle_timeout() {
@@ -328,11 +328,11 @@ async fn dead_letter_process_survives_system_default_idle_timeout() {
     // When: the timeout period passes with no messages sent to $dead-letter
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Then: the $dead-letter actor process is still registered in the registry
+    // Then: the $dead-letter process is still registered in the registry
     let dead_letter_name = ProcessName::new("$dead-letter");
     let found = system.lookup_by_name(&dead_letter_name).await;
     assert!(
         found.is_some(),
-        "$dead-letter actor must remain alive regardless of system default idle timeout"
+        "$dead-letter process must remain alive regardless of system default idle timeout"
     );
 }

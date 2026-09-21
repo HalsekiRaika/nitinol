@@ -31,7 +31,7 @@
 //!   blocking when the mailbox is full.
 //! - Setting a system pipe default of `bounded(2)` causes a `Props with
 //!   pipe=Inherit` to inherit that 2-slot bound — observed via pipe
-//!   over-subscription dropping the surplus, while the actor stays alive.
+//!   over-subscription dropping the surplus, while the process stays alive.
 //! - An explicit `Props::with_mailbox_capacity(Bounded(n))` overrides the
 //!   System default (Inherit resolution at the Props level).
 //!
@@ -235,7 +235,7 @@ async fn mailbox_explicit_bounded_overrides_system_default() {
 // System default. We observe by piping into a slow handler from a tight loop
 // and counting how many mapped messages arrive.
 //
-// For `pipe_to_self`, on-full and on-closed both drop silently. The actor
+// For `pipe_to_self`, on-full and on-closed both drop silently. The process
 // stays alive.
 
 #[derive(Default)]
@@ -311,7 +311,7 @@ fn pipe_count_props(delivered: Arc<AtomicU32>) -> Props<PipeCountProcess> {
 /// `pipe_capacity=Inherit`,
 /// when a handler enqueues many pipe futures faster than the bounded buffer
 /// can absorb them,
-/// then the actor stays alive and the delivered count is BOUNDED (it does
+/// then the process stays alive and the delivered count is BOUNDED (it does
 /// NOT grow unboundedly with the number of enqueued futures). This pins down
 /// both:
 ///   1. `pipe_capacity=Inherit` reads the System default, AND
@@ -340,11 +340,11 @@ async fn pipe_inherit_decays_to_system_default_and_drops_at_capacity() {
     // Give the bounded buffer time to drain.
     tokio::time::sleep(Duration::from_millis(400)).await;
 
-    // Actor must still be alive after the bounded buffer rejected the surplus.
+    // Process must still be alive after the bounded buffer rejected the surplus.
     let final_count = proxy
         .ask(Snapshot)
         .await
-        .expect("actor must still answer ask after pipe over-subscription");
+        .expect("process must still answer ask after pipe over-subscription");
 
     assert!(
         final_count <= attempted,

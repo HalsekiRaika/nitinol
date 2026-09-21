@@ -35,7 +35,7 @@ impl DeadLetterProxy {
     pub(crate) async fn send(&self, envelope: DeadLetterEnvelope) {
         let task: UserTask<DeadLetterProcess> =
             Box::new(TellTask::new(DeadLetterEnvelopeMsg(envelope)));
-        // Ignore send error: if the actor is stopped, dead-letter routing silently
+        // Ignore send error: if the process is stopped, dead-letter routing silently
         // drops the envelope rather than blocking the caller.
         let _ = self.tx.send(task).await;
     }

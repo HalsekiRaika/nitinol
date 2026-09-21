@@ -19,9 +19,9 @@ pub(crate) struct LoadLatestSnapshot {
 
 // SnapshotPersistor
 
-/// Persistence actor that exclusively owns an `Arc<dyn SnapshotStore>`.
+/// Persistence process that exclusively owns an `Arc<dyn SnapshotStore>`.
 ///
-/// All snapshot operations are serialized through this actor's message loop.
+/// All snapshot operations are serialized through this process's message loop.
 pub struct SnapshotPersistor {
     store: Arc<dyn SnapshotStore>,
 }
@@ -57,7 +57,7 @@ impl Receive<LoadLatestSnapshot> for SnapshotPersistor {
 impl SnapshotPersistor {
     /// Spawn a `SnapshotPersistor` on the given system and return a typed reference.
     ///
-    /// - Supervision: `Resume` — actor stays alive after handler errors.
+    /// - Supervision: `Resume` — the process stays alive after handler errors.
     /// - Idle timeout: `Persistent` — never stopped due to inactivity.
     pub async fn spawn(
         system: &ProcessSystem,
@@ -80,14 +80,14 @@ impl From<ProcessProxy<SnapshotPersistor>> for SnapshotPersistorProxy {
 
 // SnapshotPersistorRef
 
-/// Typed, cloneable handle to a `SnapshotPersistor` actor.
+/// Typed, cloneable handle to a `SnapshotPersistor` process.
 ///
 /// Callers save and load snapshots without holding any direct store reference.
 #[derive(Clone)]
 pub struct SnapshotPersistorProxy(ProcessProxy<SnapshotPersistor>);
 
 impl SnapshotPersistorProxy {
-    /// Save a snapshot via the `SnapshotPersistor` actor.
+    /// Save a snapshot via the `SnapshotPersistor` process.
     pub async fn save(&self, snapshot: PersistedSnapshot) -> Result<(), SnapshotError> {
         self.0
             .ask(SaveSnapshot { snapshot })
@@ -98,7 +98,7 @@ impl SnapshotPersistorProxy {
             })
     }
 
-    /// Load the latest snapshot via the `SnapshotPersistor` actor.
+    /// Load the latest snapshot via the `SnapshotPersistor` process.
     pub async fn load_latest(
         &self,
         aggregate_id: AggregateId,

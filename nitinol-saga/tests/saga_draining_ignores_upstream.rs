@@ -21,7 +21,7 @@
 //! is enqueued only after message N's `recv` returns.  Therefore:
 //!   recv(event-1) → handle → End → Ended written → Draining → return
 //!   recv(event-2) → Draining guard → return immediately (no handle call)
-//! This ordering is deterministic because actors process messages one at a time.
+//! This ordering is deterministic because processes handle messages one at a time.
 
 #[path = "common/helpers.rs"]
 mod common;

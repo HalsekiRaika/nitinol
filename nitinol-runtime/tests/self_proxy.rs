@@ -7,7 +7,7 @@
 //! - The self proxy is `Clone` and remains usable after the handler returns
 //!   (foundation for Pipe-to-Self)
 //! - From inside a handler, `self.self_proxy().tell(...)` queues the message
-//!   on the same actor's mailbox
+//!   on the same process's mailbox
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -90,7 +90,7 @@ impl Receive<Echo> for SelfAwareProcess {
     }
 }
 
-/// `PipeToSelf` triggers a handler that enqueues `Echo` back on the same actor
+/// `PipeToSelf` triggers a handler that enqueues `Echo` back on the same process
 /// using `ctx.self_proxy().tell(...)`. This pins down the Pipe-to-Self pattern
 /// the new API is intended to support.
 struct PipeToSelf;
@@ -105,11 +105,11 @@ impl Receive<PipeToSelf> for SelfAwareProcess {
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         // The handler is allowed to clone the self proxy and use it to send
-        // a message — the message lands on the same actor's mailbox.
+        // a message — the message lands on the same process's mailbox.
         let me = ctx.self_proxy().clone();
         // `tell` only sends the message onto the mailbox; it does not block
         // on the receiver's recv. Therefore this call must not deadlock even
-        // though the actor is currently inside its own handler.
+        // though the process is currently inside its own handler.
         me.tell(Echo).await.expect("self tell must succeed");
         Ok(())
     }
@@ -259,7 +259,7 @@ async fn cloned_self_proxy_routes_to_same_process() {
         .await
         .expect("tell through captured self proxy must succeed");
 
-    // Then: the spawn-time proxy can read the same actor's state via ask,
+    // Then: the spawn-time proxy can read the same process's state via ask,
     // confirming both proxies route to one and the same process.
     let count = spawn_proxy
         .ask(GetIncrementCount)
@@ -267,7 +267,7 @@ async fn cloned_self_proxy_routes_to_same_process() {
         .expect("ask must succeed");
     assert_eq!(
         count, 1,
-        "the cloned self proxy and the spawn-time proxy must address the same actor"
+        "the cloned self proxy and the spawn-time proxy must address the same process"
     );
 }
 
@@ -276,7 +276,7 @@ async fn cloned_self_proxy_routes_to_same_process() {
 /// Given a process whose `Receive<PipeToSelf>` clones the self proxy and
 /// uses it to send `Echo` back on the same mailbox,
 /// when `PipeToSelf` is delivered,
-/// then `Echo` is eventually processed by the same actor.
+/// then `Echo` is eventually handled by the same process.
 #[tokio::test]
 async fn self_proxy_pipe_to_self_delivers_followup_message() {
     // Given
@@ -322,7 +322,7 @@ async fn self_proxy_pipe_to_self_delivers_followup_message() {
         );
         assert!(
             Instant::now() < deadline,
-            "Echo enqueued via ctx.self_proxy().tell(Echo) must be received by the same actor"
+            "Echo enqueued via ctx.self_proxy().tell(Echo) must be received by the same process"
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -379,7 +379,7 @@ async fn captured_self_proxy_survives_spawn_proxy_drop() {
     let observer = spawn_proxy.clone();
 
     // When: drop the original spawn proxy. The captured proxy must remain
-    // alive and continue to address the running actor.
+    // alive and continue to address the running process.
     drop(spawn_proxy);
 
     self_proxy
@@ -393,7 +393,7 @@ async fn captured_self_proxy_survives_spawn_proxy_drop() {
         .expect("ask via independent observer clone must succeed");
     assert_eq!(
         count, 1,
-        "actor must still be alive and receive messages through the captured self proxy"
+        "process must still be alive and receive messages through the captured self proxy"
     );
 }
 

@@ -1,8 +1,8 @@
 //! `AggregateProps::new` accepts `Arc<dyn EventStore>` directly.
 //!
-//! Replaces the previous `EventPersistor` actor wiring.  The aggregate
+//! Replaces the previous `EventPersistor` process wiring.  The aggregate
 //! process now holds the store inline and calls `store.append` /
-//! `store.load` without crossing an actor boundary.
+//! `store.load` without crossing a process boundary.
 //!
 //! Two complementary checks:
 //!
@@ -10,7 +10,7 @@
 //!    `Arc<dyn EventStore>` as its second argument.  Any regression to the
 //!    old proxy-based signature fails to compile.
 //! 2. Runtime integration — spawning + ask must succeed end-to-end with
-//!    the new direct-store wiring (no actor in between).
+//!    the new direct-store wiring (no process in between).
 
 use std::sync::Arc;
 
@@ -97,8 +97,8 @@ fn _assert_sig_aggregate_props_new_accepts_arc_dyn_event_store() {
 // Runtime integration: spawn + ask succeeds with Arc<dyn EventStore>
 
 /// Spawning an AggregateProcess with Arc<dyn EventStore> succeeds, and the
-/// facts of an accepted decision reach `store.append` without going through an
-/// actor proxy.
+/// facts of an accepted decision reach `store.append` without going through a
+/// process proxy.
 #[tokio::test]
 async fn aggregate_props_spawns_with_arc_dyn_event_store() {
     // Given
@@ -127,7 +127,7 @@ async fn aggregate_props_spawns_with_arc_dyn_event_store() {
 /// the restored state.
 ///
 /// This is the key behavior the refactor preserves: replay still works,
-/// but now without an EventPersistor actor in between.
+/// but now without an EventPersistor process in between.
 #[tokio::test]
 async fn aggregate_replays_state_via_shared_arc_dyn_event_store() {
     // Given
@@ -160,7 +160,7 @@ async fn aggregate_replays_state_via_shared_arc_dyn_event_store() {
 // Multiple AggregateProcess can share one Arc<dyn EventStore>
 
 /// Two AggregateProcess instances on different ids share the same
-/// Arc<dyn EventStore>.  Without the EventPersistor actor, the store itself
+/// Arc<dyn EventStore>.  Without the EventPersistor process, the store itself
 /// is the synchronization point — its own thread-safe internals (Mutex)
 /// guarantee correctness.
 #[tokio::test]

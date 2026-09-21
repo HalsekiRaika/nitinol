@@ -38,13 +38,13 @@ impl<P: Process> PipedTask<P> {
 /// Future enqueued by `ProcessContext::pipe_to_self`.
 ///
 /// Each pipe future resolves to a [`PipedTask<P>`] which the driver's
-/// `apply` then runs against the actor state. Keeping the boxing inside
+/// `apply` then runs against the process state. Keeping the boxing inside
 /// `pipe_to_self` lets `PipeDriver` stay free of any knowledge about `M`
 /// (only the task type matters here).
 pub(crate) type PipeFuture<P> = BoxFuture<'static, PipedTask<P>>;
 
 /// Driver that delivers the results of `ctx.pipe_to_self(fut, mapper)` back
-/// into the actor as ordinary `Receive` messages.
+/// into the process as ordinary `Receive` messages.
 ///
 /// In-flight futures are owned by a [`FuturesUnordered`] that is polled
 /// **inside the lifecycle loop's single task** — the actor model's
@@ -56,7 +56,7 @@ pub(crate) type PipeFuture<P> = BoxFuture<'static, PipedTask<P>>;
 /// `PipeDriver::with_capacity(n)` configures the underlying tokio mpsc
 /// channel with capacity `n`. `ctx.pipe_to_self` enqueues via `try_send`:
 /// when the buffer is full or the receiving channel is closed, the future
-/// is dropped silently and the actor keeps running. The bounded shape
+/// is dropped silently and the process keeps running. The bounded shape
 /// replaces the pre-spec unbounded channel (Pain-Point P2).
 ///
 /// ## CPU-bound work is unsupported
@@ -72,7 +72,7 @@ pub(crate) type PipeFuture<P> = BoxFuture<'static, PipedTask<P>>;
 ///
 /// Each pipe future is polled inside an `AssertUnwindSafe(...).catch_unwind()`
 /// wrapper (set up by `pipe_to_self`); a panic during poll is converted to
-/// [`PipePanic`] and handed to the mapper as `Err(PipePanic)`. The actor
+/// [`PipePanic`] and handed to the mapper as `Err(PipePanic)`. The process
 /// continues running.
 ///
 /// ## No abort handle

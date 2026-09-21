@@ -3,7 +3,7 @@
 // Tests verify the full request lifecycle: spawn → ask/tell/exec → persistence → state.
 //
 // AggregateProps holds Arc<dyn EventStore> directly: the
-// EventPersistor actor was removed and the process now calls store.append /
+// EventPersistor process was removed and the process now calls store.append /
 // store.load inline.
 
 use std::sync::Arc;

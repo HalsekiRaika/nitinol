@@ -320,13 +320,13 @@ async fn dead_letter_infrastructure_outlives_the_default_idle_timeout() {
          timeout; the bootstrap spawn keeps its own Inherit-decay values"
     );
 
-    // And: the actor behind it still routes, so a dead letter still arrives
+    // And: the process behind it still routes, so a dead letter still arrives
     let count = subscribe_dead_letter_counter(&system).await;
     let proxy = spawn_and_stop(&system).await;
     tell_until_dead_lettered(
         &proxy,
         &count,
-        "the dead-letter actor must still route after the default idle timeout \
+        "the dead-letter process must still route after the default idle timeout \
          has elapsed several times over",
     )
     .await;

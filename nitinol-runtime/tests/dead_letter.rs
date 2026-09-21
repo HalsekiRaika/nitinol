@@ -181,7 +181,7 @@ async fn dead_letter_stream_downcasts_to_stream_boxed() {
 }
 
 /// A tell to a stopped process is routed to the dead-letter stream.
-/// This crosses proxy.rs → DeadLetterActor → Stream — 3 modules.
+/// This crosses proxy.rs → DeadLetterProcess → Stream — 3 modules.
 #[tokio::test]
 async fn tell_to_stopped_process_routes_to_dead_letter_stream() {
     // Given: a subscriber registered to the dead-letter stream

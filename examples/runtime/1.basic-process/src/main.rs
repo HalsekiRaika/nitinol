@@ -50,7 +50,7 @@ fn init_tracing() {
 async fn main() {
     init_tracing();
 
-    // ProcessSystem initialises the runtime and the built-in dead-letter actor.
+    // ProcessSystem initialises the runtime and the built-in dead-letter process.
     let system = ProcessSystem::new().await;
 
     // Props wraps a factory closure, not a Counter instance directly.

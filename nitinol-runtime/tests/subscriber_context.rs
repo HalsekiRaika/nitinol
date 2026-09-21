@@ -147,7 +147,7 @@ async fn subscriber_with_subscriber_context_receives_published_messages() {
 /// Given a subscriber that calls `ctx.pid()` inside `recv`,
 /// when a message is published to it,
 /// then the captured PID equals the PID the system returned at spawn time —
-/// proving the `SubscriberContext` is wired to the subscriber's own actor and
+/// proving the `SubscriberContext` is wired to the subscriber's own process and
 /// not, for example, to the stream that delivered the message.
 #[tokio::test]
 async fn subscriber_context_pid_matches_spawned_subscriber_pid() {
@@ -223,7 +223,7 @@ fn assert_subscriber_context_exposes_pid<T>(ctx: &SubscriberContext<'_, T>) -> P
 /// Given a subscriber registered to a stream,
 /// when the original spawn proxy is dropped after subscription,
 /// then published messages still reach the subscriber, because the runtime
-/// keeps the actor alive through the stream's dispatcher record.
+/// keeps the process alive through the stream's dispatcher record.
 #[tokio::test]
 async fn subscriber_remains_addressable_after_spawn_proxy_drop() {
     // Given
@@ -264,7 +264,7 @@ async fn subscriber_remains_addressable_after_spawn_proxy_drop() {
 // `SubscriberContext::watch`, `unwatch`, and `stop_self` delegate to the same
 // private `wiring` module as `ProcessContext`.  These tests prove that the
 // delegation is wired up correctly and that each operation produces the
-// expected observable side-effect at the actor level.
+// expected observable side-effect at the process level.
 
 /// Minimal process used as a watch target — starts, can be stopped.
 struct TargetProcess {

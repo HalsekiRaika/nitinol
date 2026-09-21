@@ -14,7 +14,7 @@ use crate::process::{
 /// The well-known topic name for the dead-letter stream.
 const DEAD_LETTERS_TOPIC: &str = "$dead-letters";
 
-/// The well-known process name for the dead-letter actor.
+/// The well-known process name for the dead-letter process.
 const DEAD_LETTER_PROCESS_NAME: &str = "$dead-letter";
 
 /// A handle to the system dead-letter stream with a stable, policy-compliant API.
@@ -83,12 +83,12 @@ impl ProcessSystemBuilder {
     /// configured defaults into the handle that is returned.
     ///
     /// This is construction, not just configuration — the dead-letter stream and
-    /// actor are running by the time it returns, so the first spawn already has
+    /// process are running by the time it returns, so the first spawn already has
     /// somewhere to route to.
     pub async fn build(self) -> ProcessSystem {
         let registry = ProcessRegistry::new();
 
-        // Bootstrap env for the dead-letter stream + actor. The configured
+        // Bootstrap env for the dead-letter stream + process. The configured
         // defaults are deliberately withheld from it: the dead-letter
         // infrastructure is persistent, and a system that reaped its own
         // dead-letter stream on the caller's idle timeout would silently lose
@@ -102,7 +102,7 @@ impl ProcessSystemBuilder {
         let dl_stream: ProcessProxy<Stream<BoxedMessage>> =
             bootstrap_env.spawn(dl_stream_props).await;
 
-        // Spawn the dead-letter actor (persistent — captures the stream proxy and registry).
+        // Spawn the dead-letter process (persistent — captures the stream proxy and registry).
         let dl_stream_for_producer = dl_stream.clone();
         let registry_for_producer = registry.clone();
         let dl_process_props = Props::new(move || {

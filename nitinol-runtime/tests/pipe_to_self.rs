@@ -251,7 +251,7 @@ fn make_props(
     })
 }
 
-/// Poll the actor's observed log until it contains at least `expected_len`
+/// Poll the process's observed log until it contains at least `expected_len`
 /// entries, with a 5-second timeout. Returns the snapshot.
 async fn wait_for_at_least(
     proxy: &nitinol_runtime::process::ProcessProxy<PipeProcess>,
@@ -275,7 +275,7 @@ async fn wait_for_at_least(
 
 /// Given a process spawned via `system.spawn` (PipeDriver auto-composed),
 /// when its handler calls `ctx.pipe_to_self(ready(42), |Ok(v)| Delivered(v))`,
-/// then the same actor receives `Delivered(42)` as a follow-up message.
+/// then the same process receives `Delivered(42)` as a follow-up message.
 #[tokio::test]
 async fn pipe_to_self_delivers_future_value_as_mapped_message() {
     // Given
@@ -405,7 +405,7 @@ async fn pipe_to_self_fast_future_completes_before_slow() {
 /// when it is polled by the PipeDriver,
 /// then the mapper receives `Err(PipePanic)` and `format!("{panic}")` includes
 /// the original message — proving the panic was caught and surfaced, not
-/// crashing the actor.
+/// crashing the process.
 #[tokio::test]
 async fn pipe_to_self_passes_panic_to_mapper_as_pipe_panic() {
     // Given
@@ -438,12 +438,12 @@ async fn pipe_to_self_passes_panic_to_mapper_as_pipe_panic() {
         other => panic!("expected Observed::Panic, got {other:?}"),
     }
 
-    // And: the actor is still alive after the captured panic — the handler
+    // And: the process is still alive after the captured panic — the handler
     // for a normal StartPipe must still respond.
     proxy
         .tell(StartPipe { value: 99 })
         .await
-        .expect("the actor must remain alive after a piped future panic");
+        .expect("the process must remain alive after a piped future panic");
     let snap2 = wait_for_at_least(&proxy, 2).await;
     assert!(
         snap2.iter().any(|o| matches!(o, Observed::Value(99))),

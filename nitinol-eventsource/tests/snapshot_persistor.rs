@@ -1,6 +1,6 @@
-// Integration tests for SnapshotPersistor actor.
+// Integration tests for SnapshotPersistor process.
 //
-// SnapshotPersistor is a dedicated persistence actor that owns Arc<dyn SnapshotStore>.
+// SnapshotPersistor is a dedicated persistence process that owns Arc<dyn SnapshotStore>.
 // AggregateProcess communicates with it via SnapshotPersistorRef, never holding the
 // store directly — satisfying the Phase 2 lockless messaging design.
 //

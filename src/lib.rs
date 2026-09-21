@@ -6,7 +6,7 @@
 //!
 //! | Feature        | Contents |
 //! |----------------|---------|
-//! | `runtime`      | `runtime` — actor runtime (`ProcessSystem`, `Process`, …) |
+//! | `runtime`      | `runtime` — process runtime (`ProcessSystem`, `Process`, …) |
 //! | `persistence`  | `persistence` — persistence abstractions (`EventStore`, IDs, …) |
 //! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Decider`, `Decision`, `Query`, `Event`, `Codec`, `Snapshotable`, `#[derive(Event)]`) |
 //! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |

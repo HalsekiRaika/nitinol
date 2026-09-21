@@ -8,15 +8,15 @@
 //! The runtime keeps the existing synchronous `pipe_to_self` API and uses
 //! `try_send`:
 //! - on-full and on-closed both drop silently;
-//! - the actor stays alive (capacity exhaustion is NOT a crash).
+//! - the process stays alive (capacity exhaustion is NOT a crash).
 //!
 //! These tests pin down:
-//! - A `Props::with_pipe_capacity(bounded(n))`-configured actor that pipes a
+//! - A `Props::with_pipe_capacity(bounded(n))`-configured process that pipes a
 //!   burst far larger than `n` survives — the bounded channel rejects the
 //!   surplus, but the lifecycle loop keeps running.
 //! - At least one piped future is delivered (the bounded buffer of `n` slots
 //!   does work; we do not regress to zero throughput).
-//! - The actor still answers `ask` after the burst (proof of life).
+//! - The process still answers `ask` after the burst (proof of life).
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -115,7 +115,7 @@ fn burst_props(delivered: Arc<AtomicU32>) -> Props<PipeBurstProcess> {
 /// that bursts 64 pipe-future enqueues,
 /// when the burst arrives faster than the bounded buffer can drain,
 /// then:
-///   1. the actor stays alive (subsequent `ask` succeeds);
+///   1. the process stays alive (subsequent `ask` succeeds);
 ///   2. fewer than 64 mapped messages arrive (proof that the bounded buffer
 ///      rejected the surplus rather than growing without bound).
 #[tokio::test]
@@ -136,11 +136,11 @@ async fn pipe_bounded_drops_surplus_and_keeps_actor_alive() {
     // Allow the slow in-flight futures to complete and drain the buffer.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // The actor is still alive (no panic from pipe_to_self over-subscription).
+    // The process is still alive (no panic from pipe_to_self over-subscription).
     proxy
         .ask(Ping)
         .await
-        .expect("actor must remain alive after a pipe burst beyond capacity");
+        .expect("process must remain alive after a pipe burst beyond capacity");
 
     let total = proxy
         .ask(CountSnapshot)

@@ -2,7 +2,7 @@
 //!
 //! The projector process now owns its event-store reference inline; it
 //! catches up by calling `store.load` directly instead of asking an
-//! `EventPersistor` actor.
+//! `EventPersistor` process.
 //!
 //! Two complementary checks:
 //!
