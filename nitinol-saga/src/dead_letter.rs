@@ -56,7 +56,7 @@ pub(crate) use self::settle::{
 };
 pub(crate) use self::subscriber::{make_dlq_child_spawn, DlqChildSpawn};
 
-use self::event::{append_dead_letter, DeadLetterEvent as Event};
+use self::event::DeadLetterEvent as Event;
 
 /// Outcome of [`enqueue_dead_letter`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +102,7 @@ pub(crate) async fn enqueue_dead_letter(
         occurred_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
         source,
     };
-    if append_dead_letter(store, saga_id, sequence, event).await {
+    if event::append_dead_letter(store, saga_id, sequence, event).await {
         EnqueueOutcome::Enqueued
     } else {
         EnqueueOutcome::AppendFailed

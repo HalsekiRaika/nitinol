@@ -10,7 +10,7 @@ use async_trait::async_trait;
 
 use crate::error::SendError;
 use crate::ident::Pid;
-use crate::process::dead_letter::{suppress_log, DeadLetterEnvelope};
+use crate::process::dead_letter::{self, DeadLetterEnvelope};
 use crate::process::message::{BoxedMessage, Message};
 use crate::process::task::{TellTask, UserTask};
 use crate::process::watch::Terminated;
@@ -110,7 +110,7 @@ where
                         destination: dispatcher.pid(),
                         message: BoxedMessage::new(msg.0.clone()),
                         sender: Some(ctx.pid()),
-                        suppress_log: suppress_log::<T>(),
+                        suppress_log: dead_letter::suppress_log::<T>(),
                         message_type_id: TypeId::of::<T>(),
                     };
                     dl.send(envelope).await;

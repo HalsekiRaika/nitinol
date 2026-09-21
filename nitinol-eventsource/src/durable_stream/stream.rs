@@ -12,7 +12,7 @@ use nitinol_runtime::ProcessSystem;
 
 use crate::durable_stream::cursor::SequenceCursor;
 use crate::durable_stream::poller::{DurablePollerProcess, IntervalDriver, TransformFn};
-use crate::durable_stream::proxy::{shared_poller_name, DurableStreamProxy};
+use crate::durable_stream::proxy::{self, DurableStreamProxy};
 
 const POLLER_RESTART_MAX_RETRIES: u32 = 5;
 const POLLER_RESTART_WITHIN: Duration = Duration::from_secs(60);
@@ -141,7 +141,7 @@ where
                 .expect("POLLER_RESTART_WITHIN is a positive duration constant");
 
         let driver = IntervalDriver::<DurablePollerProcess<T>>::new(poll_interval);
-        let poller_name = shared_poller_name(stream_proxy.pid());
+        let poller_name = proxy::shared_poller_name(stream_proxy.pid());
         let props = Props::new(move || DurablePollerProcess {
             store: Arc::clone(&producer_store),
             publisher: producer_publisher.clone(),

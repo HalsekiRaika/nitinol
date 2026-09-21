@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadQuery;
 
-use crate::fixture::{fact, observe};
+use crate::fixture;
 use crate::under_test::{Executor, StoreUnderTest};
 
 /// How many writers append to the store at the same time.
@@ -84,7 +84,7 @@ async fn a_checkpoint_reader_observes_every_committed_event_exactly_once<
             None => LoadQuery::default(),
             Some(observed_up_to) => LoadQuery::from_global(observed_up_to + 1),
         };
-        let served = observe(&backend, query).await;
+        let served = fixture::observe(&backend, query).await;
         for event in &served {
             observed.push(event.global_sequence);
             checkpoint = Some(match checkpoint {
@@ -168,7 +168,7 @@ async fn append_a_stream_of_its_own(
         let events = (0..batch)
             .map(|_| {
                 sequence += 1;
-                fact(sequence, b"concurrent")
+                fixture::fact(sequence, b"concurrent")
             })
             .collect();
 

@@ -13,9 +13,7 @@ use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
-use nitinol_eventsource::{
-    appending_system_event, DurableSubscription, SequenceCursor, SystemEvent,
-};
+use nitinol_eventsource::{DurableSubscription, SequenceCursor, SystemEvent};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadQuery;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Terminated};
@@ -145,7 +143,7 @@ impl<S: Saga> SagaManagerProcess<S> {
         self.store
             .append(
                 saga_id.as_str(),
-                vec![appending_system_event(
+                vec![nitinol_eventsource::appending_system_event(
                     tail + 1,
                     &marker,
                     jiff::Timestamp::now(),

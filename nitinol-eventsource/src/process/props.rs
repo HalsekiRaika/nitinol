@@ -8,7 +8,7 @@ use nitinol_runtime::ProcessSystem;
 use crate::codec;
 use crate::process::aggregate_process::{AggregateProcess, SnapshotRestoreFn};
 use crate::process::proxy::AggregateProxy;
-use crate::process::resolve::{activation_props, Activation, AggregateResolver, ResolveHandle};
+use crate::process::resolve::{self, Activation, AggregateResolver, ResolveHandle};
 use crate::process::snapshot_persistor::SnapshotPersistorProxy;
 
 /// How one activation of an aggregate is configured.
@@ -76,7 +76,7 @@ impl<A: Aggregate> AggregateProps<A> {
             }
             None => {
                 let (aggregate_id, activation) = self.into_parts();
-                let proxy = system.spawn(activation_props(activation)).await;
+                let proxy = system.spawn(resolve::activation_props(activation)).await;
                 AggregateProxy::pinned(aggregate_id, proxy)
             }
         }

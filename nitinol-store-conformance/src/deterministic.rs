@@ -7,7 +7,7 @@ use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType, LoadQuery};
 
-use crate::fixture::{fact, observe};
+use crate::fixture;
 use crate::under_test::StoreUnderTest;
 
 /// Put a store through every clause a bad interleaving is not needed for.
@@ -37,9 +37,11 @@ async fn a_sequence_the_stream_already_holds_is_refused<S: StoreUnderTest>(store
     const STREAM: &str = "occ.conformance.duplicate";
 
     let backend = store.bring_up().await;
-    committed(CLAUSE, &backend, STREAM, vec![fact(1, b"first")]).await;
+    committed(CLAUSE, &backend, STREAM, vec![fixture::fact(1, b"first")]).await;
 
-    let refusal = backend.append(STREAM, vec![fact(1, b"again")]).await;
+    let refusal = backend
+        .append(STREAM, vec![fixture::fact(1, b"again")])
+        .await;
 
     conflicted(CLAUSE, "a second append of sequence 1", refusal);
 }
@@ -53,11 +55,14 @@ async fn a_sequence_repeated_within_one_batch_is_refused<S: StoreUnderTest>(stor
     let backend = store.bring_up().await;
 
     let refusal = backend
-        .append(STREAM, vec![fact(5, b"first"), fact(5, b"duplicate")])
+        .append(
+            STREAM,
+            vec![fixture::fact(5, b"first"), fixture::fact(5, b"duplicate")],
+        )
         .await;
 
     conflicted(CLAUSE, "a batch carrying sequence 5 twice", refusal);
-    let stored = observe(&backend, LoadQuery::by_stream(STREAM)).await;
+    let stored = fixture::observe(&backend, LoadQuery::by_stream(STREAM)).await;
     assert!(
         stored.is_empty(),
         "{CLAUSE} is broken: a batch refused for carrying one sequence twice left {} event(s) \
@@ -73,14 +78,20 @@ async fn a_genesis_collision_leaves_the_first_creation_intact<S: StoreUnderTest>
     const STREAM: &str = "occ.conformance.genesis";
 
     let backend = store.bring_up().await;
-    let genesis = committed(CLAUSE, &backend, STREAM, vec![fact(1, b"genesis-original")]).await;
+    let genesis = committed(
+        CLAUSE,
+        &backend,
+        STREAM,
+        vec![fixture::fact(1, b"genesis-original")],
+    )
+    .await;
 
     let refusal = backend
-        .append(STREAM, vec![fact(1, b"genesis-retry")])
+        .append(STREAM, vec![fixture::fact(1, b"genesis-retry")])
         .await;
 
     conflicted(CLAUSE, "a second append of the genesis sequence", refusal);
-    let stored = observe(&backend, LoadQuery::by_stream(STREAM)).await;
+    let stored = fixture::observe(&backend, LoadQuery::by_stream(STREAM)).await;
     assert_eq!(
         stored.len(),
         1,
@@ -111,39 +122,48 @@ async fn a_refused_append_consumes_no_global_sequence<S: StoreUnderTest>(store: 
     const STREAM: &str = "occ.conformance.numbering";
 
     let backend = store.bring_up().await;
-    let mut last = highest(committed(CLAUSE, &backend, STREAM, vec![fact(1, b"e1")]).await);
+    let mut last =
+        highest(committed(CLAUSE, &backend, STREAM, vec![fixture::fact(1, b"e1")]).await);
 
     conflicted(
         CLAUSE,
         "a second append of sequence 1",
-        backend.append(STREAM, vec![fact(1, b"duplicate")]).await,
+        backend
+            .append(STREAM, vec![fixture::fact(1, b"duplicate")])
+            .await,
     );
     last = continues_from(
         CLAUSE,
         "a single sequence the stream already held",
         last,
-        committed(CLAUSE, &backend, STREAM, vec![fact(2, b"e2")]).await,
+        committed(CLAUSE, &backend, STREAM, vec![fixture::fact(2, b"e2")]).await,
     );
 
     conflicted(
         CLAUSE,
         "a batch whose last event repeats sequence 1",
         backend
-            .append(STREAM, vec![fact(3, b"fresh"), fact(1, b"duplicate")])
+            .append(
+                STREAM,
+                vec![fixture::fact(3, b"fresh"), fixture::fact(1, b"duplicate")],
+            )
             .await,
     );
     last = continues_from(
         CLAUSE,
         "a duplicate at the tail of a batch",
         last,
-        committed(CLAUSE, &backend, STREAM, vec![fact(3, b"e3")]).await,
+        committed(CLAUSE, &backend, STREAM, vec![fixture::fact(3, b"e3")]).await,
     );
 
     conflicted(
         CLAUSE,
         "a batch carrying sequence 4 twice",
         backend
-            .append(STREAM, vec![fact(4, b"one"), fact(4, b"other")])
+            .append(
+                STREAM,
+                vec![fixture::fact(4, b"one"), fixture::fact(4, b"other")],
+            )
             .await,
     );
     continues_from(
@@ -154,7 +174,7 @@ async fn a_refused_append_consumes_no_global_sequence<S: StoreUnderTest>(store: 
             CLAUSE,
             &backend,
             STREAM,
-            vec![fact(4, b"e4"), fact(5, b"e5")],
+            vec![fixture::fact(4, b"e4"), fixture::fact(5, b"e5")],
         )
         .await,
     );
@@ -170,17 +190,27 @@ async fn an_append_becomes_visible_as_one_commit_unit<S: StoreUnderTest>(store: 
     let backend = store.bring_up().await;
     // A stream beside the batch, so a store serving the batch short is told
     // apart from one that answers loads with nothing at all.
-    committed(CLAUSE, &backend, NEIGHBOUR, vec![fact(1, b"neighbour")]).await;
+    committed(
+        CLAUSE,
+        &backend,
+        NEIGHBOUR,
+        vec![fixture::fact(1, b"neighbour")],
+    )
+    .await;
 
     let batch = committed(
         CLAUSE,
         &backend,
         STREAM,
-        vec![fact(1, b"b1"), fact(2, b"b2"), fact(3, b"b3")],
+        vec![
+            fixture::fact(1, b"b1"),
+            fixture::fact(2, b"b2"),
+            fixture::fact(3, b"b3"),
+        ],
     )
     .await;
 
-    let visible: HashSet<u64> = observe(&backend, LoadQuery::default())
+    let visible: HashSet<u64> = fixture::observe(&backend, LoadQuery::default())
         .await
         .into_iter()
         .map(|event| event.global_sequence)
@@ -208,11 +238,17 @@ async fn a_load_serves_events_in_ascending_global_sequence_order<S: StoreUnderTe
     let backend = store.bring_up().await;
     // The second stream is numbered from 7 rather than from its genesis, so the
     // order read back cannot be the per-stream sequence wearing another name.
-    committed(CLAUSE, &backend, FIRST, vec![fact(1, b"first-1")]).await;
-    committed(CLAUSE, &backend, SECOND, vec![fact(7, b"second-1")]).await;
-    committed(CLAUSE, &backend, FIRST, vec![fact(2, b"first-2")]).await;
+    committed(CLAUSE, &backend, FIRST, vec![fixture::fact(1, b"first-1")]).await;
+    committed(
+        CLAUSE,
+        &backend,
+        SECOND,
+        vec![fixture::fact(7, b"second-1")],
+    )
+    .await;
+    committed(CLAUSE, &backend, FIRST, vec![fixture::fact(2, b"first-2")]).await;
 
-    let served = observe(&backend, LoadQuery::default()).await;
+    let served = fixture::observe(&backend, LoadQuery::default()).await;
 
     let numbering: Vec<u64> = served.iter().map(|event| event.global_sequence).collect();
     let mut ascending = numbering.clone();
@@ -248,9 +284,9 @@ async fn a_refusal_leaves_every_observable_part_of_the_store_as_it_was<S: StoreU
     const NEIGHBOUR: &str = "occ.conformance.tripwire.neighbour";
 
     let backend = store.bring_up().await;
-    committed(CLAUSE, &backend, STREAM, vec![fact(1, b"t1")]).await;
-    committed(CLAUSE, &backend, STREAM, vec![fact(2, b"t2")]).await;
-    committed(CLAUSE, &backend, NEIGHBOUR, vec![fact(1, b"n1")]).await;
+    committed(CLAUSE, &backend, STREAM, vec![fixture::fact(1, b"t1")]).await;
+    committed(CLAUSE, &backend, STREAM, vec![fixture::fact(2, b"t2")]).await;
+    committed(CLAUSE, &backend, NEIGHBOUR, vec![fixture::fact(1, b"n1")]).await;
 
     let before = content(&backend).await;
     assert_eq!(
@@ -262,7 +298,10 @@ async fn a_refusal_leaves_every_observable_part_of_the_store_as_it_was<S: StoreU
     );
 
     let refusal = backend
-        .append(STREAM, vec![fact(3, b"fresh"), fact(1, b"collision")])
+        .append(
+            STREAM,
+            vec![fixture::fact(3, b"fresh"), fixture::fact(1, b"collision")],
+        )
         .await;
 
     conflicted(
@@ -298,7 +337,7 @@ struct Stored {
 }
 
 async fn content(backend: &Arc<dyn EventStore>) -> Vec<Stored> {
-    observe(backend, LoadQuery::default())
+    fixture::observe(backend, LoadQuery::default())
         .await
         .into_iter()
         .map(|event| Stored {

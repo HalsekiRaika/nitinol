@@ -5,9 +5,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use nitinol_eventsource::codec;
-use nitinol_eventsource::{
-    appending_system_event, DurableSubscription, SequenceCursor, SystemEvent,
-};
+use nitinol_eventsource::{DurableSubscription, SequenceCursor, SystemEvent};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, LoadedEvent};
@@ -15,7 +13,7 @@ use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
 
 use crate::context::SagaContext;
 use crate::dead_letter::{
-    enqueue_dead_letter, DeadLetterDispositionEvent, DlqChildSpawn, EnqueueOutcome, EnqueuePolicy,
+    self, DeadLetterDispositionEvent, DlqChildSpawn, EnqueueOutcome, EnqueuePolicy,
     RecordDisposition, SagaFailure, SourceContext,
 };
 use crate::effect::TellIntent;
@@ -24,10 +22,10 @@ use crate::id::SagaId;
 use crate::journal::ActiveSchedule;
 use crate::observability::report_system_event;
 use crate::outbox::{OutboxAppender, RetryPolicy, TellOutcome};
-use crate::process::interpreter::{run_saga_effect, InterpretOutcome, InterpreterCtx};
-use crate::process::replay::replay_and_redispatch;
+use crate::process::interpreter::{self, InterpretOutcome, InterpreterCtx};
+use crate::process::replay;
 use crate::saga::Saga;
-use crate::scheduler::{append_schedule_marker, DispatchFn, ScheduleEvent, SchedulerProxy, Timers};
+use crate::scheduler::{self, DispatchFn, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName};
 
 /// A typed upstream event delivered to the saga by its `DirectPollerProcess`.
@@ -298,7 +296,7 @@ impl<S: Saga> SagaProcess<S> {
     /// authoritative.
     async fn record_dead_letter(&mut self, failure: SagaFailure, source: SourceContext) -> bool {
         !matches!(
-            enqueue_dead_letter(
+            dead_letter::enqueue_dead_letter(
                 &self.store,
                 &self.saga_id,
                 &mut self.sequence,
@@ -462,7 +460,7 @@ impl<S: Saga> SagaProcess<S> {
         // is no upstream cursor to withhold; stop instead when the compensation
         // could neither be persisted nor dead-lettered.
         if matches!(
-            run_saga_effect(effect, &mut ictx).await,
+            interpreter::run_saga_effect(effect, &mut ictx).await,
             InterpretOutcome::DlqFailed
         ) {
             tracing::error!(
@@ -479,7 +477,7 @@ impl<S: Saga> SagaProcess<S> {
 impl<S: Saga> Process for SagaProcess<S> {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         let factory_ref = self.crash_restart_factory.as_ref().map(|f| f.as_ref());
-        let outcome = match replay_and_redispatch(
+        let outcome = match replay::replay_and_redispatch(
             &self.saga_id,
             &mut self.state,
             &self.store,
@@ -718,7 +716,7 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
         // append also failed), propagate Err so the DirectPoller (via ask())
         // does NOT advance the upstream cursor.
         if matches!(
-            run_saga_effect(effect, &mut ictx).await,
+            interpreter::run_saga_effect(effect, &mut ictx).await,
             InterpretOutcome::DlqFailed
         ) {
             tracing::error!(
@@ -852,7 +850,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
             },
             fired_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
         };
-        append_schedule_marker(
+        scheduler::append_schedule_marker(
             &self.store,
             &self.saga_id,
             &mut self.sequence,
@@ -866,7 +864,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         // upstream cursor to withhold; call stop_self() to ensure the process
         // does not silently continue when a PersistFailed DLQ append also fails.
         if matches!(
-            run_saga_effect(effect, &mut ictx).await,
+            interpreter::run_saga_effect(effect, &mut ictx).await,
             InterpretOutcome::DlqFailed
         ) {
             tracing::error!(
@@ -977,7 +975,11 @@ impl<S: Saga> Receive<RecordDisposition> for SagaProcess<S> {
         // No lifecycle guard: a dead letter left behind by a saga that has
         // since ended still has to be settleable.
         let candidate = self.sequence + 1;
-        let appending = appending_system_event(candidate, &msg.marker, jiff::Timestamp::now());
+        let appending = nitinol_eventsource::appending_system_event(
+            candidate,
+            &msg.marker,
+            jiff::Timestamp::now(),
+        );
         match self
             .store
             .append(self.saga_id.as_str(), vec![appending])

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use nitinol_eventsource::{appending_system_event, SystemEvent, SystemEventDecodeError};
+use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{reserved_event, EventType};
 
@@ -161,7 +161,7 @@ pub(crate) async fn append_schedule_marker(
     occurred_at: jiff::Timestamp,
 ) -> bool {
     let candidate = *sequence + 1;
-    let appending = appending_system_event(candidate, &event, occurred_at);
+    let appending = nitinol_eventsource::appending_system_event(candidate, &event, occurred_at);
     if let Err(e) = store.append(saga_id.borrow(), vec![appending]).await {
         tracing::warn!(error = %e, "saga schedule marker append failed");
         return false;

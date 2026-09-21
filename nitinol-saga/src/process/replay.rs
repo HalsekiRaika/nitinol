@@ -6,16 +6,14 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 use nitinol_runtime::process::ProcessContext;
 
-use crate::dead_letter::{
-    enqueue_dead_letter, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext,
-};
+use crate::dead_letter::{self, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::journal::{ActiveSchedule, JournalState, PendingTell};
 use crate::outbox::RetryPolicy;
 use crate::outbox::{OutboxAppender, TellOutcome};
 use crate::persisted::{SagaPersisted, SagaPersistedDecodeError};
-use crate::process::outbox_executor::spawn_outbox_executor;
+use crate::process::outbox_executor;
 use crate::process::saga_process::{SagaProcess, TellState};
 use crate::saga::Saga;
 
@@ -231,7 +229,8 @@ async fn redispatch_pending<S: Saga>(
             if matches!(tell_states.get(&tell_id), Some(TellState::AppendFailed(_))) {
                 tell_states.insert(tell_id, TellState::Pending(intent.clone()));
             }
-            spawn_outbox_executor(ctx, intent, tell_id, retry_policy.clone()).await;
+            outbox_executor::spawn_outbox_executor(ctx, intent, tell_id, retry_policy.clone())
+                .await;
         } else {
             *sequence += 1;
             let claimed = *sequence;
@@ -252,7 +251,7 @@ async fn redispatch_pending<S: Saga>(
                 // The durable outbox marker already records the failure.
                 if let Some(target) = pending_tell.target {
                     let message = pending_tell.crash_restart.unwrap_or_default();
-                    let outcome = enqueue_dead_letter(
+                    let outcome = dead_letter::enqueue_dead_letter(
                         store,
                         saga_id,
                         sequence,

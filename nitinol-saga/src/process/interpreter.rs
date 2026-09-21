@@ -11,20 +11,16 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AppendingEvent, EventType};
 use nitinol_runtime::process::ProcessContext;
 
-use crate::dead_letter::{
-    enqueue_dead_letter, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext,
-};
+use crate::dead_letter::{self, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext};
 use crate::effect::{ScheduleSpec, TellIntent};
 use crate::id::SagaId;
 use crate::observability::report_system_event;
 use crate::outbox::{OutboxAppender, OutboxEvent, RetryPolicy, TELL_REQUESTED_ARM};
 use crate::persisted::SagaPersisted;
-use crate::process::outbox_executor::spawn_outbox_executor;
-use crate::process::saga_process::{
-    build_fire_dispatch, in_flight_count, Lifecycle, SagaProcess, TellState,
-};
+use crate::process::outbox_executor;
+use crate::process::saga_process::{self, Lifecycle, SagaProcess, TellState};
 use crate::saga::Saga;
-use crate::scheduler::{append_schedule_marker, ScheduleEvent, SchedulerProxy, Timers};
+use crate::scheduler::{self, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName, SCHEDULED_ARM};
 use crate::SagaEffect;
 
@@ -92,7 +88,7 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
                 }
                 *ictx.sequence = candidate;
 
-                if in_flight_count(ictx.tell_states) == 0 {
+                if saga_process::in_flight_count(ictx.tell_states) == 0 {
                     if let Err(e) = ictx.process_ctx.stop_self().await {
                         tracing::warn!(error = %e, "saga End: stop_self signal failed");
                     }
@@ -131,7 +127,7 @@ async fn cancel_schedule<S: Saga>(name: TimerName, ictx: &mut InterpreterCtx<'_,
         token,
         cancelled_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
     };
-    let appended = append_schedule_marker(
+    let appended = scheduler::append_schedule_marker(
         &ictx.store,
         &ictx.saga_id,
         ictx.sequence,
@@ -217,7 +213,7 @@ async fn persist_batch<S: Saga>(
             max_attempts = ictx.retry_policy.max_attempts,
             "saga persist batch exhausted staged retries; enqueuing PersistFailed dead letter"
         );
-        let outcome = enqueue_dead_letter(
+        let outcome = dead_letter::enqueue_dead_letter(
             &ictx.store,
             &ictx.saga_id,
             ictx.sequence,
@@ -278,14 +274,14 @@ async fn persist_batch<S: Saga>(
         ictx.tell_states
             .insert(tell_id, TellState::Pending(intent.clone()));
         let policy = ictx.retry_policy.clone();
-        spawn_outbox_executor(ictx.process_ctx, intent, tell_id, policy).await;
+        outbox_executor::spawn_outbox_executor(ictx.process_ctx, intent, tell_id, policy).await;
     }
 
     // Register timers only after the `Scheduled` markers are durably persisted,
     // so a firing can never precede its own durable record.
     if let Some(timers) = ictx.timers() {
         for reg in registrations {
-            let dispatch = build_fire_dispatch::<S>(
+            let dispatch = saga_process::build_fire_dispatch::<S>(
                 ictx.process_ctx.self_proxy().clone(),
                 reg.name.clone(),
                 reg.payload,

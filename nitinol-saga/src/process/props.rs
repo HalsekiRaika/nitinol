@@ -7,9 +7,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
-use crate::dead_letter::{
-    default_enqueue_policy, make_dlq_child_spawn, DeadLetterEvent, DlqChildSpawn, EnqueuePolicy,
-};
+use crate::dead_letter::{self, DeadLetterEvent, DlqChildSpawn, EnqueuePolicy};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::process::instance::SagaInstanceSpec;
@@ -17,7 +15,7 @@ use crate::process::proxy::SagaProxy;
 #[cfg(test)]
 use crate::process::saga_process::TellState;
 use crate::process::saga_process::{
-    upstream_subscription, CrashRestartFactory, DecodeFailureRouteFn, OwnedUpstream, SagaProcess,
+    self, CrashRestartFactory, DecodeFailureRouteFn, OwnedUpstream, SagaProcess,
 };
 use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
@@ -164,7 +162,9 @@ impl<S: Saga, Sub> SagaProps<S, Sub> {
     where
         P: Process + Receive<DeadLetterEvent, Response = ()> + 'static,
     {
-        self.dead_letter_subscriber = Some(make_dlq_child_spawn::<SagaProcess<S>, P>(subscriber));
+        self.dead_letter_subscriber = Some(dead_letter::make_dlq_child_spawn::<SagaProcess<S>, P>(
+            subscriber,
+        ));
         self
     }
 
@@ -219,9 +219,11 @@ impl<S: Saga> SagaProps<S, SubscriptionSet<S>> {
             saga_id: self.saga_id,
             store: self.store,
             producer: self.producer,
-            enqueue_policy: self.enqueue_policy.unwrap_or_else(default_enqueue_policy),
+            enqueue_policy: self
+                .enqueue_policy
+                .unwrap_or_else(dead_letter::default_enqueue_policy),
             upstream: Some(OwnedUpstream {
-                config: upstream_subscription::<S>(self.subscription.upstream_store),
+                config: saga_process::upstream_subscription::<S>(self.subscription.upstream_store),
                 cursor: self.subscription.cursor,
             }),
             crash_restart_factory: self.crash_restart_factory,

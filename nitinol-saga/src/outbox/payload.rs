@@ -1,7 +1,7 @@
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use nitinol_eventsource::{appending_system_event, SystemEvent};
+use nitinol_eventsource::SystemEvent;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
 
@@ -32,7 +32,7 @@ impl OutboxAppender {
                 .map(<[u8]>::to_vec),
             target: target.to_owned(),
         });
-        appending_system_event(sequence, &message, occurred_at)
+        nitinol_eventsource::appending_system_event(sequence, &message, occurred_at)
     }
 
     /// Append the durable `Ended` terminal marker at `sequence` on the saga's
@@ -48,7 +48,7 @@ impl OutboxAppender {
     ) -> bool {
         let now = jiff::Timestamp::now();
         let marker = OutboxEvent::Ended(Ended {});
-        let event = appending_system_event(sequence, &marker, now);
+        let event = nitinol_eventsource::appending_system_event(sequence, &marker, now);
         if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
             tracing::warn!(error = %e, "saga outbox ended marker append failed");
             return false;
@@ -74,7 +74,7 @@ impl OutboxAppender {
             TellOutcome::Acked => OutboxEvent::TellAcked(TellAcked { tell_id }),
             TellOutcome::Failed => OutboxEvent::TellFailed(TellFailed { tell_id }),
         };
-        let event = appending_system_event(sequence, &marker, now);
+        let event = nitinol_eventsource::appending_system_event(sequence, &marker, now);
         if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
             tracing::warn!(error = %e, ?outcome, "saga outbox terminal marker append failed");
             return false;

@@ -8,17 +8,13 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::process::{Process, ProcessProxy, Receive, SupervisionStrategy};
 use nitinol_runtime::{IdleTimeout, ProcessSystem, Props};
 
-use crate::dead_letter::{
-    default_enqueue_policy, make_dlq_child_spawn, DeadLetterEvent, DlqChildSpawn, EnqueuePolicy,
-};
+use crate::dead_letter::{self, DeadLetterEvent, DlqChildSpawn, EnqueuePolicy};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::process::manager::SagaManagerProcess;
 use crate::process::props::{SubscriptionSet, SubscriptionUnset};
 use crate::process::proxy::SagaManagerProxy;
-use crate::process::saga_process::{
-    upstream_subscription, CrashRestartFactory, DecodeFailureRouteFn, SagaProcess,
-};
+use crate::process::saga_process::{self, CrashRestartFactory, DecodeFailureRouteFn, SagaProcess};
 use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
 
@@ -180,7 +176,9 @@ impl<S: Saga, Sub> SagaManagerProps<S, Sub> {
     where
         P: Process + Receive<DeadLetterEvent, Response = ()> + 'static,
     {
-        self.dead_letter_subscriber = Some(make_dlq_child_spawn::<SagaProcess<S>, P>(subscriber));
+        self.dead_letter_subscriber = Some(dead_letter::make_dlq_child_spawn::<SagaProcess<S>, P>(
+            subscriber,
+        ));
         self
     }
 
@@ -238,11 +236,13 @@ impl<S: Saga> SagaManagerProps<S, SubscriptionSet<S>> {
         // manager writes to, so it keeps its own handle to it.
         let store_for_proxy = Arc::clone(&store);
         let producer = self.producer;
-        let upstream = upstream_subscription::<S>(self.subscription.upstream_store);
+        let upstream = saga_process::upstream_subscription::<S>(self.subscription.upstream_store);
         let cursor = self.subscription.cursor;
         let instance_idle_timeout = self.instance_idle_timeout;
         let scheduler = self.scheduler;
-        let enqueue_policy = self.enqueue_policy.unwrap_or_else(default_enqueue_policy);
+        let enqueue_policy = self
+            .enqueue_policy
+            .unwrap_or_else(dead_letter::default_enqueue_policy);
         let dead_letter_subscriber = self.dead_letter_subscriber;
         let crash_restart_factory = self.crash_restart_factory;
         let decode_failure_route_fn = self.decode_failure_route_fn;

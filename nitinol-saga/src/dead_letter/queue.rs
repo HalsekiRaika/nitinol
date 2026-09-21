@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use futures_util::TryStreamExt;
-use nitinol_eventsource::{appending_system_event, SystemEvent};
+use nitinol_eventsource::SystemEvent;
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
@@ -307,7 +307,7 @@ impl DeadLetterQueue {
                 self.store
                     .append(
                         self.saga_id.as_str(),
-                        vec![appending_system_event(
+                        vec![nitinol_eventsource::appending_system_event(
                             tail + 1,
                             &marker,
                             jiff::Timestamp::now(),

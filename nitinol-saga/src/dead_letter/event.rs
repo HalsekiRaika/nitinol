@@ -9,7 +9,7 @@ use std::borrow::Borrow;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use nitinol_eventsource::{appending_system_event, SystemEvent, SystemEventDecodeError};
+use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{reserved_event, AggregateId, EventType};
 
@@ -240,7 +240,7 @@ pub(crate) async fn append_dead_letter(
 ) -> bool {
     let candidate = *sequence + 1;
     let now = jiff::Timestamp::now();
-    let appending = appending_system_event(candidate, &event, now);
+    let appending = nitinol_eventsource::appending_system_event(candidate, &event, now);
     if let Err(e) = store.append(saga_id.borrow(), vec![appending]).await {
         tracing::warn!(error = %e, "saga dead letter append failed");
         return false;

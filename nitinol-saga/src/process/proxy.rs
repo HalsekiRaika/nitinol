@@ -13,7 +13,7 @@ use nitinol_runtime::process::ProcessProxy;
 
 use crate::dead_letter::DeadLetterQueue;
 use crate::id::SagaId;
-use crate::process::manager::{make_disposition_arbiter, SagaManagerProcess};
+use crate::process::manager::{self, SagaManagerProcess};
 use crate::process::saga_process::SagaProcess;
 use crate::saga::Saga;
 
@@ -121,7 +121,7 @@ impl<S: Saga> SagaManagerProxy<S> {
         DeadLetterQueue::arbitrated(
             Arc::clone(&self.store),
             saga_id,
-            make_disposition_arbiter(self.inner.clone()),
+            manager::make_disposition_arbiter(self.inner.clone()),
         )
     }
 }
