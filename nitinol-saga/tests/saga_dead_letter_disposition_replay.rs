@@ -24,9 +24,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::{
-    appending_system_event, system::EventSourceSystem, Event, SequenceCursor,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor, SystemEvent};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -146,11 +144,7 @@ async fn seed_dead_letter(store: &Arc<dyn EventStore>, saga_id: &SagaId, sequenc
     store
         .append(
             saga_id.as_str(),
-            vec![appending_system_event(
-                sequence,
-                &event,
-                jiff::Timestamp::now(),
-            )],
+            vec![event.appending(sequence, jiff::Timestamp::now())],
         )
         .await
         .expect("seeding a dead letter must succeed");

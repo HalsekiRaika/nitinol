@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{appending_system_event, Event, SequenceCursor, SystemEvent};
+use nitinol_eventsource::{Event, SequenceCursor, SystemEvent};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
@@ -373,11 +373,7 @@ async fn seed_dead_letter(store: &Arc<dyn EventStore>, saga_id: &SagaId, sequenc
     store
         .append(
             saga_id.as_str(),
-            vec![appending_system_event(
-                sequence,
-                &event,
-                jiff::Timestamp::now(),
-            )],
+            vec![event.appending(sequence, jiff::Timestamp::now())],
         )
         .await
         .expect("seeding a dead letter must succeed");

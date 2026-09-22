@@ -163,15 +163,6 @@ fn fold_loaded<S: Saga>(loaded: LoadedEvent, state: &mut S, journal: &mut Journa
     }
 }
 
-fn intent_of(state: Option<&TellState>) -> Option<TellIntent> {
-    match state {
-        Some(TellState::Pending(intent)) | Some(TellState::AppendFailed(intent)) => {
-            Some(intent.clone())
-        }
-        _ => None,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn redispatch_pending<S: Saga>(
     saga_id: &SagaId,
@@ -186,7 +177,11 @@ async fn redispatch_pending<S: Saga>(
 ) -> Result<Vec<u64>, ()> {
     let mut synthetic_failed: Vec<u64> = Vec::new();
     for (tell_id, pending_tell) in pending {
-        let resolved = if let Some(intent) = intent_of(tell_states.get(&tell_id)) {
+        let resolved = if let Some(intent) = tell_states
+            .get(&tell_id)
+            .and_then(TellState::intent)
+            .cloned()
+        {
             tracing::debug!(
                 tell_id,
                 "saga replay: supervised restart — re-dispatching pending tell"
@@ -311,7 +306,7 @@ mod tests {
     use nitinol_persistence::{LoadedEvent, TypeName};
     use nitinol_runtime::ProcessSystem;
 
-    use nitinol_eventsource::SystemEvent;
+    use nitinol_eventsource::{MatchesEventType, SystemEvent};
 
     use crate::outbox::{OutboxAppender, OutboxEvent};
     use crate::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
@@ -539,7 +534,7 @@ mod tests {
     fn count_outbox(events: &[LoadedEvent], pred: impl Fn(&OutboxEvent) -> bool) -> usize {
         events
             .iter()
-            .filter(|e| OutboxEvent::EVENT_TYPE == e.event_type)
+            .filter(|e| e.event_type.matches::<OutboxEvent>())
             .map(|e| {
                 OutboxEvent::decode(e.payload.as_ref())
                     .expect("an outbox row must carry a decodable outbox payload")

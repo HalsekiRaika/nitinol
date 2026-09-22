@@ -80,14 +80,15 @@ fn eventsource_feature_exposes_aggregate_and_projection() {
 // Feature: eventsource — SystemEvent system must NOT be exposed at umbrella root
 
 /// Regression guard: the umbrella facade (`pub mod eventsource`) must expose all
-/// user-facing root items and sub-modules, while deliberately NOT including
-/// `SystemEvent`, `appending_system_event`, or `SystemEventDecodeError`
-/// (excluded from the umbrella re-export).
+/// user-facing root items and sub-modules, while deliberately NOT including the
+/// framework-internal items — `SystemEvent`, `SystemEventDecodeError`,
+/// `DeclaresEventType`, `MatchesEventType` and `EventAppending` (excluded from
+/// the umbrella re-export).
 ///
 /// The test body is a compile-time check only: it passes if every import
 /// resolves successfully.  No runtime assertions are needed because the
-/// absence of the three framework-internal items is enforced structurally by
-/// the facade's explicit re-export list.
+/// absence of the framework-internal items is enforced structurally by the
+/// facade's explicit re-export list.
 #[cfg(feature = "eventsource")]
 #[test]
 fn eventsource_facade_exposes_user_api_without_system_event() {

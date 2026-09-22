@@ -143,11 +143,7 @@ impl<S: Saga> SagaManagerProcess<S> {
         self.store
             .append(
                 saga_id.as_str(),
-                vec![nitinol_eventsource::appending_system_event(
-                    tail + 1,
-                    &marker,
-                    jiff::Timestamp::now(),
-                )],
+                vec![marker.appending(tail + 1, jiff::Timestamp::now())],
             )
             .await?;
         report_system_event!(

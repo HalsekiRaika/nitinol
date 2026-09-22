@@ -122,4 +122,9 @@ pub use self::codec::Codec;
 pub use self::decider::Decider;
 pub use self::decision::{Accepting, Decision};
 pub use self::event::Event;
+// The declaration a stored `event_type` is matched against.  Hidden and not
+// re-exported through the umbrella crate: a domain type is covered by
+// declaring `Event`, and the framework's own records declare it by hand.
+#[doc(hidden)]
+pub use self::event::{DeclaresEventType, MatchesEventType};
 pub use self::query::Query;

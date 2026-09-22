@@ -5,17 +5,16 @@
 //! codec that declaration names is what reads it back — so the column names the
 //! declaration and the payload names the case.
 //!
-//! This file pins the boundary both traits meet the store at: the identity
-//! `appending_system_event` puts in `AppendingEvent.event_type`, and that the
-//! arms of an enum are told apart by their bytes rather than by their path.
+//! This file pins the boundary both traits meet the store at: the identity a
+//! `SystemEvent` puts in the row it builds for itself, and that the arms of an
+//! enum are told apart by their bytes rather than by their path.
 //!
 //! The counterpart for the user-facing persist path is
-//! `aggregate_process.rs::aggregate_persist_stores_the_declared_event_type_for_every_arm`.
+//! `aggregate_process.rs::aggregate_persist_stores_the_declared_event_type_for_every_arm`,
+//! and the row a user `Event` builds is pinned in `event_appending.rs`.
 
 use bytes::Bytes;
-use nitinol_eventsource::{
-    appending_system_event, codec::Codec, Event, SystemEvent, SystemEventDecodeError,
-};
+use nitinol_eventsource::{codec::Codec, Event, SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 // Event — the declaration names the path
@@ -167,16 +166,27 @@ impl SystemEvent for MarkerEnum {
     }
 }
 
-/// Given a struct `SystemEvent`, When an `AppendingEvent` is built for it, Then
-/// the row carries the declaration's identity.
+/// Given a struct `SystemEvent`, When it builds the row it is written down as,
+/// Then the row carries the declaration's identity, the position and instant it
+/// was given, and the marker's own bytes.
+///
+/// A `SystemEvent` owns its serialization, so nothing here can fail and the row
+/// is the answer rather than a `Result` — the one way this differs from the
+/// user-event side in `event_appending.rs`.
 #[test]
 fn appending_a_system_event_stores_the_declared_identity() {
     let occurred_at = jiff::Timestamp::from_second(0).expect("epoch must be valid");
 
-    let appending = appending_system_event(1, &Marker, occurred_at);
+    let appending = Marker.appending(1, occurred_at);
 
     assert_eq!(appending.event_type, Marker::EVENT_TYPE);
     assert_eq!(appending.sequence, 1);
+    assert_eq!(appending.occurred_at, occurred_at);
+    assert_eq!(
+        appending.payload,
+        Marker.encode(),
+        "the row must carry the marker's own bytes verbatim"
+    );
 }
 
 /// Given an enum `SystemEvent`, When rows are built for two different cases,
@@ -189,8 +199,8 @@ fn appending_a_system_event_stores_the_declared_identity() {
 fn every_case_of_an_enum_system_event_is_stored_under_the_one_declared_identity() {
     let occurred_at = jiff::Timestamp::from_second(0).expect("epoch must be valid");
 
-    let created = appending_system_event(1, &MarkerEnum::Created, occurred_at);
-    let retired = appending_system_event(2, &MarkerEnum::Retired, occurred_at);
+    let created = MarkerEnum::Created.appending(1, occurred_at);
+    let retired = MarkerEnum::Retired.appending(2, occurred_at);
 
     assert_eq!(created.event_type, MarkerEnum::EVENT_TYPE);
     assert_eq!(retired.event_type, MarkerEnum::EVENT_TYPE);

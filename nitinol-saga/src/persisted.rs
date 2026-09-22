@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use nitinol_eventsource::codec;
 use nitinol_eventsource::error::CodecError;
 use nitinol_eventsource::{Event, SystemEvent, SystemEventDecodeError};
@@ -12,8 +11,14 @@ pub(crate) enum SagaPersisted<E> {
     Domain(E),
     Outbox(OutboxEvent),
     Schedule(ScheduleEvent),
-    DeadLetter(DeadLetterEvent),
-    DeadLetterDisposition(DeadLetterDispositionEvent),
+    /// A dead letter the saga wrote onto its own stream.  The envelope names
+    /// the declaration without carrying the record: dead letters are an
+    /// observability side-channel reaching subscribers over their own path, so
+    /// nothing downstream of this envelope reads their content.
+    DeadLetter,
+    /// An operator's DLQ bookkeeping marker, named for the same reason and, as
+    /// with a dead letter, carried no further.
+    DeadLetterDisposition,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -31,27 +36,6 @@ pub(crate) enum SagaPersistedDecodeError {
 }
 
 impl<E: Event> SagaPersisted<E> {
-    /// The canonical path a row of this envelope's content carries.
-    pub(crate) fn event_type(&self) -> EventType {
-        match self {
-            SagaPersisted::Domain(_) => E::EVENT_TYPE,
-            SagaPersisted::Outbox(_) => OutboxEvent::EVENT_TYPE,
-            SagaPersisted::Schedule(_) => ScheduleEvent::EVENT_TYPE,
-            SagaPersisted::DeadLetter(_) => DeadLetterEvent::EVENT_TYPE,
-            SagaPersisted::DeadLetterDisposition(_) => DeadLetterDispositionEvent::EVENT_TYPE,
-        }
-    }
-
-    pub(crate) fn encode(&self) -> Result<Bytes, CodecError> {
-        match self {
-            SagaPersisted::Domain(event) => codec::encode::<E::Codec, E>(event),
-            SagaPersisted::Outbox(marker) => Ok(marker.encode()),
-            SagaPersisted::Schedule(marker) => Ok(marker.encode()),
-            SagaPersisted::DeadLetter(event) => Ok(event.encode()),
-            SagaPersisted::DeadLetterDisposition(marker) => Ok(marker.encode()),
-        }
-    }
-
     /// Read a stored row back as the content its declaration names.
     ///
     /// The four framework declarations
@@ -60,6 +44,11 @@ impl<E: Event> SagaPersisted<E> {
     /// those arms carries no meaning.  Every other path belongs to the domain
     /// and is handed to the user's own codec untouched — that catch-all is what
     /// keeps the envelope transparent to event types this crate never declared.
+    ///
+    /// The two dead-letter declarations are still decoded even though the
+    /// envelope keeps nothing from them: a row that does not decode is a
+    /// poisoned stream entry, and the caller reports it rather than passing it
+    /// off as sound.
     pub(crate) fn classify(
         event_type: EventType,
         payload: &[u8],
@@ -70,10 +59,10 @@ impl<E: Event> SagaPersisted<E> {
                 .map(SagaPersisted::Schedule)
                 .map_err(SagaPersistedDecodeError::Schedule),
             DeadLetterEvent::EVENT_TYPE => DeadLetterEvent::decode(payload)
-                .map(SagaPersisted::DeadLetter)
+                .map(|_| SagaPersisted::DeadLetter)
                 .map_err(SagaPersistedDecodeError::DeadLetter),
             DeadLetterDispositionEvent::EVENT_TYPE => DeadLetterDispositionEvent::decode(payload)
-                .map(SagaPersisted::DeadLetterDisposition)
+                .map(|_| SagaPersisted::DeadLetterDisposition)
                 .map_err(SagaPersistedDecodeError::DeadLetterDisposition),
             _ => Ok(SagaPersisted::Domain(codec::decode::<E::Codec, E>(
                 payload,
@@ -85,6 +74,7 @@ impl<E: Event> SagaPersisted<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use nitinol_eventsource::codec::Codec;
     use nitinol_persistence::{Family, TypeName};
     use serde::{Deserialize, Serialize};
@@ -175,7 +165,7 @@ mod tests {
         };
 
         match SagaPersisted::<DomainEvt>::classify(DeadLetterEvent::EVENT_TYPE, &record.encode()) {
-            Ok(SagaPersisted::DeadLetter(decoded)) => assert_eq!(decoded.seq, 3),
+            Ok(SagaPersisted::DeadLetter) => {}
             _ => panic!("a dead-letter path must classify as DeadLetter"),
         }
     }
@@ -191,32 +181,9 @@ mod tests {
             DeadLetterDispositionEvent::EVENT_TYPE,
             &marker.encode(),
         ) {
-            Ok(SagaPersisted::DeadLetterDisposition(decoded)) => {
-                assert_eq!(decoded.dead_letter_sequence, 3);
-            }
+            Ok(SagaPersisted::DeadLetterDisposition) => {}
             _ => panic!("a disposition path must classify as DeadLetterDisposition"),
         }
-    }
-
-    #[test]
-    fn encode_is_transparent_for_domain_events() {
-        let event = DomainEvt {
-            note: "raw".to_owned(),
-        };
-        let via_envelope = SagaPersisted::Domain(event.clone())
-            .encode()
-            .expect("envelope encode");
-        let direct = <JsonCodec as Codec<DomainEvt>>::encode(&event).expect("direct encode");
-
-        assert_eq!(
-            via_envelope, direct,
-            "the envelope must return the inner codec bytes verbatim (no double-encode)"
-        );
-        assert_eq!(
-            SagaPersisted::Domain(event).event_type(),
-            DomainEvt::EVENT_TYPE,
-            "the envelope must expose the inner event's own wire identity"
-        );
     }
 
     #[test]

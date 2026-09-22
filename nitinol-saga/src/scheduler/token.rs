@@ -29,3 +29,14 @@ pub struct ScheduleToken {
     pub saga_id: SagaId,
     pub name: TimerName,
 }
+
+impl ScheduleToken {
+    /// The handle addressing `name` within `saga_id`.
+    ///
+    /// Registration, cancellation, firing and replay all address the same
+    /// timer, so the pair is settled here rather than paired again at each of
+    /// them.
+    pub fn new(saga_id: SagaId, name: TimerName) -> Self {
+        Self { saga_id, name }
+    }
+}

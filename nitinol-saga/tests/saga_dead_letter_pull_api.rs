@@ -29,7 +29,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 
-use nitinol_eventsource::{appending_system_event, SystemEvent};
+use nitinol_eventsource::SystemEvent;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -73,11 +73,7 @@ async fn seed_dead_letter(
     store
         .append(
             saga_id.as_str(),
-            vec![appending_system_event(
-                sequence,
-                &event,
-                jiff::Timestamp::now(),
-            )],
+            vec![event.appending(sequence, jiff::Timestamp::now())],
         )
         .await
         .expect("seeding a dead letter must succeed");

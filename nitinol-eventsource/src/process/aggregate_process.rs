@@ -5,9 +5,10 @@ use futures_util::StreamExt;
 use nitinol_contract::{Aggregate, Decider, Decision, Event, Query};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
+use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
+use crate::appending::EventAppending;
 use crate::codec;
 use crate::error::{AskHandlerError, CodecError, ExecHandlerError, PersistError};
 use crate::process::snapshot_persistor::SnapshotPersistorProxy;
@@ -388,14 +389,11 @@ impl<A: Aggregate> AggregateProcess<A> {
         let mut appending = Vec::with_capacity(events.len());
         for event in &events {
             next_sequence += 1;
-            let payload = codec::encode::<<A::Event as Event>::Codec, A::Event>(event)
-                .map_err(PersistError::Codec)?;
-            appending.push(AppendingEvent {
-                sequence: next_sequence,
-                event_type: <A::Event as Event>::EVENT_TYPE,
-                payload,
-                occurred_at: jiff::Timestamp::now(),
-            });
+            appending.push(
+                event
+                    .appending(next_sequence, jiff::Timestamp::now())
+                    .map_err(PersistError::Codec)?,
+            );
         }
 
         match self

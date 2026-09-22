@@ -132,8 +132,9 @@ pub enum ExecError<E: std::error::Error + Send + Sync + 'static> {
 
 /// Internal error produced by `AggregateProcess::recv` for command messages.
 ///
-/// Mapped variant-for-variant to `AskError<R>` by `AggregateProxy`, which adds
-/// only the failures it can observe itself.
+/// Carried to the caller as [`AskError`], variant for variant, by the `From`
+/// below; the failures the reference boundary can observe itself are the ones
+/// that conversion adds.
 #[derive(Debug, thiserror::Error)]
 pub enum AskHandlerError<R: std::error::Error + Send + Sync + 'static> {
     #[error("rejection: {0}")]
@@ -146,11 +147,60 @@ pub enum AskHandlerError<R: std::error::Error + Send + Sync + 'static> {
 
 /// Internal error produced by `AggregateProcess::recv` for query messages.
 ///
-/// Mapped to `ExecError<E>` by `AggregateProxy`.
+/// Carried to the caller as [`ExecError`] by the `From` below.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecHandlerError<E: std::error::Error + Send + Sync + 'static> {
     #[error("domain error: {0}")]
     Domain(E),
+}
+
+/// What an activation's answer to a command becomes at the reference boundary.
+///
+/// The handler's verdict keeps its meaning, and every way the dispatch could
+/// fail to arrive collapses to [`AskError::Send`]: nothing was decided, because
+/// the command reached no aggregate that could judge it. Which way it failed to
+/// arrive is the runtime's to report; what this layer says is only that no
+/// verdict exists.
+impl<R> From<nitinol_runtime::error::AskError<AskHandlerError<R>>> for AskError<R>
+where
+    R: std::error::Error + Send + Sync + 'static,
+{
+    fn from(e: nitinol_runtime::error::AskError<AskHandlerError<R>>) -> Self {
+        match e {
+            nitinol_runtime::error::AskError::Handler(h) => match h {
+                AskHandlerError::Rejection(r) => AskError::Rejection(r),
+                AskHandlerError::AlreadyCreated => AskError::AlreadyCreated,
+                AskHandlerError::Persist(e) => AskError::Persist(e),
+            },
+            nitinol_runtime::error::AskError::DeadLetter { .. }
+            | nitinol_runtime::error::AskError::ReplyDropped
+            | nitinol_runtime::error::AskError::Timeout { .. } => {
+                AskError::Send(nitinol_runtime::error::SendError)
+            }
+        }
+    }
+}
+
+/// What an activation's answer to a query becomes at the reference boundary.
+///
+/// The query surface's counterpart of the conversion above, and the same
+/// reading of an undelivered dispatch.
+impl<E> From<nitinol_runtime::error::AskError<ExecHandlerError<E>>> for ExecError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn from(e: nitinol_runtime::error::AskError<ExecHandlerError<E>>) -> Self {
+        match e {
+            nitinol_runtime::error::AskError::Handler(h) => match h {
+                ExecHandlerError::Domain(e) => ExecError::Domain(e),
+            },
+            nitinol_runtime::error::AskError::DeadLetter { .. }
+            | nitinol_runtime::error::AskError::ReplyDropped
+            | nitinol_runtime::error::AskError::Timeout { .. } => {
+                ExecError::Send(nitinol_runtime::error::SendError)
+            }
+        }
+    }
 }
 
 /// Internal error produced by `ProjectorProcess::recv` when an event's

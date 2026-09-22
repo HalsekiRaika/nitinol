@@ -53,9 +53,9 @@ pub mod contract {
 /// Facade for the `eventsource` feature.
 ///
 /// Re-exports all user-facing APIs from `nitinol-eventsource`.
-/// Framework-internal types (`SystemEvent`, `appending_system_event`,
-/// `SystemEventDecodeError`) are intentionally excluded so they are not
-/// discoverable through the umbrella entry point.
+/// Framework-internal types (`SystemEvent`, `SystemEventDecodeError`,
+/// `DeclaresEventType`, `MatchesEventType`, `EventAppending`) are intentionally
+/// excluded so they are not discoverable through the umbrella entry point.
 /// Direct consumers of `nitinol-eventsource` can still reach them.
 ///
 /// # Visibility contract — `error` sub-module

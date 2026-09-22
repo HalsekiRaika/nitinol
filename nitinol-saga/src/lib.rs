@@ -73,8 +73,8 @@
 //!   persisted in the saga's own event stream (`SagaPersisted::Schedule`) and
 //!   re-registered on restart (at-least-once delivery; handlers must be idempotent).
 //! - Dead-letter queue (DLQ): each saga failure kind is persisted as a
-//!   `SagaPersisted::DeadLetter(`[`DeadLetterEvent`]`)` on the saga's own
-//!   EventStore stream, mixed into the same envelope as domain events.
+//!   [`DeadLetterEvent`] on the saga's own EventStore stream, mixed into the
+//!   same envelope as domain events.
 //!   `TellFailed` and `PersistFailed` exhaust staged retry before being enqueued;
 //!   `HandleFailed`, `DecodeFailed`, `EndedSagaReceivedMessage`,
 //!   `ScheduledFailed`, and `TellFailedHookFailed` are enqueued immediately.

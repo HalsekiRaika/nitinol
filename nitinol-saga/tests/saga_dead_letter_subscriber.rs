@@ -28,9 +28,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::{
-    appending_system_event, system::EventSourceSystem, Event, SequenceCursor,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor, SystemEvent};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
@@ -295,7 +293,7 @@ async fn dead_letter_subscriber_catchup_delivers_pre_existing_dead_letters() {
         occurred_at_unix_millis: 0,
         source: SourceContext::without_upstream(),
     };
-    let appending = appending_system_event(1, &pre_existing, jiff::Timestamp::now());
+    let appending = pre_existing.appending(1, jiff::Timestamp::now());
     saga_store
         .append(saga_id.as_str(), vec![appending])
         .await
@@ -379,7 +377,7 @@ async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
         occurred_at_unix_millis: 0,
         source: SourceContext::without_upstream(),
     };
-    let appending = appending_system_event(1, &pre_existing, jiff::Timestamp::now());
+    let appending = pre_existing.appending(1, jiff::Timestamp::now());
     saga_store
         .append(saga_id.as_str(), vec![appending])
         .await
@@ -511,7 +509,7 @@ async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
     saga_store_a
         .append(
             saga_id_a.as_str(),
-            vec![appending_system_event(1, &pre_a, jiff::Timestamp::now())],
+            vec![pre_a.appending(1, jiff::Timestamp::now())],
         )
         .await
         .expect("pre-append to saga A must succeed");
@@ -531,7 +529,7 @@ async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
     saga_store_b
         .append(
             saga_id_b.as_str(),
-            vec![appending_system_event(1, &pre_b, jiff::Timestamp::now())],
+            vec![pre_b.appending(1, jiff::Timestamp::now())],
         )
         .await
         .expect("pre-append to saga B must succeed");

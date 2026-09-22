@@ -219,13 +219,14 @@ impl SystemEvent for DeadLetterEvent {
     }
 }
 
-/// Is `event_type` the dead-letter record's own declaration?
-///
-/// `nitinol.saga.dead_letter` is a sibling of `nitinol.saga.outbox` and
-/// `nitinol.saga.schedule`, and a declaration answers for its own path alone,
-/// so the classifications never overlap.
-pub(crate) fn is_dead_letter_event_type(event_type: EventType) -> bool {
-    event_type == DEAD_LETTER_MARKER
+// A stored identity is matched against this record the same way it is matched
+// against a domain event.  Written out by hand because the blanket that covers
+// every `Event` cannot reach a `SystemEvent`: the two traits are independent
+// and nothing implements both, which is also why this does not conflict with
+// it.  The trait is named by path rather than imported so `EVENT_TYPE` in this
+// module keeps resolving to the one `SystemEvent` states.
+impl nitinol_eventsource::DeclaresEventType for DeadLetterEvent {
+    const EVENT_TYPE: EventType = <Self as SystemEvent>::EVENT_TYPE;
 }
 
 /// Append a single dead-letter event at `*sequence + 1`, advancing `*sequence`
@@ -240,7 +241,7 @@ pub(crate) async fn append_dead_letter(
 ) -> bool {
     let candidate = *sequence + 1;
     let now = jiff::Timestamp::now();
-    let appending = nitinol_eventsource::appending_system_event(candidate, &event, now);
+    let appending = event.appending(candidate, now);
     if let Err(e) = store.append(saga_id.borrow(), vec![appending]).await {
         tracing::warn!(error = %e, "saga dead letter append failed");
         return false;
@@ -260,9 +261,6 @@ pub(crate) async fn append_dead_letter(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use nitinol_persistence::__private::reserved_family;
-    use nitinol_persistence::TypeName;
 
     use crate::dead_letter::disposition::DEAD_LETTER_DISPOSITION_MARKER;
 
@@ -386,19 +384,6 @@ mod tests {
             },
             Err(e) => panic!("decode failed: {e}"),
         }
-    }
-
-    #[test]
-    fn is_dead_letter_event_type_accepts_the_declaration_but_not_its_siblings() {
-        assert!(is_dead_letter_event_type(DEAD_LETTER_MARKER));
-        assert!(!is_dead_letter_event_type(EventType::new(
-            reserved_family("nitinol.saga"),
-            TypeName::new("outbox"),
-        )));
-        assert!(!is_dead_letter_event_type(EventType::new(
-            reserved_family("nitinol.saga"),
-            TypeName::new("schedule"),
-        )));
     }
 
     /// `DeadLetterQueue::list` selects dead letters by the dead-letter path as a

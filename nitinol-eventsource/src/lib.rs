@@ -68,6 +68,7 @@
 //! design — is the operator's judgement; this crate emits the events and draws
 //! no conclusion from them.
 
+mod appending;
 pub mod codec;
 mod durable_stream;
 mod system_event;
@@ -88,7 +89,16 @@ pub use nitinol_contract::{Accepting, Aggregate, Decider, Decision, Event, Query
 #[doc(hidden)]
 pub use self::error::SystemEventDecodeError;
 #[doc(hidden)]
-pub use self::system_event::{appending_system_event, SystemEvent};
+pub use self::system_event::SystemEvent;
+
+// Matching a stored identity against the type that declared it, and building
+// the row a user event is written down as.  Both are framework-internal: they
+// are defined in terms of `Event` / `SystemEvent` rather than adding anything a
+// domain has to declare.
+#[doc(hidden)]
+pub use self::appending::EventAppending;
+#[doc(hidden)]
+pub use nitinol_contract::{DeclaresEventType, MatchesEventType};
 
 pub use self::error::{AskError, ExecError, Retryability, TellError};
 pub use self::process::{AggregateProps, AggregateProxy, AggregateTellTarget};

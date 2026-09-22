@@ -87,7 +87,7 @@ impl JournalState {
             // anything the saga did.  Their stream positions are still observed
             // ([`Self::observe_sequence`]), so a marker at the tail cannot
             // desynchronise the saga's next append.
-            SagaPersisted::DeadLetter(_) | SagaPersisted::DeadLetterDisposition(_) => {}
+            SagaPersisted::DeadLetter | SagaPersisted::DeadLetterDisposition => {}
         }
         None
     }
@@ -164,9 +164,6 @@ mod tests {
 
     use super::*;
 
-    use crate::dead_letter::{
-        DeadLetterDispositionEvent, DeadLetterEvent, Disposition, SagaFailure, SourceContext,
-    };
     use crate::id::SagaId;
     use crate::outbox::{
         Ended, OutboxEvent, Scheduled as OutboxScheduled, TellAcked, TellFailed, TellRequested,
@@ -243,18 +240,6 @@ mod tests {
         SagaPersisted::Schedule(ScheduleEvent::Fired {
             token: token(name),
             fired_at_unix_millis: 0,
-        })
-    }
-
-    fn dead_letter() -> SagaPersisted<DomainEvt> {
-        SagaPersisted::DeadLetter(DeadLetterEvent {
-            seq: 1,
-            saga_id: saga_id(),
-            failure: SagaFailure::HandleFailed {
-                error: "injected".to_owned(),
-            },
-            occurred_at_unix_millis: 0,
-            source: SourceContext::without_upstream(),
         })
     }
 
@@ -426,7 +411,7 @@ mod tests {
     fn dead_letter_is_not_folded_into_the_journal() {
         let mut journal = JournalState::new(0);
 
-        let handed_back = journal.fold(dead_letter());
+        let handed_back = journal.fold(SagaPersisted::<DomainEvt>::DeadLetter);
 
         assert!(
             handed_back.is_none(),
@@ -442,34 +427,27 @@ mod tests {
     }
 
     /// The DLQ pull API appends its markers onto the saga's **own** stream, so
-    /// replay folds them.  Neither arm may contribute a journal fact — an
-    /// `evicted` marker mistaken for termination would leave the saga looking
-    /// `ended` and silently deaf to upstream events.
+    /// replay folds them.  A disposition may not contribute a journal fact — one
+    /// mistaken for termination would leave the saga looking `ended` and
+    /// silently deaf to upstream events.
     #[test]
     fn a_dead_letter_disposition_is_not_folded_into_the_journal() {
-        for disposition in [Disposition::Processed, Disposition::Evicted] {
-            let mut journal = JournalState::new(0);
+        let mut journal = JournalState::new(0);
 
-            let handed_back = journal.fold(SagaPersisted::<DomainEvt>::DeadLetterDisposition(
-                DeadLetterDispositionEvent {
-                    dead_letter_sequence: 1,
-                    disposition,
-                },
-            ));
+        let handed_back = journal.fold(SagaPersisted::<DomainEvt>::DeadLetterDisposition);
 
-            assert!(
-                handed_back.is_none(),
-                "a disposition marker is an operator's DLQ bookkeeping, not a \
-                 domain event to apply"
-            );
-            assert!(
-                journal.pending_tells.is_empty()
-                    && journal.failed_tell_ids.is_empty()
-                    && journal.active_schedules.is_empty()
-                    && !journal.ended,
-                "a disposition marker must leave the projection untouched"
-            );
-        }
+        assert!(
+            handed_back.is_none(),
+            "a disposition marker is an operator's DLQ bookkeeping, not a \
+             domain event to apply"
+        );
+        assert!(
+            journal.pending_tells.is_empty()
+                && journal.failed_tell_ids.is_empty()
+                && journal.active_schedules.is_empty()
+                && !journal.ended,
+            "a disposition marker must leave the projection untouched"
+        );
     }
 
     #[test]

@@ -135,10 +135,33 @@ pub(crate) enum TellState {
     Failed,
 }
 
+impl TellState {
+    /// The intent this tell can still be re-dispatched from, if any.
+    ///
+    /// A tell that is pending and one whose terminal marker failed to append
+    /// both still hold what they were told to send; a failed one has given it
+    /// up, so there is nothing to re-dispatch.
+    pub(crate) fn intent(&self) -> Option<&TellIntent> {
+        match self {
+            TellState::Pending(intent) | TellState::AppendFailed(intent) => Some(intent),
+            TellState::Failed => None,
+        }
+    }
+
+    /// Is this tell still out, with its outcome unknown?
+    ///
+    /// Only `Pending` is: `AppendFailed` and `Failed` have both reached their
+    /// outcome, and what is left of them is a marker to write rather than a
+    /// delivery to wait for.
+    pub(crate) fn is_in_flight(&self) -> bool {
+        matches!(self, TellState::Pending(_))
+    }
+}
+
 pub(crate) fn in_flight_count(tell_states: &HashMap<u64, TellState>) -> usize {
     tell_states
         .values()
-        .filter(|state| matches!(state, TellState::Pending(_)))
+        .filter(|state| state.is_in_flight())
         .count()
 }
 
@@ -844,10 +867,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         // Best-effort once: an append failure is tolerated (at-least-once
         // delivery permits a replay re-fire).
         let fired_event = ScheduleEvent::Fired {
-            token: ScheduleToken {
-                saga_id: self.saga_id.clone(),
-                name,
-            },
+            token: ScheduleToken::new(self.saga_id.clone(), name),
             fired_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
         };
         scheduler::append_schedule_marker(
@@ -975,11 +995,7 @@ impl<S: Saga> Receive<RecordDisposition> for SagaProcess<S> {
         // No lifecycle guard: a dead letter left behind by a saga that has
         // since ended still has to be settleable.
         let candidate = self.sequence + 1;
-        let appending = nitinol_eventsource::appending_system_event(
-            candidate,
-            &msg.marker,
-            jiff::Timestamp::now(),
-        );
+        let appending = msg.marker.appending(candidate, jiff::Timestamp::now());
         match self
             .store
             .append(self.saga_id.as_str(), vec![appending])
@@ -1061,6 +1077,130 @@ mod tests {
             > = Box::pin(futures_util::stream::empty());
             Ok(stream)
         }
+    }
+
+    use nitinol_eventsource::codec::Codec;
+    use nitinol_eventsource::test_helpers::MockAggregateProxy;
+    use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
+    use nitinol_persistence::{EventType, Family, TypeName};
+
+    #[derive(Clone)]
+    struct Noted;
+
+    struct UnitCodec;
+
+    impl Codec<Noted> for UnitCodec {
+        type Error = std::convert::Infallible;
+
+        fn encode(_: &Noted) -> Result<Bytes, Self::Error> {
+            Ok(Bytes::new())
+        }
+
+        fn decode(_: &[u8]) -> Result<Noted, Self::Error> {
+            Ok(Noted)
+        }
+    }
+
+    impl Event for Noted {
+        const EVENT_TYPE: EventType = EventType::new(
+            Family::new("saga_process_unit_test"),
+            TypeName::new("Noted"),
+        );
+
+        type Codec = UnitCodec;
+    }
+
+    #[derive(Default)]
+    struct NotingAggregate;
+
+    impl Aggregate for NotingAggregate {
+        type Event = Noted;
+
+        fn apply(&mut self, _event: Noted) {}
+    }
+
+    #[derive(Clone)]
+    struct Note;
+
+    impl Decider<Note> for NotingAggregate {
+        type Output = ();
+        type Rejection = std::convert::Infallible;
+
+        fn decide(&self, _cmd: Note) -> Decision<Noted, (), Self::Rejection> {
+            Decision::persist(Vec::new()).output(())
+        }
+    }
+
+    /// A tell to hold in a [`TellState`].  What it would send is immaterial
+    /// here: these tests read which states still hold one.
+    fn intent() -> TellIntent {
+        TellIntent::new::<NotingAggregate, Note, _>(
+            MockAggregateProxy::<NotingAggregate>::new(),
+            Note,
+        )
+    }
+
+    /// Given each state a tell can be in, When it is asked for the intent it
+    /// can be re-dispatched from, Then the two states that still hold one
+    /// answer with it and the one that has given it up answers with nothing.
+    ///
+    /// A tell whose terminal marker failed to append is still a tell that was
+    /// sent, so replay re-dispatches it; a failed one has already been recorded
+    /// as failed, and re-sending it would repeat a delivery the stream says is
+    /// over.
+    #[test]
+    fn only_a_tell_that_still_holds_its_intent_answers_with_one() {
+        assert!(
+            TellState::Pending(intent()).intent().is_some(),
+            "a pending tell must still offer the intent it is waiting on"
+        );
+        assert!(
+            TellState::AppendFailed(intent()).intent().is_some(),
+            "a tell whose terminal marker did not land must still offer its intent"
+        );
+        assert!(
+            TellState::Failed.intent().is_none(),
+            "a failed tell has no intent left to re-dispatch"
+        );
+    }
+
+    /// Given each state a tell can be in, When it is asked whether it is still
+    /// in flight, Then only the pending one is.
+    ///
+    /// This is what a draining saga waits on before it stops, so counting a
+    /// tell that has already reached its outcome would keep the saga alive
+    /// with nothing left to wait for.
+    #[test]
+    fn only_a_pending_tell_is_in_flight() {
+        assert!(
+            TellState::Pending(intent()).is_in_flight(),
+            "a pending tell is out with its outcome unknown"
+        );
+        assert!(
+            !TellState::AppendFailed(intent()).is_in_flight(),
+            "a tell whose outcome is known is not in flight, marker or no marker"
+        );
+        assert!(
+            !TellState::Failed.is_in_flight(),
+            "a failed tell has reached its outcome"
+        );
+    }
+
+    /// The count a draining saga reads is the number of pending tells, and
+    /// nothing else in the registry contributes to it.
+    #[test]
+    fn in_flight_count_counts_the_pending_tells_alone() {
+        let mut tell_states = HashMap::new();
+        tell_states.insert(1, TellState::Pending(intent()));
+        tell_states.insert(2, TellState::AppendFailed(intent()));
+        tell_states.insert(3, TellState::Failed);
+        tell_states.insert(4, TellState::Pending(intent()));
+
+        assert_eq!(
+            in_flight_count(&tell_states),
+            2,
+            "two of the four tells are pending, so two are in flight"
+        );
     }
 
     #[tokio::test]

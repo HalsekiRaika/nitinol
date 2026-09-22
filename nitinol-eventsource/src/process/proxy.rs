@@ -3,11 +3,8 @@ use std::sync::{Arc, Mutex};
 use nitinol_contract::{Aggregate, Decider, Query};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::error::AskError as RuntimeAskError;
 
-use crate::error::{
-    AskError, AskHandlerError, ExecError, ExecHandlerError, PersistError, TellError,
-};
+use crate::error::{AskError, ExecError, PersistError, TellError};
 use crate::process::aggregate_process::{AskCmd, ExecMsg, TellCmd};
 use crate::process::resolve::{AggregateResolver, Incarnation};
 
@@ -135,7 +132,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
         let incarnation = self.incarnation().await;
-        let outcome = incarnation.ask(AskCmd(cmd)).await.map_err(map_ask_error);
+        let outcome = incarnation.ask(AskCmd(cmd)).await.map_err(AskError::from);
         if signals_stopped_activation(&outcome) {
             self.invalidate(&incarnation);
         }
@@ -183,7 +180,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         <A as Query<M>>::Error: std::error::Error + Send + Sync + 'static,
     {
         let incarnation = self.incarnation().await;
-        let outcome = incarnation.ask(ExecMsg(msg)).await.map_err(map_exec_error);
+        let outcome = incarnation.ask(ExecMsg(msg)).await.map_err(ExecError::from);
         if matches!(outcome, Err(ExecError::Send(_))) {
             self.invalidate(&incarnation);
         }
@@ -264,36 +261,4 @@ where
                 AppendError::SequenceConflict(_)
             )))
     )
-}
-
-// Error mappers
-
-fn map_ask_error<R>(e: RuntimeAskError<AskHandlerError<R>>) -> AskError<R>
-where
-    R: std::error::Error + Send + Sync + 'static,
-{
-    match e {
-        RuntimeAskError::Handler(h) => match h {
-            AskHandlerError::Rejection(r) => AskError::Rejection(r),
-            AskHandlerError::AlreadyCreated => AskError::AlreadyCreated,
-            AskHandlerError::Persist(e) => AskError::Persist(e),
-        },
-        RuntimeAskError::DeadLetter { .. }
-        | RuntimeAskError::ReplyDropped
-        | RuntimeAskError::Timeout { .. } => AskError::Send(nitinol_runtime::error::SendError),
-    }
-}
-
-fn map_exec_error<E>(e: RuntimeAskError<ExecHandlerError<E>>) -> ExecError<E>
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    match e {
-        RuntimeAskError::Handler(h) => match h {
-            ExecHandlerError::Domain(e) => ExecError::Domain(e),
-        },
-        RuntimeAskError::DeadLetter { .. }
-        | RuntimeAskError::ReplyDropped
-        | RuntimeAskError::Timeout { .. } => ExecError::Send(nitinol_runtime::error::SendError),
-    }
 }

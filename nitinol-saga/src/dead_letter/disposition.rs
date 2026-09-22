@@ -116,6 +116,16 @@ impl SystemEvent for DeadLetterDispositionEvent {
     }
 }
 
+// A stored identity is matched against this record the same way it is matched
+// against a domain event.  Written out by hand because the blanket that covers
+// every `Event` cannot reach a `SystemEvent`: the two traits are independent
+// and nothing implements both, which is also why this does not conflict with
+// it.  The trait is named by path rather than imported so `EVENT_TYPE` in this
+// module keeps resolving to the one `SystemEvent` states.
+impl nitinol_eventsource::DeclaresEventType for DeadLetterDispositionEvent {
+    const EVENT_TYPE: EventType = <Self as SystemEvent>::EVENT_TYPE;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

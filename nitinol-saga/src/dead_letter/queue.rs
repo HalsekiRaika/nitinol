@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use futures_util::TryStreamExt;
-use nitinol_eventsource::SystemEvent;
+use nitinol_eventsource::{MatchesEventType, SystemEvent};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
@@ -33,7 +33,7 @@ use crate::id::SagaId;
 use crate::observability::report_system_event;
 
 use super::disposition::{DeadLetterDispositionEvent, Disposition, DEAD_LETTER_DISPOSITION_MARKER};
-use super::event::{is_dead_letter_event_type, DeadLetterEvent, DEAD_LETTER_MARKER};
+use super::event::{DeadLetterEvent, DEAD_LETTER_MARKER};
 use super::settle::{DispositionArbiter, SettleError};
 
 /// A settle that did not happen, told the way the operator asked the question.
@@ -281,7 +281,7 @@ impl DeadLetterQueue {
         let mut tail = 0;
         for loaded in &stream {
             tail = tail.max(loaded.sequence);
-            if loaded.sequence == sequence && is_dead_letter_event_type(loaded.event_type) {
+            if loaded.sequence == sequence && loaded.event_type.matches::<DeadLetterEvent>() {
                 settles_a_dead_letter = true;
             }
         }
@@ -307,11 +307,7 @@ impl DeadLetterQueue {
                 self.store
                     .append(
                         self.saga_id.as_str(),
-                        vec![nitinol_eventsource::appending_system_event(
-                            tail + 1,
-                            &marker,
-                            jiff::Timestamp::now(),
-                        )],
+                        vec![marker.appending(tail + 1, jiff::Timestamp::now())],
                     )
                     .await?;
                 report_system_event!(

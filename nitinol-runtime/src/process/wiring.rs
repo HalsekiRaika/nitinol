@@ -6,14 +6,11 @@
 //! logic.  This module holds the single implementation; both context types
 //! delegate to it so that a change to watch semantics only needs to land once.
 
-use std::any::TypeId;
-
 use tokio::sync::mpsc;
 
 use crate::error::SendError;
 use crate::ident::Pid;
 use crate::process::dead_letter::{DeadLetterEnvelope, DeadLetterProxy};
-use crate::process::message::BoxedMessage;
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
 use crate::process::watch::{TerminatedReason, WatchRequest};
@@ -64,16 +61,15 @@ async fn deliver_not_found(
 ) {
     match dead_letter {
         Some(dl) => {
-            let envelope = DeadLetterEnvelope {
-                destination: target_pid,
-                message: BoxedMessage::new(WatchRequest {
+            let envelope = DeadLetterEnvelope::new(
+                WatchRequest {
                     watched: target_pid,
                     watcher: watcher_pid,
-                }),
-                sender: Some(watcher_pid),
-                suppress_log: true,
-                message_type_id: TypeId::of::<WatchRequest>(),
-            };
+                },
+                target_pid,
+                Some(watcher_pid),
+                true,
+            );
             dl.send(envelope).await;
         }
         None => {

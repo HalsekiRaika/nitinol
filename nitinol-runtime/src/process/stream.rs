@@ -2,7 +2,6 @@ mod stream_props;
 
 pub use self::stream_props::StreamProps;
 
-use std::any::TypeId;
 use std::collections::HashMap;
 use std::future::Future;
 
@@ -106,13 +105,12 @@ where
         for dispatcher in self.subscribers.values() {
             if dispatcher.dispatch(msg.0.clone()).await.is_err() {
                 if let Some(ref dl) = ctx.dead_letter {
-                    let envelope = DeadLetterEnvelope {
-                        destination: dispatcher.pid(),
-                        message: BoxedMessage::new(msg.0.clone()),
-                        sender: Some(ctx.pid()),
-                        suppress_log: dead_letter::suppress_log::<T>(),
-                        message_type_id: TypeId::of::<T>(),
-                    };
+                    let envelope = DeadLetterEnvelope::new(
+                        msg.0.clone(),
+                        dispatcher.pid(),
+                        Some(ctx.pid()),
+                        dead_letter::suppress_log::<T>(),
+                    );
                     dl.send(envelope).await;
                 }
             }

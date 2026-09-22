@@ -4,11 +4,10 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use futures_core::future::BoxFuture;
-use nitinol_eventsource::SystemEvent;
+use nitinol_eventsource::{EventAppending, SystemEvent};
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{AppendingEvent, EventType};
+use nitinol_persistence::AppendingEvent;
 use nitinol_runtime::process::ProcessContext;
 
 use crate::dead_letter::{self, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext};
@@ -16,7 +15,6 @@ use crate::effect::{ScheduleSpec, TellIntent};
 use crate::id::SagaId;
 use crate::observability::report_system_event;
 use crate::outbox::{OutboxAppender, OutboxEvent, RetryPolicy, TELL_REQUESTED_ARM};
-use crate::persisted::SagaPersisted;
 use crate::process::outbox_executor;
 use crate::process::saga_process::{self, Lifecycle, SagaProcess, TellState};
 use crate::saga::Saga;
@@ -119,10 +117,7 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
 /// (single append, sequence advances only on success) and cancel the pending
 /// timer with the resident scheduler.
 async fn cancel_schedule<S: Saga>(name: TimerName, ictx: &mut InterpreterCtx<'_, S>) {
-    let token = ScheduleToken {
-        saga_id: ictx.saga_id.clone(),
-        name: name.clone(),
-    };
+    let token = ScheduleToken::new(ictx.saga_id.clone(), name.clone());
     let event = ScheduleEvent::Cancelled {
         token,
         cancelled_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
@@ -156,20 +151,14 @@ async fn persist_batch<S: Saga>(
         return InterpretOutcome::Continue;
     }
 
-    let persisted: Vec<SagaPersisted<S::Event>> =
-        events.into_iter().map(SagaPersisted::Domain).collect();
-
-    let encoded_events = match encode_events::<S>(&persisted) {
-        Some(payloads) => payloads,
-        None => return InterpretOutcome::Continue,
-    };
-
     let now = jiff::Timestamp::now();
     let mut next_seq = *ictx.sequence;
 
     let mut appending: Vec<AppendingEvent> =
-        Vec::with_capacity(encoded_events.len() + tells.len() + schedules.len());
-    append_user_events(&mut appending, encoded_events, &mut next_seq, now);
+        Vec::with_capacity(events.len() + tells.len() + schedules.len());
+    if !append_user_events::<S>(&mut appending, &events, &mut next_seq, now) {
+        return InterpretOutcome::Continue;
+    }
     let tell_ids = append_tell_requested(&mut appending, &tells, &mut next_seq, now);
     let registrations = append_schedule_specs(
         &mut appending,
@@ -239,16 +228,8 @@ async fn persist_batch<S: Saga>(
 
     *ictx.sequence = next_seq;
 
-    for persisted_event in persisted {
-        match persisted_event {
-            SagaPersisted::Domain(event) => ictx.state.apply(event),
-            SagaPersisted::Outbox(_)
-            | SagaPersisted::Schedule(_)
-            | SagaPersisted::DeadLetter(_)
-            | SagaPersisted::DeadLetterDisposition(_) => {
-                unreachable!("persist_batch enqueues only Domain events into the envelope")
-            }
-        }
+    for event in events {
+        ictx.state.apply(event);
     }
 
     // The schedule markers of this batch are durable now, so what they record
@@ -300,35 +281,31 @@ async fn persist_batch<S: Saga>(
     InterpretOutcome::Continue
 }
 
-fn encode_events<S: Saga>(events: &[SagaPersisted<S::Event>]) -> Option<Vec<(EventType, Bytes)>> {
-    let mut encoded = Vec::with_capacity(events.len());
+/// Add the row each of the saga's own events is written down as to the batch.
+///
+/// Answers `false` when a codec refused one of them, having reported it. The
+/// batch is atomic, so a refusal anywhere in it means none of it is written:
+/// the caller abandons the batch before reaching the store, leaving the saga's
+/// sequence where it was.
+fn append_user_events<S: Saga>(
+    appending: &mut Vec<AppendingEvent>,
+    events: &[S::Event],
+    next_seq: &mut u64,
+    now: jiff::Timestamp,
+) -> bool {
     for event in events {
-        match event.encode() {
-            Ok(payload) => encoded.push((event.event_type(), payload)),
+        match event.appending(*next_seq + 1, now) {
+            Ok(row) => {
+                *next_seq += 1;
+                appending.push(row);
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "saga event encode failed; skipping persist batch");
-                return None;
+                return false;
             }
         }
     }
-    Some(encoded)
-}
-
-fn append_user_events(
-    appending: &mut Vec<AppendingEvent>,
-    encoded: Vec<(EventType, Bytes)>,
-    next_seq: &mut u64,
-    now: jiff::Timestamp,
-) {
-    for (event_type, payload) in encoded {
-        *next_seq += 1;
-        appending.push(AppendingEvent {
-            sequence: *next_seq,
-            event_type,
-            payload,
-            occurred_at: now,
-        });
-    }
+    true
 }
 
 fn append_tell_requested(
@@ -378,19 +355,14 @@ fn append_schedule_specs(
     let mut registrations = Vec::with_capacity(schedules.len());
     for spec in schedules {
         *next_seq += 1;
-        let token = ScheduleToken {
-            saga_id: saga_id.clone(),
-            name: spec.name.clone(),
-        };
+        let token = ScheduleToken::new(saga_id.clone(), spec.name.clone());
         let event = ScheduleEvent::Scheduled {
             token,
             after: spec.after,
             payload: spec.payload.clone(),
             scheduled_at_unix_millis,
         };
-        appending.push(nitinol_eventsource::appending_system_event(
-            *next_seq, &event, now,
-        ));
+        appending.push(event.appending(*next_seq, now));
         registrations.push(PendingRegistration {
             name: spec.name.clone(),
             after: spec.after,

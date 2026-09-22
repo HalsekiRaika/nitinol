@@ -1,8 +1,7 @@
-//! Saga DLQ: each saga failure kind, when it occurs, must be
-//! enqueued as a `SagaPersisted::DeadLetter(DeadLetterEvent)` on the saga's
-//! **own** EventStore stream, written on the wire under the reserved
-//! type `nitinol.saga.dead_letter`, with the failure kind carried by the
-//! payload the record holds:
+//! Saga DLQ: each saga failure kind, when it occurs, must be enqueued as a
+//! `DeadLetterEvent` on the saga's **own** EventStore stream, written on the
+//! wire under the reserved type `nitinol.saga.dead_letter`, with the failure
+//! kind carried by the payload the record holds:
 //!
 //! | SagaFailure                | payload `oneof` arm             | timing        |
 //! |----------------------------|---------------------------------|---------------|

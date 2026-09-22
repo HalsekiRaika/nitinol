@@ -24,13 +24,13 @@
 use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
-use nitinol_eventsource::{DurableSubscription, SequenceCursor, SystemEvent};
+use nitinol_eventsource::{DurableSubscription, MatchesEventType, SequenceCursor, SystemEvent};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadedEvent;
 use nitinol_runtime::ident::{Pid, ProcessName};
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
 
-use crate::dead_letter::event::{is_dead_letter_event_type, DeadLetterEvent};
+use crate::dead_letter::event::DeadLetterEvent;
 use crate::id::SagaId;
 
 /// Object-safe interface for spawning the DLQ direct-poller as a **child** of
@@ -109,7 +109,7 @@ where
 /// Decode only dead-letter events off the saga stream; skip everything else
 /// (domain / outbox / schedule) so the subscriber sees dead letters alone.
 fn dead_letter_transform(loaded: LoadedEvent) -> Option<DeadLetterEvent> {
-    if !is_dead_letter_event_type(loaded.event_type) {
+    if !loaded.event_type.matches::<DeadLetterEvent>() {
         return None;
     }
     match DeadLetterEvent::decode(&loaded.payload) {

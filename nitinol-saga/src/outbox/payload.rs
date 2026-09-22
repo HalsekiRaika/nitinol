@@ -32,7 +32,7 @@ impl OutboxAppender {
                 .map(<[u8]>::to_vec),
             target: target.to_owned(),
         });
-        nitinol_eventsource::appending_system_event(sequence, &message, occurred_at)
+        message.appending(sequence, occurred_at)
     }
 
     /// Append the durable `Ended` terminal marker at `sequence` on the saga's
@@ -48,7 +48,7 @@ impl OutboxAppender {
     ) -> bool {
         let now = jiff::Timestamp::now();
         let marker = OutboxEvent::Ended(Ended {});
-        let event = nitinol_eventsource::appending_system_event(sequence, &marker, now);
+        let event = marker.appending(sequence, now);
         if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
             tracing::warn!(error = %e, "saga outbox ended marker append failed");
             return false;
@@ -74,7 +74,7 @@ impl OutboxAppender {
             TellOutcome::Acked => OutboxEvent::TellAcked(TellAcked { tell_id }),
             TellOutcome::Failed => OutboxEvent::TellFailed(TellFailed { tell_id }),
         };
-        let event = nitinol_eventsource::appending_system_event(sequence, &marker, now);
+        let event = marker.appending(sequence, now);
         if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
             tracing::warn!(error = %e, ?outcome, "saga outbox terminal marker append failed");
             return false;
@@ -97,6 +97,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures_core::Stream;
+    use nitinol_eventsource::MatchesEventType;
     use nitinol_persistence::error::{AppendError, LoadError};
     use nitinol_persistence::store::EventStream;
     use nitinol_persistence::AppendOutcome;
@@ -106,7 +107,7 @@ mod tests {
         let event =
             OutboxAppender::build_tell_requested(1, 42, Some(&[]), "", jiff::Timestamp::UNIX_EPOCH);
         assert!(
-            event.event_type == OutboxEvent::EVENT_TYPE,
+            event.event_type.matches::<OutboxEvent>(),
             "build_tell_requested must write the outbox declaration's event type"
         );
         match OutboxEvent::decode(&event.payload) {

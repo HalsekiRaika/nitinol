@@ -7,9 +7,15 @@
 //! owns its serialization: there is no user codec involved, so the replay path
 //! can decode the markers without going through `Saga::Event`'s codec.
 //!
-//! The two traits are deliberately independent — there is no shared super-trait
-//! — and `SystemEvent` is hidden from documentation so consumers are not
-//! tempted to implement it.
+//! The two traits are deliberately independent — neither is a super-trait of
+//! the other — and `SystemEvent` is hidden from documentation so consumers are
+//! not tempted to implement it.  What the two do share is that each states the
+//! one [`EventType`] its rows carry, and that shared statement is what
+//! [`DeclaresEventType`](nitinol_contract::DeclaresEventType) names, so one
+//! match against a stored identity answers for both families.  Each
+//! implementor of `SystemEvent` declares it by hand: the blanket that covers
+//! every [`crate::Event`] does not reach a framework record, precisely because
+//! no framework record is one.
 
 use bytes::Bytes;
 use jiff::Timestamp;
@@ -35,23 +41,25 @@ pub trait SystemEvent: Sized {
     fn encode(&self) -> Bytes;
 
     fn decode(payload: &[u8]) -> Result<Self, SystemEventDecodeError>;
-}
 
-/// Build an [`AppendingEvent`] for a [`SystemEvent`].
-///
-/// Centralises construction of framework marker events so every write goes
-/// through a single, named operation instead of assembling `AppendingEvent`
-/// literals at each call site.
-#[doc(hidden)]
-pub fn appending_system_event<E: SystemEvent>(
-    sequence: u64,
-    event: &E,
-    occurred_at: Timestamp,
-) -> AppendingEvent {
-    AppendingEvent {
-        sequence,
-        event_type: E::EVENT_TYPE,
-        payload: event.encode(),
-        occurred_at,
+    /// The row this record is written down as, at `sequence` and `occurred_at`.
+    ///
+    /// Everything else the row carries is settled by the record itself — the
+    /// identity it declares and the bytes it writes — so it builds its own row
+    /// rather than the row being assembled again at each place a marker is
+    /// appended.  `sequence` and `occurred_at` are the machine's coordinates
+    /// and stay the caller's: only the caller knows the position it holds on
+    /// the stream.
+    ///
+    /// Nothing here can fail: a `SystemEvent` owns its serialization.  The
+    /// user-event counterpart, [`EventAppending`](crate::EventAppending), goes
+    /// through a codec that can refuse, and answers with a `Result`.
+    fn appending(&self, sequence: u64, occurred_at: Timestamp) -> AppendingEvent {
+        AppendingEvent {
+            sequence,
+            event_type: Self::EVENT_TYPE,
+            payload: self.encode(),
+            occurred_at,
+        }
     }
 }

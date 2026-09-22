@@ -3,8 +3,8 @@ syntax = "proto3";
 package nitinol.saga.dead_letter_disposition;
 
 // Marker recording that an operator settled one dead letter through the DLQ
-// pull API.  Persisted on the saga's own EventStore stream as
-// `SagaPersisted::DeadLetterDisposition(DeadLetterDispositionEvent)`.
+// pull API.  Persisted on the saga's own EventStore stream, classified back as
+// `SagaPersisted::DeadLetterDisposition`.
 //
 // The reserved event type `nitinol.saga.dead_letter_disposition` is a sibling
 // of `nitinol.saga.dead_letter`, not a variant inside it, so the dead-letter

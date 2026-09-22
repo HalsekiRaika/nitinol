@@ -124,17 +124,17 @@ impl SystemEvent for ScheduleEvent {
             .map_err(SystemEventDecodeError::new)?;
         match marker.kind {
             Some(Kind::Scheduled(m)) => Ok(ScheduleEvent::Scheduled {
-                token: token_of(m.saga_id, m.name),
+                token: ScheduleToken::new(SagaId::new(m.saga_id), TimerName::new(m.name)),
                 after: Duration::from_nanos(m.after_nanos),
                 payload: Bytes::from(m.payload),
                 scheduled_at_unix_millis: m.scheduled_at_unix_millis,
             }),
             Some(Kind::Cancelled(m)) => Ok(ScheduleEvent::Cancelled {
-                token: token_of(m.saga_id, m.name),
+                token: ScheduleToken::new(SagaId::new(m.saga_id), TimerName::new(m.name)),
                 cancelled_at_unix_millis: m.cancelled_at_unix_millis,
             }),
             Some(Kind::Fired(m)) => Ok(ScheduleEvent::Fired {
-                token: token_of(m.saga_id, m.name),
+                token: ScheduleToken::new(SagaId::new(m.saga_id), TimerName::new(m.name)),
                 fired_at_unix_millis: m.fired_at_unix_millis,
             }),
             None => Err(SystemEventDecodeError::new(MissingScheduleKind)),
@@ -142,11 +142,14 @@ impl SystemEvent for ScheduleEvent {
     }
 }
 
-fn token_of(saga_id: String, name: String) -> ScheduleToken {
-    ScheduleToken {
-        saga_id: SagaId::new(saga_id),
-        name: TimerName::new(name),
-    }
+// A stored identity is matched against this record the same way it is matched
+// against a domain event.  Written out by hand because the blanket that covers
+// every `Event` cannot reach a `SystemEvent`: the two traits are independent
+// and nothing implements both, which is also why this does not conflict with
+// it.  The trait is named by path rather than imported so `EVENT_TYPE` in this
+// module keeps resolving to the one `SystemEvent` states.
+impl nitinol_eventsource::DeclaresEventType for ScheduleEvent {
+    const EVENT_TYPE: EventType = <Self as SystemEvent>::EVENT_TYPE;
 }
 
 /// Append a single schedule marker at `*sequence + 1`, advancing `*sequence`
@@ -161,7 +164,7 @@ pub(crate) async fn append_schedule_marker(
     occurred_at: jiff::Timestamp,
 ) -> bool {
     let candidate = *sequence + 1;
-    let appending = nitinol_eventsource::appending_system_event(candidate, &event, occurred_at);
+    let appending = event.appending(candidate, occurred_at);
     if let Err(e) = store.append(saga_id.borrow(), vec![appending]).await {
         tracing::warn!(error = %e, "saga schedule marker append failed");
         return false;
