@@ -55,6 +55,18 @@ pub enum DeliveryMode {
     /// event for redelivery. A failed `commit` is read as uncommitted — see the
     /// `TxProvider` trait in `nitinol-eventsource` for why that reading is the
     /// safe one and what it costs.
+    ///
+    /// **What this guarantees, and what it does not.** The guarantee above
+    /// holds for a single consumer per [`ProjectionId`] — one process, or one
+    /// holding an exclusive claim on that projection, driving it. A projector
+    /// loads its checkpoint once at startup and judges each event against the
+    /// copy it holds in memory from then on, so two projectors starting from
+    /// the same stored checkpoint each read the same event as unprocessed and
+    /// can each commit: atomicity with its own checkpoint stops neither.
+    /// Acquiring and revalidating the right to process a projection, and
+    /// ordering events between concurrent projectors sharing a
+    /// `projection_id`, are out of scope here and remain a future design
+    /// target.
     ExactlyOnce,
 }
 

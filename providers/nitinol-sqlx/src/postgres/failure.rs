@@ -1,15 +1,17 @@
 //! What can go wrong inside the store, and what each failure means to a caller.
 //!
-//! Every fallible step of an append or a load answers with the one error below,
-//! so a step reports what went wrong without also deciding what it amounts to.
-//! Reaching the contract's own errors happens here, in one place per error: a
-//! refusal the caller is expected to see is told apart from a fault in the
-//! store the same way wherever in an append the database raised it.
+//! Every fallible step of an append, a load or a checkpoint save answers with
+//! the one error below, so a step reports what went wrong without also deciding
+//! what it amounts to. Reaching the contract's own errors happens here, in one
+//! place per error: a refusal the caller is expected to see is told apart from
+//! a fault in the store the same way wherever in an append the database raised
+//! it.
 
 use std::num::TryFromIntError;
 
-use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::error::{AppendError, CheckpointError, LoadError};
 
+use super::checkpoint::CheckpointConflict;
 use super::load::UnknownEventType;
 use super::numbering::OutOfRange;
 use super::timestamp::InstantOutOfRange;
@@ -42,6 +44,8 @@ pub(super) enum Failure {
     /// counts in.
     #[error(transparent)]
     LimitPastBigint(#[from] TryFromIntError),
+    #[error(transparent)]
+    CheckpointConflict(#[from] CheckpointConflict),
 }
 
 impl Failure {
@@ -58,6 +62,7 @@ impl Failure {
             Self::UnknownEventType(cause) => Box::new(cause),
             Self::Timestamp(cause) => Box::new(cause),
             Self::LimitPastBigint(cause) => Box::new(cause),
+            Self::CheckpointConflict(cause) => Box::new(cause),
         }
     }
 }
@@ -71,6 +76,15 @@ impl From<Failure> for AppendError {
 }
 
 impl From<Failure> for LoadError {
+    fn from(failure: Failure) -> Self {
+        Self::Backend(failure.into_cause())
+    }
+}
+
+/// `CheckpointError` names no conflict of its own, so a refused save reaches
+/// its caller as the backend cause `CheckpointConflict` already is — the same
+/// way `UnknownEventType` reaches a caller reading into a failed load.
+impl From<Failure> for CheckpointError {
     fn from(failure: Failure) -> Self {
         Self::Backend(failure.into_cause())
     }

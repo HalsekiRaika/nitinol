@@ -35,6 +35,13 @@ time = { version = "0.3", optional = true }
 
 [dev-dependencies]
 nitinol-store-conformance = { path = "../../nitinol-store-conformance" }
+# The ExactlyOnce acceptance criteria are about a projector running against this
+# provider's checkpoint store, so judging them needs the interpreter that drives
+# `begin → project → checkpoint save → commit` and the runtime it spawns in.
+# Both are dev-dependencies only: a provider that depended on the interpreter
+# for its own compilation would invert the layering this workspace keeps.
+nitinol-eventsource = { path = "../../nitinol-eventsource" }
+nitinol-runtime = { path = "../../nitinol-runtime" }
 # The contract tests declare their event types the way a user's crate does —
 # by placing entries in the collection slice. `#[derive(Event)]` writes that
 # for a user, but the derive lives behind the umbrella crate, which this
@@ -42,7 +49,10 @@ nitinol-store-conformance = { path = "../../nitinol-store-conformance" }
 linkme = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# `sync` and `time` are what the checkpoint clauses need: a rendezvous that
+# puts two writers on one row at the same moment, and a deadline on every wait
+# so a rule that never released a lock fails the run instead of hanging it.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 # Pinned exactly rather than by caret: both crates break their API across patch
 # ranges of their own dependency on each other, and a resolver free to move

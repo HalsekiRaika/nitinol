@@ -142,14 +142,32 @@ impl PostgresBackend {
     /// A store holding nothing: a schema of its own, migrated, over a pool of
     /// its own.
     pub async fn bring_up_store(&self) -> Arc<dyn EventStore> {
+        let schema = self.migrated_schema().await;
+        let store = PostgresEventStore::new(schema.pool())
+            .expect("the event types this test binary linked claim distinct canonical paths");
+        Arc::new(store) as Arc<dyn EventStore>
+    }
+
+    /// A migrated schema holding nothing, for a clause that puts more than one
+    /// thing over it.
+    ///
+    /// `bring_up_store` answers with an `EventStore` and nothing else, which is
+    /// the whole of what a clause about the journal needs. A clause about
+    /// checkpoints needs the journal, the checkpoint table and a read model of
+    /// its own to be the *same* database — otherwise the transaction it is
+    /// about does not span them — so what it is handed is the schema rather
+    /// than one store over it.
+    pub async fn migrated_schema(&self) -> MigratedSchema {
         let schema = self.create_schema().await;
-        let pool = self.pool_on(&schema).await;
+        let pool = pool_on(&self.url, &schema).await;
         PostgresEventStore::migrate(&pool)
             .await
             .expect("the provider's migrations must apply to a database it has reached");
-        let store = PostgresEventStore::new(pool)
-            .expect("the event types this test binary linked claim distinct canonical paths");
-        Arc::new(store) as Arc<dyn EventStore>
+        MigratedSchema {
+            url: self.url.clone(),
+            schema,
+            pool,
+        }
     }
 
     /// A schema no other store in this run writes to.
@@ -172,22 +190,50 @@ impl PostgresBackend {
             .expect("the database this run reached must allow a schema of its own");
         schema
     }
+}
 
-    async fn pool_on(&self, schema: &str) -> PgPool {
-        let schema = schema.to_owned();
-        PgPoolOptions::new()
-            .max_connections(POOL_CONNECTIONS)
-            .after_connect(move |connection, _| {
-                let search_path = format!("SET search_path TO {schema}");
-                Box::pin(async move {
-                    connection.execute(AssertSqlSafe(search_path)).await?;
-                    Ok(())
-                })
-            })
-            .connect(&self.url)
-            .await
-            .expect("the database this run reached must accept a pool of connections")
+/// A migrated schema, and the way back to it for a caller that needs a second
+/// set of connections onto the same rows.
+pub struct MigratedSchema {
+    url: String,
+    schema: String,
+    pool: PgPool,
+}
+
+impl MigratedSchema {
+    /// The pool this schema was migrated over.
+    ///
+    /// A `PgPool` is a handle onto a shared set of connections, so what comes
+    /// back holds the same ones rather than opening more.
+    pub fn pool(&self) -> PgPool {
+        self.pool.clone()
     }
+
+    /// A pool of its own onto the same schema.
+    ///
+    /// What a clause about two projectors over one database needs: writers
+    /// whose transactions are held on connections neither borrowed from the
+    /// other, so a writer waiting on a row the other holds is waiting on the
+    /// row and not on a connection being handed back.
+    pub async fn separate_pool(&self) -> PgPool {
+        pool_on(&self.url, &self.schema).await
+    }
+}
+
+async fn pool_on(url: &str, schema: &str) -> PgPool {
+    let schema = schema.to_owned();
+    PgPoolOptions::new()
+        .max_connections(POOL_CONNECTIONS)
+        .after_connect(move |connection, _| {
+            let search_path = format!("SET search_path TO {schema}");
+            Box::pin(async move {
+                connection.execute(AssertSqlSafe(search_path)).await?;
+                Ok(())
+            })
+        })
+        .connect(url)
+        .await
+        .expect("the database this run reached must accept a pool of connections")
 }
 
 impl StoreUnderTest for PostgresBackend {
