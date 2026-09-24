@@ -8,7 +8,7 @@
 //!     Then each one carries the instant it was appended with, held at the
 //!          resolution the column has — never the moment the row was written
 //!
-//!   Scenario: 手動登録なしで round-trip できる
+//!   Scenario: a round-trip with nothing registered by hand
 //!     Given events of every shape an event type has, declared to the
 //!          collection and nowhere else
 //!     When a store opened with `PostgresEventStore::new(pool)` appends and

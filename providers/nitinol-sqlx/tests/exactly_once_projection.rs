@@ -2,32 +2,35 @@
 //! it.
 //!
 //! ```gherkin
-//! Feature: CheckpointStore (Postgres) と ExactlyOnce projection
+//! Feature: CheckpointStore (Postgres) and ExactlyOnce projection
 //!
-//!   Scenario: 再配信下の増分型read modelの一貫性
-//!     Given ExactlyOnce + TxProvider構成のprojectorと増分型read model
-//!     When 同一イベントが再配信される
-//!     Then read modelへの適用は1回だけである
-//!     And checkpointはread model更新と同一トランザクションで進んでいる
+//!   Scenario: an incremental read model under redelivery
+//!     Given a projector wired for ExactlyOnce with a TxProvider, and an
+//!           incremental read model
+//!     When the same event is redelivered
+//!     Then the read model is applied to once and no more
+//!     And the checkpoint moved in the same transaction as the read-model
+//!         update
 //!
-//!   Scenario: 途中失敗のロールバック
-//!     Given ExactlyOnce + TxProvider構成のprojector
-//!     When projectまたはcheckpoint保存が失敗する
-//!     Then トランザクションはrollbackされる
-//!     And checkpointは進まず、イベントは処理済みにならない
+//!   Scenario: a rollback on a failure partway through
+//!     Given a projector wired for ExactlyOnce with a TxProvider
+//!     When project, or the checkpoint save, fails
+//!     Then the transaction is rolled back
+//!     And the checkpoint does not move, and the event is not treated as
+//!         handled
 //!
-//!   Scenario: 並行projectorの二重適用の防止（防御の検証）
-//!     Given 独立した2つのProcessSystemが同一projection_id・同一DBを使い、
-//!           双方が同じ古いcheckpointを保持した状態
-//!     When 双方が同じイベントを適用しようとする
-//!     Then read modelが更新されるのは1回だけである
-//!     And 敗れた側は観測可能なエラーとしてrollbackされる
+//!   Scenario: concurrent projectors kept from applying twice (the defence)
+//!     Given two independent ProcessSystems over one projection_id and one
+//!           database, both holding the same stale checkpoint
+//!     When both try to apply the same event
+//!     Then the read model is updated once and no more
+//!     And the one that lost is rolled back as an error that can be observed
 //!
-//!   Scenario: checkpoint未作成からの二重開始
-//!     Given checkpointレコードが存在しないprojection_idに対して、
-//!           2つのprojectorが同時に初回処理を行う
-//!     Then read modelが更新されるのは1回だけであり、
-//!          敗れた側は観測可能なエラーとしてrollbackされる
+//!   Scenario: two starting where no checkpoint has been written yet
+//!     Given a projection_id with no checkpoint record, and two projectors
+//!           doing their first work at the same time
+//!     Then the read model is updated once and no more, and the one that lost
+//!          is rolled back as an error that can be observed
 //! ```
 //!
 //! The read model is a counter, which is the shape that cannot absorb a second
@@ -166,8 +169,8 @@ enum ProjectionFailed {
     Intentional,
     /// ExactlyOnce delivery owes `project` the transaction the checkpoint save
     /// will ride. Without it the read-model update would land on a connection
-    /// of its own, and "checkpoint と read model が同一トランザクションで進む"
-    /// would be a claim nothing held up.
+    /// of its own, and "the checkpoint and the read model move in one
+    /// transaction" would be a claim nothing held up.
     #[error("ExactlyOnce delivery must hand project() the transaction to write in")]
     NoTransaction,
 }
@@ -367,7 +370,7 @@ async fn stopped<P: Process>(system: &ProcessSystem, proxy: &ProcessProxy<P>) {
         .expect("a projector that was told to stop must leave the runtime's registry");
 }
 
-/// Acceptance: "再配信下の増分型read modelの一貫性".
+/// Acceptance: "an incremental read model under redelivery".
 ///
 /// A projector restarted on the same `projection_id` is handed the checkpoint
 /// the first one left, so the event it already applied is not delivered to it
@@ -481,7 +484,8 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     );
 }
 
-/// Acceptance: "途中失敗のロールバック", where `project` is what fails.
+/// Acceptance: "a rollback on a failure partway through", where `project` is
+/// what fails.
 ///
 /// The read-model update and the checkpoint move together or not at all, so a
 /// `project` that wrote the read model and then failed must leave both where
@@ -572,8 +576,8 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_checkpoint_where_the
     );
 }
 
-/// Acceptance: "途中失敗のロールバック", where the checkpoint save is what
-/// fails.
+/// Acceptance: "a rollback on a failure partway through", where the checkpoint
+/// save is what fails.
 ///
 /// The checkpoint is carried past the event while the projector is already
 /// running, which is what another consumer of the same projection would do.
@@ -652,7 +656,7 @@ async fn a_refused_checkpoint_save_rolls_the_read_model_update_back() {
     );
 }
 
-/// Acceptance: "並行projectorの二重適用の防止（防御の検証）".
+/// Acceptance: "concurrent projectors kept from applying twice (the defence)".
 ///
 /// Two `ProcessSystem`s, two pools, one database, one `projection_id`, and both
 /// projectors holding the same checkpoint the moment they reach the same event.
@@ -788,7 +792,7 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
     );
 }
 
-/// Acceptance: "checkpoint未作成からの二重開始".
+/// Acceptance: "two starting where no checkpoint has been written yet".
 ///
 /// The same defence where the projection has no checkpoint row yet: the two
 /// projectors are racing to write the first one rather than to carry an

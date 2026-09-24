@@ -2,7 +2,8 @@
 //! `with_codec` step, no codec typestate to step through, and no type-erased
 //! codec handle to pass around.
 //!
-//! This is the acceptance scenario "codec 注入 API は存在しない". An API that no
+//! This is the acceptance scenario "the codec injection API does not exist".
+//! An API that no
 //! longer exists cannot be called, so each half of the contract is observed by
 //! letting a downstream definition claim the name or the method, following the
 //! idiom `nitinol-saga/tests/saga_snapshot_type_removed.rs` established:

@@ -1,4 +1,5 @@
-//! Acceptance scenario "tokio 非依存の契約層 / tokio-free 構成での利用":
+//! Acceptance scenario "a contract layer that does not depend on tokio / use
+//! in a tokio-free configuration":
 //! with `nitinol = { features = ["contract"] }` alone, `#[derive(Event)]`,
 //! `Aggregate`, `Snapshotable`, `Decider` and `Query` must be usable and
 //! behave as specified.

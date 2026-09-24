@@ -1,7 +1,8 @@
 //! A snapshot is written and read through the codec its aggregate names, and
 //! the snapshot persistor is wired without being handed one.
 //!
-//! This is the acceptance scenario "スナップショットも型レベル束縛で動く". The
+//! This is the acceptance scenario "snapshots too run on the type-level
+//! binding". The
 //! framework itself only ever *restores* a snapshot — capturing and saving one
 //! is the caller's decision and the caller's call — so the two directions are
 //! observed at the two places they actually happen:

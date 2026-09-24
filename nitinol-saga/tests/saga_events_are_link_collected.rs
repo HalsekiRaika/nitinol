@@ -1,7 +1,7 @@
 //! The saga's own records are collected the same way a user's events are.
 //!
 //! ```gherkin
-//!   Scenario: saga + Postgres が動く (the half that needs no database)
+//!   Scenario: saga + Postgres works (the half that needs no database)
 //!     Given a binary that links nitinol-saga
 //!     When a registry is built from what was linked
 //!     Then every canonical path a saga journals resolves, so a load of that

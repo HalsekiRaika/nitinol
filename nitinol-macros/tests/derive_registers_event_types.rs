@@ -1,7 +1,8 @@
 //! What `#[derive(Event)]` places in the collection slice.
 //!
 //! ```gherkin
-//!   Scenario: 手動登録なしで round-trip できる (the half that needs no database)
+//!   Scenario: a round-trip with nothing registered by hand (the half that
+//!             needs no database)
 //!     Given #[derive(Event)] types — a struct, and an enum
 //!     When a registry is built from what this binary linked
 //!     Then each type's canonical path resolves, with nothing registered by hand

@@ -1,7 +1,7 @@
 use nitinol_persistence::store::{CheckpointStore, InMemoryCheckpointStore};
 use nitinol_persistence::ProjectionId;
 
-/// save した checkpoint を load で取得でき、値が一致する
+/// A saved checkpoint is returned by load, with the same value.
 #[tokio::test]
 async fn save_and_load_checkpoint_roundtrip() {
     // Given: an empty store and one projection
@@ -19,7 +19,7 @@ async fn save_and_load_checkpoint_roundtrip() {
     assert_eq!(loaded, Some(42));
 }
 
-/// 同一 Projection に複数回 save した場合、最後の値で上書きされる（後勝ち）
+/// Several saves against one Projection leave the last value (last writer wins).
 #[tokio::test]
 async fn multiple_saves_update_checkpoint_to_latest_value() {
     // Given: an empty store
@@ -46,7 +46,7 @@ async fn multiple_saves_update_checkpoint_to_latest_value() {
     assert_eq!(loaded, Some(30));
 }
 
-/// 未保存 Projection への load は Ok(None) を返す（エラーにならない）
+/// load for an unsaved Projection returns Ok(None), and is not an error.
 #[tokio::test]
 async fn load_for_unknown_projection_returns_none() {
     // Given: an empty store
@@ -63,7 +63,7 @@ async fn load_for_unknown_projection_returns_none() {
     assert!(result.is_none());
 }
 
-/// tx: None を渡しても正常に動作する（InMemory は TX を使わない）
+/// Handing tx: None works as usual — InMemory uses no transaction.
 #[tokio::test]
 async fn save_with_none_tx_succeeds() {
     // Given: an empty store

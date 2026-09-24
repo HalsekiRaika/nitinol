@@ -3,10 +3,10 @@
 //! ```gherkin
 //! Feature: nitinol-sqlx CheckpointStore (Postgres)
 //!
-//!   Scenario: tx外の単独保存
-//!     Given txを渡さないcheckpoint保存
-//!     When saveを呼ぶ
-//!     Then checkpointが永続化される
+//!   Scenario: a save on its own, outside any transaction
+//!     Given a checkpoint save that is handed no transaction
+//!     When save is called
+//!     Then the checkpoint is persisted
 //!
 //!   Scenario: a save that does not carry the checkpoint forward is refused
 //!     Given a checkpoint a projection has already reached
@@ -94,7 +94,7 @@ async fn a_projection_nothing_has_saved_for_has_no_checkpoint() {
     );
 }
 
-/// Acceptance: "tx外の単独保存".
+/// Acceptance: "a save on its own, outside any transaction".
 #[tokio::test]
 async fn a_save_that_was_handed_no_transaction_persists_the_checkpoint() {
     let Some(backend) = harness::postgres_backend().await else {

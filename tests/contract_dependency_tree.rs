@@ -1,4 +1,5 @@
-//! Acceptance scenario "tokio 非依存の契約層": the normal dependency tree of
+//! Acceptance scenario "a contract layer that does not depend on tokio": the
+//! normal dependency tree of
 //! `nitinol = { features = ["contract"] }` must not contain `tokio` or
 //! `nitinol-runtime`.
 //!

@@ -1,4 +1,5 @@
-//! Acceptance scenario "既存利用者の互換維持": moving the contract traits into
+//! Acceptance scenario "existing users keep compatibility": moving the
+//! contract traits into
 //! `nitinol-contract` must keep `nitinol::eventsource::{Event, Aggregate,
 //! Snapshotable}` denoting the *same* trait items as `nitinol::contract::{...}`,
 //! not look-alike wrappers.

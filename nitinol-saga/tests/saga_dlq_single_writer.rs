@@ -379,7 +379,8 @@ async fn seed_dead_letter(store: &Arc<dyn EventStore>, saga_id: &SagaId, sequenc
         .expect("seeding a dead letter must succeed");
 }
 
-// Test 1 — the resident case: Rule "運用操作が常駐 saga を止めない", scenario 1
+// Test 1 — the resident case: Rule "an operator's action does not stop a
+// resident saga", scenario 1
 
 /// Given a resident saga whose stream already carries a dead letter,
 /// When an operator marks it processed through the manager's queue,
@@ -488,7 +489,8 @@ async fn resident_saga_keeps_appending_after_an_operator_settles_its_dead_letter
     );
 }
 
-// Test 2 — the dormant case: Rule "運用操作が常駐 saga を止めない", scenario 2
+// Test 2 — the dormant case: Rule "an operator's action does not stop a
+// resident saga", scenario 2
 
 /// Given a saga with a dead letter and no resident instance,
 /// When an operator evicts it through the manager's queue,

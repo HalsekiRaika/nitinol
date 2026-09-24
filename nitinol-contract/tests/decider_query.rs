@@ -1,4 +1,5 @@
-//! Acceptance scenario "runtime-free での契約実装": with `nitinol-contract` and
+//! Acceptance scenario "implementing the contract runtime-free": with
+//! `nitinol-contract` and
 //! `nitinol-persistence` alone — no async runtime, no `async_trait`, no
 //! `#[tokio::test]` anywhere in this file — a domain crate must be able to
 //! implement `Decider<C>` and `Query<M>` and unit- and property-test them.

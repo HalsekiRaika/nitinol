@@ -1,7 +1,8 @@
 //! An activation writes and replays through the codec its event type names,
 //! and nothing has to hand it one.
 //!
-//! This is the acceptance scenario "codec 指名だけで集約が動く": props are built
+//! This is the acceptance scenario "an aggregate runs on its named codec
+//! alone": props are built
 //! and spawned with no codec step anywhere in the chain, and both directions of
 //! the stream still work.
 //!

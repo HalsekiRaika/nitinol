@@ -1,7 +1,7 @@
 //! A canonical path claimed twice, reached the way a deployment reaches it.
 //!
 //! ```gherkin
-//!   Scenario: canonical path 衝突は構築時に検出される
+//!   Scenario: a canonical path collision is caught when the registry is built
 //!     Given two declarations claiming one family and one type name between them
 //!     When the process-wide EventRegistry is asked for
 //!     Then it refuses with an explicit error

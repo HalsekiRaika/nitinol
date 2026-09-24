@@ -16,7 +16,7 @@ fn make_snapshot(
     }
 }
 
-/// save した Snapshot を load_latest で取得でき、内容が一致する
+/// A saved Snapshot comes back from load_latest with the same contents.
 #[tokio::test]
 async fn save_and_load_latest_roundtrip() {
     // Given: an empty store and one snapshot to save
@@ -38,7 +38,7 @@ async fn save_and_load_latest_roundtrip() {
     assert_eq!(loaded.payload, Bytes::from_static(b"state-at-42"));
 }
 
-/// 同一 Aggregate に複数回 save した場合、最後に save したものが返る
+/// Several saves against one Aggregate return the one saved last.
 #[tokio::test]
 async fn multiple_saves_return_latest_snapshot() {
     // Given: an empty store
@@ -70,7 +70,7 @@ async fn multiple_saves_return_latest_snapshot() {
     assert_eq!(loaded.payload, Bytes::from_static(b"state-10"));
 }
 
-/// 未保存 Aggregate への load_latest は Ok(None) を返す（エラーにならない）
+/// load_latest for an unsaved Aggregate returns Ok(None), and is not an error.
 #[tokio::test]
 async fn load_latest_for_unknown_aggregate_returns_none() {
     // Given: an empty store

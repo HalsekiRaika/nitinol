@@ -15,7 +15,8 @@ fn make_event(sequence: u64, event_type: EventType, payload: &'static [u8]) -> A
     }
 }
 
-/// append した Event を load(by_stream) で取得し、payload・sequence が一致する
+/// An appended Event comes back from load(by_stream) with the same payload
+/// and sequence.
 #[tokio::test]
 async fn append_and_load_by_stream_matches_payload_and_sequence() {
     // Given: an empty store and one event to append
@@ -43,7 +44,7 @@ async fn append_and_load_by_stream_matches_payload_and_sequence() {
     assert_eq!(events[0].payload, Bytes::from_static(b"hello world"));
 }
 
-/// by_event_type フィルタで該当する EventType のみ返る
+/// The by_event_type filter returns only events of the named EventType.
 #[tokio::test]
 async fn load_by_event_type_returns_only_matching_events() {
     // Given: one aggregate with three events of two different types
@@ -79,7 +80,7 @@ async fn load_by_event_type_returns_only_matching_events() {
     );
 }
 
-/// limit が指定された場合、返る Event 数が limit を超えない
+/// Where a limit is given, no more than that many Events come back.
 #[tokio::test]
 async fn load_with_limit_returns_at_most_limit_events() {
     // Given: one aggregate with five events
@@ -110,7 +111,7 @@ async fn load_with_limit_returns_at_most_limit_events() {
     assert_eq!(events.len(), 3);
 }
 
-/// 空 Aggregate への load は空 Stream を返す（エラーにならない）
+/// load for an empty Aggregate returns an empty Stream, and is not an error.
 #[tokio::test]
 async fn load_nonexistent_aggregate_returns_empty_stream() {
     // Given: an empty store
@@ -128,7 +129,8 @@ async fn load_nonexistent_aggregate_returns_empty_stream() {
     assert!(events.is_empty());
 }
 
-/// 空バッチの append は no-op — assigned_sequences が空で stream_version は現在の最大 sequence を返す
+/// Appending an empty batch is a no-op — assigned_sequences is empty and
+/// stream_version is the current highest sequence.
 #[tokio::test]
 async fn empty_batch_append_is_noop_and_returns_current_stream_version() {
     // Given: an aggregate with one event already stored (sequence=3)
@@ -166,7 +168,8 @@ async fn empty_batch_append_is_noop_and_returns_current_stream_version() {
     assert_eq!(events.len(), 1, "no event must be added by empty batch");
 }
 
-/// 空バッチを未存在 Aggregate に append した場合 stream_version は 0 を返す
+/// Appending an empty batch to an Aggregate that does not exist returns a
+/// stream_version of 0.
 #[tokio::test]
 async fn empty_batch_on_nonexistent_aggregate_returns_stream_version_zero() {
     // Given: an empty store
