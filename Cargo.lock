@@ -1718,6 +1718,7 @@ name = "nitinol"
 version = "0.4.2"
 dependencies = [
  "bytes",
+ "jiff",
  "linkme",
  "nitinol-contract",
  "nitinol-eventsource",
@@ -2546,6 +2547,22 @@ dependencies = [
 
 [[package]]
 name = "saga-fanout-pattern"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "nitinol-eventsource",
+ "nitinol-persistence",
+ "nitinol-runtime",
+ "nitinol-saga",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "saga-idempotent-receive"
 version = "0.1.0"
 dependencies = [
  "async-trait",

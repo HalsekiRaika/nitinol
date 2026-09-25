@@ -67,6 +67,116 @@ impl<E> SagaEffect<E> {
     /// receive the serialized bytes and reconstruct the [`TellIntent`] for
     /// re-dispatch.
     ///
+    /// # What the outbox delivers
+    ///
+    /// What follows is the delivery contract for every tell this crate
+    /// dispatches.  It is stated here, once; anything else that needs it links
+    /// here rather than restating it.
+    ///
+    /// A tell is **not** simply "at-least-once", and it is never exactly-once.
+    /// What holds depends on which stage is being talked about and on how the
+    /// saga was wired, so the stages are named separately:
+    ///
+    /// | Stage | What it means | What the outbox promises |
+    /// |---|---|---|
+    /// | Intent recorded | the `TellRequested` marker is committed | atomically with the saga events of the same `Persist` batch |
+    /// | Dispatch attempted | [`AggregateProxy::tell`](nitinol_eventsource::AggregateProxy::tell) was called | up to a finite retry budget, see below |
+    /// | Accepted for delivery | that call answered `Ok` | recorded as `TellAcked` on the saga's own stream |
+    /// | Committed by the receiver | the target aggregate persisted its events | **nothing** — no marker observes this |
+    /// | Business completion | the operation it asked for is done | **nothing** — see *Beyond acceptance* |
+    ///
+    /// The third and fourth rows are the ones that surprise.  `tell` answers
+    /// when the command is *queued* on the target's mailbox, not when the target
+    /// decided or committed it — [`AggregateProxy::tell`](nitinol_eventsource::AggregateProxy::tell)
+    /// says so on its own surface — and the executor treats that answer as the
+    /// tell settling and has `TellAcked` appended.
+    ///
+    /// ## Re-dispatch on replay
+    ///
+    /// A `TellRequested` with no `TellAcked` and no `TellFailed` after it is
+    /// *pending*, and replay decides its fate in this order:
+    ///
+    /// 0. A saga whose stream carries a durable `Ended` marker skips this
+    ///    entirely: a terminated saga re-dispatches nothing, ever.
+    /// 1. **The in-memory intent is still held** — a supervised restart within
+    ///    the same OS process, including one after a failed terminal-marker
+    ///    append.  Re-dispatched.
+    /// 2. **A crash-restart factory is wired, the marker carries a crash-restart
+    ///    payload, and the factory answers `Some`.**  Re-dispatched.  All three
+    ///    are required: an unwired factory, a marker written without a payload,
+    ///    and a factory answering `None` all fall through to the next case.
+    /// 3. **Otherwise** replay *attempts* to append a synthesized `TellFailed`
+    ///    for it — an explicit, recorded give-up rather than a silent drop.  The
+    ///    attempt can itself fail: the store may refuse the append, in which case
+    ///    the claimed sequence is released and the marker stays pending for a
+    ///    later incarnation to evaluate again.  When the append succeeds, a dead
+    ///    letter follows, and a *failed* dead-letter append stops the process
+    ///    before it subscribes, so the failure is not left half-recorded.
+    ///
+    /// So a saga with no crash-restart factory does not lose pending tells
+    /// quietly — it gives up on them in writing.  Wiring the factory is what
+    /// turns case 3 into case 2, and it is what makes
+    /// [`SagaManagerProps::with_instance_passivation`](crate::SagaManagerProps::with_instance_passivation)
+    /// lossless for in-flight tells as well.
+    ///
+    /// ## The retry budget is finite
+    ///
+    /// A dispatch is retried three times in total (one attempt plus two
+    /// retries), with exponential backoff starting at 100 ms.  Exhausting it
+    /// settles the tell as `TellFailed`, which reaches
+    /// [`Saga::on_tell_failed`](crate::Saga::on_tell_failed).  "At-least-once"
+    /// here therefore never means "retried until it arrives".
+    ///
+    /// ## Windows no wiring closes
+    ///
+    /// * Once `TellAcked` is persisted on the sending saga's stream, the tell is
+    ///   settled.  If the receiving aggregate then lost an append race, or its
+    ///   node died before it committed, nothing re-dispatches it — the factory
+    ///   and the payload make no difference, because the marker is no longer
+    ///   pending.
+    /// * The converse is worth stating precisely, because it is the same
+    ///   scenario one moment earlier: if the mailbox accepted the command but
+    ///   the *sender* stopped before `TellAcked` reached its stream, the marker
+    ///   is still pending, so the cases above apply and the command may be
+    ///   delivered a second time.
+    ///
+    /// ## What re-dispatch reproduces, and what it does not
+    ///
+    /// The crash-restart payload is stored verbatim and handed to the factory
+    /// verbatim, so a command re-dispatched from a marker is rebuilt from the
+    /// same bytes that were dispatched the first time.  That is the whole of the
+    /// framework's promise.  That the factory rebuilds *the same command
+    /// addressed to the same target* from those bytes is the factory's
+    /// obligation — nothing checks what it returns — and so is keeping the
+    /// command's serialized shape and the factory itself compatible across a
+    /// deployment that restarts with markers still pending.
+    ///
+    /// Note also that a re-dispatched marker is only one of the two ways the
+    /// same operation is asked for twice.  The other is the same upstream event
+    /// reaching [`Saga::handle`](crate::Saga::handle) again — a second
+    /// incarnation catching up, or another node holding a duplicate activation —
+    /// which builds a *new* marker around a freshly constructed command.  No
+    /// bytes are re-decoded there, so an identifier minted inside `handle` comes
+    /// out different every time.
+    ///
+    /// ## Beyond acceptance
+    ///
+    /// Nothing above promises the operation was carried out, and no envelope is
+    /// attached to a dispatched command for a receiver to recognise a repeat by:
+    /// the record an append is handed, the record a load returns and a decider's
+    /// [`Decision`](nitinol_eventsource::Decision) carry the domain's own bytes
+    /// and nothing beside them.  A receiver that must not carry an operation out
+    /// twice is therefore the one that recognises the repeat, from data the
+    /// domain put on the command.  That is the idempotent-receive pattern, worked
+    /// through end to end — including the requirement that the operation id be
+    /// derived so it survives the *second* duplication route above — in
+    /// [the idempotent-receive example](https://github.com/HalsekiRaika/nitinol/tree/master/examples/saga/3.idempotent-receive).
+    ///
+    /// Promising *business completion* is a further step this crate does not
+    /// take: it needs an acknowledgement the receiver emits after it commits, or
+    /// a result event plus re-driving of operations still outstanding, and that
+    /// is a mechanism of its own rather than a setting on this one.
+    ///
     /// # Panics
     ///
     /// Panics if `serde_json::to_vec(&cmd)` fails.  This should not happen for

@@ -118,6 +118,10 @@ impl<S: Saga> SagaProps<S, SubscriptionUnset> {
 
 impl<S: Saga, Sub> SagaProps<S, Sub> {
     /// Register a factory for crash-restart re-dispatch.
+    ///
+    /// Which pending tells this recovers, which it cannot, and what the factory
+    /// is obliged to return are stated with the rest of the delivery contract on
+    /// [`SagaEffect::tell`](crate::SagaEffect::tell).
     pub fn with_crash_restart_factory<F>(mut self, factory: F) -> Self
     where
         F: Fn(&[u8]) -> Option<TellIntent> + Send + Sync + 'static,

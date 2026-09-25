@@ -151,6 +151,24 @@
 //! - Side-effect failures and persistence failures are enqueued to the DLQ
 //!   after staged retry, not silently logged and discarded.
 //!
+//! # What tell dispatch delivers
+//!
+//! A tell dispatched through the outbox is neither plainly "at-least-once" nor
+//! ever exactly-once: what holds is stated per stage — intent recorded,
+//! dispatch attempted, accepted for delivery, committed by the receiver,
+//! business completion — and which stage a given saga reaches depends on how it
+//! was wired, in particular on whether
+//! [`SagaManagerProps::with_crash_restart_factory`] is registered.  That
+//! contract, the replay branches that decide a pending tell's fate, the finite
+//! retry budget, and the windows no wiring closes are stated once, on
+//! [`SagaEffect::tell`](SagaEffect::tell).
+//!
+//! The framework attaches no metadata or causation envelope to a dispatched
+//! command, so a receiver that must not carry an operation out twice recognises
+//! the repeat from data the domain itself put on the command — the
+//! idempotent-receive pattern, worked through in
+//! [the idempotent-receive example](https://github.com/HalsekiRaika/nitinol/tree/master/examples/saga/3.idempotent-receive).
+//!
 //! # The fan-out pattern
 //!
 //! One decision frequently has consequences that live on other aggregates'
@@ -170,9 +188,11 @@
 //!    leave a crash able to record half of it.
 //! 2. **Fan-out by process manager.**  A [`Saga`] running under a
 //!    [`SagaManagerProps`] manager subscribes to that fact and dispatches one
-//!    creation command per child with [`SagaEffect::tell`], at-least-once,
-//!    through the outbox.  The upstream subscription is at-least-once as well,
-//!    so the same fact — and with it the same fan-out — can arrive more than
+//!    creation command per child with [`SagaEffect::tell`], whose delivery is
+//!    staged rather than a flat at-least-once — see
+//!    [`SagaEffect::tell`](SagaEffect::tell) for what each stage promises and
+//!    how wiring changes it.  The upstream subscription is at-least-once, so
+//!    the same fact — and with it the same fan-out — can arrive more than
 //!    once.
 //! 3. **Idempotent creation.**  The child answers a repeated creation command
 //!    with "already created" rather than with a second write, which is what
