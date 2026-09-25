@@ -69,31 +69,16 @@ impl ReservationSaga {
 
     /// The operation id for the reservation `event` owes.
     ///
-    /// # Why this is a function of the event and nothing else
-    ///
-    /// Re-dispatching a pending `TellRequested` re-decodes bytes that were
-    /// already persisted, so the command — and the id inside it — comes back
-    /// identical without the domain doing anything.  That covers only one of the
-    /// two ways the same operation is asked for twice.  The other is the *same
-    /// upstream event reaching [`Saga::handle`] again* — a second manager
-    /// incarnation catching up from the start of the order's stream, or another
-    /// node processing it concurrently — which builds a brand new
-    /// `TellRequested` with a freshly constructed command inside it.  An id
-    /// minted per `handle` call (a fresh UUID, a clock reading) survives the
-    /// first and fails the second, and the failure is invisible until the stock
-    /// item applies the reservation a second time.
-    ///
-    /// So the id is derived from the upstream event's own domain content.
-    /// `order_id` is the right derivation base here because an order owes its
-    /// reservation exactly once: deriving from something every order shares
-    /// would be equally stable and would make the *next* order's reservation
-    /// look like a repeat, which the receiver would then silently withhold.
-    ///
-    /// The machine's coordinates are deliberately unavailable for this: a saga
-    /// is handed the decoded event and nothing else — not the sequence the
-    /// record was read at, not its `occurred_at` — because those are not facts
-    /// the domain observes, and the same upstream fact re-read from a different
-    /// position must still yield the same id.
+    /// It is a function of the upstream event's own domain content because a
+    /// re-dispatched marker is only one of the two ways the same operation is
+    /// asked for twice — the other, the same event reaching [`Saga::handle`]
+    /// again, builds the command from scratch (see
+    /// [`SagaEffect::tell`]).  An id minted per `handle` call survives the first
+    /// and fails the second, invisibly, until the stock item applies the
+    /// reservation twice.  `order_id` is the derivation base because an order
+    /// owes its reservation exactly once: something every order shares would be
+    /// just as stable and would make the *next* order's reservation look like a
+    /// repeat the receiver then silently withholds.
     pub fn reservation_id(event: &OrderPlaced) -> String {
         format!("{}/reservation", event.order_id)
     }
@@ -101,20 +86,12 @@ impl ReservationSaga {
     /// Rebuild a pending reservation from the bytes a `TellRequested` marker
     /// kept for it.
     ///
-    /// After a full process crash the in-memory intent is gone and only the
-    /// marker survives, so the command has to be reconstructed from its
-    /// serialized form — which is why [`Reserve`] carries the target's stream
-    /// key as well as the operation id.
-    ///
-    /// The bytes are handed over verbatim, so the operation id inside them comes
-    /// back exactly as it was sent.  That the *command and target* this rebuilds
-    /// are the ones originally dispatched is this function's obligation rather
-    /// than the framework's: it is the same obligation across a deployment that
-    /// changed this factory or the command's serialized shape.
-    ///
-    /// `None` is the framework's signal that this marker cannot be
-    /// reconstructed; replay then records a `TellFailed` for it instead of
-    /// dropping it unnoticed.
+    /// After a full process crash only the marker survives, so the command has
+    /// to be rebuilt from its serialized form — which is why [`Reserve`] carries
+    /// the target's stream key as well as the operation id.  That what comes
+    /// back is the command and target originally dispatched is this function's
+    /// obligation, not the framework's; when and how the bytes are handed over
+    /// is stated on [`SagaEffect::tell`].
     pub fn crash_restart_intent(
         system: &ReservationSystem,
         crash_restart_payload: &[u8],

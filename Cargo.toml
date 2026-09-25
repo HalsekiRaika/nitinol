@@ -77,7 +77,3 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt-mul
 nitinol-persistence = { path = "nitinol-persistence" }
 # `Codec` is stated in `Bytes`, so a test fixture that names a codec spells it.
 bytes = "1"
-# `AppendingEvent::occurred_at` and `LoadedEvent::occurred_at` are `jiff`
-# timestamps, so a test that builds one of those records field by field names the
-# type.
-jiff = "0.2"

@@ -1718,7 +1718,6 @@ name = "nitinol"
 version = "0.4.2"
 dependencies = [
  "bytes",
- "jiff",
  "linkme",
  "nitinol-contract",
  "nitinol-eventsource",

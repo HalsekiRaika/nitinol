@@ -1,29 +1,15 @@
-//! The same tell delivered twice must reach the receiving aggregate's stream
-//! once.
+//! The same operation delivered twice reaches the receiving aggregate's stream
+//! once, and the repeat is accepted rather than refused.
 //!
-//! The operation id travels as a field of the command — the framework attaches no
-//! envelope — and the stock item keeps the ids it has applied in its own state,
-//! recorded on its own stream.  A repeated command is therefore recognised from
-//! durable facts and answered with an acceptance that states none (L-3), rather
-//! than refused or short-circuited inside the saga.
-//!
-//! Two deliveries are exercised, because they fail in different ways:
-//!
-//! * the command handed straight to the aggregate twice — the dispatch window the
-//!   outbox cannot close, since `AggregateProxy::tell` answers when the command is
-//!   queued and not when the aggregate committed it;
-//! * the upstream fact event re-processed by a second manager incarnation, which
-//!   builds a fresh `TellRequested` and dispatches the command again.
-//!
-//! Every stream these tests observe — the order's, the stock item's and the
-//! saga's own — lives in the one store the incarnation was given.
+//! When a second delivery can happen is stated on
+//! [`nitinol_saga::SagaEffect::tell`].
 
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    applied_reservations, fingerprint, load_stream, recorded_reservations, requested_reservations,
-    reserved_quantity, single_store, spawn_manager, spawn_system, spawn_world, stock_ref,
-    wait_for_decisions, wait_for_records, DISPATCH_TIMEOUT, ORDER_QUANTITY, REDISPATCH_SETTLE, SKU,
+    drain_stock_item, fingerprint, load_stream, recorded_reservations, requested_reservations,
+    single_store, spawn_manager, spawn_system, spawn_world, stock_ref, wait_for_decisions,
+    wait_for_records, DISPATCH_TIMEOUT, ORDER_QUANTITY, REDISPATCH_SETTLE, SKU,
 };
 
 use std::sync::Arc;
@@ -71,29 +57,15 @@ async fn a_repeated_reserve_is_accepted_and_appends_nothing() {
 
     // An `ask`, not a `tell`: the answer is what the acceptance of a duplicate is
     // observable as, and `tell` discards it.
-    stock.ask(reserve).await.expect(
-        "a duplicate Reserve must be accepted — a repeat is a command that found nothing \
-         left to do, not a domain rule violation, so it must not borrow the vocabulary of \
-         refusal",
-    );
+    stock
+        .ask(reserve)
+        .await
+        .expect("a duplicate Reserve must be accepted, not refused");
 
     assert_eq!(
         fingerprint(&store, &stock_key).await,
         before,
-        "a duplicate Reserve must leave the stock item's stream byte-identical: same \
-         record count, same stream sequence, same global sequence, same payload"
-    );
-    assert_eq!(
-        reserved_quantity(&system, &stock_key).await,
-        ORDER_QUANTITY,
-        "the business effect must be applied exactly once; twice the quantity means the \
-         duplicate was carried out"
-    );
-    assert_eq!(
-        applied_reservations(&system, &stock_key).await,
-        vec![DIRECT_RESERVATION.to_owned()],
-        "the stock item must hold the one operation id it applied, and it must be the one \
-         the command carried"
+        "a duplicate Reserve must leave the stock item's stream unchanged"
     );
 }
 
@@ -123,13 +95,13 @@ async fn a_redispatched_tell_writes_no_second_reservation() {
         .await
         .expect("ask(PlaceOrder) must succeed");
 
-    wait_for_records(&store, &stock_key, 1, DISPATCH_TIMEOUT).await;
+    let stock_stream = wait_for_records(&store, &stock_key, 1, DISPATCH_TIMEOUT).await;
     let before = fingerprint(&store, &stock_key).await;
-    assert_eq!(
-        before.len(),
-        1,
-        "the first dispatch must reach the stock item's stream as exactly one record"
-    );
+
+    let recorded = recorded_reservations(&stock_stream);
+    let [reservation] = recorded.as_slice() else {
+        panic!("the first dispatch must record exactly one reservation (recorded {recorded:?})")
+    };
 
     // Stopping the manager cascade-stops its poller and its saga instances;
     // dropping the handle alone would leave them running.
@@ -145,39 +117,21 @@ async fn a_redispatched_tell_writes_no_second_reservation() {
     let saga_stream = wait_for_decisions(&store, saga_key.as_str(), 2, DISPATCH_TIMEOUT).await;
     tokio::time::sleep(REDISPATCH_SETTLE).await;
 
-    // Drains the stock item's mailbox, so the assertions below cannot pass merely
-    // because the re-dispatched command was still queued.
-    let applied = applied_reservations(&world.system, &stock_key).await;
+    // So the assertions below cannot pass merely because the re-dispatched command
+    // was still queued.
+    drain_stock_item(&world.system, &stock_key, reservation).await;
 
     let requested = requested_reservations(&saga_stream);
     assert!(
         requested.len() >= 2,
-        "the second incarnation must really have re-processed the fact event and asked for \
-         the reservation again — otherwise nothing was absorbed (saga recorded {requested:?})"
+        "the second incarnation must really have re-processed the fact event; without a \
+         second decision nothing was absorbed (saga recorded {requested:?})"
     );
 
-    let recorded = recorded_reservations(&load_stream(&store, &stock_key).await);
-    assert_eq!(
-        recorded.len(),
-        1,
-        "the stock item's stream must still record exactly one reservation after the \
-         re-dispatch (recorded {recorded:?})"
-    );
-    assert_eq!(
-        applied, recorded,
-        "the operation ids the stock item considers applied must be exactly the ones its own \
-         stream records"
-    );
     assert_eq!(
         fingerprint(&store, &stock_key).await,
         before,
-        "a re-dispatched tell must leave the stock item's stream byte-identical: same record \
-         count, same stream sequence, same global sequence, same payload"
-    );
-    assert_eq!(
-        reserved_quantity(&world.system, &stock_key).await,
-        ORDER_QUANTITY,
-        "the business effect must be applied exactly once across both dispatches"
+        "a re-dispatched tell must leave the stock item's stream unchanged"
     );
     assert_eq!(
         load_stream(&store, order_id.as_str()).await.len(),

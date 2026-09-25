@@ -1,30 +1,16 @@
-//! The operation id must survive more than the replay of one outbox marker.
+//! The operation id a tell carries is the same one every time the same upstream
+//! event is processed, including by an incarnation that built the command from
+//! scratch.
 //!
-//! Re-dispatching a pending `TellRequested` re-decodes bytes that were already
-//! persisted, so the command — and the id inside it — is identical without the
-//! domain doing anything.  That is not the whole requirement: the *same upstream
-//! event* re-processed by another incarnation produces a **new**
-//! `TellRequested`, built by `Saga::handle` running again, and the id in it must
-//! still be the same one.  An id minted per `handle` call satisfies the first and
-//! fails the second, and the failure is invisible until a duplicate is applied
-//! downstream.
-//!
-//! The id is therefore derived from the upstream event's own domain content.
-//! Deriving it from the machine's coordinates instead — the upstream sequence, the
-//! record's `occurred_at` — is what the derivation below deliberately cannot do:
-//! those are not facts the domain observes, and a saga is handed the decoded event
-//! and nothing else.
-//!
-//! Two incarnations are used rather than two managers on one system: the receiving
-//! aggregate has to rebuild its processed-id set from its own stream, which is only
-//! observable when the activation that held the set in memory is gone.
+//! What re-dispatch reproduces on its own, and what it does not, is stated on
+//! [`nitinol_saga::SagaEffect::tell`].
 
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    applied_reservations, fingerprint, load_stream, recorded_reservations, requested_reservations,
-    reserved_quantity, single_store, spawn_world, wait_for_decisions, wait_for_records,
-    DISPATCH_TIMEOUT, ORDER_QUANTITY, REDISPATCH_SETTLE, SKU,
+    drain_stock_item, fingerprint, load_stream, recorded_reservations, requested_reservations,
+    single_store, spawn_world, wait_for_decisions, wait_for_records, DISPATCH_TIMEOUT,
+    ORDER_QUANTITY, REDISPATCH_SETTLE, SKU,
 };
 
 use std::sync::Arc;
@@ -64,15 +50,12 @@ fn the_operation_id_is_derived_from_the_upstream_event_alone() {
     assert_eq!(
         ReservationSaga::reservation_id(&april),
         ReservationSaga::reservation_id(&april),
-        "two derivations from the same upstream event must produce the same operation id; \
-         an id minted per `handle` call cannot be recognised as a repeat downstream"
+        "the same upstream event must derive the same operation id"
     );
     assert_ne!(
         ReservationSaga::reservation_id(&april),
         ReservationSaga::reservation_id(&may),
-        "two different orders must produce different operation ids; a constant id would pass \
-         the stability check above while making the second order's reservation look like a \
-         duplicate and be withheld"
+        "two different orders must derive different operation ids"
     );
 }
 
@@ -100,14 +83,12 @@ async fn reprocessing_the_same_upstream_event_converges_on_one_reservation() {
         .expect("ask(PlaceOrder) must succeed");
 
     let stock_stream = wait_for_records(&store, &stock_key, 1, DISPATCH_TIMEOUT).await;
-    let recorded = recorded_reservations(&stock_stream);
-    assert_eq!(
-        recorded.len(),
-        1,
-        "the first incarnation must record exactly one reservation, carrying the operation id \
-         it applied (recorded {recorded:?})"
-    );
     let before = fingerprint(&store, &stock_key).await;
+
+    let recorded = recorded_reservations(&stock_stream);
+    let [reservation] = recorded.as_slice() else {
+        panic!("the first incarnation must record exactly one reservation (recorded {recorded:?})")
+    };
 
     // Stopping the manager cascade-stops its poller and its saga instances.  The
     // stock item's process belongs to the system, not to the manager, so
@@ -130,37 +111,24 @@ async fn reprocessing_the_same_upstream_event_converges_on_one_reservation() {
 
     // Drains the restored stock item's mailbox before anything is claimed not to
     // have changed.
-    let applied = applied_reservations(&second.system, &stock_key).await;
+    drain_stock_item(&second.system, &stock_key, reservation).await;
 
     let requested = requested_reservations(&saga_stream);
     assert!(
         requested.len() >= 2,
-        "the second incarnation must really have re-processed the fact event — without a \
+        "the second incarnation must really have re-processed the fact event; without a \
          second decision nothing was absorbed (saga recorded {requested:?})"
     );
     assert!(
-        requested.iter().all(|id| id == &recorded[0]),
+        requested.iter().all(|id| id == reservation),
         "every tell derived from the same upstream event must carry the operation id the \
-         first one carried, including the one a later incarnation built from scratch \
-         (saga asked for {requested:?}, the stock item recorded {recorded:?})"
+         first one carried (saga asked for {requested:?}, stream recorded {reservation})"
     );
 
     assert_eq!(
-        applied, recorded,
-        "a stock item restored from its own stream must know the reservation it already \
-         applied: the operation id has to be recorded on the event, not kept only in the \
-         incarnation that handled it"
-    );
-    assert_eq!(
         fingerprint(&store, &stock_key).await,
         before,
-        "re-processing must leave the stock item's stream byte-identical: same record count, \
-         same stream sequence, same global sequence, same payload"
-    );
-    assert_eq!(
-        reserved_quantity(&second.system, &stock_key).await,
-        ORDER_QUANTITY,
-        "the business effect must converge on one application across both incarnations"
+        "re-processing must leave the stock item's stream unchanged"
     );
     assert_eq!(
         load_stream(&store, order_id.as_str()).await.len(),

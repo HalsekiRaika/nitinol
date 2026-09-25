@@ -20,19 +20,16 @@ use nitinol_saga::{SagaDefaultStoreExt, SagaManagerProxy};
 
 use saga_idempotent_receive::order::Order;
 use saga_idempotent_receive::saga::{ReservationRequested, ReservationSaga};
-use saga_idempotent_receive::stock_item::{
-    AppliedReservations, ReservedQuantity, StockItem, StockReserved,
-};
+use saga_idempotent_receive::stock_item::{Reserve, StockItem, StockReserved};
 
 /// The stock item every order in these tests reserves against.
 pub const SKU: &str = "sku-cobalt-ingot";
 
 /// How much one order reserves.
 ///
-/// Anything other than zero or one works; what the value has to make observable
-/// is the difference between "applied once" and "applied twice", which a count
-/// of records alone cannot show if the second application were folded into the
-/// first.
+/// Anything other than zero works: the quantity is part of the stored payload
+/// the fingerprint compares, so a second application folded into the first
+/// record rather than appended beside it still shows up as a difference.
 pub const ORDER_QUANTITY: u64 = 7;
 
 /// Budget for an order to reach the stock item through the outbox.  The manager
@@ -255,28 +252,29 @@ pub fn stock_ref(system: &EventSourceSystem<StoreSet>, key: &str) -> AggregatePr
     system.aggregate_proxy::<StockItem>(AggregateId::new(key))
 }
 
-/// The operation ids the stock item considers already applied.
+/// Round-trip a command through the stock item's mailbox, so a re-dispatch that
+/// was merely still queued cannot be mistaken for one that was absorbed.
 ///
-/// Round-tripping a query through the stock item's mailbox also drains it:
-/// `AggregateProxy::tell` returns once the command is queued, so a later `exec`
-/// through a reference to the same aggregate cannot be served before that command
-/// has been handled.  That is what stops "no duplicate was written" from passing
-/// merely because the re-dispatched command had not been processed yet.
-pub async fn applied_reservations(
+/// `AggregateProxy::tell` — how the outbox dispatches — returns once the command
+/// is queued, and `ask` through a reference to the same aggregate resolves to the
+/// same activation, whose process loop is single-threaded and FIFO.  The answer
+/// to this `ask` therefore cannot arrive before every command queued ahead of it
+/// has been handled.
+///
+/// The command sent is a repeat of `reservation`, which the pattern answers with
+/// an acceptance that appends nothing: draining the mailbox this way adds no
+/// record for the assertions that follow to see.
+pub async fn drain_stock_item(
     system: &EventSourceSystem<StoreSet>,
     stock_key: &str,
-) -> Vec<String> {
+    reservation: &str,
+) {
     stock_ref(system, stock_key)
-        .exec(AppliedReservations)
+        .ask(Reserve {
+            reservation: reservation.to_owned(),
+            stock: stock_key.to_owned(),
+            quantity: ORDER_QUANTITY,
+        })
         .await
-        .expect("exec(AppliedReservations) must succeed")
-}
-
-/// How much the stock item has actually reserved — the business effect a second
-/// application would double.
-pub async fn reserved_quantity(system: &EventSourceSystem<StoreSet>, stock_key: &str) -> u64 {
-    stock_ref(system, stock_key)
-        .exec(ReservedQuantity)
-        .await
-        .expect("exec(ReservedQuantity) must succeed")
+        .expect("a repeat of an applied reservation must be accepted");
 }

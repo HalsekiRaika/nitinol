@@ -7,6 +7,10 @@ authors.workspace = true
 repository.workspace = true
 description = "Official idempotent-receive pattern: an operation id carried as domain data, absorbed by the receiving aggregate"
 
+[[bin]]
+name = "saga-idempotent-receive"
+path = "src/main.rs"
+
 [dependencies]
 nitinol-saga = { path = "../../../nitinol-saga" }
 nitinol-eventsource = { path = "../../../nitinol-eventsource" }
@@ -14,9 +18,9 @@ nitinol-persistence = { path = "../../../nitinol-persistence" }
 nitinol-runtime = { path = "../../../nitinol-runtime" }
 async-trait = "0.1"
 bytes = "1"
+# The demo binary reads the streams it verifies itself against, and
+# `EventStore::load` answers with a `Stream`.
+futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-
-[dev-dependencies]
-futures-util = "0.3"
