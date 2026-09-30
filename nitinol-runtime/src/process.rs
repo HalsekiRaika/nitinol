@@ -7,6 +7,7 @@ mod pid_set;
 mod props;
 mod proxy;
 mod registry;
+mod resident;
 mod signal;
 pub(crate) mod spawn;
 pub(crate) mod spawnable;
@@ -25,6 +26,7 @@ pub use self::{
     pid_set::PidSet,
     props::*,
     proxy::*,
+    resident::Resident,
     stream::{Stream, StreamProps},
     subscriber::{Subscriber, SubscriberContext},
     watch::{Terminated, TerminatedReason},
@@ -32,6 +34,7 @@ pub use self::{
 
 pub(crate) use self::dead_letter::{DeadLetterProcess, DeadLetterProxy};
 pub(crate) use self::registry::*;
+pub(crate) use self::resident::ResidentTable;
 
 use std::future::Future;
 

@@ -25,6 +25,11 @@ use crate::process::{Process, ProcessProxy};
 ///
 /// Construct via [`SpawnEnv::top_level`] for system-level spawns (no parent)
 /// or [`SpawnEnv::child`] for child spawns (parent = self).
+///
+/// `Clone` so a caller can hand an owned copy to a detached `tokio::spawn`ed
+/// task (e.g. `ResidentTable::resolve`) that must keep spawning after the
+/// original caller's own future is gone.
+#[derive(Clone)]
 pub(crate) struct SpawnEnv {
     registry: ProcessRegistry,
     dead_letter: Option<DeadLetterProxy>,

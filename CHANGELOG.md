@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-runtime`): `ProcessSystem::spawn_resident::<P>()`, which resolves a
+  process by its type rather than starting one — the mechanism a crate needs to
+  keep a singleton of its own running inside a system.
+
+  A type opts in by implementing `Resident`, whose one method states the `Props`
+  it is started from. The first ask starts that lifecycle; every later ask
+  through the system, or through any clone of it, hands back a proxy to the same
+  process, and callers racing on the first ask converge on one lifecycle rather
+  than one each. This is the complement of `spawn`, which stays what it was: a
+  lifecycle call that starts a process every time and never resolves a running
+  one.
+
+  A resident is persistent, and `spawn_resident` is what makes it so — neither
+  the system default idle timeout nor an `IdleTimeout` the declaration set for
+  itself will reap it. That the guarantee lives in the call and not in the
+  declaration is what lets a resident's author leave idling alone instead of
+  having to remember it.
+
+  The runtime supplies the mechanism and no residents: it names no resident type
+  of its own, so the crate that declares one keeps its own dependency direction.
+  The dead-letter stream and process the runtime already keeps alive are
+  unchanged and are not routed through this API.
+
 - (`nitinol-macros`, `nitinol-persistence`): a declaration now claims its
   canonical path with an exported symbol, so two declarations claiming one path
   fail the build instead of reaching a deployment.
