@@ -2,8 +2,9 @@
 //!
 //! `JournalState` folds the persisted `SagaPersisted` envelope into the facts
 //! replay needs — highest observed sequence, termination, pending tells,
-//! active schedules, failed tell ids — without performing any I/O.  Loading the
-//! stream and acting on the projection stay in `process::replay`.
+//! active schedules, failed tell ids, consumed upstream positions — without
+//! performing any I/O.  Loading the stream and acting on the projection stay in
+//! `process::replay`.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,6 +12,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use nitinol_persistence::AggregateId;
 
+use crate::consumed::ConsumedPositions;
 use crate::outbox::OutboxEvent;
 use crate::persisted::SagaPersisted;
 use crate::scheduler::{ScheduleEvent, TimerName};
@@ -50,6 +52,9 @@ pub(crate) struct JournalState {
     pub(crate) active_schedules: HashMap<TimerName, ActiveSchedule>,
     /// `tell_id`s whose terminal marker is `TellFailed`, in stream order.
     pub(crate) failed_tell_ids: Vec<u64>,
+    /// How far each upstream source has been consumed, rebuilt from the
+    /// positions the stream carries.
+    pub(crate) consumed: ConsumedPositions,
 }
 
 impl JournalState {
@@ -62,6 +67,7 @@ impl JournalState {
             pending_tells: HashMap::new(),
             active_schedules: HashMap::new(),
             failed_tell_ids: Vec::new(),
+            consumed: ConsumedPositions::default(),
         }
     }
 
@@ -80,6 +86,9 @@ impl JournalState {
             SagaPersisted::Domain(event) => return Some(event),
             SagaPersisted::Outbox(marker) => self.fold_outbox(marker),
             SagaPersisted::Schedule(marker) => self.fold_schedule(marker),
+            SagaPersisted::ConsumedPosition(position) => self
+                .consumed
+                .record(position.source.as_str(), position.sequence),
             // Dead letters are not folded into saga state — they are an
             // observability side-channel delivered to subscribers — and neither
             // are the disposition markers the DLQ pull API writes for them,
@@ -164,6 +173,7 @@ mod tests {
 
     use super::*;
 
+    use crate::consumed::ConsumedPositionEvent;
     use crate::id::SagaId;
     use crate::outbox::{
         Ended, OutboxEvent, Scheduled as OutboxScheduled, TellAcked, TellFailed, TellRequested,
@@ -233,6 +243,13 @@ mod tests {
         SagaPersisted::Schedule(ScheduleEvent::Cancelled {
             token: token(name),
             cancelled_at_unix_millis: 0,
+        })
+    }
+
+    fn consumed_position(source: &str, sequence: u64) -> SagaPersisted<DomainEvt> {
+        SagaPersisted::ConsumedPosition(ConsumedPositionEvent {
+            source: AggregateId::new(source),
+            sequence,
         })
     }
 
@@ -572,6 +589,64 @@ mod tests {
             journal.active_schedules.len(),
             1,
             "the fold reports what the stream said; dropping schedules for an ended saga is replay's decision"
+        );
+    }
+
+    #[test]
+    fn a_consumed_position_is_folded_under_the_source_it_names() {
+        let mut journal = JournalState::new(0);
+
+        let handed_back = journal.fold(consumed_position("order-stream", 2));
+
+        assert!(
+            handed_back.is_none(),
+            "a position is framework bookkeeping, not a domain event to apply"
+        );
+        assert!(
+            journal.consumed.covers("order-stream", 2),
+            "the position the stream carries must be what the fold restores"
+        );
+        assert!(
+            !journal.consumed.covers("other-stream", 1),
+            "a position covers the source it was read from and nothing else"
+        );
+        assert!(
+            journal.pending_tells.is_empty()
+                && journal.failed_tell_ids.is_empty()
+                && journal.active_schedules.is_empty()
+                && !journal.ended,
+            "a position says what was consumed and nothing more"
+        );
+    }
+
+    /// The stream may hold a later position naming a lower sequence — an input
+    /// redelivered while an earlier incarnation was still writing.  A fold that
+    /// kept the last row it saw would re-open an input whose decision is
+    /// already durable.
+    #[test]
+    fn a_later_lower_position_does_not_move_the_fold_backwards() {
+        let mut journal = JournalState::new(0);
+
+        journal.fold(consumed_position("order-stream", 2));
+        journal.fold(consumed_position("order-stream", 1));
+
+        assert!(
+            journal.consumed.covers("order-stream", 2),
+            "the highest position wins, whatever order the rows are in"
+        );
+    }
+
+    #[test]
+    fn a_stream_with_no_position_consumed_nothing() {
+        let mut journal = JournalState::new(0);
+
+        journal.fold(tell_requested(7, "target-stream", None));
+
+        assert!(
+            !journal.consumed.covers("order-stream", 1),
+            "with no position on the stream every upstream record is still \
+             unconsumed; claiming otherwise would swallow inputs no decision \
+             was ever made from"
         );
     }
 

@@ -8,12 +8,13 @@
 mod common;
 use common::{
     drain_stock_item, fingerprint, load_stream, recorded_reservations, requested_reservations,
-    single_store, spawn_manager, spawn_system, spawn_world, stock_ref, wait_for_decisions,
-    wait_for_records, DISPATCH_TIMEOUT, ORDER_QUANTITY, REDISPATCH_SETTLE, SKU,
+    single_store, spawn_manager, spawn_system, spawn_world, stock_ref, wait_for_records,
+    UnsettledDispatchStore, DECISION_BLOCK_LEN, DISPATCH_TIMEOUT, ORDER_QUANTITY, SKU,
 };
 
 use std::sync::Arc;
 
+use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AggregateId;
 
 use saga_idempotent_receive::order::PlaceOrder;
@@ -69,21 +70,31 @@ async fn a_repeated_reserve_is_accepted_and_appends_nothing() {
     );
 }
 
-/// Given an order whose reservation already reached the stock item, When a second
-/// manager incarnation re-processes the same fact event, Then the re-dispatched
-/// command changes nothing on the stock item's stream.
+/// Given an order whose reservation reached the stock item but whose dispatch was
+/// never recorded as settled, When a second manager incarnation re-dispatches the
+/// pending tell, Then the repeated command changes nothing on the stock item's
+/// stream.
 ///
-/// The manager is stopped and spawned again over the same store; its cursor is in
-/// memory, so the second incarnation replays the fact event from the start.  The
-/// stock item's process stays resident across the restart, so this is redelivery
-/// in its plain form — no aggregate replay involved.
+/// The first incarnation writes through a store that refuses to record anything
+/// beyond the append that opened the saga's journal, so the reservation is applied
+/// while the marker for it stays pending — the durable state a process that dies
+/// mid-dispatch leaves behind.  The manager is then stopped and spawned again over
+/// the same store, and it is that pending marker, not a second decision, that asks
+/// for the operation again: the fact event is delivered a second time, but its
+/// position is on the saga's own stream, so it never reaches `handle`.
+///
+/// The stock item's process stays resident across the restart, so the repeat is
+/// absorbed in its plain form — no aggregate replay involved.
 #[tokio::test]
 async fn a_redispatched_tell_writes_no_second_reservation() {
     let store = single_store();
     let order_id = AggregateId::new("order-redispatch");
     let stock_key = StockItem::stream_key(SKU);
+    let saga_key = ReservationSaga::instance_id(order_id.as_str());
 
-    let world = spawn_world(&order_id, Arc::clone(&store)).await;
+    let interrupted = UnsettledDispatchStore::new(Arc::clone(&store), saga_key.as_str().to_owned());
+
+    let world = spawn_world(&order_id, Arc::clone(&interrupted) as Arc<dyn EventStore>).await;
 
     world
         .order
@@ -103,6 +114,21 @@ async fn a_redispatched_tell_writes_no_second_reservation() {
         panic!("the first dispatch must record exactly one reservation (recorded {recorded:?})")
     };
 
+    let unsettled = wait_for_records(
+        &store,
+        saga_key.as_str(),
+        DECISION_BLOCK_LEN,
+        DISPATCH_TIMEOUT,
+    )
+    .await;
+    assert_eq!(
+        unsettled.len(),
+        DECISION_BLOCK_LEN,
+        "the interrupted incarnation must leave its dispatch unsettled: the decision \
+         block alone, with no terminal marker after it (journal holds {} records)",
+        unsettled.len()
+    );
+
     // Stopping the manager cascade-stops its poller and its saga instances;
     // dropping the handle alone would leave them running.
     world
@@ -111,21 +137,48 @@ async fn a_redispatched_tell_writes_no_second_reservation() {
         .await
         .expect("stopping the manager must succeed");
 
+    // The interrupted incarnation is gone, so the store the next one writes to
+    // records everything again.
+    interrupted.incarnation_ended();
+
     let _second_manager = spawn_manager(&world.system, &order_id).await;
 
-    let saga_key = ReservationSaga::instance_id(order_id.as_str());
-    let saga_stream = wait_for_decisions(&store, saga_key.as_str(), 2, DISPATCH_TIMEOUT).await;
-    tokio::time::sleep(REDISPATCH_SETTLE).await;
+    // The terminal marker the interrupted incarnation never wrote is what says the
+    // pending tell was dispatched again, and it is written after the command was
+    // handed to the stock item — so this is the observable point the assertions
+    // below need, not a guessed settle window.
+    wait_for_records(
+        &store,
+        saga_key.as_str(),
+        DECISION_BLOCK_LEN + 1,
+        DISPATCH_TIMEOUT,
+    )
+    .await;
 
     // So the assertions below cannot pass merely because the re-dispatched command
     // was still queued.
     drain_stock_item(&world.system, &stock_key, reservation).await;
 
+    let saga_stream = load_stream(&store, saga_key.as_str()).await;
+    assert_eq!(
+        saga_stream.len(),
+        DECISION_BLOCK_LEN + 1,
+        "the re-dispatch must have reached the stock item and settled as that one \
+         marker: a dispatch that could not be delivered settles as a failure with a \
+         dead letter beside it (journal holds {:?})",
+        saga_stream
+            .iter()
+            .map(|event| event.event_type.to_string())
+            .collect::<Vec<String>>()
+    );
+
     let requested = requested_reservations(&saga_stream);
-    assert!(
-        requested.len() >= 2,
-        "the second incarnation must really have re-processed the fact event; without a \
-         second decision nothing was absorbed (saga recorded {requested:?})"
+    assert_eq!(
+        requested.as_slice(),
+        std::slice::from_ref(reservation),
+        "the redelivered fact event must not be decided from a second time: its \
+         position is on the saga's own stream, so the framework drops it before \
+         `handle` (saga recorded {requested:?})"
     );
 
     assert_eq!(
@@ -136,6 +189,6 @@ async fn a_redispatched_tell_writes_no_second_reservation() {
     assert_eq!(
         load_stream(&store, order_id.as_str()).await.len(),
         1,
-        "re-processing must not add records to the stream that owns the decision"
+        "a re-dispatch must not add records to the stream that owns the decision"
     );
 }

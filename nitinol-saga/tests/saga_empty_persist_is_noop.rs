@@ -2,10 +2,12 @@
 //!
 //! `SagaEffect::persist_all(vec![])` keeps a `Persist` variant structurally —
 //! it stays a valid `combine` receiver — but a `Persist` whose `events`,
-//! `tells` **and** `schedules` are all empty reaches the store as nothing at
-//! all: the interpreter takes the same no-op path it takes for
-//! `SagaEffect::None`. These tests pin that observable behaviour so the
-//! rustdoc on `persist_all` can state it truthfully.
+//! `tells` **and** `schedules` are all empty contributes no batch of its own,
+//! exactly like `SagaEffect::None`. Neither is a true no-op, though: the
+//! input it was decided from can still have a position pending, and the
+//! interpreter writes a consumed-position-only append for it so the input is
+//! not redelivered to `Saga::handle`. These tests pin that observable
+//! behaviour so the rustdoc on `persist_all` can state it truthfully.
 //!
 //! The second test pins the other side of the condition, which is the part
 //! easiest to get wrong: emptiness of `events` alone is **not** enough. A
@@ -13,16 +15,16 @@
 //! itself builds, and collapsing it to a no-op would silently discard every
 //! tell a saga ever emits.
 //!
-//! Absence of an append cannot be observed by waiting, so the first test makes
-//! the saga handle a second, event-producing upstream message after the empty
-//! one. Upstream messages are interpreted strictly sequentially (the poller
+//! The first test makes the saga handle a second, event-producing upstream
+//! message after the empty one so the batch each input produced can be told
+//! apart. Upstream messages are interpreted strictly sequentially (the poller
 //! `ask()`s and `recv` awaits the interpreter), so once the second message's
 //! batch is recorded the first message's interpretation has already finished
 //! and the total batch count is a complete observation.
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{decode_outbox_kind, JsonCodec, OutboxKind, OUTBOX_MARKER};
+use common::{decode_outbox_kind, JsonCodec, OutboxKind, CONSUMED_POSITION_MARKER, OUTBOX_MARKER};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -346,10 +348,13 @@ async fn append_order_placed(
 /// tells and schedules are all empty — followed by one that returns a real
 /// event,
 /// When both upstream events are handled,
-/// Then the store received exactly one `append` call, carrying only the real
-/// event: the empty `Persist` wrote nothing, exactly like `SagaEffect::None`.
+/// Then the store receives one `append` call per input: the empty `Persist`
+/// carries nothing of its own, exactly like `SagaEffect::None`, but its
+/// append still carries the consumed position of the input it was decided
+/// from; the real event's append carries the domain event and its own
+/// position.
 #[tokio::test]
-async fn all_empty_persist_writes_nothing_to_the_store() {
+async fn all_empty_persist_writes_only_the_consumed_position() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
 
@@ -392,20 +397,44 @@ async fn all_empty_persist_writes_nothing_to_the_store() {
 
     assert_eq!(
         recorded.len(),
-        1,
-        "an all-empty Persist must not reach the store at all — the only append \
-         may be the one carrying the real event; batches: {:?}",
+        2,
+        "each input gets its own append — the empty Persist's position-only \
+         append, and the real event's append; batches: {:?}",
         describe(&recorded)
     );
     assert_eq!(
         recorded[0].len(),
         1,
-        "the single append must carry only the real domain event; batches: {:?}",
+        "the empty Persist contributes nothing of its own; the single row in \
+         its append is the consumed position of the input it was decided \
+         from; batches: {:?}",
+        describe(&recorded)
+    );
+    assert_eq!(
+        recorded[0][0].event_type,
+        CONSUMED_POSITION_MARKER,
+        "the only row the empty Persist's append carries is the consumed \
+         position of the input it was decided from; batches: {:?}",
+        describe(&recorded)
+    );
+    assert_eq!(
+        recorded[1].len(),
+        2,
+        "the real event's append must carry the domain event and the position \
+         of the input it was decided from, and nothing else; batches: {:?}",
         describe(&recorded)
     );
     assert!(
-        is_domain_event(&recorded[0][0]),
-        "the single appended event must be the real domain event; batches: {:?}",
+        is_domain_event(&recorded[1][0]),
+        "the first row of the real event's append must be the domain event; \
+         batches: {:?}",
+        describe(&recorded)
+    );
+    assert_eq!(
+        recorded[1][1].event_type,
+        CONSUMED_POSITION_MARKER,
+        "the position of the input it was decided from closes the batch; \
+         batches: {:?}",
         describe(&recorded)
     );
 }

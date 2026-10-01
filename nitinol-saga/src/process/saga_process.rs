@@ -11,6 +11,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, LoadedEvent};
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
 
+use crate::consumed::{ConsumedPositionEvent, ConsumedPositions};
 use crate::context::SagaContext;
 use crate::dead_letter::{
     self, DeadLetterDispositionEvent, DlqChildSpawn, EnqueueOutcome, EnqueuePolicy,
@@ -193,6 +194,15 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) store: Arc<dyn EventStore>,
     pub(crate) decode_failure_route_fn: Option<DecodeFailureRouteFn>,
     pub(crate) sequence: u64,
+    /// How far each upstream source this saga reads has been consumed.
+    ///
+    /// Restored by replay from the saga's own stream and advanced by every
+    /// batch that lands, so a record already consumed — whether by a
+    /// [`Saga::handle`] decision or by a dead-letter append that settled it
+    /// without one — is dropped before it reaches [`Saga::handle`] again,
+    /// whether the position was folded out of the journal or written by this
+    /// incarnation.
+    pub(crate) consumed: ConsumedPositions,
     pub(crate) retry_policy: RetryPolicy,
     pub(crate) tell_states: HashMap<u64, TellState>,
     pub(crate) crash_restart_factory: Option<CrashRestartFactory>,
@@ -309,15 +319,30 @@ impl<S: Saga> SagaProcess<S> {
     }
 
     /// Route a saga failure to the DLQ (policy-gated append on the saga's own
-    /// stream).  The single per-process entry point so every failure site funnels
-    /// through one named operation.
+    /// stream) — plus the consumed position, when `input_position` names the
+    /// upstream record this failure settles.  The single per-process entry
+    /// point so every failure site funnels through one named operation.
     ///
-    /// Returns `true` when the dead letter was written (or ignored by policy),
-    /// and `false` when the policy required writing but the store append failed.
+    /// `input_position` is `Some` exactly where this call is the `Ok` outcome
+    /// a `DirectPoller` will advance its cursor past: the record must become
+    /// durably consumed in the same call, or a restart before the next
+    /// incarnation's own progress covers it would redeliver it into the same
+    /// failure forever.  Every other caller — tell-outcome reports, timer
+    /// firings, replay re-dispatch — has no upstream record to settle and
+    /// passes `None`.
+    ///
+    /// Returns `true` when the dead letter (and position, if any) was written
+    /// — or ignored by policy, which still durably records a bare position
+    /// when one was given — and `false` when the store append failed.
     /// Callers that receive `false` **must** stop the process so the upstream
     /// message is not treated as processed — the persisted DLQ must stay
     /// authoritative.
-    async fn record_dead_letter(&mut self, failure: SagaFailure, source: SourceContext) -> bool {
+    async fn record_dead_letter(
+        &mut self,
+        failure: SagaFailure,
+        source: SourceContext,
+        input_position: Option<ConsumedPositionEvent>,
+    ) -> bool {
         !matches!(
             dead_letter::enqueue_dead_letter(
                 &self.store,
@@ -326,6 +351,8 @@ impl<S: Saga> SagaProcess<S> {
                 self.enqueue_policy.as_ref(),
                 failure,
                 source,
+                input_position.as_ref(),
+                &mut self.consumed,
             )
             .await,
             EnqueueOutcome::AppendFailed
@@ -334,9 +361,14 @@ impl<S: Saga> SagaProcess<S> {
 
     /// Lend the interpreter everything it mutates on this process, so every
     /// entry point that runs a [`SagaEffect`] does so against the same state.
+    ///
+    /// `input_position` is the upstream record the effect was decided from —
+    /// `None` at the entry points that have no upstream input, which is why
+    /// what they persist records no position.
     fn interpreter_ctx<'a>(
         &'a mut self,
         process_ctx: &'a mut ProcessContext<Self>,
+        input_position: Option<ConsumedPositionEvent>,
     ) -> InterpreterCtx<'a, S> {
         InterpreterCtx {
             state: &mut self.state,
@@ -349,6 +381,8 @@ impl<S: Saga> SagaProcess<S> {
             lifecycle: &mut self.lifecycle,
             scheduler: self.scheduler.clone(),
             enqueue_policy: Arc::clone(&self.enqueue_policy),
+            consumed: &mut self.consumed,
+            input_position,
         }
     }
 
@@ -393,6 +427,7 @@ impl<S: Saga> SagaProcess<S> {
                     message,
                 },
                 SourceContext::without_upstream(),
+                None,
             )
             .await
         {
@@ -460,6 +495,7 @@ impl<S: Saga> SagaProcess<S> {
                             error: e.to_string(),
                         },
                         SourceContext::without_upstream(),
+                        None,
                     )
                     .await
                 {
@@ -478,7 +514,9 @@ impl<S: Saga> SagaProcess<S> {
             }
         };
 
-        let mut ictx = self.interpreter_ctx(ctx);
+        // A tell failure is not an upstream record, so a compensation persisted
+        // for it consumes nothing.
+        let mut ictx = self.interpreter_ctx(ctx, None);
         // The outcome report does not arrive through the DirectPoller, so there
         // is no upstream cursor to withhold; stop instead when the compensation
         // could neither be persisted nor dead-lettered.
@@ -531,6 +569,10 @@ impl<S: Saga> Process for SagaProcess<S> {
         for tell_id in outcome.failed {
             self.tell_states.insert(tell_id, TellState::Failed);
         }
+        // What earlier incarnations consumed is theirs to hand over: it decides
+        // both which redelivered records this one drops and where its
+        // subscription resumes.
+        self.consumed = outcome.consumed;
 
         // A saga whose stream carries a durable `Ended` marker terminated in a
         // previous incarnation, so this one starts in the same drained
@@ -563,7 +605,11 @@ impl<S: Saga> Process for SagaProcess<S> {
                 .await;
 
             if let Some(upstream) = self.upstream.clone() {
-                upstream.config.spawn_child(ctx, upstream.cursor).await;
+                // Resuming past what the journal says was consumed is what
+                // frees a restart from re-reading the whole upstream history;
+                // the configured position still holds as a floor.
+                let cursor = self.consumed.resume(upstream.cursor);
+                upstream.config.spawn_child(ctx, cursor).await;
             }
         }
 
@@ -627,12 +673,37 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
                         _ => {}
                     }
                 }
+
+                // Delivery is at-least-once, so a corrupt record whose decode
+                // failure is already durable can arrive again — after a
+                // restart, or while this incarnation is still running. It is
+                // dropped here, before another dead letter is appended for
+                // it: the `Decoded` arm below gives redelivered records the
+                // same guard via `self.consumed.covers`, and a decode failure
+                // settles the same upstream position, so it must not bypass
+                // it.
+                if self.consumed.covers(aggregate_id.as_str(), sequence) {
+                    tracing::debug!(
+                        saga_id = self.saga_id.as_str(),
+                        upstream_key = aggregate_id.as_str(),
+                        upstream_sequence = sequence,
+                        "saga dropped a redelivered decode-failure record it has already consumed"
+                    );
+                    return Ok(());
+                }
                 let source = SourceContext {
-                    aggregate_id,
+                    aggregate_id: aggregate_id.clone(),
                     upstream_sequence: sequence,
                 };
+                // This call settles the record with `Ok`, so its position
+                // must become durable in the same append as the dead letter —
+                // see `record_dead_letter`'s doc comment.
+                let input_position = Some(ConsumedPositionEvent {
+                    source: aggregate_id,
+                    sequence,
+                });
                 if !self
-                    .record_dead_letter(SagaFailure::DecodeFailed { error }, source)
+                    .record_dead_letter(SagaFailure::DecodeFailed { error }, source, input_position)
                     .await
                 {
                     // Return Err so the DirectPoller (via ask()) does NOT
@@ -664,6 +735,24 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             return Ok(());
         }
 
+        // A record already consumed — whether by a `Saga::handle` decision or
+        // by a dead-letter append that settled it without one — must not
+        // reach `Saga::handle` again, and delivery is at-least-once, so the
+        // same record can arrive again — after a restart, or while this
+        // incarnation is still running.  It is dropped here, before anything
+        // else looks at it: `Saga::handle` must not see an input it has
+        // already consumed, and the drop must not spend the lifecycle's dead
+        // letter or the one report a failed tell is owed.
+        if self.consumed.covers(aggregate_id.as_str(), sequence) {
+            tracing::debug!(
+                saga_id = self.saga_id.as_str(),
+                upstream_key = aggregate_id.as_str(),
+                upstream_sequence = sequence,
+                "saga dropped a redelivered upstream record it has already consumed"
+            );
+            return Ok(());
+        }
+
         let source = SourceContext {
             aggregate_id: aggregate_id.clone(),
             upstream_sequence: sequence,
@@ -677,12 +766,20 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
         // dropped message is recorded as a dead letter immediately, with its
         // raw wire payload preserved.
         if matches!(self.lifecycle, Lifecycle::Draining) {
+            // This call settles the record with `Ok`, so its position must
+            // become durable in the same append as the dead letter — see
+            // `record_dead_letter`'s doc comment.
+            let input_position = Some(ConsumedPositionEvent {
+                source: aggregate_id.clone(),
+                sequence,
+            });
             if !self
                 .record_dead_letter(
                     SagaFailure::EndedSagaReceivedMessage {
                         message: raw_payload,
                     },
                     source,
+                    input_position,
                 )
                 .await
             {
@@ -712,12 +809,20 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             Ok(effect) => effect,
             Err(e) => {
                 tracing::warn!(error = %e, "saga handle failed");
+                // This call settles the record with `Ok`, so its position
+                // must become durable in the same append as the dead letter —
+                // see `record_dead_letter`'s doc comment.
+                let input_position = Some(ConsumedPositionEvent {
+                    source: aggregate_id.clone(),
+                    sequence,
+                });
                 if !self
                     .record_dead_letter(
                         SagaFailure::HandleFailed {
                             error: e.to_string(),
                         },
                         source,
+                        input_position,
                     )
                     .await
                 {
@@ -734,7 +839,20 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             }
         };
 
-        let mut ictx = self.interpreter_ctx(ctx);
+        // Hand the upstream record's position to the interpreter as a
+        // `ConsumedPositionEvent`; the interpreter's effect interpretation
+        // (see `interpreter::run_saga_effect`) owns whether that position is
+        // attached to an append at all, and if so, to which one. For a
+        // `Sequence`, only the closing append carries it, and only once every
+        // preceding append in the batch has landed — so a decision can become
+        // durable without its input's consumed position becoming durable too.
+        let mut ictx = self.interpreter_ctx(
+            ctx,
+            Some(ConsumedPositionEvent {
+                source: aggregate_id,
+                sequence,
+            }),
+        );
         // If the interpreter signals DlqFailed (PersistFailed DLQ
         // append also failed), propagate Err so the DirectPoller (via ask())
         // does NOT advance the upstream cursor.
@@ -773,6 +891,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
                         message: msg.payload.clone(),
                     },
                     SourceContext::without_upstream(),
+                    None,
                 )
                 .await
             {
@@ -801,6 +920,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
                             error: e.to_string(),
                         },
                         SourceContext::without_upstream(),
+                        None,
                     )
                     .await
                 {
@@ -836,6 +956,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
                             error: e.to_string(),
                         },
                         SourceContext::without_upstream(),
+                        None,
                     )
                     .await
                 {
@@ -870,16 +991,19 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
             token: ScheduleToken::new(self.saga_id.clone(), name),
             fired_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
         };
+        // A timer firing is not an upstream record, so it consumes nothing.
         scheduler::append_schedule_marker(
             &self.store,
             &self.saga_id,
             &mut self.sequence,
             fired_event,
             jiff::Timestamp::now(),
+            None,
+            &mut self.consumed,
         )
         .await;
 
-        let mut ictx = self.interpreter_ctx(ctx);
+        let mut ictx = self.interpreter_ctx(ctx, None);
         // FireScheduled is not delivered via DirectPoller so there is no
         // upstream cursor to withhold; call stop_self() to ensure the process
         // does not silently continue when a PersistFailed DLQ append also fails.

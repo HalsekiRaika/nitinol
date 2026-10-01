@@ -1,26 +1,29 @@
 //! A fan-out interrupted part-way must finish on replay.
 //!
-//! The first incarnation runs against a store that refuses to append to a
-//! chosen subset of the payslip streams, so the fan-out stops with some
-//! payslips issued and the rest missing — the durable state a crash leaves
-//! behind.  Refusing by name is what lets one store back the whole incarnation:
-//! the payroll run's own stream and the saga's journal keep working, so the
+//! The first incarnation runs against a store that refuses to append to a chosen
+//! subset of the payslip streams, and to record anything on the saga's journal
+//! beyond the append that opened it — the durable state a process that dies
+//! mid-fan-out leaves behind: some payslips issued, the rest missing, and no
+//! record that any dispatch settled.  Refusing by name is what lets one store back
+//! the whole incarnation: the payroll run's own stream keeps working, so the
 //! decision that drives the fan-out is recorded exactly as in a healthy run.
 //!
 //! The second incarnation starts fresh (new `ProcessSystem`, new payslip
-//! processes, an unwrapped store) over the same durable state.  Its manager
-//! cursor begins at zero, so the fact event is delivered again, and the pattern
-//! has to complete the missing issues without disturbing the ones that already
-//! exist.
+//! processes, an unwrapped store) over the same durable state.  What completes the
+//! fan-out is the durable intent the first incarnation left: every issue is still
+//! a pending outbox marker, and replay re-dispatches it — rebuilt from the marker's
+//! own bytes, since nothing of the first incarnation is in memory.  The fact event
+//! is delivered again too, and dropped before `Saga::handle`: its position is on
+//! the saga's own stream.
 //!
-//! This is the reason the fan-out needs no compensation: the interrupted work
-//! is finished by re-running it, because issuing a payslip is idempotent.
+//! This is the reason the fan-out needs no compensation: the interrupted work is
+//! finished by re-running it, because issuing a payslip is idempotent.
 
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    employee_ids, fingerprints, issued, load_stream, payslip_keys, spawn_world, wait_for_issued,
-    PartialFailurePayslipStore, EMPLOYEE_COUNT,
+    decisions, employee_ids, fingerprints, issued, load_stream, payslip_keys, spawn_world,
+    wait_for_issued, wait_for_records, InterruptedFanOutStore, DECISION_BLOCK_LEN, EMPLOYEE_COUNT,
 };
 
 use std::collections::HashSet;
@@ -33,6 +36,7 @@ use nitinol_persistence::AggregateId;
 
 use saga_fanout_pattern::payroll_run::ApprovePayrollRun;
 use saga_fanout_pattern::payslip::PayslipIssued;
+use saga_fanout_pattern::saga::FanOutSaga;
 
 /// Budget for a 32-wide fan-out to reach the store.  A deadline, not a
 /// synchronisation device — every wait below polls an observable condition.
@@ -58,11 +62,15 @@ async fn replay_completes_the_payslips_an_interrupted_fanout_never_issued() {
     let (survivors, missing) = payslips.split_at(SURVIVING_PAYSLIPS);
     let survivors = survivors.to_vec();
     let missing = missing.to_vec();
+    let saga_key = FanOutSaga::instance_id(run_id.as_str());
 
     // Run 1 — the fan-out is cut off part-way.
 
-    let interrupted_store =
-        PartialFailurePayslipStore::new(Arc::clone(&store), missing.iter().cloned().collect());
+    let interrupted_store = InterruptedFanOutStore::new(
+        Arc::clone(&store),
+        saga_key.as_str().to_owned(),
+        missing.iter().cloned().collect(),
+    );
 
     let first_run = spawn_world(
         &run_id,
@@ -101,6 +109,23 @@ async fn replay_completes_the_payslips_an_interrupted_fanout_never_issued() {
         1,
         "the interrupted run must still have recorded its decision: refusing \
          payslip appends must not touch the stream that owns the decision"
+    );
+
+    let unsettled = wait_for_records(
+        &store,
+        saga_key.as_str(),
+        DECISION_BLOCK_LEN,
+        FANOUT_TIMEOUT,
+    )
+    .await;
+    assert_eq!(
+        unsettled.len(),
+        DECISION_BLOCK_LEN,
+        "the interrupted run must leave durable intent and nothing more: the decision, \
+         its {EMPLOYEE_COUNT} outbox markers and the position of the fact it was \
+         derived from, with no marker recording a dispatch as settled (journal holds \
+         {} records)",
+        unsettled.len()
     );
 
     let survivor_records = fingerprints(&store, &survivors).await;
@@ -152,6 +177,15 @@ async fn replay_completes_the_payslips_an_interrupted_fanout_never_issued() {
              issue event"
         );
     }
+
+    let saga_stream = load_stream(&store, saga_key.as_str()).await;
+    assert_eq!(
+        decisions(&saga_stream).len(),
+        1,
+        "the fan-out must have been completed by the pending markers, not by a second \
+         decision: the redelivered fact event's position is on the saga's own stream, \
+         so the framework drops it before `handle`"
+    );
 
     assert_eq!(
         load_stream(&store, run_id.as_str()).await.len(),

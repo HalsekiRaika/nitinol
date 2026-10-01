@@ -38,6 +38,14 @@ pub(crate) struct SagaManagerProcess<S: Saga> {
     pub(crate) producer: Arc<dyn Fn() -> S + Send + Sync>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
     pub(crate) upstream: DurableSubscription<UpstreamMessage<S::SubscribedEvent>>,
+    /// Where the one shared subscription starts.
+    ///
+    /// Left exactly as configured, unlike the cursor of a saga that owns its
+    /// subscription: this one is shared by every instance the manager fronts,
+    /// so no single instance's consumed position can speak for it, and the
+    /// sweep from the configured position is what activates the instances that
+    /// are not resident.  Each instance still drops the records it has already
+    /// consumed, so the sweep costs no second decision.
     pub(crate) cursor: SequenceCursor,
     /// Passivation window handed to every instance this manager spawns.
     pub(crate) instance_idle_timeout: IdleTimeout,

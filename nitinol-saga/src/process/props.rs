@@ -88,6 +88,11 @@ impl<S: Saga> SagaProps<S, SubscriptionUnset> {
     /// (catchup + live, at-least-once).  The poller is cascade-stopped when
     /// the saga stops.
     ///
+    /// `cursor` is where the poller starts *at the latest*: a stream cursor is
+    /// carried forward to the position the saga's own stream records for that
+    /// stream, so a restart does not re-read what it has already consumed.  The
+    /// configured position still holds as a floor.
+    ///
     /// Which of the delivered events belong to this instance is decided by
     /// [`Saga::correlate`], not here — correlation is domain knowledge carried
     /// by the saga type.

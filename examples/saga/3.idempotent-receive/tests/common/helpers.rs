@@ -5,16 +5,19 @@
 
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures_util::TryStreamExt;
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
 use nitinol_eventsource::{AggregateProxy, Event};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
+use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDefaultStoreExt, SagaManagerProxy};
 
@@ -38,15 +41,14 @@ pub const ORDER_QUANTITY: u64 = 7;
 /// condition.
 pub const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Settle window used only in front of a negative assertion.
+/// Number of records the saga's own stream holds for one decision: the decision
+/// event, the outbox marker of the tell it dispatched, and the position of the
+/// fact event it was derived from — all committed by the one append.
 ///
-/// The saga appends its tell marker and *then* dispatches it, so the moment the
-/// second decision becomes visible on the saga's stream the re-dispatched command
-/// may still be in flight.  There is no earlier observable point, so the
-/// re-dispatch is given a bounded window to land before the "nothing changed"
-/// assertions run.  Mirrors the settle used by
-/// `examples/saga/2.fanout-pattern/tests/redelivery_is_noop.rs`.
-pub const REDISPATCH_SETTLE: Duration = Duration::from_millis(750);
+/// A dispatch that settles adds its terminal marker *after* that block, which is
+/// what makes "the dispatch was left unsettled" and "it settled" two record
+/// counts a test can wait on.
+pub const DECISION_BLOCK_LEN: usize = 3;
 
 /// The one store an incarnation is wired with.
 ///
@@ -83,10 +85,11 @@ pub struct ReservationWorld {
 /// Spawn a complete incarnation: a fresh `ProcessSystem`, the order aggregate,
 /// and the saga manager subscribed to the order's stream.
 ///
-/// The store is a parameter because the reprocessing test hands the same durable
-/// state to two successive incarnations, which is what makes the receiving
-/// aggregate restore its processed-id set from its own stream rather than inherit
-/// it from memory.
+/// The store is a parameter because the re-dispatch tests hand the same durable
+/// state to two successive incarnations, wrapping the first one's in
+/// [`UnsettledDispatchStore`] — which is what makes the receiving aggregate
+/// restore its processed-id set from its own stream rather than inherit it from
+/// memory.
 pub async fn spawn_world(order_id: &AggregateId, store: Arc<dyn EventStore>) -> ReservationWorld {
     let system = spawn_system(store).await;
 
@@ -104,8 +107,12 @@ pub async fn spawn_world(order_id: &AggregateId, store: Arc<dyn EventStore>) -> 
 /// Spawn (or re-spawn) the saga manager over an existing system.
 ///
 /// The cursor starts at `after: 0` and lives in memory, so a manager spawned a
-/// second time over the same store replays the order's fact event — the
-/// at-least-once redelivery the pattern has to absorb.
+/// second time over the same store delivers the order's fact event again.  The
+/// saga instance it addresses drops that delivery — the position of the fact is
+/// on the instance's own stream, committed by the append that carried the
+/// decision — so what a second incarnation re-does is not the decision but any
+/// dispatch whose settlement never landed.  That is the at-least-once delivery
+/// this pattern has to absorb.
 pub async fn spawn_manager(
     system: &EventSourceSystem<StoreSet>,
     order_id: &AggregateId,
@@ -216,32 +223,76 @@ pub async fn wait_for_records(
     }
 }
 
-/// Poll the saga's own stream until it holds at least `expected` records of
-/// [`ReservationRequested`] — one per decision the saga committed.
-pub async fn wait_for_decisions(
-    store: &Arc<dyn EventStore>,
-    saga_key: &str,
-    expected: usize,
-    timeout: Duration,
-) -> Vec<LoadedEvent> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let events = load_stream(store, saga_key).await;
-        let decisions = events
-            .iter()
-            .filter(|event| event.event_type == ReservationRequested::EVENT_TYPE)
-            .count();
-        if decisions >= expected {
-            return events;
+// Fault injection
+
+/// `EventStore` decorator that leaves a dispatch unsettled: the saga's journal
+/// keeps the append that created it — the decision, the outbox marker of the tell
+/// it dispatched and the position of the fact it was derived from, all committed
+/// together — and every later append to that journal is refused.
+///
+/// That is the durable state an incarnation that dies mid-dispatch leaves behind:
+/// the command may already have reached its target, but nothing on the journal
+/// says the dispatch settled, so the marker is still pending and a later
+/// incarnation asks for the same operation again.  Refusing by stream key rather
+/// than allowing by key is what lets one store back the whole incarnation — the
+/// order's stream and the stock item's keep working, so the reservation this
+/// example is about is recorded exactly as in a healthy run.
+///
+/// `load` always delegates: a later incarnation has to be able to read the
+/// journal the interrupted one wrote.
+pub struct UnsettledDispatchStore {
+    inner: Arc<dyn EventStore>,
+    /// Stream key of the saga instance whose progress goes unrecorded.
+    journal: String,
+    interrupted: AtomicBool,
+}
+
+impl UnsettledDispatchStore {
+    pub fn new(inner: Arc<dyn EventStore>, journal: String) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            journal,
+            interrupted: AtomicBool::new(true),
+        })
+    }
+
+    /// End the interruption.
+    ///
+    /// The incarnation that could not record its progress is gone, and the store
+    /// the next one writes to was never broken — which is what lets the tests
+    /// that keep the receiving aggregate resident hand the same system to a second
+    /// manager.
+    pub fn incarnation_ended(&self) {
+        self.interrupted.store(false, Ordering::Release);
+    }
+
+    /// Is `events` an append that would extend an already-created journal?
+    ///
+    /// The decision block opens the stream at its genesis sequence, so anything
+    /// starting above it is progress the interrupted incarnation never got to
+    /// record.
+    fn extends_the_journal(&self, key: &str, events: &[AppendingEvent]) -> bool {
+        key == self.journal && events.first().is_some_and(|event| event.sequence > 1)
+    }
+}
+
+#[async_trait]
+impl EventStore for UnsettledDispatchStore {
+    async fn append(
+        &self,
+        key: &str,
+        events: Vec<AppendingEvent>,
+    ) -> Result<AppendOutcome, AppendError> {
+        if self.interrupted.load(Ordering::Acquire) && self.extends_the_journal(key, &events) {
+            return Err(AppendError::Backend(Box::new(std::io::Error::other(
+                format!("the incarnation writing {key} is gone"),
+            ))));
         }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for {expected} ReservationRequested records on {saga_key} \
-                 (had {decisions} among {} records)",
-                events.len()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        self.inner.append(key, events).await
+    }
+
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        self.inner.load(query).await
     }
 }
 

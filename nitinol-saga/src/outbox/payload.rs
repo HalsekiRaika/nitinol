@@ -5,6 +5,9 @@ use nitinol_eventsource::SystemEvent;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
 
+use crate::consumed::{
+    append_consumed_position, finalize_consumed_position, ConsumedPositionEvent, ConsumedPositions,
+};
 use crate::id::SagaId;
 use crate::observability::report_system_event;
 use crate::outbox::message::{Ended, OutboxEvent, TellAcked, TellFailed, TellRequested};
@@ -35,30 +38,47 @@ impl OutboxAppender {
         message.appending(sequence, occurred_at)
     }
 
-    /// Append the durable `Ended` terminal marker at `sequence` on the saga's
-    /// own stream.  Written when `SagaEffect::End` is interpreted so a later
-    /// spawn can detect termination and refuse to revive the saga.
+    /// Append the durable `Ended` terminal marker — plus the consumed
+    /// position, when `input_position` names one this append is closing out —
+    /// at `*sequence + 1` on the saga's own stream, advancing `*sequence` past
+    /// every row only on success.  Written when `SagaEffect::End` is
+    /// interpreted so a later spawn can detect termination and refuse to
+    /// revive the saga.
     ///
-    /// Returns `false` (and does not advance any caller-held sequence) when the
-    /// store rejects the append, mirroring [`OutboxAppender::append_terminal`].
+    /// `input_position` is `None` at call sites with no upstream input to
+    /// consume, and also whenever `End` is not the effect closing out its
+    /// input — the interpreter's `Sequence` handling only ever hands the
+    /// position to that one.
+    ///
+    /// Returns `false` (and does not advance `*sequence`) when the store
+    /// rejects the append, mirroring [`OutboxAppender::append_terminal`].
     pub(crate) async fn append_ended(
         store: &Arc<dyn EventStore>,
         saga_id: &SagaId,
-        sequence: u64,
+        sequence: &mut u64,
+        input_position: Option<&ConsumedPositionEvent>,
+        consumed: &mut ConsumedPositions,
     ) -> bool {
         let now = jiff::Timestamp::now();
+        let candidate = *sequence + 1;
         let marker = OutboxEvent::Ended(Ended {});
-        let event = marker.appending(sequence, now);
-        if let Err(e) = store.append(saga_id.borrow(), vec![event]).await {
+        let mut appending = vec![marker.appending(candidate, now)];
+        let mut next_seq = candidate;
+        let recorded_position =
+            append_consumed_position(&mut appending, input_position, consumed, &mut next_seq, now);
+
+        if let Err(e) = store.append(saga_id.borrow(), appending).await {
             tracing::warn!(error = %e, "saga outbox ended marker append failed");
             return false;
         }
+        *sequence = next_seq;
         report_system_event!(
             OutboxEvent::EVENT_TYPE,
             marker.arm(),
             saga_id.as_str(),
-            sequence = sequence,
+            sequence = candidate,
         );
+        finalize_consumed_position(consumed, saga_id.as_str(), recorded_position);
         true
     }
 

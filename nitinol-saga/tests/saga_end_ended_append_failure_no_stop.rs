@@ -6,9 +6,12 @@
 //! the saga would stop anyway, leaving the stream without the restart guard.
 //! The next spawn would then see no `Ended` marker and revive the saga.
 //!
-//! With the fix, a failed `Ended` append returns `InterpretOutcome::Continue`
-//! so the saga remains alive.  The next incoming upstream event again triggers
-//! `handle`, which can return `SagaEffect::End` again, retrying the append.
+//! With the fix, a failed `Ended` append returns without stopping — as
+//! `InterpretOutcome::AppendFailed`, which reports that an append this input
+//! required never landed and is therefore also what keeps the input from being
+//! recorded as consumed — so the saga remains alive.  The next incoming
+//! upstream event again triggers `handle`, which can return `SagaEffect::End`
+//! again, retrying the append.
 //!
 //! This test verifies the alive-after-failure invariant by injecting a saga
 //! store that always rejects appends and confirming that two successive

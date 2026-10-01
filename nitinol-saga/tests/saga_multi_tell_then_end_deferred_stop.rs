@@ -238,8 +238,9 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
 
     append_upstream(&upstream_store, &agg_id, 1, "order-1").await;
 
-    // 1 user event + 2 TellRequested + 1 Ended (from End) + 2 TellAcked = 6.
-    let events = wait_for_event_count(&saga_store, &saga_id, 6).await;
+    // 1 user event + 2 TellRequested + 1 consumed position + 1 Ended (from End)
+    // + 2 TellAcked = 7.
+    let events = wait_for_event_count(&saga_store, &saga_id, 7).await;
 
     let requested = count_outbox(&events, |k| matches!(k, OutboxKind::TellRequested(_)));
     let acked = count_outbox(&events, |k| matches!(k, OutboxKind::TellAcked(_)));
@@ -287,7 +288,7 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
     seqs.sort_unstable();
     assert_eq!(
         seqs,
-        vec![1, 2, 3, 4, 5, 6],
+        vec![1, 2, 3, 4, 5, 6, 7],
         "saga sequences must be gap-free and consecutive across the atomic batch, \
          the Ended marker, and both terminal claims; a gap means a terminal claim \
          advanced the cursor without a durable append (or vice versa)"
@@ -304,8 +305,9 @@ async fn multi_tell_then_end_stops_saga_after_last_executor_settles() {
 
     append_upstream(&upstream_store, &agg_id, 1, "order-1").await;
 
-    // 1 user event + 2 TellRequested + 1 Ended (from End) + 2 TellAcked = 6.
-    let events = wait_for_event_count(&saga_store, &saga_id, 6).await;
+    // 1 user event + 2 TellRequested + 1 consumed position + 1 Ended (from End)
+    // + 2 TellAcked = 7.
+    let events = wait_for_event_count(&saga_store, &saga_id, 7).await;
     assert_eq!(
         count_outbox(&events, |k| matches!(k, OutboxKind::TellAcked(_))),
         2,

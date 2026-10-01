@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,8 +32,14 @@ use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 pub const EMPLOYEE_COUNT: usize = 32;
 
 /// Number of records the saga's own stream must hold for one decision: the
-/// decision event plus one outbox marker per dispatched tell.
-pub const DECISION_BLOCK_LEN: usize = 1 + EMPLOYEE_COUNT;
+/// decision event, one outbox marker per dispatched tell, and the position of
+/// the upstream fact the decision was derived from — all committed by the one
+/// append.
+///
+/// A dispatch that settles adds its terminal marker *after* that block, which is
+/// what makes "no dispatch was recorded as settled" and "all 32 settled" two
+/// record counts a test can wait on.
+pub const DECISION_BLOCK_LEN: usize = 2 + EMPLOYEE_COUNT;
 
 /// The employees an approved payroll run is expected to cover.
 ///
@@ -79,10 +86,10 @@ pub struct FanOutWorld {
 /// stream are tenants of the same instance and each owner still reads only its
 /// own key.
 ///
-/// The store is a parameter because the crash/replay test hands the same durable
-/// state to two successive incarnations, wrapping the first one's in a
-/// fault-injecting decorator — which is what makes a partially completed fan-out
-/// reproducible.
+/// The store is a parameter because the redelivery and crash/replay tests hand
+/// the same durable state to two successive incarnations, wrapping the first
+/// one's in [`InterruptedFanOutStore`] — which is what makes an interrupted
+/// fan-out reproducible.
 pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> FanOutWorld {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
@@ -103,8 +110,12 @@ pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> Fa
 /// Spawn (or re-spawn) the saga manager over an existing system.
 ///
 /// The cursor starts at `after: 0` and lives in memory, so a manager spawned a
-/// second time over the same store replays the fact event — the at-least-once
-/// redelivery the pattern has to absorb.
+/// second time over the same store delivers the fact event again.  The saga
+/// instance it addresses drops that delivery — the position of the fact is on the
+/// instance's own stream, committed by the append that carried the decision — so
+/// what a second incarnation re-does is not the fan-out but the dispatches whose
+/// settlement never landed.  That is the at-least-once delivery the payslips have
+/// to absorb.
 ///
 /// Subscribing by the run's stream key is also what keeps the manager pointed at
 /// the run's own stream while the payslip streams and the saga's journal share
@@ -208,33 +219,35 @@ pub async fn wait_for_issued(
     }
 }
 
-/// Poll the saga's own stream until it holds at least `expected` records of
-/// `FanOutStarted` — one per decision the saga committed.
-pub async fn wait_for_decisions(
+/// Poll the stream `key` until it holds at least `expected` records.
+pub async fn wait_for_records(
     store: &Arc<dyn EventStore>,
-    saga_key: &str,
+    key: &str,
     expected: usize,
     timeout: Duration,
 ) -> Vec<LoadedEvent> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let events = load_stream(store, saga_key).await;
-        let decisions = events
-            .iter()
-            .filter(|event| event.event_type == FanOutStarted::EVENT_TYPE)
-            .count();
-        if decisions >= expected {
+        let events = load_stream(store, key).await;
+        if events.len() >= expected {
             return events;
         }
         if std::time::Instant::now() >= deadline {
             panic!(
-                "timed out waiting for {expected} FanOutStarted records on {saga_key} \
-                 (had {decisions} among {} records)",
+                "timed out waiting for {expected} records on {key} (had {})",
                 events.len()
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+/// The decisions the saga's own stream records, in stream order.
+pub fn decisions(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
+    events
+        .iter()
+        .filter(|event| event.event_type == FanOutStarted::EVENT_TYPE)
+        .collect()
 }
 
 /// Round-trip a query through every payslip process's mailbox.
@@ -261,33 +274,77 @@ pub async fn drain_payslips(system: &EventSourceSystem<StoreSet>, keys: &[String
 
 // Fault injection
 
-/// `EventStore` decorator that refuses `append` for the streams named in
-/// `refuses`, so a fan-out can be stopped part-way with no timing dependency.
+/// `EventStore` decorator that models an incarnation dying part-way through a
+/// fan-out, with no timing dependency.
+///
+/// Two things go unrecorded.  The saga's journal keeps the append that created it
+/// — the decision, all 32 outbox markers and the position of the fact they were
+/// derived from, committed together — and every later append to it is refused, so
+/// no dispatch is ever recorded as settled and every marker stays pending.  The
+/// payslip streams named in `unreachable` refuse their issue, so those payslips go
+/// missing the way the ones a dying incarnation never reached do.
 ///
 /// Refusing by name rather than allowing by name is what lets one store back the
-/// whole incarnation: the run's own stream and the saga's journal keep working,
-/// so the decision that drives the fan-out is still recorded, and only the
-/// payslips named here go missing.
+/// whole incarnation: the run's own stream keeps working, so the decision that
+/// drives the fan-out is recorded exactly as in a healthy run.
 ///
-/// `load` always delegates: a payslip whose issue was refused must still be able
-/// to replay (and find itself empty) in a later incarnation.
-pub struct PartialFailurePayslipStore {
+/// `load` always delegates: a later incarnation has to be able to read the journal
+/// this one wrote, and a payslip whose issue was refused must still be able to
+/// replay (and find itself empty).
+///
+/// [`Self::incarnation_ended`] lifts the journal refusal: the incarnation that
+/// could not record its progress is gone, and the store the next one writes to was
+/// never broken.
+pub struct InterruptedFanOutStore {
     inner: Arc<dyn EventStore>,
-    refuses: HashSet<String>,
+    /// Stream key of the saga instance whose progress goes unrecorded.
+    journal: String,
+    interrupted: AtomicBool,
+    /// Payslip streams the dying incarnation never got to issue.
+    unreachable: HashSet<String>,
     refused: Mutex<HashSet<String>>,
     refused_changed: Notify,
 }
 
-impl PartialFailurePayslipStore {
-    pub fn new(inner: Arc<dyn EventStore>, refuses: HashSet<String>) -> Arc<Self> {
+impl InterruptedFanOutStore {
+    pub fn new(
+        inner: Arc<dyn EventStore>,
+        journal: String,
+        unreachable: HashSet<String>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             inner,
-            refuses,
+            journal,
+            interrupted: AtomicBool::new(true),
+            unreachable,
             refused: Mutex::new(HashSet::new()),
             refused_changed: Notify::new(),
         })
     }
 
+    /// End the interruption of the journal.
+    ///
+    /// What the interrupted incarnation could not record stays unrecorded; from
+    /// here the store records everything again, which is what lets a test keep the
+    /// payslip processes resident and hand the same system to a second manager.
+    pub fn incarnation_ended(&self) {
+        self.interrupted.store(false, Ordering::Release);
+    }
+
+    /// Is `events` an append that would extend an already-created journal?
+    ///
+    /// The decision block opens the stream at its genesis sequence, so anything
+    /// starting above it is progress the interrupted incarnation never got to
+    /// record.
+    fn extends_the_journal(&self, key: &str, events: &[AppendingEvent]) -> bool {
+        key == self.journal && events.first().is_some_and(|event| event.sequence > 1)
+    }
+
+    /// The payslip streams that have had their issue refused.
+    ///
+    /// The journal's unrecorded progress is deliberately not counted here: nothing
+    /// was recorded, so there is nothing for a test to wait on — only the payslips
+    /// that go missing are observable.
     pub fn refused(&self) -> HashSet<String> {
         self.refused
             .lock()
@@ -322,13 +379,18 @@ impl PartialFailurePayslipStore {
 }
 
 #[async_trait]
-impl EventStore for PartialFailurePayslipStore {
+impl EventStore for InterruptedFanOutStore {
     async fn append(
         &self,
         key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        if !self.refuses.contains(key) {
+        if self.interrupted.load(Ordering::Acquire) && self.extends_the_journal(key, &events) {
+            return Err(AppendError::Backend(Box::new(std::io::Error::other(
+                format!("the incarnation writing {key} is gone"),
+            ))));
+        }
+        if !self.unreachable.contains(key) {
             return self.inner.append(key, events).await;
         }
         self.refused

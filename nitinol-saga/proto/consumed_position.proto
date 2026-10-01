@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package nitinol.saga.consumed_position;
+
+// The position of an upstream record the saga has consumed.  Persisted on the
+// saga's own EventStore stream — most often in the append that closes out the
+// `handle` decision its input produced (the last one, when a single `handle`
+// call reaches the store as more than one atomic append), or in a
+// dead-letter append that settles the input without any `handle` decision at
+// all — and classified back as `SagaPersisted::ConsumedPosition`.
+//
+// The position names the source stream it belongs to rather than standing for
+// the subscription as a whole, so a saga reading several upstream streams holds
+// one position per stream and a record of one source can never be read as
+// covering another.
+message ConsumedPositionMarker {
+  oneof kind {
+    Consumed consumed = 1;
+  }
+}
+
+// One source's position: the highest sequence of `source` the saga has
+// consumed on its own stream.
+message Consumed {
+  // Stream key of the upstream source the position belongs to.
+  string source = 1;
+  // Highest sequence of that source the saga has consumed.
+  uint64 sequence = 2;
+}

@@ -70,15 +70,16 @@ impl ReservationSaga {
     /// The operation id for the reservation `event` owes.
     ///
     /// It is a function of the upstream event's own domain content because a
-    /// re-dispatched marker is only one of the two ways the same operation is
-    /// asked for twice — the other, the same event reaching [`Saga::handle`]
-    /// again, builds the command from scratch (see
-    /// [`SagaEffect::tell`]).  An id minted per `handle` call survives the first
-    /// and fails the second, invisibly, until the stock item applies the
-    /// reservation twice.  `order_id` is the derivation base because an order
-    /// owes its reservation exactly once: something every order shares would be
-    /// just as stable and would make the *next* order's reservation look like a
-    /// repeat the receiver then silently withholds.
+    /// re-dispatched marker is only one of the ways the same operation is asked
+    /// for twice — the others reach [`Saga::handle`] again and build the command
+    /// from scratch (see [`SagaEffect::tell`]): a batch that never landed leaves
+    /// its input unconsumed, and two activations of one instance can both decide
+    /// from an input before either's batch is durable.  An id minted per `handle`
+    /// call survives the marker route and fails those, invisibly, until the stock
+    /// item applies the reservation twice.  `order_id` is the derivation base
+    /// because an order owes its reservation exactly once: something every order
+    /// shares would be just as stable and would make the *next* order's
+    /// reservation look like a repeat the receiver then silently withholds.
     pub fn reservation_id(event: &OrderPlaced) -> String {
         format!("{}/reservation", event.order_id)
     }
@@ -120,13 +121,15 @@ impl Saga for ReservationSaga {
     /// two owners that a crash between the two writes could leave disagreeing.
     fn apply(&mut self, _event: Self::Event) {}
 
-    /// A redelivered fact event produces the same decision again, on purpose.
+    /// Nothing here suppresses a repeat, on purpose.
     ///
-    /// Suppressing the second dispatch here would put the idempotence in the
-    /// saga, where it holds only as long as this incarnation's memory does.
-    /// Leaving it in the stock item puts it behind a durable stream instead, so
-    /// it survives the restart it exists to protect against — and the operation
-    /// id is what lets the stock item do so.
+    /// Two things could: the framework drops an input whose decision is already
+    /// durable before this method sees it, and the stock item answers a
+    /// reservation it has already applied with a write-free acceptance.  Both are
+    /// backed by a stream.  A check inside this method would not be: it would hold
+    /// only as long as this incarnation's memory does, and it would do nothing at
+    /// all about the dispatch a pending marker repeats, which never passes through
+    /// here.  The operation id is what lets the stock item recognise that repeat.
     async fn handle(
         &mut self,
         event: Self::SubscribedEvent,

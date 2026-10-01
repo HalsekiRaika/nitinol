@@ -37,8 +37,10 @@ impl<E> SagaEffect<E> {
     /// a receiver that [`SagaEffect::combine`] folds tells and schedules into.
     /// The interpreter, however, does not see an "intent to persist zero
     /// events": a `Persist` whose `events`, `tells` **and** `schedules` are all
-    /// empty takes the same no-op path as [`SagaEffect::None`] and writes
-    /// nothing.
+    /// empty takes the same no-op path as [`SagaEffect::None`] and persists no
+    /// batch of its own — though the interpreter still writes a
+    /// consumed-position-only append when the input this was decided from has
+    /// a position not yet durable, so a no-op decision is not redelivered.
     ///
     /// Emptiness of `events` alone is not enough to make a branch a no-op — a
     /// `Persist` carrying a tell or a schedule but no user event is exactly what

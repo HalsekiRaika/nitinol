@@ -1,11 +1,16 @@
-//! The fan-out pattern under at-least-once redelivery.
+//! The fan-out pattern under at-least-once delivery.
 //!
 //! One decision is recorded as one fact event on one stream; the saga manager
-//! turns that fact into 32 payslip issues; and because the manager's cursor is
-//! not durable, a manager spawned a second time over the same run stream
-//! delivers the very same fact event again.  The pattern's claim is that the
-//! second delivery changes nothing observable in the payslip streams — the
-//! idempotence lives in the payslips, not in a short-circuit inside the saga.
+//! turns that fact into 32 payslip issues; and a second incarnation over the same
+//! durable state re-dispatches every issue whose settlement the first one never
+//! recorded.  The pattern's claim is that those repeats change nothing observable
+//! in the payslip streams — the idempotence lives in the payslips, not in a
+//! short-circuit inside the saga.
+//!
+//! The fact event itself is delivered a second time as well, because the manager's
+//! cursor is not durable, and it is *not* fanned out again: its position is on the
+//! saga's own stream, committed by the append that carried the decision, so the
+//! framework drops it before `Saga::handle`.
 //!
 //! The store-side half of that claim — a conflict on a stream's genesis sequence
 //! means "already created", and the first write stays intact — is stated and
@@ -20,11 +25,12 @@
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    drain_payslips, employee_ids, fingerprint, fingerprints, issued, load_stream, payslip_keys,
-    spawn_manager, spawn_world, wait_for_decisions, wait_for_issued, DECISION_BLOCK_LEN,
-    EMPLOYEE_COUNT,
+    decisions, drain_payslips, employee_ids, fingerprint, fingerprints, issued, load_stream,
+    payslip_keys, spawn_manager, spawn_world, wait_for_issued, wait_for_records,
+    InterruptedFanOutStore, DECISION_BLOCK_LEN, EMPLOYEE_COUNT,
 };
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,16 +47,6 @@ use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 /// upstream every 250ms and each tell is dispatched through the outbox, so this
 /// is generous rather than tight — a deadline, not a synchronisation device.
 const FANOUT_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// Settle window used only in front of a negative assertion.
-///
-/// The saga appends its tell markers and *then* dispatches them, so the moment
-/// the second decision becomes visible in the saga stream the redelivered
-/// commands may still be in flight.  There is no earlier observable point, so
-/// the redelivery is given a bounded window to land before the "nothing
-/// changed" assertions run.  Mirrors the settle used by
-/// `nitinol-saga/tests/saga_manager_lazy_spawn.rs`.
-const REDELIVERY_SETTLE: Duration = Duration::from_millis(750);
 
 /// The one store an incarnation is wired with.
 ///
@@ -124,8 +120,8 @@ async fn one_fact_event_records_the_approval_and_fans_out_to_thirty_two_payslips
     let saga_stream = load_stream(&store, saga_key.as_str()).await;
     assert!(
         saga_stream.len() >= DECISION_BLOCK_LEN,
-        "the saga stream must hold the decision and its {EMPLOYEE_COUNT} tell markers \
-         (had {} records)",
+        "the saga stream must hold the decision, its {EMPLOYEE_COUNT} tell markers \
+         and the position of the fact it was derived from (had {} records)",
         saga_stream.len()
     );
     let block = &saga_stream[..DECISION_BLOCK_LEN];
@@ -148,7 +144,8 @@ async fn one_fact_event_records_the_approval_and_fans_out_to_thirty_two_payslips
             .count(),
         1,
         "the decision block must carry exactly one domain event; the other \
-         {EMPLOYEE_COUNT} records are the framework's tell markers"
+         records are the framework's — {EMPLOYEE_COUNT} tell markers and the \
+         consumed position of the fact event"
     );
     assert!(
         block.iter().all(|e| e.occurred_at == block[0].occurred_at),
@@ -157,20 +154,34 @@ async fn one_fact_event_records_the_approval_and_fans_out_to_thirty_two_payslips
     );
 }
 
-/// The same fact event delivered twice must leave the payslips untouched.
+/// Every issue delivered a second time must leave the payslips untouched.
 ///
-/// The manager is stopped and spawned again over the same store; its cursor is
-/// in memory, so the second incarnation replays the fact event from the start.
-/// The payslip processes stay resident across the restart, so this is
-/// redelivery in its plain form — no aggregate replay involved.
+/// The first incarnation writes through a store that refuses to record anything
+/// beyond the append that opened the saga's journal, so all 32 payslips are issued
+/// while every marker for them stays pending — the durable state a process that
+/// dies mid-fan-out leaves behind.  The manager is then stopped and spawned again
+/// over the same store, and it is those pending markers, not a second decision,
+/// that deliver all 32 issues again.
+///
+/// The payslip processes stay resident across the restart, so the repeats are
+/// absorbed in their plain form — no aggregate replay involved.
 #[tokio::test]
-async fn redelivered_fact_event_writes_no_second_payslip() {
+async fn a_redispatched_issue_writes_no_second_payslip() {
     let store = single_store();
     let run_id = AggregateId::new("payroll-run-redelivery");
     let employees = employee_ids();
     let payslips = payslip_keys(run_id.as_str(), &employees);
+    let saga_key = FanOutSaga::instance_id(run_id.as_str());
 
-    let world = spawn_world(&run_id, Arc::clone(&store)).await;
+    // Every payslip is reachable here: what goes unrecorded is only the settling
+    // of the dispatches.
+    let interrupted = InterruptedFanOutStore::new(
+        Arc::clone(&store),
+        saga_key.as_str().to_owned(),
+        HashSet::new(),
+    );
+
+    let world = spawn_world(&run_id, Arc::clone(&interrupted) as Arc<dyn EventStore>).await;
 
     world
         .payroll_run
@@ -184,6 +195,21 @@ async fn redelivered_fact_event_writes_no_second_payslip() {
     wait_for_issued(&store, &payslips, EMPLOYEE_COUNT, FANOUT_TIMEOUT).await;
     let before = fingerprints(&store, &payslips).await;
 
+    let unsettled = wait_for_records(
+        &store,
+        saga_key.as_str(),
+        DECISION_BLOCK_LEN,
+        FANOUT_TIMEOUT,
+    )
+    .await;
+    assert_eq!(
+        unsettled.len(),
+        DECISION_BLOCK_LEN,
+        "the interrupted incarnation must leave every dispatch unsettled: the decision \
+         block alone, with no terminal marker after it (journal holds {} records)",
+        unsettled.len()
+    );
+
     // Stopping the manager cascade-stops its poller and its saga instances;
     // dropping the handle alone would leave them running.
     world
@@ -192,23 +218,35 @@ async fn redelivered_fact_event_writes_no_second_payslip() {
         .await
         .expect("stopping the manager must succeed");
 
+    // The interrupted incarnation is gone, so the store the next one writes to
+    // records everything again.
+    interrupted.incarnation_ended();
+
     let _second_manager = spawn_manager(&world.system, &run_id).await;
 
-    let saga_key = FanOutSaga::instance_id(run_id.as_str());
-    wait_for_decisions(&store, saga_key.as_str(), 2, FANOUT_TIMEOUT).await;
-    tokio::time::sleep(REDELIVERY_SETTLE).await;
+    // One terminal marker per re-dispatched issue is what says all 32 were
+    // dispatched again, and each is written after its command was handed to the
+    // payslip — so this is the observable point the assertions below need, not a
+    // guessed settle window.
+    wait_for_records(
+        &store,
+        saga_key.as_str(),
+        DECISION_BLOCK_LEN + EMPLOYEE_COUNT,
+        FANOUT_TIMEOUT,
+    )
+    .await;
 
     let states = drain_payslips(&world.system, &payslips).await;
     assert_eq!(
         states,
         vec![true; EMPLOYEE_COUNT],
-        "every payslip must report itself issued after the redelivery"
+        "every payslip must report itself issued after the re-dispatch"
     );
 
     let after = fingerprints(&store, &payslips).await;
     assert_eq!(
         after, before,
-        "a redelivered fact event must leave every payslip stream byte-identical: \
+        "a re-dispatched issue must leave every payslip stream byte-identical: \
          same record count, same stream sequences, same global sequences, same \
          payloads"
     );
@@ -216,19 +254,35 @@ async fn redelivered_fact_event_writes_no_second_payslip() {
         assert_eq!(
             stream.len(),
             1,
-            "payslip {key} must still hold exactly one issue record after redelivery"
+            "payslip {key} must still hold exactly one issue record after the re-dispatch"
         );
     }
+
+    let saga_stream = load_stream(&store, saga_key.as_str()).await;
+    assert_eq!(
+        saga_stream.len(),
+        DECISION_BLOCK_LEN + EMPLOYEE_COUNT,
+        "the 32 re-dispatches must settle as one marker each: a dispatch that could \
+         not be delivered settles as a failure with a dead letter beside it (journal \
+         holds {} records)",
+        saga_stream.len()
+    );
+    assert_eq!(
+        decisions(&saga_stream).len(),
+        1,
+        "the redelivered fact event must not be fanned out a second time: its position \
+         is on the saga's own stream, so the framework drops it before `handle`"
+    );
 
     assert_eq!(
         load_stream(&store, run_id.as_str()).await.len(),
         1,
-        "redelivery must not add records to the stream that owns the decision"
+        "the re-dispatch must not add records to the stream that owns the decision"
     );
     assert_eq!(
         issued(&store, &payslips).await.len(),
         EMPLOYEE_COUNT,
-        "redelivery must not issue payslips beyond the ones the fact event named"
+        "the re-dispatch must not issue payslips beyond the ones the fact event named"
     );
 }
 

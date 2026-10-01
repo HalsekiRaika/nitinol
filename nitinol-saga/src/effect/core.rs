@@ -22,15 +22,19 @@ use crate::scheduler::TimerName;
 ///
 /// # Variants
 ///
-/// - `None` — Monoid identity, no-op.
+/// - `None` — Monoid identity.  Writes no batch of its own on the saga's own
+///   event store; see [`crate::Saga::handle`] for when the interpreter still
+///   commits a consumed-position-only append for the input this was decided
+///   from.
 /// - `Persist { events, tells, schedules }` — append the user events together
 ///   with one `TellRequested` outbox marker per tell, and one
 ///   `ScheduleEvent::Scheduled` marker per schedule, **in a single atomic
 ///   batch** on the saga's own event store.  After the append succeeds, each
 ///   tell is dispatched via the retry executor and each schedule is registered
 ///   with the resident `SchedulerProcess` via the injected [`SchedulerProxy`].
-///   A branch whose `events`, `tells` and `schedules` are all empty carries
-///   nothing to append and is interpreted exactly like `None`.
+///   A branch whose `events`, `tells` and `schedules` are all empty writes no
+///   batch of its own either, taking the same path as `None` — see
+///   [`crate::Saga::handle`] for the full contract.
 /// - `End` — single-responsibility termination marker.  Stops the saga
 ///   process and tears down its upstream subscription.  Effects placed after
 ///   `End` inside a `Sequence` are not interpreted.
@@ -46,7 +50,8 @@ use crate::scheduler::TimerName;
 ///
 /// [`SchedulerProxy`]: crate::SchedulerProxy
 pub enum SagaEffect<E> {
-    /// No-op — the identity element of the Monoid.
+    /// The identity element of the Monoid.  See type-level docs for the full
+    /// contract.
     None,
     /// Persist a batch of user events together with the per-tell `TellRequested`
     /// markers and the per-schedule `ScheduleEvent::Scheduled` markers in one

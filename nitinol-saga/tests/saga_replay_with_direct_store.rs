@@ -112,7 +112,21 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-async fn wait_for_saga_event_count(
+/// The saga's own decisions, told apart from the framework bookkeeping that
+/// shares their stream — the consumed-position record that rides the append
+/// closing an input out, which for this file's single-`Persist` saga is the
+/// same append its decision is in.
+fn decisions(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
+    events
+        .iter()
+        .filter(|e| e.event_type == ReservationRequested::EVENT_TYPE)
+        .collect()
+}
+
+/// Wait for `expected` *decisions*, not for `expected` rows: a decision no
+/// longer occupies its stream alone, so counting rows would return while the
+/// saga still owes a decision.
+async fn wait_for_decisions(
     store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
     expected: usize,
@@ -121,14 +135,14 @@ async fn wait_for_saga_event_count(
     tokio::time::timeout(timeout, async {
         loop {
             let events = load_saga_events(store, saga_id).await;
-            if events.len() >= expected {
+            if decisions(&events).len() >= expected {
                 return events;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {expected} saga events"))
+    .unwrap_or_else(|_| panic!("timed out waiting for {expected} saga decisions"))
 }
 
 #[tokio::test]
@@ -181,16 +195,16 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let saga_events = load_saga_events(&store, &saga_id).await;
+    let persisted = decisions(&saga_events);
 
     assert_eq!(
-        saga_events.len(),
+        persisted.len(),
         1,
         "saga must persist exactly one ReservationRequested event"
     );
-    assert_eq!(saga_events[0].sequence, 1);
-    assert_eq!(saga_events[0].event_type, ReservationRequested::EVENT_TYPE);
+    assert_eq!(persisted[0].sequence, 1);
     assert_eq!(
-        saga_events[0].stream_key,
+        persisted[0].stream_key,
         saga_id.as_str(),
         "saga event must be keyed by saga_id (Borrow<str>) — not by an aggregate id"
     );
@@ -261,7 +275,7 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
         })
         .await
         .expect("ask(PlaceOrder) must succeed");
-    wait_for_saga_event_count(&store, &saga_id, 1, Duration::from_secs(3)).await;
+    wait_for_decisions(&store, &saga_id, 1, Duration::from_secs(3)).await;
 
     drop(saga_proxy);
 
@@ -272,16 +286,19 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
         .await
         .expect("ask(PlaceOrder) must succeed");
 
-    let saga_events = wait_for_saga_event_count(&store, &saga_id, 2, Duration::from_secs(3)).await;
+    let saga_events = wait_for_decisions(&store, &saga_id, 2, Duration::from_secs(3)).await;
+    let persisted = decisions(&saga_events);
 
     assert_eq!(
-        saga_events.len(),
+        persisted.len(),
         2,
         "SagaProxy drop must not stop the upstream subscription; \
          SagaProcess must continue persisting events after the handle is released"
     );
-    assert_eq!(saga_events[0].sequence, 1);
-    assert_eq!(saga_events[1].sequence, 2);
+    // Each decision is committed with the position of the input it was decided
+    // from, so the second one starts a sequence past its predecessor's pair.
+    assert_eq!(persisted[0].sequence, 1);
+    assert_eq!(persisted[1].sequence, 3);
 }
 
 #[tokio::test]
@@ -325,7 +342,7 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
         })
         .await
         .expect("ask must succeed");
-    wait_for_saga_event_count(&store, &saga_id, 1, Duration::from_secs(3)).await;
+    wait_for_decisions(&store, &saga_id, 1, Duration::from_secs(3)).await;
 
     // Explicitly stop the saga process so the upstream DurableStream poller is
     // also torn down.  Dropping the proxy handle alone is not sufficient —
@@ -361,19 +378,38 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
         .await
         .expect("ask must succeed");
 
-    let saga_events = wait_for_saga_event_count(&store, &saga_id, 3, Duration::from_secs(3)).await;
+    let saga_events = wait_for_decisions(&store, &saga_id, 2, Duration::from_secs(3)).await;
 
+    let seen = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+        .len();
     assert_eq!(
-        saga_events.len(),
-        3,
-        "saga stream must contain three events after respawn (1 pre-drop, \
-         2 post-respawn from at-least-once catchup + new live event)"
+        seen, 2,
+        "one handle call per upstream order: the catchup the respawn performs \
+         re-reads the order the first incarnation already decided from, and the \
+         position replay restored is what keeps it from reaching handle a \
+         second time"
     );
-    assert_eq!(saga_events[0].sequence, 1);
-    assert_eq!(saga_events[1].sequence, 2);
+
+    let persisted = decisions(&saga_events);
     assert_eq!(
-        saga_events[2].sequence, 3,
-        "highest saga sequence must be 3, proving on_start restored \
-         state.sequence to 1 from the direct store"
+        persisted.len(),
+        2,
+        "one decision per order — one written before the drop and one after the \
+         respawn"
+    );
+    assert_eq!(persisted[0].sequence, 1);
+    assert_eq!(
+        persisted[1].sequence, 3,
+        "the respawned incarnation appends past the pair the first one left \
+         behind, which is what proves on_start restored state.sequence to 2 \
+         from the direct store"
+    );
+    assert_eq!(
+        saga_events.last().map(|e| e.sequence),
+        Some(4),
+        "the position committed with the second decision is the stream's last \
+         row"
     );
 }

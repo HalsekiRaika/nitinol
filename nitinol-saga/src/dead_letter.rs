@@ -35,10 +35,14 @@ mod queue;
 mod settle;
 mod subscriber;
 
+use std::borrow::Borrow;
 use std::sync::Arc;
 
 use nitinol_persistence::store::EventStore;
 
+use crate::consumed::{
+    append_consumed_position, finalize_consumed_position, ConsumedPositionEvent, ConsumedPositions,
+};
 use crate::id::SagaId;
 
 pub use self::event::{DeadLetterEvent, SagaFailure, SourceContext};
@@ -61,29 +65,45 @@ use self::event::DeadLetterEvent as Event;
 /// Outcome of [`enqueue_dead_letter`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EnqueueOutcome {
-    /// The policy decided to ignore the failure.  No append was attempted; the
-    /// caller may continue normally.
+    /// The policy decided to ignore the failure: no dead-letter row was
+    /// written.  When `input_position` named one, its position-only append
+    /// still landed, so the upstream record this call settles is durably
+    /// consumed either way.
     Ignored,
     /// The policy decided to enqueue and the dead-letter was successfully
     /// appended to the saga's own stream.
     Enqueued,
-    /// The policy decided to enqueue but the store append failed.  The saga's
-    /// persisted DLQ contract is broken for this failure — the caller must not
-    /// treat the upstream message as processed.
+    /// The store append failed — either the dead-letter row the policy asked
+    /// for, or, when the policy ignored the failure, the position-only append
+    /// that was standing in for it.  Either way the saga's persisted record of
+    /// this input is not durable — the caller must not treat the upstream
+    /// message as processed.
     AppendFailed,
 }
 
 /// Enqueue a saga `failure` as a dead letter on the saga's own stream, subject
-/// to `policy`.
+/// to `policy` — plus the consumed position, when `input_position` names one
+/// this call is settling, in the same atomic append.
 ///
 /// This is the single named operation every failure point routes through, so
 /// the full set of DLQ writes is discoverable from one place.  On a successful
-/// append `*sequence` advances by one; a failed append leaves it untouched so
-/// no sequence number is skipped.
+/// append `*sequence` advances past every row written; a failed append leaves
+/// it untouched so no sequence number is skipped.
 ///
-/// Callers **must** handle [`EnqueueOutcome::AppendFailed`]: when the policy
-/// says `Enqueue` but the store write fails, the upstream message must not be
-/// silently treated as processed — the persisted DLQ must stay authoritative.
+/// `input_position` is `None` at call sites with no upstream input to settle
+/// (timer firings, tell-outcome reports), and also at `PersistFailed` — the
+/// batch that would have carried the position is exactly what never landed,
+/// so recording it here would mark an undelivered decision as consumed.
+/// Where it names one, the caller is settling that upstream record with an
+/// `Ok` outcome (the `DirectPoller` will advance its cursor past it), so the
+/// position must become durable in the same call whether or not the policy
+/// also writes a dead letter: an `Ignore`d failure still gets a position-only
+/// append, because "no dead letter" does not mean "not settled".
+///
+/// Callers **must** handle [`EnqueueOutcome::AppendFailed`]: the upstream
+/// message must not be silently treated as processed when this call's
+/// durable record of it — row, position, or both — did not land.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn enqueue_dead_letter(
     store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
@@ -91,9 +111,32 @@ pub(crate) async fn enqueue_dead_letter(
     policy: &dyn EnqueuePolicy,
     failure: SagaFailure,
     source: SourceContext,
+    input_position: Option<&ConsumedPositionEvent>,
+    consumed: &mut ConsumedPositions,
 ) -> EnqueueOutcome {
     if matches!(policy.decide(&failure), EnqueueDecision::Ignore) {
-        return EnqueueOutcome::Ignored;
+        let now = jiff::Timestamp::now();
+        let mut appending = Vec::new();
+        let mut next_seq = *sequence;
+        let recorded_position =
+            append_consumed_position(&mut appending, input_position, consumed, &mut next_seq, now);
+        if appending.is_empty() {
+            return EnqueueOutcome::Ignored;
+        }
+        return match store.append(saga_id.borrow(), appending).await {
+            Ok(_) => {
+                *sequence = next_seq;
+                finalize_consumed_position(consumed, saga_id.as_str(), recorded_position);
+                EnqueueOutcome::Ignored
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "saga consumed-position-only append failed (dead letter ignored by policy)"
+                );
+                EnqueueOutcome::AppendFailed
+            }
+        };
     }
     let event = Event {
         seq: *sequence + 1,
@@ -102,7 +145,7 @@ pub(crate) async fn enqueue_dead_letter(
         occurred_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
         source,
     };
-    if event::append_dead_letter(store, saga_id, sequence, event).await {
+    if event::append_dead_letter(store, saga_id, sequence, event, input_position, consumed).await {
         EnqueueOutcome::Enqueued
     } else {
         EnqueueOutcome::AppendFailed
@@ -121,10 +164,12 @@ mod tests {
     use nitinol_persistence::{AppendOutcome, AppendingEvent, LoadQuery};
 
     use super::{enqueue_dead_letter, EnqueueOutcome};
+    use crate::consumed::{ConsumedPositionEvent, ConsumedPositions};
     use crate::dead_letter::event::SourceContext;
     use crate::dead_letter::policy::{EnqueueAll, EnqueuePolicy};
     use crate::dead_letter::{DeadLetterQuery, DeadLetterQueue, EnqueueDecision, SagaFailure};
     use crate::id::SagaId;
+    use nitinol_persistence::AggregateId;
 
     struct AlwaysFailStore;
 
@@ -166,6 +211,7 @@ mod tests {
         let store: Arc<dyn EventStore> = Arc::new(AlwaysFailStore);
         let saga_id = SagaId::new("saga-1");
         let mut sequence: u64 = 0;
+        let mut consumed = ConsumedPositions::default();
 
         let outcome = enqueue_dead_letter(
             &store,
@@ -176,11 +222,60 @@ mod tests {
                 error: "e".to_owned(),
             },
             SourceContext::without_upstream(),
+            None,
+            &mut consumed,
         )
         .await;
 
         assert_eq!(outcome, EnqueueOutcome::Ignored);
         assert_eq!(sequence, 0, "sequence must not advance when policy ignores");
+    }
+
+    /// Regression test: when policy says `Ignore` but `input_position` names
+    /// an upstream record this call is settling, the position must still
+    /// become durable — "no dead letter" is not "not settled", and the caller
+    /// is about to return `Ok` either way.  Before this fix an ignored
+    /// failure never appended anything, so a record settled this way was
+    /// silently redeliverable after a restart.
+    #[tokio::test]
+    async fn enqueue_outcome_ignored_with_a_position_still_commits_it() {
+        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let saga_id = SagaId::new("saga-1");
+        let mut sequence: u64 = 0;
+        let mut consumed = ConsumedPositions::default();
+        let position = ConsumedPositionEvent {
+            source: AggregateId::new("upstream-order"),
+            sequence: 7,
+        };
+
+        let outcome = enqueue_dead_letter(
+            &store,
+            &saga_id,
+            &mut sequence,
+            &IgnoreAllPolicy,
+            SagaFailure::HandleFailed {
+                error: "e".to_owned(),
+            },
+            SourceContext::without_upstream(),
+            Some(&position),
+            &mut consumed,
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            EnqueueOutcome::Ignored,
+            "no dead letter is written, so the outcome is still Ignored"
+        );
+        assert_eq!(
+            sequence, 1,
+            "the position-only append must still advance the sequence"
+        );
+        assert!(
+            consumed.covers("upstream-order", 7),
+            "the position must be recorded in memory, the same as a written \
+             dead letter's would be"
+        );
     }
 
     /// Regression test: when policy says `Enqueue` but the store
@@ -192,6 +287,7 @@ mod tests {
         let store: Arc<dyn EventStore> = Arc::new(AlwaysFailStore);
         let saga_id = SagaId::new("saga-1");
         let mut sequence: u64 = 0;
+        let mut consumed = ConsumedPositions::default();
 
         let outcome = enqueue_dead_letter(
             &store,
@@ -202,6 +298,8 @@ mod tests {
                 error: "e".to_owned(),
             },
             SourceContext::without_upstream(),
+            None,
+            &mut consumed,
         )
         .await;
 
@@ -222,6 +320,7 @@ mod tests {
         let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
         let saga_id = SagaId::new("saga-1");
         let mut sequence: u64 = 0;
+        let mut consumed = ConsumedPositions::default();
 
         for error in ["first", "second"] {
             let outcome = enqueue_dead_letter(
@@ -233,6 +332,8 @@ mod tests {
                     error: error.to_owned(),
                 },
                 SourceContext::without_upstream(),
+                None,
+                &mut consumed,
             )
             .await;
             assert_eq!(outcome, EnqueueOutcome::Enqueued);

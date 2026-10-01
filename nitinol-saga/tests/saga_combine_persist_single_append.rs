@@ -13,8 +13,8 @@
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    decode_outbox_kind, decode_schedule_kind, JsonCodec, OutboxKind, ScheduleKind, OUTBOX_MARKER,
-    SCHEDULE_MARKER,
+    decode_outbox_kind, decode_schedule_kind, JsonCodec, OutboxKind, ScheduleKind,
+    CONSUMED_POSITION_MARKER, OUTBOX_MARKER, SCHEDULE_MARKER,
 };
 
 use std::sync::{Arc, Mutex};
@@ -170,6 +170,13 @@ fn tell_targets(batch: &[RecordedEvent]) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// The position of the upstream input the batch was decided from — framework
+/// bookkeeping that rides the append closing that input out, which for every
+/// saga in this file is the single batch its one `Persist` becomes.
+fn is_consumed_position(event: &RecordedEvent) -> bool {
+    event.event_type == CONSUMED_POSITION_MARKER
 }
 
 fn is_scheduled_marker(event: &RecordedEvent) -> bool {
@@ -580,8 +587,8 @@ async fn persist_combined_with_tell_is_written_in_one_append_batch() {
         .await
         .expect("Saga::handle must run within 3 seconds");
 
-    // domain event + TellRequested + the eventual TellAcked.
-    let recorded = wait_for_recorded_events(&batches, 3).await;
+    // domain event + TellRequested + consumed position + the eventual TellAcked.
+    let recorded = wait_for_recorded_events(&batches, 4).await;
 
     let domain_batches: Vec<&Vec<RecordedEvent>> = recorded
         .iter()
@@ -597,9 +604,10 @@ async fn persist_combined_with_tell_is_written_in_one_append_batch() {
     let atomic_batch = domain_batches[0];
     assert_eq!(
         atomic_batch.len(),
-        2,
-        "persist(e).combine(tell(..)) must append the domain event and the \
-         TellRequested marker together; batches: {:?}",
+        3,
+        "persist(e).combine(tell(..)) must append the domain event, the \
+         TellRequested marker and the position of the input they were decided \
+         from together; batches: {:?}",
         describe(&recorded)
     );
     assert!(
@@ -611,6 +619,12 @@ async fn persist_combined_with_tell_is_written_in_one_append_batch() {
         is_tell_requested(&atomic_batch[1]),
         "the TellRequested marker must ride in the same batch as the user event; \
          batches: {:?}",
+        describe(&recorded)
+    );
+    assert!(
+        is_consumed_position(&atomic_batch[2]),
+        "the position closes the batch, so the marker before it keeps the \
+         sequence its tell_id names; batches: {:?}",
         describe(&recorded)
     );
 
@@ -683,8 +697,8 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
         .await
         .expect("Saga::handle must run within 3 seconds");
 
-    // domain event + TellRequested + the eventual TellAcked.
-    let recorded = wait_for_recorded_events(&batches, 3).await;
+    // domain event + TellRequested + consumed position + the eventual TellAcked.
+    let recorded = wait_for_recorded_events(&batches, 4).await;
 
     let domain_batches: Vec<&Vec<RecordedEvent>> = recorded
         .iter()
@@ -700,10 +714,10 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
     let atomic_batch = domain_batches[0];
     assert_eq!(
         atomic_batch.len(),
-        2,
-        "Sequence(vec![Persist(e), Persist(tell)]) must append the domain event \
-         and the TellRequested marker together, exactly like persist(e).combine(tell(..)); \
-         batches: {:?}",
+        3,
+        "Sequence(vec![Persist(e), Persist(tell)]) must append the domain event, \
+         the TellRequested marker and the consumed position together, exactly \
+         like persist(e).combine(tell(..)); batches: {:?}",
         describe(&recorded)
     );
     assert!(
@@ -715,6 +729,12 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
         is_tell_requested(&atomic_batch[1]),
         "the TellRequested marker must ride in the same batch as the user event; \
          batches: {:?}",
+        describe(&recorded)
+    );
+    assert!(
+        is_consumed_position(&atomic_batch[2]),
+        "the position closes the batch, so the marker before it keeps the \
+         sequence its tell_id names; batches: {:?}",
         describe(&recorded)
     );
 
@@ -787,8 +807,8 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
         .await
         .expect("Saga::handle must run within 3 seconds");
 
-    // domain event + TellRequested + the eventual TellAcked.
-    let recorded = wait_for_recorded_events(&batches, 3).await;
+    // domain event + TellRequested + consumed position + the eventual TellAcked.
+    let recorded = wait_for_recorded_events(&batches, 4).await;
 
     let domain_batches: Vec<&Vec<RecordedEvent>> = recorded
         .iter()
@@ -804,11 +824,11 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
     let atomic_batch = domain_batches[0];
     assert_eq!(
         atomic_batch.len(),
-        2,
+        3,
         "Sequence(vec![Persist(e), Sequence(vec![]), Persist(tell)]) must append \
-         the domain event and the TellRequested marker together — the empty \
-         nested Sequence contributes zero leaves and must not become a merge \
-         boundary; batches: {:?}",
+         the domain event, the TellRequested marker and the consumed position \
+         together — the empty nested Sequence contributes zero leaves and must \
+         not become a merge boundary; batches: {:?}",
         describe(&recorded)
     );
     assert!(
@@ -820,6 +840,12 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
         is_tell_requested(&atomic_batch[1]),
         "the TellRequested marker must ride in the same batch as the user event; \
          batches: {:?}",
+        describe(&recorded)
+    );
+    assert!(
+        is_consumed_position(&atomic_batch[2]),
+        "the position closes the batch, so the marker before it keeps the \
+         sequence its tell_id names; batches: {:?}",
         describe(&recorded)
     );
 
@@ -892,8 +918,8 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
         .await
         .expect("Saga::handle must run within 3 seconds");
 
-    // domain event + TellRequested + the eventual TellAcked.
-    let recorded = wait_for_recorded_events(&batches, 3).await;
+    // domain event + TellRequested + consumed position + the eventual TellAcked.
+    let recorded = wait_for_recorded_events(&batches, 4).await;
 
     let domain_batches: Vec<&Vec<RecordedEvent>> = recorded
         .iter()
@@ -909,10 +935,11 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
     let atomic_batch = domain_batches[0];
     assert_eq!(
         atomic_batch.len(),
-        2,
+        3,
         "Sequence(vec![Persist(e), None, Persist(tell)]) must append the domain \
-         event and the TellRequested marker together — None is the Monoid \
-         identity and must not become a merge boundary; batches: {:?}",
+         event, the TellRequested marker and the consumed position together — \
+         None is the Monoid identity and must not become a merge boundary; \
+         batches: {:?}",
         describe(&recorded)
     );
     assert!(
@@ -924,6 +951,12 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
         is_tell_requested(&atomic_batch[1]),
         "the TellRequested marker must ride in the same batch as the user event; \
          batches: {:?}",
+        describe(&recorded)
+    );
+    assert!(
+        is_consumed_position(&atomic_batch[2]),
+        "the position closes the batch, so the marker before it keeps the \
+         sequence its tell_id names; batches: {:?}",
         describe(&recorded)
     );
 
@@ -995,8 +1028,9 @@ async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
         .await
         .expect("Saga::handle must run within 3 seconds");
 
-    // domain event + 2 TellRequested + the eventual 2 TellAcked.
-    let recorded = wait_for_recorded_events(&batches, 5).await;
+    // domain event + 2 TellRequested + consumed position + the eventual
+    // 2 TellAcked.
+    let recorded = wait_for_recorded_events(&batches, 6).await;
 
     let domain_batches: Vec<&Vec<RecordedEvent>> = recorded
         .iter()
@@ -1012,14 +1046,21 @@ async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
     let atomic_batch = domain_batches[0];
     assert_eq!(
         atomic_batch.len(),
-        3,
-        "persist(e).combine(tell(a)).combine(tell(b)) must append the user event \
-         and both TellRequested markers together; batches: {:?}",
+        4,
+        "persist(e).combine(tell(a)).combine(tell(b)) must append the user event, \
+         both TellRequested markers and the consumed position together; \
+         batches: {:?}",
         describe(&recorded)
     );
     assert!(
         is_domain_event(&atomic_batch[0]),
         "the user event must lead the atomic batch; batches: {:?}",
+        describe(&recorded)
+    );
+    assert!(
+        is_consumed_position(&atomic_batch[3]),
+        "the position closes the batch, so both tell markers keep the sequences \
+         their tell_ids name; batches: {:?}",
         describe(&recorded)
     );
     assert_eq!(
@@ -1076,9 +1117,10 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
         .await
         .expect("Saga::handle must run within 3 seconds");
 
-    // domain event + the `scheduled` marker; the timer itself is an hour out and
-    // no scheduler is injected, so nothing else reaches the store.
-    let recorded = wait_for_recorded_events(&batches, 2).await;
+    // domain event + the `scheduled` marker + the consumed position; the timer
+    // itself is an hour out and no scheduler is injected, so nothing else
+    // reaches the store.
+    let recorded = wait_for_recorded_events(&batches, 3).await;
 
     let domain_batches: Vec<&Vec<RecordedEvent>> = recorded
         .iter()
@@ -1094,9 +1136,10 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
     let atomic_batch = domain_batches[0];
     assert_eq!(
         atomic_batch.len(),
-        2,
-        "persist(e).combine(schedule(..)) must append the domain event and the \
-         scheduled marker together; batches: {:?}",
+        3,
+        "persist(e).combine(schedule(..)) must append the domain event, the \
+         scheduled marker and the position of the input they were decided from \
+         together; batches: {:?}",
         describe(&recorded)
     );
     assert!(
@@ -1108,6 +1151,12 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
         is_scheduled_marker(&atomic_batch[1]),
         "the scheduled marker must ride in the same batch as the user event; \
          batches: {:?}",
+        describe(&recorded)
+    );
+    assert!(
+        is_consumed_position(&atomic_batch[2]),
+        "the position closes the batch, after the rows the effect itself \
+         produced; batches: {:?}",
         describe(&recorded)
     );
 

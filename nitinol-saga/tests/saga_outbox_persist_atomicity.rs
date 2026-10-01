@@ -3,6 +3,12 @@
 //! and the per-schedule `Scheduled` markers in **one** atomic batch on the
 //! saga's own event store.
 //!
+//! The sagas here return no hard boundary — no `End`, no `CancelSchedule` —
+//! so that one `Persist` is also the append closing their input out, and the
+//! consumed position rides it.  Which append carries a position is the
+//! interpreter's rule rather than part of this invariant: a `Persist` that is
+//! not the one closing the input out writes no position at all.
+//!
 //! Without atomicity, a crash between the user event append and the outbox
 //! marker append would leave the system in an inconsistent state — the saga
 //! would think it had emitted a tell that no executor will ever pick up on
@@ -10,7 +16,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{outbox_kind_of, JsonCodec, OutboxKind};
+use common::{outbox_kind_of, JsonCodec, OutboxKind, CONSUMED_POSITION_MARKER};
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -244,9 +250,10 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
         .await
         .expect("Saga::handle must run within 3 seconds");
 
-    // Expect at least: 1 user event + 2 TellRequested + (eventually) 2 TellAcked.
-    // We wait for all 5 to land so the assertions below are stable.
-    let events = wait_for_event_count(&saga_store, &saga_id, 5).await;
+    // Expect at least: 1 user event + 2 TellRequested + 1 consumed position +
+    // (eventually) 2 TellAcked.  We wait for all 6 to land so the assertions
+    // below are stable.
+    let events = wait_for_event_count(&saga_store, &saga_id, 6).await;
 
     let user_events: Vec<&LoadedEvent> = events
         .iter()
@@ -282,13 +289,17 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
         "no TellFailed must be emitted when every dispatch succeeds first try"
     );
 
-    // The atomic batch is the *initial* burst: user event + 2 TellRequested
-    // appended at consecutive sequences with the same occurred_at (because the
-    // saga interpreter builds them all from one `jiff::Timestamp::now()` call).
+    // The atomic batch is the *initial* burst: user event + 2 TellRequested +
+    // the consumed position of the upstream input, appended at consecutive
+    // sequences with the same occurred_at (because the saga interpreter builds
+    // them all from one `jiff::Timestamp::now()` call).  The position closes
+    // the batch, which is what leaves each `tell_id` equal to the sequence of
+    // its own marker.
     let mut atomic_batch: Vec<&LoadedEvent> = events
         .iter()
         .filter(|e| {
             e.event_type == ReservationRequested::EVENT_TYPE
+                || e.event_type == CONSUMED_POSITION_MARKER
                 || matches!(outbox_kind_of(e), Some(OutboxKind::TellRequested(_)))
         })
         .collect();
@@ -296,15 +307,34 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
 
     assert_eq!(
         atomic_batch.len(),
-        3,
-        "atomic Persist batch must be exactly 3 events (1 user + 2 TellRequested)"
+        4,
+        "atomic Persist batch must be exactly 4 events (1 user + 2 TellRequested \
+         + 1 consumed position)"
     );
     let seqs: Vec<u64> = atomic_batch.iter().map(|e| e.sequence).collect();
     assert_eq!(
         seqs,
-        vec![1, 2, 3],
+        vec![1, 2, 3, 4],
         "the atomic batch must occupy consecutive sequences starting from 1 — \
          a gap would mean the appends were not in the same store::append call"
+    );
+    assert_eq!(
+        atomic_batch[3].event_type, CONSUMED_POSITION_MARKER,
+        "the position is the last row of the batch"
+    );
+    let tell_ids: Vec<(u64, u64)> = atomic_batch
+        .iter()
+        .filter_map(|e| match outbox_kind_of(e) {
+            Some(OutboxKind::TellRequested(m)) => Some((e.sequence, m.tell_id)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tell_ids,
+        vec![(2, 2), (3, 3)],
+        "a tell is identified by the stream sequence of the marker that \
+         requested it; a row inserted before them would repoint every pending \
+         tell"
     );
 
     // Sanity: both mock targets received exactly one Reserve each (the
@@ -407,10 +437,29 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
         .filter(|e| outbox_kind_of(e).is_some())
         .collect();
 
+    let user_events: Vec<&LoadedEvent> = events
+        .iter()
+        .filter(|e| e.event_type == ReservationRequested::EVENT_TYPE)
+        .collect();
+    assert_eq!(
+        user_events.len(),
+        1,
+        "saga must persist exactly one user event for a tell-less Persist branch"
+    );
     assert_eq!(
         events.len(),
-        1,
-        "saga must persist exactly one event for a tell-less Persist branch"
+        2,
+        "the only other row is the position of the input it was decided from; \
+         got: {:?}",
+        events
+            .iter()
+            .map(|e| e.event_type.to_string())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        events[1].event_type, CONSUMED_POSITION_MARKER,
+        "the position is a sibling declaration of the outbox, which is why the \
+         outbox assertion below still holds"
     );
     assert!(
         outbox_events.is_empty(),

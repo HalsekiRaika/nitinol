@@ -163,6 +163,16 @@ pub const DEAD_LETTER_MARKER: EventType = EventType::new(SAGA_FAMILY, TypeName::
 pub const DISPOSITION_MARKER: EventType =
     EventType::new(SAGA_FAMILY, TypeName::new("dead_letter_disposition"));
 
+/// The one identity every consumed-position record is written down as — a
+/// sibling of [`OUTBOX_MARKER`], so counting outbox markers never counts the
+/// input positions the framework folds its de-duplication out of.
+///
+/// Tests that count what a saga wrote select on this rather than adding one to
+/// a literal: the row is framework bookkeeping, and an assertion that says
+/// "exactly one user event" has to keep counting user events.
+pub const CONSUMED_POSITION_MARKER: EventType =
+    EventType::new(SAGA_FAMILY, TypeName::new("consumed_position"));
+
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct TellRequestedPayload {
     #[prost(uint64, tag = "1")]
@@ -343,6 +353,69 @@ pub fn schedule_transition(kind: &ScheduleKind) -> &'static str {
         ScheduleKind::Cancelled(_) => "cancelled",
         ScheduleKind::Fired(_) => "fired",
     }
+}
+
+// Consumed-position records — mirror of `proto/consumed_position.proto`.
+//
+// `ConsumedPositionEvent` is `pub(crate)` in `nitinol-saga`, so an integration
+// test reads the fact the way any other consumer of the column would: by
+// decoding the payload's `oneof`, which is where the fact lives.
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ConsumedPayload {
+    /// Stream key of the upstream source the position belongs to.
+    #[prost(string, tag = "1")]
+    pub source: String,
+    /// Highest upstream sequence of that source the saga has consumed.
+    #[prost(uint64, tag = "2")]
+    pub sequence: u64,
+}
+
+#[derive(Clone, PartialEq, prost::Oneof)]
+pub enum ConsumedPositionKind {
+    #[prost(message, tag = "1")]
+    Consumed(ConsumedPayload),
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ConsumedPositionMarkerPayload {
+    #[prost(oneof = "ConsumedPositionKind", tags = "1")]
+    pub kind: Option<ConsumedPositionKind>,
+}
+
+pub fn encode_consumed_position(source: &str, sequence: u64) -> Bytes {
+    let msg = ConsumedPositionMarkerPayload {
+        kind: Some(ConsumedPositionKind::Consumed(ConsumedPayload {
+            source: source.to_owned(),
+            sequence,
+        })),
+    };
+    Bytes::from(prost::Message::encode_to_vec(&msg))
+}
+
+pub fn decode_consumed_position(payload: &[u8]) -> ConsumedPayload {
+    let ConsumedPositionKind::Consumed(consumed) =
+        <ConsumedPositionMarkerPayload as prost::Message>::decode(payload)
+            .expect("payload must be a valid prost ConsumedPositionMarker message")
+            .kind
+            .expect("consumed position payload must carry a oneof kind");
+    consumed
+}
+
+/// The position a row holds, or `None` when the row is not one or cannot be
+/// read as one.
+///
+/// Unlike [`decode_consumed_position`], this answers rather than insisting: a
+/// test whose subject *is* an unreadable row has to be able to describe the
+/// stream it seeded without panicking on the very row under test.
+pub fn readable_consumed_position_of(event: &LoadedEvent) -> Option<ConsumedPayload> {
+    if event.event_type != CONSUMED_POSITION_MARKER {
+        return None;
+    }
+    <ConsumedPositionMarkerPayload as prost::Message>::decode(&event.payload[..])
+        .ok()?
+        .kind
+        .map(|ConsumedPositionKind::Consumed(consumed)| consumed)
 }
 
 // Disposition markers — mirror of `proto/dead_letter_disposition.proto`.

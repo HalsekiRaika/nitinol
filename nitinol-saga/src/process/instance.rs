@@ -6,6 +6,7 @@ use std::sync::Arc;
 use nitinol_persistence::store::EventStore;
 use nitinol_runtime::Props;
 
+use crate::consumed::ConsumedPositions;
 use crate::dead_letter::{DlqChildSpawn, EnqueuePolicy};
 use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
@@ -56,6 +57,9 @@ impl<S: Saga> SagaInstanceSpec<S> {
                 store: Arc::clone(&self.store),
                 decode_failure_route_fn: self.decode_failure_route_fn.clone(),
                 sequence: 0,
+                // Both are restored from the saga's own stream in `on_start`:
+                // a freshly built process knows nothing of what it consumed.
+                consumed: ConsumedPositions::default(),
                 retry_policy: RetryPolicy::default(),
                 tell_states,
                 crash_restart_factory: self.crash_restart_factory.clone(),

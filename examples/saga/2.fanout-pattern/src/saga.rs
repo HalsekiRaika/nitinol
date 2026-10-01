@@ -110,12 +110,14 @@ impl Saga for FanOutSaga {
     /// and the disagreement would be invisible until the next replay.
     fn apply(&mut self, _event: Self::Event) {}
 
-    /// A redelivered fact event produces the same decision again, on purpose.
+    /// Nothing here suppresses a repeat, on purpose.
     ///
-    /// Suppressing the second fan-out here would put the idempotence in the
-    /// saga, where it holds only as long as this incarnation's memory does.
-    /// Leaving it in the payslips puts it behind their durable streams
-    /// instead, so it survives the crash it exists to protect against.
+    /// Two things could: the framework drops a fact event whose fan-out is already
+    /// durable before this method sees it, and each payslip answers a repeated
+    /// issue with a write-free acceptance.  Both are backed by a stream.  A check
+    /// inside this method would not be: it would hold only as long as this
+    /// incarnation's memory does, and it would do nothing at all about the issues
+    /// a pending outbox marker repeats, which never pass through here.
     async fn handle(
         &mut self,
         event: Self::SubscribedEvent,

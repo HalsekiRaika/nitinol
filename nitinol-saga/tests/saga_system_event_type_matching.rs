@@ -7,9 +7,10 @@
 //! is the framework record this crate exports, and it is what the question can
 //! be asked of from outside the crate.
 //!
-//! Its siblings — `nitinol.saga.outbox`, `nitinol.saga.schedule` and
-//! `nitinol.saga.dead_letter_disposition` — are named here as the stored
-//! strings they are, because the types declaring them are crate-internal. Those
+//! Its siblings — `nitinol.saga.outbox`, `nitinol.saga.schedule`,
+//! `nitinol.saga.dead_letter_disposition` and
+//! `nitinol.saga.consumed_position` — are named here as the stored strings
+//! they are, because the types declaring them are crate-internal. Those
 //! strings are the wire contract a stored row carries, so spelling them out is
 //! naming an external contract rather than copying an internal definition.
 
@@ -40,12 +41,18 @@ fn a_stored_event_type_matches_the_system_event_that_declares_it() {
 /// Given the identity of each of the dead letter's sibling framework records,
 /// When each is matched against `DeadLetterEvent`, Then none of them match.
 ///
-/// This is what keeps a settlement marker, an outbox marker and a timer marker
-/// from being read as dead letters: they share the reserved family, and the
-/// family alone is not what a record is recognised by.
+/// This is what keeps a settlement marker, an outbox marker, a timer marker
+/// and a consumed-position record from being read as dead letters: they share
+/// the reserved family, and the family alone is not what a record is
+/// recognised by.
 #[test]
 fn the_sibling_framework_declarations_do_not_match() {
-    for sibling in ["outbox", "schedule", "dead_letter_disposition"] {
+    for sibling in [
+        "outbox",
+        "schedule",
+        "dead_letter_disposition",
+        "consumed_position",
+    ] {
         let stored = saga_record(sibling);
 
         assert!(

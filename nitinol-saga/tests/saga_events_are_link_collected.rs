@@ -8,7 +8,7 @@
 //!          stream restores it rather than failing with UnknownEventType
 //! ```
 //!
-//! The four markers below are `pub(crate)`, so what is named here is the wire
+//! The five markers below are `pub(crate)`, so what is named here is the wire
 //! form rather than the constant: the canonical path is what a journal column
 //! holds and what a registry is asked for, and it is the only part of these
 //! records the framework cannot change without changing what an existing
@@ -17,8 +17,8 @@
 //! A path missing from this list is not covered by this clause; a path in the
 //! list that the saga never writes would make the clause pass on a record no
 //! reader ever sees. Both are pinned against the declarations in
-//! `outbox/message.rs`, `scheduler/event.rs`, `dead_letter/event.rs` and
-//! `dead_letter/disposition.rs`.
+//! `outbox/message.rs`, `scheduler/event.rs`, `dead_letter/event.rs`,
+//! `dead_letter/disposition.rs` and `consumed.rs`.
 //!
 //! Each of those is one declaration written down as one path. Which arm of it a
 //! row holds is carried by the payload's `oneof`, so no path beneath a marker
@@ -35,6 +35,7 @@ const JOURNALLED_PATHS: &[&str] = &[
     "nitinol.saga.schedule",
     "nitinol.saga.dead_letter",
     "nitinol.saga.dead_letter_disposition",
+    "nitinol.saga.consumed_position",
 ];
 
 /// Paths the saga wrote before arms were removed from the grammar, and writes
@@ -58,6 +59,7 @@ const PATHS_NO_DECLARATION_OWNS: &[&str] = &[
     "nitinol.saga.dead_letter.tell_failed_hook_failed",
     "nitinol.saga.dead_letter_disposition.processed",
     "nitinol.saga.dead_letter_disposition.evicted",
+    "nitinol.saga.consumed_position.consumed",
 ];
 
 #[test]

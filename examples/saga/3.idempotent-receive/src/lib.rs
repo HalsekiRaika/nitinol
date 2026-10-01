@@ -13,8 +13,11 @@
 //!    written by whoever builds the command.
 //! 2. **The sender derives it deterministically.**
 //!    [`saga::ReservationSaga::reservation_id`] is a pure function of the
-//!    upstream event, so a command built again from that event — by a later
-//!    incarnation, or another node — carries the id the first one carried.
+//!    upstream event, so a command built again from that event — by an
+//!    incarnation whose predecessor's batch never landed, or by another node
+//!    holding a duplicate activation — carries the id the first one carried.
+//!    A command rebuilt from a pending marker's bytes carries it for a different
+//!    reason: those bytes are the ones dispatched the first time.
 //! 3. **The receiver records the ids it applied on its own stream.**
 //!    [`stock_item::StockReserved`] carries the operation id, so
 //!    [`stock_item::StockItem`] rebuilds the applied set by replaying its

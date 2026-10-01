@@ -7,7 +7,8 @@
 //!
 //! ```gherkin
 //!   Scenario: a framework record written, a record emitted
-//!     Given a saga that fails a handle, a tell, and fires a timer
+//!     Given a saga that fails a handle, fails a tell, fires a timer and
+//!           consumes an upstream input
 //!     When each framework record lands on the saga's own stream
 //!     Then a tracing record names the event type, the arm and the stream
 //!
@@ -39,7 +40,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{JsonCodec, DEAD_LETTER_MARKER, SCHEDULE_MARKER};
+use common::{JsonCodec, CONSUMED_POSITION_MARKER, DEAD_LETTER_MARKER, SCHEDULE_MARKER};
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -75,6 +76,11 @@ use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TimerName};
 const EVENT_TYPE: &str = "event_type";
 const ARM: &str = "arm";
 const STREAM_ID: &str = "stream_id";
+
+/// The context a record about a consumed position adds to those three: which
+/// upstream stream was read, and how far.
+const SOURCE: &str = "source";
+const UPSTREAM_SEQUENCE: &str = "upstream_sequence";
 
 /// Why the capture buffer's lock cannot be poisoned: it guards a push and a
 /// read of a `Vec`, and no holder can panic.
@@ -174,6 +180,25 @@ impl Capture {
             .collect()
     }
 
+    /// Every field of every record about `stream_id` that named `event_type`
+    /// and `arm`.
+    ///
+    /// [`Self::system_records`] keeps only the three required fields; a
+    /// record's own context fields are what say *which* write it was about.
+    fn records_of(&self, stream_id: &str, event_type: &str, arm: &str) -> Vec<Fields> {
+        self.0
+            .lock()
+            .expect(CAPTURE_LOCK)
+            .iter()
+            .filter(|fields| {
+                fields.get(STREAM_ID).map(String::as_str) == Some(stream_id)
+                    && fields.get(EVENT_TYPE).map(String::as_str) == Some(event_type)
+                    && fields.get(ARM).map(String::as_str) == Some(arm)
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Every `event_type` a record about `stream_id` named.
     fn event_types(&self, stream_id: &str) -> Vec<String> {
         self.system_records(stream_id)
@@ -207,6 +232,7 @@ impl Capture {
 const OUTBOX: &str = "nitinol.saga.outbox";
 const SCHEDULE: &str = "nitinol.saga.schedule";
 const DEAD_LETTER: &str = "nitinol.saga.dead_letter";
+const CONSUMED_POSITION: &str = "nitinol.saga.consumed_position";
 
 // Domain fixtures
 
@@ -586,7 +612,101 @@ async fn a_registered_and_a_fired_timer_are_reported_with_distinct_arms() {
     capture.wait_for(SCHEDULE_SAGA_ID, SCHEDULE, "fired").await;
 }
 
-// Scenario 4 — a user's own event is not reported
+// Scenario 4 — the position a batch consumed is reported like any other
+// framework record
+
+const POSITION_SAGA_ID: &str = "tracing-position-saga";
+const POSITION_UPSTREAM_KEY: &str = "tracing-position-upstream";
+
+struct PositionSaga {
+    handled: Arc<Notify>,
+}
+
+#[async_trait]
+impl Saga for PositionSaga {
+    type SubscribedEvent = Ping;
+    type Event = SagaLog;
+    type Error = std::convert::Infallible;
+    type ScheduledMessage = ();
+
+    fn correlate(_event: &Ping) -> Option<SagaId> {
+        Some(SagaId::new(POSITION_SAGA_ID))
+    }
+    fn apply(&mut self, _event: SagaLog) {}
+
+    async fn handle(
+        &mut self,
+        event: Ping,
+        _ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        self.handled.notify_one();
+        Ok(SagaEffect::persist(SagaLog { note: event.tag }))
+    }
+}
+
+/// Given a saga whose decision batch also carries the position of the input it
+/// was decided from, When that batch lands, Then a record names the position's
+/// event type, its arm and the stream — the framework reports every record it
+/// writes itself, and this is one of them — and names the upstream stream and
+/// sequence the write recorded, which is the progress the arm alone leaves
+/// unsaid.
+#[tokio::test]
+async fn the_position_a_batch_consumed_is_reported_with_its_own_arm() {
+    let capture = Capture::installed();
+    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ps).build();
+
+    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    append_ping(&upstream_store, POSITION_UPSTREAM_KEY, 1, "note").await;
+
+    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_id = SagaId::new(POSITION_SAGA_ID);
+    let handled = Arc::new(Notify::new());
+    let handled_for_saga = Arc::clone(&handled);
+
+    let _proxy =
+        SagaProps::<PositionSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+            PositionSaga {
+                handled: Arc::clone(&handled_for_saga),
+            }
+        })
+        .with_subscription(
+            Arc::clone(&upstream_store),
+            SequenceCursor::Stream {
+                key: POSITION_UPSTREAM_KEY.to_owned(),
+                after: 0,
+            },
+        )
+        .spawn(system.process_system())
+        .await;
+
+    // The row has to be on the stream before the record about it means
+    // anything: a record claiming a write that never happened would be worse
+    // than none.
+    wait_for_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+
+    capture
+        .wait_for(POSITION_SAGA_ID, CONSUMED_POSITION, "consumed")
+        .await;
+
+    let reported = capture.records_of(POSITION_SAGA_ID, CONSUMED_POSITION, "consumed");
+    let progress: Vec<(Option<&String>, Option<&String>)> = reported
+        .iter()
+        .map(|fields| (fields.get(SOURCE), fields.get(UPSTREAM_SEQUENCE)))
+        .collect();
+    assert_eq!(
+        progress,
+        vec![(
+            Some(&POSITION_UPSTREAM_KEY.to_owned()),
+            Some(&"1".to_owned())
+        )],
+        "the arm says a position landed but not which input it closed out; an \
+         operator reading how far the saga has consumed each upstream stream \
+         needs the source and the sequence named too; the capture held {reported:?}"
+    );
+}
+
+// Scenario 5 — a user's own event is not reported
 
 const DOMAIN_ONLY_SAGA_ID: &str = "tracing-domain-saga";
 

@@ -30,6 +30,24 @@
 //!   via a runtime child `DirectPollerProcess` (catchup + live, at-least-once delivery).
 //!   The poller's lifetime is bound to the saga process; when the saga stops the runtime
 //!   cascade-stops the child poller automatically.
+//! - Consumed inputs are de-duplicated by the framework.  Most positions are
+//!   written onto the saga's own stream by the append that closes out the
+//!   `handle` decision the input produced — the last one, when one `handle`
+//!   call reaches the store as more than one atomic append — so the position
+//!   is never durable before every append it depends on is.  A record that
+//!   fails to decode, arrives while an earlier correlated record is draining
+//!   to a dead letter, or gets an `Err` from `handle`, is instead settled by
+//!   a dead-letter append carrying the same position — these inputs are
+//!   consumed without ever producing a `handle` decision.  Either way, replay
+//!   rebuilds those positions from the stream alone, a redelivered record at
+//!   or below one is dropped before [`Saga::handle`] runs again, and a stream
+//!   subscription resumes past it instead of re-reading the upstream history.
+//!   An effect that writes nothing else still commits a consumed-position-only
+//!   append, so a no-op decision is not redelivered either; what the guarantee
+//!   does *not* cover — an append that never landed, and the entry points with
+//!   no input to consume — is stated on [`Saga::handle`].  Positions are held
+//!   per source stream, so one upstream stream's progress never covers a
+//!   record of another.
 //! - Symmetric spawn: [`SagaSystemExt`] extends
 //!   [`nitinol_eventsource::system::EventSourceSystem`] with
 //!   [`spawn_saga`](SagaSystemExt::spawn_saga), the counterpart of
@@ -192,13 +210,17 @@
 //!    staged rather than a flat at-least-once — see
 //!    [`SagaEffect::tell`](SagaEffect::tell) for what each stage promises and
 //!    how wiring changes it.  The upstream subscription is at-least-once, so
-//!    the same fact — and with it the same fan-out — can arrive more than
-//!    once.
+//!    the same fact can be *delivered* more than once; whether it is fanned out
+//!    again depends on whether the batch recording the fan-out landed.  Until
+//!    it does, the fact is unconsumed and a redelivery runs the fan-out again.
+//!    Once it has, the fact's position is on the saga's own stream and the
+//!    redelivery is dropped before [`Saga::handle`].
 //! 3. **Idempotent creation.**  The child answers a repeated creation command
 //!    with "already created" rather than with a second write, which is what
-//!    lets a creation-only fan-out need no compensation: the recovery for an
-//!    interrupted fan-out is to run it again.  Where a redelivered command
-//!    reaches the store anyway, an
+//!    lets a creation-only fan-out need no compensation.  A creation command
+//!    does repeat even when the fact behind it is not handled twice: a tell
+//!    left pending at a crash is re-dispatched from its own durable marker.
+//!    Where a redelivered command reaches the store anyway, an
 //!    [`nitinol_persistence::error::AppendError::SequenceConflict`] on the
 //!    genesis sequence carries that same meaning — *this aggregate has already
 //!    been created* — and leaves the first write intact, so a caller on the
@@ -251,6 +273,7 @@
 //!   key — which is also what makes the command reconstructible from its outbox
 //!   marker after a crash.
 
+mod consumed;
 mod context;
 mod dead_letter;
 mod effect;

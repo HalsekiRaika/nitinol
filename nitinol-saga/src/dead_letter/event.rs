@@ -13,6 +13,9 @@ use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{reserved_event, AggregateId, EventType};
 
+use crate::consumed::{
+    append_consumed_position, finalize_consumed_position, ConsumedPositionEvent, ConsumedPositions,
+};
 use crate::id::SagaId;
 use crate::observability::report_system_event;
 
@@ -229,24 +232,41 @@ impl nitinol_eventsource::DeclaresEventType for DeadLetterEvent {
     const EVENT_TYPE: EventType = <Self as SystemEvent>::EVENT_TYPE;
 }
 
-/// Append a single dead-letter event at `*sequence + 1`, advancing `*sequence`
-/// only on success.  Mirrors the terminal-append discipline used for outbox and
-/// schedule markers: a failed store append leaves the caller's sequence
-/// untouched so the next attempt does not skip numbers.
+/// Append a single dead-letter event at `*sequence + 1` — plus the consumed
+/// position, when `input_position` names one this append is closing out — in
+/// one atomic append, advancing `*sequence` past every row only on success.
+/// Mirrors the terminal-append discipline used for outbox and schedule
+/// markers: a failed store append leaves the caller's sequence untouched so
+/// the next attempt does not skip numbers.
+///
+/// `input_position` is `None` at call sites with no upstream input to
+/// consume, and also where the dead letter does not itself settle the input
+/// (e.g. `PersistFailed`, where the batch that would have carried the
+/// position is exactly what never landed — recording it here would mark an
+/// undelivered decision as consumed).  Where it names one, the position rides
+/// the same append as the dead letter: an upstream record this method settles
+/// with a durable row must never be redeliverable because its position landed
+/// on neither.
 pub(crate) async fn append_dead_letter(
     store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
     sequence: &mut u64,
     event: DeadLetterEvent,
+    input_position: Option<&ConsumedPositionEvent>,
+    consumed: &mut ConsumedPositions,
 ) -> bool {
     let candidate = *sequence + 1;
     let now = jiff::Timestamp::now();
-    let appending = event.appending(candidate, now);
-    if let Err(e) = store.append(saga_id.borrow(), vec![appending]).await {
+    let mut appending = vec![event.appending(candidate, now)];
+    let mut next_seq = candidate;
+    let recorded_position =
+        append_consumed_position(&mut appending, input_position, consumed, &mut next_seq, now);
+
+    if let Err(e) = store.append(saga_id.borrow(), appending).await {
         tracing::warn!(error = %e, "saga dead letter append failed");
         return false;
     }
-    *sequence = candidate;
+    *sequence = next_seq;
     // A dead letter's position on the saga stream is its identity — it is what
     // an operator settles it by — so that is the context the record carries.
     report_system_event!(
@@ -255,6 +275,7 @@ pub(crate) async fn append_dead_letter(
         saga_id.as_str(),
         sequence = candidate,
     );
+    finalize_consumed_position(consumed, saga_id.as_str(), recorded_position);
     true
 }
 

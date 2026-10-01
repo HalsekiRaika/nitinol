@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-saga`): a saga records the upstream positions it has consumed on its
+  own journal, so de-duplicating its input stops being the user's job.
+
+  `nitinol.saga.consumed_position` is a reserved record naming one upstream
+  stream and the highest sequence of it the saga has consumed. One `handle`
+  call can reach the store as more than one atomic append — a `CancelSchedule`
+  or `End` is a boundary the interpreter never merges across — so the position
+  rides only the append that closes the input's interpretation out, and is
+  never durable before every append that input required is. The position goes
+  last in the batch it does ride, which is what leaves every `tell_id` equal to
+  the stream sequence of its own `TellRequested` marker.
+
+  Replay rebuilds those positions from the journal alone — highest per source
+  wins, and a row that cannot be read is skipped rather than read as a position
+  of its own. A redelivered record at or below the position recorded for its own
+  source is then dropped before `Saga::handle`, so a saga whose `handle` is not
+  idempotent is covered too. A stream subscription additionally resumes past the
+  folded position, which takes restart cost off the length of the upstream
+  history; the configured `after` still holds as a floor, and a `Global` cursor
+  is left exactly as configured, since a per-source sequence cannot be
+  translated into a store-wide ordering.
+
+  Where the guarantee stops is deliberate and stated on `Saga::handle`: an
+  input is consumed only once *every* append it required has landed, so a
+  decision can be durable while its input is not — the reverse never happens.
+  A batch that never landed writes no position (its input is handled again,
+  at-least-once), and when the append that never landed comes before the one
+  that would have closed the input out, that later append is withheld too,
+  closing marker included: `End` never durably terminates a saga around a
+  decision that input owes but no store holds. A record is also consumed
+  without ever producing a `handle` decision at all: one whose upstream bytes
+  fail to decode, one that arrives while an earlier correlated record is
+  already draining to a dead letter, and one for which `handle` returns an
+  error, are each settled by a dead-letter append that carries the same
+  position instead, so none of them is redelivered to `handle` either. The
+  dead letter that reports a failed persist batch is the exception: it
+  deliberately carries no position, because the batch that would have
+  carried one is exactly what never landed. An effect that writes nothing
+  else still commits a consumed-position-only append when its input has one
+  pending, so a no-op decision is not redelivered either; only the entry
+  points with no input to consume — a timer firing, and the tell-failure
+  hook — commit no position, because they have none to commit. A manager's
+  shared cursor is unchanged — it is shared by every instance it fronts, so no
+  one instance's position can speak for it — and each instance still drops what
+  it has consumed.
+
+  One consequence is worth stating for callers who leaned on redelivery: work an
+  interrupted incarnation left unfinished is no longer re-driven by the upstream
+  record arriving again, because that record is consumed. It is re-driven by the
+  outbox markers the same append made durable — a tell still pending at a restart
+  is re-dispatched from its own marker, which is what the fan-out and
+  idempotent-receive examples now demonstrate.
+
 - (`nitinol-runtime`): `ProcessSystem::spawn_resident::<P>()`, which resolves a
   process by its type rather than starting one — the mechanism a crate needs to
   keep a singleton of its own running inside a system.

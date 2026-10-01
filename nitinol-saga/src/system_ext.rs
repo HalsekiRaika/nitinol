@@ -42,8 +42,11 @@ impl Subscription {
     /// [`AggregateId`](nitinol_persistence::AggregateId) for an aggregate's
     /// stream, a [`SagaId`] for another saga's own stream.  Starting at the
     /// beginning means the saga catches up on everything already written before
-    /// it was spawned; [`with_after`](Self::with_after) resumes from a position
-    /// already processed instead.
+    /// it was spawned — everything it has not already consumed, that is: a
+    /// restarted saga resumes past the positions its own stream records, so
+    /// "from the beginning" costs a re-read of the upstream history only on a
+    /// saga that has consumed nothing of it.
+    /// [`with_after`](Self::with_after) names a position to start past instead.
     pub fn stream<K>(store: &Arc<dyn EventStore>, key: &K) -> Self
     where
         K: ?Sized + Borrow<str>,
@@ -57,6 +60,10 @@ impl Subscription {
 
     /// Deliver only the records past sequence `after`, skipping the ones at or
     /// below it.
+    ///
+    /// A floor, not a starting point: a saga that has consumed further already
+    /// resumes from its own recorded position, and a saga that has consumed
+    /// less still never sees the records below this one.
     pub fn with_after(mut self, after: u64) -> Self {
         self.after = after;
         self
@@ -322,8 +329,9 @@ pub trait SagaDefaultStoreExt {
     /// Begin a saga spawn that journals onto `store`, overriding the system
     /// default.
     ///
-    /// The default receives nothing of this saga's own stream — neither its
-    /// domain events nor its outbox markers.  The upstream it is subscribed to
+    /// The default receives nothing of this saga's own stream — not its domain
+    /// events, not its outbox markers, not the positions it consumed.  The
+    /// upstream it is subscribed to
     /// is chosen separately, by the [`Subscription`] handed to
     /// [`SagaSpawn::subscribed_to`].
     fn spawn_saga_with_store<S>(
@@ -536,7 +544,9 @@ impl<'a, S: Saga> SagaSpawn<'a, S, SubscriptionUnset> {
     /// the codec [`Saga::SubscribedEvent`] names.
     ///
     /// Which of the delivered events this instance acts on is decided by
-    /// [`Saga::correlate`], not here.
+    /// [`Saga::correlate`], not here — and, of those, the ones it has not
+    /// already consumed, which the framework decides from the positions on the
+    /// saga's own stream ([`Saga::handle`]).
     pub fn subscribed_to(self, subscription: Subscription) -> SagaSpawn<'a, S, SubscriptionSet<S>> {
         let (upstream_store, cursor) = subscription.into_parts();
         SagaSpawn {

@@ -14,6 +14,9 @@ use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{reserved_event, EventType};
 
+use crate::consumed::{
+    append_consumed_position, finalize_consumed_position, ConsumedPositionEvent, ConsumedPositions,
+};
 use crate::id::SagaId;
 use crate::observability::report_system_event;
 use crate::scheduler::token::{ScheduleToken, TimerName};
@@ -152,30 +155,49 @@ impl nitinol_eventsource::DeclaresEventType for ScheduleEvent {
     const EVENT_TYPE: EventType = <Self as SystemEvent>::EVENT_TYPE;
 }
 
-/// Append a single schedule marker at `*sequence + 1`, advancing `*sequence`
-/// only on success.  Mirrors the terminal-append discipline used for outbox
-/// markers (`OutboxAppender::append_terminal`): a failed store append leaves
-/// the caller's sequence untouched so the next attempt does not skip numbers.
+/// Append a single schedule marker at `*sequence + 1` — plus the consumed
+/// position, when `input_position` names one this append is closing out —
+/// advancing `*sequence` past every row only on success.  Mirrors the
+/// terminal-append discipline used for outbox markers
+/// (`OutboxAppender::append_terminal`): a failed store append leaves the
+/// caller's sequence untouched so the next attempt does not skip numbers.
+///
+/// `input_position` is `None` at call sites with no upstream input to
+/// consume (a timer firing), and also whenever this marker is not the append
+/// closing out its input — the interpreter's `Sequence` handling only ever
+/// hands the position to that one.
 pub(crate) async fn append_schedule_marker(
     store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
     sequence: &mut u64,
     event: ScheduleEvent,
     occurred_at: jiff::Timestamp,
+    input_position: Option<&ConsumedPositionEvent>,
+    consumed: &mut ConsumedPositions,
 ) -> bool {
     let candidate = *sequence + 1;
-    let appending = event.appending(candidate, occurred_at);
-    if let Err(e) = store.append(saga_id.borrow(), vec![appending]).await {
+    let mut appending = vec![event.appending(candidate, occurred_at)];
+    let mut next_seq = candidate;
+    let recorded_position = append_consumed_position(
+        &mut appending,
+        input_position,
+        consumed,
+        &mut next_seq,
+        occurred_at,
+    );
+
+    if let Err(e) = store.append(saga_id.borrow(), appending).await {
         tracing::warn!(error = %e, "saga schedule marker append failed");
         return false;
     }
-    *sequence = candidate;
+    *sequence = next_seq;
     report_system_event!(
         ScheduleEvent::EVENT_TYPE,
         event.arm(),
         saga_id.as_str(),
         timer = event.timer().as_str(),
     );
+    finalize_consumed_position(consumed, saga_id.as_str(), recorded_position);
     true
 }
 

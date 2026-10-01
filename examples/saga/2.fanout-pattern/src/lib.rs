@@ -21,11 +21,17 @@
 //!    than nitinol offers.
 //! 2. **Fan-out by process manager.**  [`saga::FanOutSaga`], run under a
 //!    `SagaManagerProps` manager, reacts to that fact and dispatches one issue
-//!    command per employee, at-least-once, through the outbox.
+//!    command per employee, at-least-once, through the outbox.  The fact itself
+//!    is fanned out once: its position is committed by the append that records
+//!    the fan-out, so a later delivery of it is dropped before
+//!    [`nitinol_saga::Saga::handle`].  What repeats is the dispatch — an issue
+//!    whose outbox marker was still pending when an incarnation died is
+//!    re-dispatched from that marker.
 //! 3. **Idempotent creation.**  [`payslip::Payslip`] answers a repeated
 //!    [`payslip::IssuePayslip`] with "already issued" instead of a second
 //!    write.  A creation-only fan-out therefore needs no compensation: the
-//!    recovery for an interrupted fan-out is to run it again.
+//!    recovery for an interrupted fan-out is to run the dispatches it never
+//!    settled again.
 //!
 //! # One store, many streams
 //!
@@ -81,10 +87,12 @@
 //! which is right.
 //!
 //! What the saga's own stream does hold is its decision
-//! ([`saga::FanOutStarted`]) and one outbox marker per dispatched command,
-//! committed in the same append — that is durable *intent*, not duplicated
-//! state, and it is what lets a restarted incarnation finish a dispatch it
-//! never got to.
+//! ([`saga::FanOutStarted`]), one outbox marker per dispatched command, and the
+//! position of the fact event all of it was derived from, committed in the same
+//! append — that is durable *intent* plus the record that its input is spent, not
+//! duplicated state.  The markers are what let a restarted incarnation finish a
+//! dispatch it never got to; the position is what stops it from deciding the
+//! fan-out a second time on the way.
 //!
 //! # Make the trigger event self-sufficient
 //!
@@ -113,14 +121,15 @@
 //! # What the tests fix
 //!
 //! * `tests/redelivery_is_noop.rs` — one approval reaches the run's stream as
-//!   one record and fans out to 32 payslips; the same fact delivered a second
-//!   time leaves every payslip stream byte-identical; an issue replayed all the
-//!   way down to the store conflicts on the genesis sequence while leaving the
-//!   first write intact; and two runs covering one employee address separate
-//!   payslip streams.
+//!   one record and fans out to 32 payslips; 32 issues re-dispatched from
+//!   markers an interrupted incarnation left pending leave every payslip stream
+//!   byte-identical, while the fact event delivered with them is not fanned out
+//!   again; an issue replayed all the way down to the store conflicts on the
+//!   genesis sequence while leaving the first write intact; and two runs covering
+//!   one employee address separate payslip streams.
 //! * `tests/crash_replay_completes_fanout.rs` — a fan-out interrupted part-way
-//!   is completed by replay, without rewriting the payslips that already
-//!   existed.
+//!   is completed by replay of its pending markers, without rewriting the
+//!   payslips that already existed.
 
 pub mod codec;
 pub mod payroll_run;

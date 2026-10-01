@@ -86,10 +86,11 @@ async fn main() {
         first.reservation, first.quantity
     );
 
-    // The second delivery of the same operation.  Re-deriving the id from the
-    // order's own fact event is exactly what a second saga incarnation does when
-    // it re-processes that event, so this is the same operation arriving again —
-    // not a new one that happens to look alike.
+    // The second delivery of the same operation.  The id is re-derived from the
+    // order's own fact event, which is what makes this the same operation arriving
+    // again rather than a new one that happens to look alike: a re-dispatch of the
+    // saga's pending marker would carry exactly this id, because it is the one the
+    // first dispatch carried.
     let reservation = ReservationSaga::reservation_id(&order_fact(&store, order_id.as_str()).await);
     system
         .aggregate_proxy::<StockItem>(AggregateId::new(&stock_key))

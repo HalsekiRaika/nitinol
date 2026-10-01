@@ -6,6 +6,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 use nitinol_runtime::process::ProcessContext;
 
+use crate::consumed::ConsumedPositions;
 use crate::dead_letter::{self, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
@@ -36,6 +37,11 @@ pub(crate) struct ReplayOutcome {
     /// Schedules still pending after replay, to be re-registered with the
     /// scheduler.  Empty when the saga has ended.
     pub(crate) active_schedules: Vec<ActiveSchedule>,
+    /// How far each upstream source was consumed by the incarnations before
+    /// this one.  Reported for an ended saga as well: what a previous
+    /// incarnation consumed is a fact about the stream, not a decision about
+    /// what to do next.
+    pub(crate) consumed: ConsumedPositions,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -67,9 +73,11 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
             failed: journal.failed_tell_ids,
             ended: true,
             active_schedules: Vec::new(),
+            consumed: journal.consumed,
         });
     }
     let active_schedules: Vec<ActiveSchedule> = journal.active_schedules.into_values().collect();
+    let mut consumed = journal.consumed;
     let mut failed = journal.failed_tell_ids;
     let synthetic_failed = redispatch_pending(
         saga_id,
@@ -80,6 +88,7 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
         crash_restart_factory,
         retry_policy,
         enqueue_policy,
+        &mut consumed,
         ctx,
     )
     .await?;
@@ -88,6 +97,7 @@ pub(crate) async fn replay_and_redispatch<S: Saga>(
         failed,
         ended: false,
         active_schedules,
+        consumed,
     })
 }
 
@@ -157,6 +167,13 @@ fn fold_loaded<S: Saga>(loaded: LoadedEvent, state: &mut S, journal: &mut Journa
                 "saga dead letter disposition marker decode failed; skipping event"
             );
         }
+        Err(SagaPersistedDecodeError::ConsumedPosition(e)) => {
+            // Skipped rather than read as a position of its own: a row that
+            // cannot be read says nothing about what was consumed, and a
+            // default would claim an input no decision was made from.  Replay
+            // carries on, so the rows after it still take effect.
+            tracing::error!(error = %e, "saga consumed position decode failed; skipping event");
+        }
         Err(SagaPersistedDecodeError::Domain(e)) => {
             tracing::error!(error = %e, "saga event decode failed; skipping event");
         }
@@ -173,6 +190,7 @@ async fn redispatch_pending<S: Saga>(
     crash_restart_factory: Option<CrashRestartFactory<'_>>,
     retry_policy: RetryPolicy,
     enqueue_policy: &dyn EnqueuePolicy,
+    consumed: &mut ConsumedPositions,
     ctx: &mut ProcessContext<SagaProcess<S>>,
 ) -> Result<Vec<u64>, ()> {
     let mut synthetic_failed: Vec<u64> = Vec::new();
@@ -246,6 +264,8 @@ async fn redispatch_pending<S: Saga>(
                 // The durable outbox marker already records the failure.
                 if let Some(target) = pending_tell.target {
                     let message = pending_tell.crash_restart.unwrap_or_default();
+                    // A re-dispatch outcome from replay carries no upstream
+                    // record of its own, so there is no position to settle.
                     let outcome = dead_letter::enqueue_dead_letter(
                         store,
                         saga_id,
@@ -253,6 +273,8 @@ async fn redispatch_pending<S: Saga>(
                         enqueue_policy,
                         SagaFailure::TellFailed { target, message },
                         SourceContext::without_upstream(),
+                        None,
+                        consumed,
                     )
                     .await;
                     // When the DLQ append fails the synthetic TellFailed is
@@ -308,6 +330,7 @@ mod tests {
 
     use nitinol_eventsource::{MatchesEventType, SystemEvent};
 
+    use crate::consumed::ConsumedPositions;
     use crate::outbox::{OutboxAppender, OutboxEvent};
     use crate::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
 
@@ -517,7 +540,17 @@ mod tests {
 
     async fn seed_ended(store: &Arc<InMemoryEventStore>, saga_id: &SagaId, sequence: u64) {
         let store_dyn: Arc<dyn EventStore> = Arc::clone(store) as Arc<dyn EventStore>;
-        let ok = OutboxAppender::append_ended(&store_dyn, saga_id, sequence).await;
+        // This is test seeding, not an upstream-driven `End`, so there is no
+        // input to consume and nothing to fold it into.
+        let mut candidate = sequence - 1;
+        let ok = OutboxAppender::append_ended(
+            &store_dyn,
+            saga_id,
+            &mut candidate,
+            None,
+            &mut ConsumedPositions::default(),
+        )
+        .await;
         assert!(ok, "seed Ended must succeed");
     }
 

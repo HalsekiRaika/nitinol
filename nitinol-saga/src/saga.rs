@@ -115,7 +115,64 @@ pub trait Saga: Send + Sync + 'static {
     fn apply(&mut self, event: Self::Event);
 
     /// Reactive entry point.  Invoked for every subscribed event that
-    /// [`Saga::correlate`] maps to this saga instance.
+    /// [`Saga::correlate`] maps to this saga instance and that the instance has
+    /// not already consumed.
+    ///
+    /// # What "already consumed" means
+    ///
+    /// Delivery is at-least-once, so the same upstream record can arrive more
+    /// than once — redelivered after a restart, or twice over within one
+    /// incarnation.  Whatever this method returns is persisted together with
+    /// the position of the record it was decided from, by the append that
+    /// closes out every append the returned effect required — the last one,
+    /// when interpreting it reaches the store as more than one atomic batch —
+    /// so the position is never durable before the decision it stands for is.
+    /// The reverse can happen: a decision can be durable while its input's
+    /// position is not.  A record at or below the position the saga's own
+    /// stream records for that record's source is dropped before it reaches
+    /// here, so de-duplicating the *input* is not this method's to do.
+    ///
+    /// This method is not the only way a record becomes consumed. A record
+    /// whose upstream bytes fail to decode, a record that arrives while an
+    /// earlier record from the same correlation is already draining to a dead
+    /// letter, and a record for which this method returns `Err`, never
+    /// produce a decision from this method at all — instead each is settled
+    /// by a dead-letter append that carries the same consumed position. Once
+    /// that append lands, the record is consumed the same way a decision's
+    /// position would be, and does not reach this method again on
+    /// redelivery, even though no decision of this method's was ever durable
+    /// for it.
+    ///
+    /// Where that guarantee stops:
+    ///
+    /// - A record decided by this method's own returned effect, or settled
+    ///   by the dead letter this method's `Err` produces, is not consumed
+    ///   until that settling append lands; if it does not, the record
+    ///   reaches this method again on redelivery.  That holds for the
+    ///   closing append too — including a durable `Ended` marker, which is
+    ///   withheld the same way when an earlier append the same effect needed
+    ///   did not land, so the saga is never durably terminated around a
+    ///   decision no store holds.
+    /// - A record settled without ever reaching this method — because its
+    ///   upstream bytes failed to decode, or because it arrived while this
+    ///   saga was already draining to a dead letter — is not consumed until
+    ///   that dead-letter append lands either; if it does not, the record
+    ///   stays unconsumed and is redelivered into the same dead-letter
+    ///   handling it came from, not into this method.  This is
+    ///   at-least-once, not exactly-once.
+    /// - An effect that writes nothing else still commits a consumed-position-only
+    ///   append when the input it was decided from has a position not yet
+    ///   durable — which is always the case here, since `handle` is only ever
+    ///   invoked for input whose position has not already landed — so a no-op
+    ///   decision is not redelivered either. Only the entry points with no
+    ///   input to consume — a timer firing, and the tell-failure hook — write
+    ///   no position at all, because they have none to commit.
+    /// - A position belongs to the source stream it was read from, so progress
+    ///   on one upstream stream never covers a record of another.
+    ///
+    /// None of this makes what the saga *sends* idempotent: what a tell
+    /// delivers, and how often, is stated on
+    /// [`SagaEffect::tell`](crate::SagaEffect::tell).
     async fn handle(
         &mut self,
         event: Self::SubscribedEvent,

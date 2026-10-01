@@ -10,6 +10,9 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
 use nitinol_runtime::process::ProcessContext;
 
+use crate::consumed::{
+    append_consumed_position, finalize_consumed_position, ConsumedPositionEvent, ConsumedPositions,
+};
 use crate::dead_letter::{self, EnqueueOutcome, EnqueuePolicy, SagaFailure, SourceContext};
 use crate::effect::{ScheduleSpec, TellIntent};
 use crate::id::SagaId;
@@ -33,6 +36,16 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     pub(crate) lifecycle: &'a mut Lifecycle,
     pub(crate) scheduler: Option<SchedulerProxy>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
+    /// How far each upstream source has been consumed, advanced here as each
+    /// batch lands so the running incarnation answers the same question replay
+    /// does.
+    pub(crate) consumed: &'a mut ConsumedPositions,
+    /// The upstream record this effect was decided from, when there is one.
+    ///
+    /// `None` for the entry points that have no upstream input to consume — a
+    /// timer firing and the tell-failure hook — which is why nothing they
+    /// persist records a position.
+    pub(crate) input_position: Option<ConsumedPositionEvent>,
 }
 
 impl<S: Saga> InterpreterCtx<'_, S> {
@@ -45,6 +58,17 @@ impl<S: Saga> InterpreterCtx<'_, S> {
 
 pub(crate) enum InterpretOutcome {
     Continue,
+    /// An append this effect required never landed, and the failure has already
+    /// been reported — as a dead letter, or as a warning where the batch was
+    /// abandoned before it reached the store.
+    ///
+    /// Interpretation carries on, which is why this is not `Stop`, but the
+    /// input the effect was decided from is *not* consumed: a decision it owes
+    /// is in no store.  The `Sequence` arm reads this to withhold the consumed
+    /// position from the append that closes the input out; the outermost
+    /// callers, which only ask whether the dead letter itself landed, treat it
+    /// the same as `Continue`.
+    AppendFailed,
     Stop,
     /// A dead-letter append failed inside the interpreter for an upstream-
     /// delivered message.  The caller (`Receive<UpstreamMessage>::recv`) must
@@ -65,7 +89,13 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
         // point every effect passes through — makes the atomic-batch
         // guarantee hold regardless of how the effect was constructed.
         match effect.normalize_for_interpretation() {
-            SagaEffect::None => InterpretOutcome::Continue,
+            // Routed through `persist_batch` with an empty batch rather than
+            // answered with `Continue` directly: a successful `handle` that
+            // decided nothing still owes a consumed-position append when the
+            // input it was decided from has one pending, and `persist_batch`'s
+            // empty-batch gate is what already knows whether that is the case
+            // (see its comment below).
+            SagaEffect::None => persist_batch(Vec::new(), Vec::new(), Vec::new(), ictx).await,
             SagaEffect::Persist {
                 events,
                 tells,
@@ -80,11 +110,22 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
                 // the guard, allowing the saga to be revived on the next spawn.
                 // Remaining alive lets the next incoming event retry the End
                 // decision.
-                let candidate = *ictx.sequence + 1;
-                if !OutboxAppender::append_ended(&ictx.store, &ictx.saga_id, candidate).await {
-                    return InterpretOutcome::Continue;
+                //
+                // `input_position` is carried into the same append when `End`
+                // is the effect closing out this input — see the `Sequence`
+                // arm below — so the position is never durable before the
+                // `Ended` marker it depends on is.
+                if !OutboxAppender::append_ended(
+                    &ictx.store,
+                    &ictx.saga_id,
+                    ictx.sequence,
+                    ictx.input_position.as_ref(),
+                    ictx.consumed,
+                )
+                .await
+                {
+                    return InterpretOutcome::AppendFailed;
                 }
-                *ictx.sequence = candidate;
 
                 if saga_process::in_flight_count(ictx.tell_states) == 0 {
                     if let Err(e) = ictx.process_ctx.stop_self().await {
@@ -95,28 +136,95 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
                 }
                 InterpretOutcome::Stop
             }
-            SagaEffect::Sequence(sub_effects) => {
+            SagaEffect::Sequence(mut sub_effects) => {
+                // `normalize_for_interpretation` only ever returns a
+                // `Sequence` carrying two or more elements (see its own
+                // `match flat.len()`), so there is always at least one
+                // element left after the closing one is taken out.
+                //
+                // `End` short-circuits unconditionally — the public
+                // contract on `SagaEffect::End` states "effects placed
+                // after `End` inside a `Sequence` are not interpreted" —
+                // so the append that actually lands last for this input is
+                // not always the physically last element of the vector:
+                // when `End` occurs before it, `End`'s own append is what
+                // closes the input out, and every element physically after
+                // it never runs at all.
+                let closing_idx = sub_effects
+                    .iter()
+                    .position(|e| matches!(e, SagaEffect::End))
+                    .unwrap_or(sub_effects.len() - 1);
+                let closing = sub_effects.remove(closing_idx);
+                sub_effects.truncate(closing_idx);
+                // One `handle` call can reach the store as more than one
+                // atomic append — a `CancelSchedule` or `End` is a hard
+                // boundary the `Persist × Persist` fold does not cross — and
+                // the position must never be durable before every decision
+                // this input produced is durable too.  So only the append
+                // that lands last for this Sequence may carry it; every
+                // earlier one here runs with no input to consume attached.
+                let position = ictx.input_position.take();
+                let mut every_append_landed = true;
                 for sub in sub_effects {
                     match run_saga_effect(sub, ictx).await {
                         InterpretOutcome::Stop => return InterpretOutcome::Stop,
                         InterpretOutcome::DlqFailed => return InterpretOutcome::DlqFailed,
+                        // Reported, and interpretation goes on to the closing
+                        // append — but this input now owes a decision no store
+                        // holds, so it is not consumed.
+                        InterpretOutcome::AppendFailed => every_append_landed = false,
                         InterpretOutcome::Continue => {}
                     }
                 }
-                InterpretOutcome::Continue
+                // An input is consumed only once *every* append it required has
+                // landed.  A missed append above therefore forfeits the position
+                // for good: handing it to the closing append would make "this
+                // input is dealt with" durable while a decision the same input
+                // produced is not, and the redelivery that would have re-made
+                // that decision is exactly what the position stops.
+                if every_append_landed {
+                    ictx.input_position = position;
+                }
+                // `End` is not just another closing append: interpreting it
+                // writes the durable `Ended` marker that the revival guard
+                // uses to refuse ever spawning this saga again (see the
+                // `SagaEffect::End` arm above). Once that marker lands, no
+                // later restart resubscribes from upstream, so the recovery
+                // path every other `AppendFailed` relies on — a redelivery
+                // that reaches `Saga::handle` again — is permanently closed.
+                // A preceding append in this `Sequence` already failed and
+                // was reported, so this input still owes a decision no store
+                // holds; closing it out here would durably terminate the
+                // saga around that gap.  Withhold the `End` append entirely
+                // and report this closing step as failed too, leaving the
+                // saga exactly as it was before this `handle` call — alive,
+                // and reachable by redelivery on restart.
+                if !every_append_landed && matches!(closing, SagaEffect::End) {
+                    return InterpretOutcome::AppendFailed;
+                }
+                match run_saga_effect(closing, ictx).await {
+                    // The parts that did land say nothing about the ones that
+                    // did not: an enclosing `Sequence` has the same position to
+                    // withhold.
+                    InterpretOutcome::Continue if !every_append_landed => {
+                        InterpretOutcome::AppendFailed
+                    }
+                    outcome => outcome,
+                }
             }
-            SagaEffect::CancelSchedule(name) => {
-                cancel_schedule(name, ictx).await;
-                InterpretOutcome::Continue
-            }
+            SagaEffect::CancelSchedule(name) => cancel_schedule(name, ictx).await,
         }
     })
 }
 
 /// Interpret `CancelSchedule(name)`: append a `ScheduleEvent::Cancelled` marker
-/// (single append, sequence advances only on success) and cancel the pending
-/// timer with the resident scheduler.
-async fn cancel_schedule<S: Saga>(name: TimerName, ictx: &mut InterpreterCtx<'_, S>) {
+/// — plus the consumed position, when this is the effect closing out the
+/// input — in one atomic append (sequence advances only on success), and
+/// cancel the pending timer with the resident scheduler.
+async fn cancel_schedule<S: Saga>(
+    name: TimerName,
+    ictx: &mut InterpreterCtx<'_, S>,
+) -> InterpretOutcome {
     let token = ScheduleToken::new(ictx.saga_id.clone(), name.clone());
     let event = ScheduleEvent::Cancelled {
         token,
@@ -128,17 +236,20 @@ async fn cancel_schedule<S: Saga>(name: TimerName, ictx: &mut InterpreterCtx<'_,
         ictx.sequence,
         event,
         jiff::Timestamp::now(),
+        ictx.input_position.as_ref(),
+        ictx.consumed,
     )
     .await;
     if !appended {
         // Leave the timer registered: without the durable Cancelled marker a
         // later replay would re-register it, so cancelling the live timer now
         // would diverge from the persisted state.  The next effect can retry.
-        return;
+        return InterpretOutcome::AppendFailed;
     }
     if let Some(timers) = ictx.timers() {
         timers.cancel(name).await;
     }
+    InterpretOutcome::Continue
 }
 
 async fn persist_batch<S: Saga>(
@@ -147,7 +258,20 @@ async fn persist_batch<S: Saga>(
     schedules: Vec<ScheduleSpec>,
     ictx: &mut InterpreterCtx<'_, S>,
 ) -> InterpretOutcome {
-    if events.is_empty() && tells.is_empty() && schedules.is_empty() {
+    // A batch with nothing to persist still owes an append when the input it
+    // was decided from has a position that is not yet durable: otherwise a
+    // successful `handle` that writes nothing — `SagaEffect::None`, or a
+    // `Persist` folded down to nothing — would leave no record of having
+    // consumed its input, and redelivery would reach `Saga::handle` again for
+    // a decision already made. `position_pending` mirrors the condition
+    // `append_consumed_position` itself gates on below, so the two agree on
+    // when there is nothing left to write.
+    let position_pending = ictx.input_position.as_ref().is_some_and(|position| {
+        !ictx
+            .consumed
+            .covers(position.source.as_str(), position.sequence)
+    });
+    if events.is_empty() && tells.is_empty() && schedules.is_empty() && !position_pending {
         return InterpretOutcome::Continue;
     }
 
@@ -155,15 +279,26 @@ async fn persist_batch<S: Saga>(
     let mut next_seq = *ictx.sequence;
 
     let mut appending: Vec<AppendingEvent> =
-        Vec::with_capacity(events.len() + tells.len() + schedules.len());
+        Vec::with_capacity(events.len() + tells.len() + schedules.len() + 1);
     if !append_user_events::<S>(&mut appending, &events, &mut next_seq, now) {
-        return InterpretOutcome::Continue;
+        return InterpretOutcome::AppendFailed;
     }
     let tell_ids = append_tell_requested(&mut appending, &tells, &mut next_seq, now);
     let registrations = append_schedule_specs(
         &mut appending,
         &ictx.saga_id,
         &schedules,
+        &mut next_seq,
+        now,
+    );
+    // The position closes the batch.  Placed anywhere earlier it would shift
+    // every row after it, and a `tell_id` is the stream sequence of its own
+    // `TellRequested` row — the identity the outbox re-dispatch path resolves a
+    // pending tell by.
+    let recorded_position = append_consumed_position(
+        &mut appending,
+        ictx.input_position.as_ref(),
+        ictx.consumed,
         &mut next_seq,
         now,
     );
@@ -202,6 +337,9 @@ async fn persist_batch<S: Saga>(
             max_attempts = ictx.retry_policy.max_attempts,
             "saga persist batch exhausted staged retries; enqueuing PersistFailed dead letter"
         );
+        // `input_position: None` — the batch that would have carried the
+        // position is exactly what never landed, so this dead letter must not
+        // mark the input it reports on as consumed.
         let outcome = dead_letter::enqueue_dead_letter(
             &ictx.store,
             &ictx.saga_id,
@@ -209,6 +347,8 @@ async fn persist_batch<S: Saga>(
             ictx.enqueue_policy.as_ref(),
             SagaFailure::PersistFailed { error: last_error },
             SourceContext::without_upstream(),
+            None,
+            ictx.consumed,
         )
         .await;
         // When the DLQ append also fails, signal DlqFailed so the
@@ -223,7 +363,7 @@ async fn persist_batch<S: Saga>(
             );
             return InterpretOutcome::DlqFailed;
         }
-        return InterpretOutcome::Continue;
+        return InterpretOutcome::AppendFailed;
     }
 
     *ictx.sequence = next_seq;
@@ -231,6 +371,10 @@ async fn persist_batch<S: Saga>(
     for event in events {
         ictx.state.apply(event);
     }
+
+    // The input is consumed exactly when the batch carrying its position is
+    // durable, so the in-memory position moves here and nowhere else.
+    finalize_consumed_position(ictx.consumed, ictx.saga_id.as_str(), recorded_position);
 
     // The schedule markers of this batch are durable now, so what they record
     // can be reported. The timers themselves are registered further below,
