@@ -3,13 +3,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures_core::future::BoxFuture;
 use nitinol_eventsource::codec;
 use nitinol_eventsource::{DurableSubscription, SequenceCursor, SystemEvent};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, LoadedEvent};
-use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
+use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::consumed::{ConsumedPositionEvent, ConsumedPositions};
 use crate::context::SagaContext;
@@ -23,10 +22,11 @@ use crate::id::SagaId;
 use crate::journal::ActiveSchedule;
 use crate::observability::report_system_event;
 use crate::outbox::{OutboxAppender, RetryPolicy, TellOutcome};
+use crate::process::instance::ScheduleDelivery;
 use crate::process::interpreter::{self, InterpretOutcome, InterpreterCtx};
 use crate::process::replay;
 use crate::saga::Saga;
-use crate::scheduler::{self, DispatchFn, ScheduleEvent, SchedulerProxy, Timers};
+use crate::scheduler::{self, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName};
 
 /// A typed upstream event delivered to the saga by its `DirectPollerProcess`.
@@ -211,6 +211,9 @@ pub struct SagaProcess<S: Saga> {
     /// delivers this instance's correlated events itself.
     pub(crate) upstream: Option<OwnedUpstream<S::SubscribedEvent>>,
     pub(crate) scheduler: Option<SchedulerProxy>,
+    /// Where a deadline's firing is addressed, and so whether this instance's
+    /// deadlines survive it stopping.
+    pub(crate) delivery: ScheduleDelivery<S>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
     /// DLQ child poller spawner.
     ///
@@ -222,34 +225,16 @@ pub struct SagaProcess<S: Saga> {
 
 /// A timer firing delivered to the saga: the scheduled message payload keyed by
 /// its [`TimerName`].  Constructed by the type-erased dispatch closure the
-/// scheduler invokes when a timer elapses.
+/// scheduler invokes when a deadline is reached.
+///
+/// `Clone` so a manager-fronted delivery that finds its cached instance proxy
+/// already stale can retry the same firing against the instance it respawns,
+/// without losing this delivery attempt — see
+/// `SagaManagerProcess::recv(DeliverScheduled)`.
+#[derive(Clone)]
 pub(crate) struct FireScheduled {
     pub(crate) name: TimerName,
     pub(crate) payload: Bytes,
-}
-
-/// Build the type-erased dispatch that the resident scheduler invokes when a
-/// timer fires.  Captures a clone of the saga's own typed proxy so the
-/// scheduler stays saga-type agnostic.
-pub(crate) fn build_fire_dispatch<S: Saga>(
-    proxy: ProcessProxy<SagaProcess<S>>,
-    name: TimerName,
-    payload: Bytes,
-) -> DispatchFn {
-    Arc::new(move || -> BoxFuture<'static, ()> {
-        let proxy = proxy.clone();
-        let name = name.clone();
-        let payload = payload.clone();
-        Box::pin(async move {
-            if let Err(e) = proxy.tell(FireScheduled { name, payload }).await {
-                tracing::warn!(
-                    error = ?e,
-                    "scheduler failed to deliver a timer firing to the saga; \
-                     it may be stopping"
-                );
-            }
-        })
-    })
 }
 
 impl<S: Saga> SagaProcess<S> {
@@ -292,11 +277,9 @@ impl<S: Saga> SagaProcess<S> {
                 // remaining > 0 here; cast to u64 is safe.
                 Duration::from_millis(remaining as u64)
             };
-            let dispatch = build_fire_dispatch::<S>(
-                ctx.self_proxy().clone(),
-                sched.name.clone(),
-                sched.payload,
-            );
+            let dispatch =
+                self.delivery
+                    .dispatch(&self.saga_id, ctx, sched.name.clone(), sched.payload);
             timers.start_single(sched.name, after, dispatch).await;
         }
     }
@@ -380,6 +363,7 @@ impl<S: Saga> SagaProcess<S> {
             tell_states: &mut self.tell_states,
             lifecycle: &mut self.lifecycle,
             scheduler: self.scheduler.clone(),
+            delivery: &self.delivery,
             enqueue_policy: Arc::clone(&self.enqueue_policy),
             consumed: &mut self.consumed,
             input_position,
@@ -623,11 +607,29 @@ impl<S: Saga> Process for SagaProcess<S> {
     }
 
     async fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) {
-        // Saga lifecycle teardown: cancel every timer this saga owns so
-        // the resident scheduler does not fire into a stopped process.  This is
-        // an in-memory scheduler cancel only — no `Cancelled` marker is
-        // persisted, so a future incarnation replays and re-registers any still
-        // unfired schedule.
+        // Saga lifecycle teardown.  A deadline belongs to the saga instance
+        // rather than to this incarnation, so releasing one here is right only
+        // where the firing is addressed to this process: once it is stopped,
+        // such a firing has nowhere to land and the entry would sit in the
+        // resident scheduler for nothing.  An instance a manager fronts is
+        // addressed through that manager, which restores it — so its deadlines
+        // must stay armed across a passivation that may well be shorter than
+        // the deadline itself.
+        //
+        // That exception holds only while the saga is still `Running`: once
+        // `SagaEffect::End` has landed (or replay found the `Ended` marker
+        // from a previous incarnation), `lifecycle` is `Draining` and there is
+        // no future activation this deadline could still serve — restoring the
+        // instance to hand it a firing only produces the dead letter
+        // `on_scheduled` can never run to settle any other way. So a draining
+        // stop always releases, manager-fronted or not.
+        //
+        // Either way this is an in-memory release only — no `Cancelled` marker
+        // is persisted, so a non-terminal later incarnation replays and
+        // re-registers any still unfired schedule.
+        if self.delivery.restores_the_instance() && matches!(self.lifecycle, Lifecycle::Running) {
+            return;
+        }
         if let Some(timers) = self.timers() {
             timers.cancel_all().await;
         }

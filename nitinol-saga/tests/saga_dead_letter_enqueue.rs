@@ -361,7 +361,7 @@ impl Saga for ScheduleThenFailSaga {
 async fn on_scheduled_error_enqueues_a_scheduled_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-sched-upstream", 1, "tick").await;
@@ -1043,7 +1043,7 @@ impl Saga for DecodeFailSaga {
 async fn decode_failure_in_scheduled_payload_enqueues_a_decode_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-decode-upstream", 1, "decode-test").await;

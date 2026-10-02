@@ -11,9 +11,11 @@
 //!   Self::ScheduledMessage, ctx)`.
 //! - `SagaEffect::schedule(TimerName, Duration, msg)` and
 //!   `SagaEffect::cancel_schedule(TimerName)`.
-//! - `nitinol_saga::spawn_scheduler(&ProcessSystem) -> SchedulerProxy`
-//!   (system-wide resident scheduler) and
-//!   `SagaProps::with_scheduler(SchedulerProxy)` to inject it.
+//! - `ProcessSystem::spawn_resident::<nitinol_saga::SchedulerProcess>()`
+//!   (the system-wide resident scheduler, resolved by type) whose
+//!   `ProcessProxy` converts into `nitinol_saga::SchedulerProxy`, and
+//!   `SagaProps::with_scheduler(SchedulerProxy)` to inject it.  The two steps
+//!   are spelled once in `common::resident_scheduler`.
 //! - Schedule events are appended to the saga stream under the event type
 //!   `nitinol.saga.schedule`; which transition a marker records
 //!   (`scheduled` / `cancelled` / `fired`) is carried by its payload's `oneof`.
@@ -219,7 +221,7 @@ async fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
 async fn schedule_fires_and_delivers_typed_message() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_trigger(
@@ -281,7 +283,7 @@ async fn schedule_fires_and_delivers_typed_message() {
 async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_trigger(
@@ -351,7 +353,7 @@ async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
 async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     // First: a long delay under name "reminder".
@@ -425,7 +427,7 @@ async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
 async fn cancel_schedule_prevents_the_timer_from_firing() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_trigger(
@@ -501,7 +503,7 @@ async fn cancel_schedule_prevents_the_timer_from_firing() {
 async fn replay_reregisters_unfired_schedule_and_fires_it() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(TIMER_SAGA_ID);
@@ -596,6 +598,96 @@ async fn replay_reregisters_unfired_schedule_and_fires_it() {
         seen,
         vec!["survivor".to_owned()],
         "the re-registered timer must carry the original scheduled payload"
+    );
+}
+
+/// A delay far past the horizon one revolution of the retired hashed wheel
+/// covered (512 slots x 10 ms = 5.12 s).  A wheel reached such a deadline only
+/// by counting revolutions per entry; a deadline-ordered timer waits for the
+/// deadline itself.
+const BEYOND_OLD_WHEEL_HORIZON: u64 = 6_000;
+
+/// Given a schedule whose delay is longer than the retired wheel's single
+/// revolution,
+/// when that delay elapses,
+/// then the timer fires once and records one `fired` marker.
+///
+/// This is the horizon half of the replacement: a timer core that clamps a long
+/// delay to a bound of its own fires early and writes its marker before the
+/// 6 s mark; one that loses the overflow never fires and the wait below times
+/// out.  Neither failure is visible to the sub-second schedules the rest of
+/// this file uses.
+#[tokio::test]
+async fn a_deadline_beyond_the_old_wheel_horizon_fires() {
+    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ps).build();
+    let scheduler = common::resident_scheduler(system.process_system()).await;
+
+    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    append_trigger(
+        &upstream_store,
+        "deadline-upstream-horizon",
+        1,
+        Trigger {
+            note: "beyond-horizon".to_owned(),
+            after_millis: BEYOND_OLD_WHEEL_HORIZON,
+            cancel: false,
+        },
+    )
+    .await;
+
+    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_id = SagaId::new(TIMER_SAGA_ID);
+    let fired = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let fired_producer = Arc::clone(&fired);
+    let scheduled_at = Instant::now();
+    let _proxy = SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        TimerSaga {
+            fired: Arc::clone(&fired_producer),
+        }
+    })
+    .with_subscription(
+        Arc::clone(&upstream_store),
+        SequenceCursor::Stream {
+            key: "deadline-upstream-horizon".to_owned(),
+            after: 0,
+        },
+    )
+    .with_scheduler(scheduler.clone())
+    .spawn(system.process_system())
+    .await;
+
+    let fired_check = Arc::clone(&fired);
+    let ok = wait_until(Duration::from_secs(20), || {
+        !fired_check.lock().expect("fired mutex").is_empty()
+    })
+    .await;
+
+    let waited = scheduled_at.elapsed();
+    let seen = fired.lock().expect("fired mutex").clone();
+    assert!(
+        ok,
+        "a {BEYOND_OLD_WHEEL_HORIZON}ms schedule must still fire; fired={seen:?}"
+    );
+    assert_eq!(
+        seen,
+        vec!["beyond-horizon".to_owned()],
+        "the long schedule must deliver its own payload, exactly once"
+    );
+    assert!(
+        waited >= Duration::from_millis(BEYOND_OLD_WHEEL_HORIZON),
+        "the timer fired after {waited:?}, before its {BEYOND_OLD_WHEEL_HORIZON}ms deadline"
+    );
+
+    // Allow the post-fire persist to settle, the way the marker tests above do.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let events = load_saga_events(&saga_store, &saga_id).await;
+    assert_eq!(
+        count_schedule_transition(&events, "fired"),
+        1,
+        "firing a long schedule must append exactly one `fired` marker"
     );
 }
 
@@ -697,7 +789,7 @@ impl Saga for OnceRescheduleSaga {
 async fn on_scheduled_reschedule_same_name_survives_replay() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     // A single trigger that starts the first "repeat" timer.

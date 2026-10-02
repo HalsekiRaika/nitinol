@@ -18,6 +18,7 @@ use crate::effect::{ScheduleSpec, TellIntent};
 use crate::id::SagaId;
 use crate::observability::report_system_event;
 use crate::outbox::{OutboxAppender, OutboxEvent, RetryPolicy, TELL_REQUESTED_ARM};
+use crate::process::instance::ScheduleDelivery;
 use crate::process::outbox_executor;
 use crate::process::saga_process::{self, Lifecycle, SagaProcess, TellState};
 use crate::saga::Saga;
@@ -35,6 +36,8 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     pub(crate) tell_states: &'a mut HashMap<u64, TellState>,
     pub(crate) lifecycle: &'a mut Lifecycle,
     pub(crate) scheduler: Option<SchedulerProxy>,
+    /// Where a deadline this effect registers must address its firing.
+    pub(crate) delivery: &'a ScheduleDelivery<S>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
     /// How far each upstream source has been consumed, advanced here as each
     /// batch lands so the running incarnation answers the same question replay
@@ -127,12 +130,15 @@ pub(crate) fn run_saga_effect<'a, S: Saga>(
                     return InterpretOutcome::AppendFailed;
                 }
 
+                // Set unconditionally, before either branch below: `on_stop`
+                // reads this to tell a terminal stop from a passivation (see
+                // `SagaProcess::on_stop`), and that distinction must hold
+                // whether or not a tell was still in flight when `End` landed.
+                *ictx.lifecycle = Lifecycle::Draining;
                 if saga_process::in_flight_count(ictx.tell_states) == 0 {
                     if let Err(e) = ictx.process_ctx.stop_self().await {
                         tracing::warn!(error = %e, "saga End: stop_self signal failed");
                     }
-                } else {
-                    *ictx.lifecycle = Lifecycle::Draining;
                 }
                 InterpretOutcome::Stop
             }
@@ -406,8 +412,9 @@ async fn persist_batch<S: Saga>(
     // so a firing can never precede its own durable record.
     if let Some(timers) = ictx.timers() {
         for reg in registrations {
-            let dispatch = saga_process::build_fire_dispatch::<S>(
-                ictx.process_ctx.self_proxy().clone(),
+            let dispatch = ictx.delivery.dispatch(
+                &ictx.saga_id,
+                ictx.process_ctx,
                 reg.name.clone(),
                 reg.payload,
             );

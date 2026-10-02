@@ -15,7 +15,10 @@ use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{DeadLetterEvent, SagaEffect, SagaFailure, ScheduleSpec, TellIntent};
+use nitinol_saga::{
+    DeadLetterEvent, SagaEffect, SagaFailure, SagaId, ScheduleSpec, SchedulerProcess,
+    SchedulerProxy, TellIntent, TimerName,
+};
 
 // JsonCodec — shared across all integration tests
 
@@ -31,6 +34,19 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     fn decode(payload: &[u8]) -> Result<E, Self::Error> {
         serde_json::from_slice(payload)
     }
+}
+
+// The one way a test reaches the system-wide scheduler.
+
+/// Resolve the resident `SchedulerProcess` and hand back the proxy the saga
+/// builders take.
+///
+/// `spawn_resident` keys on the type, so this is idempotent: a test may call it
+/// once and clone, or call it again, and either way names the one scheduler the
+/// system holds.  The `.into()` is the only step between what the runtime hands
+/// back and what `with_scheduler` accepts.
+pub async fn resident_scheduler(system: &ProcessSystem) -> SchedulerProxy {
+    system.spawn_resident::<SchedulerProcess>().await.into()
 }
 
 // Minimal aggregate used only to obtain an AggregateProxy for Tell tests.
@@ -330,6 +346,31 @@ pub enum ScheduleKind {
 pub struct ScheduleMarkerPayload {
     #[prost(oneof = "ScheduleKind", tags = "1, 2, 3")]
     pub kind: Option<ScheduleKind>,
+}
+
+/// Encode the `scheduled` arm so a test can seed a stream that already holds an
+/// unfired schedule — the state a crash leaves behind — without first running
+/// an incarnation that would also arm the timer in a live scheduler.
+///
+/// Field for field this is what `ScheduleEvent::Scheduled` writes: the nanos
+/// delay and the wall-clock anchor it is measured from.
+pub fn encode_schedule_scheduled(
+    saga_id: &SagaId,
+    name: &TimerName,
+    after: std::time::Duration,
+    payload: &[u8],
+    scheduled_at_unix_millis: i64,
+) -> Bytes {
+    let msg = ScheduleMarkerPayload {
+        kind: Some(ScheduleKind::Scheduled(ScheduledMarkerPayload {
+            saga_id: saga_id.as_str().to_owned(),
+            name: name.as_str().to_owned(),
+            after_nanos: u64::try_from(after.as_nanos()).unwrap_or(u64::MAX),
+            payload: payload.to_vec(),
+            scheduled_at_unix_millis,
+        })),
+    };
+    Bytes::from(prost::Message::encode_to_vec(&msg))
 }
 
 pub fn decode_schedule_kind(payload: &[u8]) -> ScheduleKind {

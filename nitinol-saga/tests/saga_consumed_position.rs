@@ -2554,7 +2554,7 @@ async fn an_input_that_wrote_nothing_is_still_consumed() {
 async fn a_timer_firing_writes_no_consumed_position() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let source = AggregateId::new("timer-order");

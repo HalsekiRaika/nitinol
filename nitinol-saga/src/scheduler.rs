@@ -11,5 +11,5 @@ pub(crate) use self::event::{append_schedule_marker, ScheduleEvent, SCHEDULED_AR
 pub(crate) use self::process::DispatchFn;
 pub(crate) use self::timers::Timers;
 
-pub use self::process::{spawn_scheduler, SchedulerProxy};
+pub use self::process::{SchedulerProcess, SchedulerProxy};
 pub use self::token::{ScheduleToken, TimerName};

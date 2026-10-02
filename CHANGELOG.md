@@ -376,6 +376,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- (`nitinol-saga`): the resident scheduler keeps its deadlines in deadline
+  order and waits for the earliest one, instead of turning a hashed timing
+  wheel.
+
+  A wheel buys `O(1)` insertion and cancellation for millions of short-lived
+  timers, and pays for it with a tick that runs whether or not anything is
+  registered, a resolution quantised to that tick, and per-entry bookkeeping
+  for any deadline past one revolution. Saga deadlines are the opposite
+  regime — few, long-lived, and coarse, since delivery is already paced by the
+  subscription's polling interval — so the price bought nothing. What replaces
+  it is a `BTreeMap` keyed by deadline and a single `sleep_until` pointed at
+  the earliest one: a scheduler holding no deadline arms no sleep and wakes
+  never, a deadline hours or days out is just a later key with no revolutions
+  to count, and cancelling one is a lookup by name and a removal rather than a
+  stale entry filtered out later. Registration is `O(log n)`, which is the
+  trade this regime is glad to make.
+
+  A deadline's firing is now addressed to the saga *manager* together with the
+  instance's `SagaId`, rather than to a proxy for the incarnation that
+  registered it. A deadline outlives the instance that set it — that is what a
+  deadline is for — so an instance passivated by
+  `SagaManagerProps::with_instance_passivation` is restored from its own
+  stream and then handed the firing, where before the firing reached a process
+  that had already stopped. Such an instance consequently keeps its deadlines
+  armed when it passivates; a standalone `SagaProps` saga, which has no
+  manager to restore it, still releases its own as it stops.
+
+  Nothing about where a deadline durably lives changes: the `scheduled` marker
+  on the saga's own stream is still the record, written in the same atomic
+  batch as the decision that set it, and the scheduler is still a cache in
+  front of it that restores nothing of its own after a restart.
+
 - (`nitinol-persistence`, `nitinol-saga`): the framework's own records are
   declared through one macro rather than four hand-written pieces each.
 
@@ -639,6 +671,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `type State = ...;` line; no other change is required.
 
 ### Removed
+
+- **BREAKING** (`nitinol-saga`): removed `spawn_scheduler`. The resident
+  scheduler is started by type, through `ProcessSystem::spawn_resident`, and
+  `SchedulerProcess` is exported so a caller can name it.
+
+  A spawn function of its own started a timer core on every call, so wiring
+  two sagas meant either threading one proxy through the whole startup or
+  silently running two cores. `spawn_resident` keys on the type: however many
+  places ask, the first ask starts the one scheduler and every later ask
+  resolves it.
+
+  ```rust
+  // before
+  let scheduler = nitinol_saga::spawn_scheduler(&system).await;
+  // after
+  let scheduler: SchedulerProxy = system.spawn_resident::<SchedulerProcess>().await.into();
+  ```
+
+  `SagaProps::with_scheduler` and `SagaManagerProps::with_scheduler` take the
+  same `SchedulerProxy` as before.
 
 - **BREAKING** (`nitinol-persistence`, `nitinol-sqlx`): removed
   `EventRegistry::from_linked` and `EventRegistry::from_entries` from the

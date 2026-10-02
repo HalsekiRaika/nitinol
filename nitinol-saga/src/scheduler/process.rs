@@ -1,214 +1,301 @@
 //! `SchedulerProcess` — the system-wide resident timer core.
 //!
-//! A single non-generic process owns every saga's timers using a **Hashed Wheel
-//! Timer** with [`WHEEL_SIZE`] slots and a [`TICK_INTERVAL`] resolution.  It
-//! stays saga-type agnostic by keying registrations on [`ScheduleToken`] and
-//! dispatching through a type-erased [`DispatchFn`] that the saga builds while
-//! it still has access to its own typed proxy.
+//! A single non-generic process owns every saga's deadlines, held in **deadline
+//! order** and waited on one at a time.  It stays saga-type agnostic by keying
+//! registrations on [`ScheduleToken`] and firing through a type-erased
+//! [`DispatchFn`] the saga builds while it still has access to its own route
+//! home.
 //!
-//! ## Timer precision
+//! ## What the order costs
 //!
-//! Timers fire within one tick period (10 ms) after their deadline.  The wheel
-//! has 512 slots, giving a maximum non-round-trip delay of 5.12 s per
-//! revolution; longer delays are handled by a `remaining_rounds` counter.
+//! Only the earliest deadline is ever waited on, with a single
+//! [`tokio::time::sleep_until`].  So:
+//!
+//! - an idle scheduler costs nothing: no deadline, no sleep, no wakeup;
+//! - a deadline arbitrarily far ahead is just a later key — there are no
+//!   revolutions to count and no horizon to exceed;
+//! - a registration is `O(log n)`, which is the trade this domain is happy to
+//!   make: saga deadlines are few and long-lived, not millions of short-lived
+//!   network timeouts.
 //!
 //! ## Cancellation
 //!
-//! A per-token monotonic generation counter stored in `generations` is the
-//! authoritative active-timer table.  Cancelling a token removes it from
-//! `generations`; existing wheel entries carrying a stale generation are
-//! discarded lazily when their slot is visited.  This makes `CancelTimer` and
-//! `CancelAllForSaga` O(1) (or O(active timers for saga), respectively) without
-//! scanning the wheel.
+//! [`SchedulerProcess::placed`] says where each token's deadline sits, so
+//! cancelling one — by name, or by saga at lifecycle teardown — is a lookup and
+//! a removal rather than a scan, and nothing stale is left in the order to be
+//! filtered out later.
+//!
+//! ## The scheduler holds no truth
+//!
+//! Where a deadline durably lives is the saga's own stream: the `scheduled`
+//! marker is written in the same atomic batch as the decision that set it.
+//! Everything here is an accelerator over those facts, which is why starting
+//! this process restores nothing — re-arming belongs to each instance's
+//! activation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_core::future::BoxFuture;
+use futures_util::future::select;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive};
-use nitinol_runtime::{IdleTimeout, ProcessSystem, Props};
+use nitinol_runtime::{Props, Resident};
+use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 use crate::id::SagaId;
 use crate::scheduler::token::ScheduleToken;
 
-/// Type-erased dispatch invoked when a timer fires.  The saga constructs this
-/// by capturing a clone of its own typed proxy, so the scheduler never needs
-/// to know the concrete saga type.
+/// Type-erased dispatch invoked when a deadline is reached.  The saga
+/// constructs this by capturing the route back to itself, so the scheduler
+/// never needs to know the concrete saga type.
 pub(crate) type DispatchFn = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
 
-/// Number of slots in the hashed wheel.  Must be a power of two for the modulo
-/// to simplify to a bitwise AND, though we use plain `%` for clarity.
-const WHEEL_SIZE: usize = 512;
-
-/// How long between wheel ticks.  Timers fire within `TICK_INTERVAL` of their
-/// deadline.
-const TICK_INTERVAL: Duration = Duration::from_millis(10);
-
-/// Convert a [`Duration`] into the number of ticks the wheel must advance
-/// before the timer may fire.
+/// Where a deadline is placed when its delay runs past what the monotonic
+/// clock can represent.
 ///
-/// Uses ceiling division so the timer **never fires before `after` has
-/// elapsed**:
-///
-/// | `after`  | ticks |
-/// |----------|-------|
-/// | 0 ms     | 1     |
-/// | 10 ms    | 1     |
-/// | 11 ms    | 2     |
-/// | 19 ms    | 2     |
-/// | 20 ms    | 2     |
-/// | 21 ms    | 3     |
-///
-/// The minimum is 1 so the entry always lands in a *future* slot and never
-/// the current one.  Saturates to [`u64::MAX`] on pathological durations
-/// (≫ 5 000 years).
-fn duration_to_ticks(after: Duration) -> u64 {
-    let nanos = after.as_nanos();
-    if nanos == 0 {
-        return 1;
-    }
-    let tick_nanos = TICK_INTERVAL.as_nanos();
-    // Ceiling division keeps the entry in a future slot; flooring could fire early.
-    let ticks = nanos.div_ceil(tick_nanos);
-    u64::try_from(ticks).unwrap_or(u64::MAX)
-}
+/// `tokio`'s own timer treats roughly this distance as "never", so a delay
+/// this long is already indistinguishable from one that is never reached; what
+/// matters is that an absurd [`Duration`] leaves the one timer core standing
+/// instead of overflowing it.
+const FAR_FUTURE: Duration = Duration::from_secs(30 * 365 * 24 * 60 * 60);
 
-/// A single pending timer entry held in a wheel slot.
-struct WheelEntry {
+/// A deadline's place in the firing order.
+///
+/// The instant decides it; the serial number only keeps two deadlines due at
+/// the same instant from displacing one another.
+type DeadlineKey = (Instant, u64);
+
+/// A deadline waiting to be reached.
+struct Pending {
     token: ScheduleToken,
-    generation: u64,
-    /// How many more full wheel revolutions must pass before this entry is
-    /// eligible to fire.  Decremented once per visit to the slot; fires when
-    /// it reaches zero.
-    remaining_rounds: u64,
     dispatch: DispatchFn,
 }
 
-/// The resident timer core.  Spawn one per [`ProcessSystem`] via
-/// [`spawn_scheduler`].
+/// The one sleep this process ever waits on.
+///
+/// Exactly one is outstanding at a time, which is what [`Sleep::Ending`] is
+/// for: a sleep is never started while another is on its way back, however
+/// often the order changes in between.
+enum Sleep {
+    /// Nothing is waited for.  An idle scheduler rests here — no deadline, no
+    /// sleep, no wakeup.
+    Idle,
+    /// A sleep is outstanding for this deadline.  Holding the cancellation
+    /// sender is what lets a nearer deadline end it: dropping the sender
+    /// resolves the sleep at once.
+    Waiting {
+        deadline: Instant,
+        /// Held, never read: nothing is sent on it, and dropping it is the
+        /// whole signal.
+        _cancel: oneshot::Sender<()>,
+    },
+    /// The outstanding sleep has been told to end, and its wakeup is already
+    /// on the way.  That wakeup starts whatever sleep the order needs by then,
+    /// so nothing starts one in the meantime.
+    Ending,
+}
+
+/// What a change to the order asks of the one sleep.
+enum SleepChange {
+    /// Leave the outstanding sleep — or the absence of one — as it is.
+    Leave,
+    /// Start a sleep for this deadline.
+    StartFor(Instant),
+    /// End the outstanding sleep; its wakeup starts whatever is needed then.
+    End,
+}
+
+/// The resident timer core.  Resolved by type through
+/// [`ProcessSystem::spawn_resident`](nitinol_runtime::ProcessSystem::spawn_resident),
+/// so a system holds exactly one however many sagas ask for it.
 pub struct SchedulerProcess {
-    /// The hashed wheel: `WHEEL_SIZE` slots, each a list of pending entries.
-    wheel: Box<[Vec<WheelEntry>]>,
-    /// Monotonically increasing tick counter (never wrapped).
-    /// The slot processed on each tick is `current_tick % WHEEL_SIZE`.
-    current_tick: u64,
-    /// Authoritative active-generation table.  A token present here with the
-    /// matching generation is live; absent or mismatched means stale.
-    generations: HashMap<ScheduleToken, u64>,
+    /// Every registered deadline, in firing order.
+    deadlines: BTreeMap<DeadlineKey, Pending>,
+    /// Where each registered token's deadline sits in that order.
+    placed: HashMap<ScheduleToken, DeadlineKey>,
+    /// Serial numbers for [`DeadlineKey`], handed out in registration order.
+    next_serial: u64,
+    sleep: Sleep,
 }
 
 impl SchedulerProcess {
     fn new() -> Self {
-        let wheel = std::iter::repeat_with(Vec::new)
-            .take(WHEEL_SIZE)
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
         SchedulerProcess {
-            wheel,
-            current_tick: 0,
-            generations: HashMap::new(),
+            deadlines: BTreeMap::new(),
+            placed: HashMap::new(),
+            next_serial: 0,
+            sleep: Sleep::Idle,
         }
     }
 
-    /// Place a single-shot timer for `token` in the slot it must fire from,
-    /// superseding any earlier registration under the same token.
+    /// Place a single-shot deadline for `token`, superseding any earlier
+    /// registration under the same token.
     fn insert(&mut self, token: ScheduleToken, after: Duration, dispatch: DispatchFn) {
-        // Bump the generation so any earlier wheel entry for this token becomes stale.
-        let generation = self.generations.get(&token).map(|g| g + 1).unwrap_or(1);
-        self.generations.insert(token.clone(), generation);
+        // Replacing rather than layering: `startSingleTimer` semantics say the
+        // name holds one deadline, and leaving the earlier one in the order
+        // would fire it as well.
+        self.remove(&token);
 
-        // Convert `after` to a number of ticks using ceiling division so the
-        // timer never fires before the deadline (minimum 1 tick).
-        let ticks_until = duration_to_ticks(after);
-
-        // Target slot: `(current_tick + ticks_until) % WHEEL_SIZE`.
-        // Decompose into modular parts to avoid u64 overflow when `ticks_until`
-        // is saturated to `u64::MAX` (pathological duration such as Duration::MAX).
-        let wheel = WHEEL_SIZE as u64;
-        let slot = (((self.current_tick % wheel) + (ticks_until % wheel)) % wheel) as usize;
-
-        // remaining_rounds: how many full wheel revolutions before the entry
-        // may fire.  The formula `(ticks_until - 1) / WHEEL_SIZE` ensures the
-        // entry fires exactly `ticks_until` ticks from now (off-by-one
-        // correction for the "advance before drain" tick loop design).
-        let remaining_rounds = ticks_until.saturating_sub(1) / WHEEL_SIZE as u64;
-
-        self.wheel[slot].push(WheelEntry {
-            token,
-            generation,
-            remaining_rounds,
-            dispatch,
-        });
+        let key = (deadline_in(after), self.next_serial);
+        self.next_serial += 1;
+        self.placed.insert(token.clone(), key);
+        self.deadlines.insert(key, Pending { token, dispatch });
     }
 
-    /// Advance the wheel by one tick and hand back the dispatches that came due.
-    ///
-    /// All bookkeeping is finished before the caller runs any dispatch.  A
-    /// dispatch only sends messages to other processes and cannot re-enter the
-    /// scheduler while its own `recv` holds `&mut self`, so it can never observe
-    /// the wheel mid-tick.
-    fn advance(&mut self) -> Vec<DispatchFn> {
-        self.current_tick += 1;
-        let slot = (self.current_tick % WHEEL_SIZE as u64) as usize;
-
-        // Drain the slot; entries not yet ready are re-queued in the same slot
-        // for the next revolution.
-        let entries = std::mem::take(&mut self.wheel[slot]);
-        let mut to_requeue: Vec<WheelEntry> = Vec::new();
-        let mut due: Vec<DispatchFn> = Vec::new();
-
-        for mut entry in entries {
-            // Discard stale entries: cancelled tokens or superseded registrations.
-            if self.generations.get(&entry.token) != Some(&entry.generation) {
-                continue;
-            }
-
-            if entry.remaining_rounds > 0 {
-                entry.remaining_rounds -= 1;
-                to_requeue.push(entry);
-            } else {
-                // Remove from the authoritative table before firing — prevents a
-                // stale duplicate from firing the same registration twice.
-                self.generations.remove(&entry.token);
-                due.push(entry.dispatch);
-            }
+    /// Drop the deadline registered under `token`, if there is one.
+    fn remove(&mut self, token: &ScheduleToken) {
+        if let Some(key) = self.placed.remove(token) {
+            self.deadlines.remove(&key);
         }
+    }
 
-        self.wheel[slot].extend(to_requeue);
+    /// Drop every deadline `saga_id` owns.
+    fn remove_all_owned_by(&mut self, saga_id: &SagaId) {
+        let owned: Vec<ScheduleToken> = self
+            .placed
+            .keys()
+            .filter(|token| &token.saga_id == saga_id)
+            .cloned()
+            .collect();
+        for token in owned {
+            self.remove(&token);
+        }
+    }
 
+    /// Take every deadline that has been reached, earliest first, leaving the
+    /// rest in the order.
+    fn take_due(&mut self) -> Vec<Pending> {
+        // `u64::MAX` as the serial puts the split past every deadline due at
+        // this instant, so one registered for exactly now is taken rather than
+        // held back for a wakeup that nothing would arm.
+        let later = self.deadlines.split_off(&(Instant::now(), u64::MAX));
+        let due = std::mem::replace(&mut self.deadlines, later);
+        let due: Vec<Pending> = due.into_values().collect();
+        for pending in &due {
+            self.placed.remove(&pending.token);
+        }
         due
     }
-}
 
-impl Process for SchedulerProcess {
-    async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
-        // Kick off the recurring wheel tick.
-        ctx.pipe_to_self(async { tokio::time::sleep(TICK_INTERVAL).await }, |_| {
-            WheelTick
-        });
+    /// The deadline at the head of the order, if the order holds one.
+    fn earliest(&self) -> Option<Instant> {
+        self.deadlines.keys().next().map(|(at, _)| *at)
+    }
+
+    /// What the one sleep must become for the current order.
+    fn sleep_change(&self) -> SleepChange {
+        match (&self.sleep, self.earliest()) {
+            // A sleep is already on its way back; its wakeup settles this.
+            (Sleep::Ending, _) => SleepChange::Leave,
+            // Nothing to wait for and nothing waiting: an idle scheduler.
+            (Sleep::Idle, None) => SleepChange::Leave,
+            (Sleep::Idle, Some(deadline)) => SleepChange::StartFor(deadline),
+            // Waking before the earliest deadline costs one wakeup that fires
+            // nothing and starts the right sleep; ending this one costs the
+            // same wakeup, so it is left where it is.
+            (Sleep::Waiting { deadline, .. }, Some(earliest)) if *deadline <= earliest => {
+                SleepChange::Leave
+            }
+            // Either a nearer deadline arrived or the last one went away.
+            (Sleep::Waiting { .. }, _) => SleepChange::End,
+        }
+    }
+
+    /// Make the one sleep match the order: start it, end it, or leave it.
+    fn settle_sleep(&mut self, ctx: &mut ProcessContext<Self>) {
+        match self.sleep_change() {
+            SleepChange::Leave => {}
+            // Assigning drops the cancellation sender, which resolves the
+            // outstanding sleep rather than leaving it to wake for a deadline
+            // nobody waits on any more.
+            SleepChange::End => self.sleep = Sleep::Ending,
+            SleepChange::StartFor(deadline) => self.start_sleep(deadline, ctx),
+        }
+    }
+
+    /// Wait for `deadline`, or until the order ends the wait.
+    fn start_sleep(&mut self, deadline: Instant, ctx: &mut ProcessContext<Self>) {
+        let (cancel, cancelled) = oneshot::channel::<()>();
+        self.sleep = Sleep::Waiting {
+            deadline,
+            _cancel: cancel,
+        };
+        ctx.pipe_to_self(
+            async move {
+                // Whichever resolves first, the process has to re-read the
+                // order: the deadline arrived, or the order moved under it.
+                select(Box::pin(tokio::time::sleep_until(deadline)), cancelled).await;
+            },
+            |outcome| {
+                // Neither a sleep nor a dropped cancellation can panic.
+                // Reporting it and re-reading the order is what would keep
+                // every other saga's deadline alive if one ever did.
+                if let Err(panic) = outcome {
+                    tracing::error!(
+                        panic = %panic,
+                        "scheduler sleep panicked; re-reading the deadline order"
+                    );
+                }
+                Wakeup
+            },
+        );
     }
 }
 
-/// Register (or replace) a single-shot timer for `token`, firing after `after`.
+/// The instant `after` from now.
+///
+/// A delay the monotonic clock cannot represent is placed at [`FAR_FUTURE`]
+/// rather than overflowing: the registration is absurd, but it is one saga's
+/// absurdity and every other saga's deadlines live in this process too.
+fn deadline_in(after: Duration) -> Instant {
+    let now = Instant::now();
+    match now.checked_add(after) {
+        Some(deadline) => deadline,
+        None => {
+            tracing::warn!(
+                ?after,
+                "schedule delay runs past the monotonic clock's range; \
+                 placing the deadline as far ahead as the clock allows"
+            );
+            now + FAR_FUTURE
+        }
+    }
+}
+
+impl Process for SchedulerProcess {}
+
+impl Resident for SchedulerProcess {
+    /// Nothing to restore and nothing to arm: a scheduler started after a
+    /// restart is empty, and each saga instance re-arms its own deadlines when
+    /// it is activated.
+    fn props() -> Props<Self> {
+        Props::new(SchedulerProcess::new)
+    }
+}
+
+/// Register (or replace) a single-shot deadline for `token`, reached after
+/// `after`.
 pub(crate) struct RegisterTimer {
     pub(crate) token: ScheduleToken,
     pub(crate) after: Duration,
     pub(crate) dispatch: DispatchFn,
 }
 
-/// Cancel the timer registered under `token`, if any.
+/// Cancel the deadline registered under `token`, if any.
 pub(crate) struct CancelTimer {
     pub(crate) token: ScheduleToken,
 }
 
-/// Cancel every timer owned by `saga_id` (saga lifecycle teardown).
+/// Cancel every deadline owned by `saga_id` (saga lifecycle teardown).
 pub(crate) struct CancelAllForSaga {
     pub(crate) saga_id: SagaId,
 }
 
-/// Internal self-message that advances the wheel by one slot.
-struct WheelTick;
+/// Internal self-message delivered when the one sleep ends — reached or
+/// ended early, which the order answers for itself.
+struct Wakeup;
 
 impl Receive<RegisterTimer> for SchedulerProcess {
     type Response = ();
@@ -217,9 +304,10 @@ impl Receive<RegisterTimer> for SchedulerProcess {
     async fn recv(
         &mut self,
         msg: RegisterTimer,
-        _ctx: &mut ProcessContext<Self>,
+        ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
         self.insert(msg.token, msg.after, msg.dispatch);
+        self.settle_sleep(ctx);
         Ok(())
     }
 }
@@ -231,11 +319,10 @@ impl Receive<CancelTimer> for SchedulerProcess {
     async fn recv(
         &mut self,
         msg: CancelTimer,
-        _ctx: &mut ProcessContext<Self>,
+        ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
-        // Remove from the authoritative table; the wheel entry is discarded
-        // lazily as stale when its slot is next visited.
-        self.generations.remove(&msg.token);
+        self.remove(&msg.token);
+        self.settle_sleep(ctx);
         Ok(())
     }
 }
@@ -247,46 +334,62 @@ impl Receive<CancelAllForSaga> for SchedulerProcess {
     async fn recv(
         &mut self,
         msg: CancelAllForSaga,
-        _ctx: &mut ProcessContext<Self>,
+        ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
-        self.generations
-            .retain(|token, _| token.saga_id != msg.saga_id);
+        self.remove_all_owned_by(&msg.saga_id);
+        self.settle_sleep(ctx);
         Ok(())
     }
 }
 
-impl Receive<WheelTick> for SchedulerProcess {
+impl Receive<Wakeup> for SchedulerProcess {
     type Response = ();
     type Error = std::convert::Infallible;
 
     async fn recv(
         &mut self,
-        _: WheelTick,
+        _: Wakeup,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
-        for dispatch in self.advance() {
-            dispatch().await;
-        }
+        // However it ended, that sleep is over.
+        self.sleep = Sleep::Idle;
+        // Whatever has been reached is due whether the sleep was waiting for
+        // it or was ended early by a nearer one, so both read the order the
+        // same way.
+        let due = self.take_due();
+        // Settled before any dispatch runs, so a slow delivery cannot hold up
+        // the deadlines behind it.
+        self.settle_sleep(ctx);
 
-        // Re-arm the next tick.
-        ctx.pipe_to_self(async { tokio::time::sleep(TICK_INTERVAL).await }, |_| {
-            WheelTick
-        });
+        // A dispatch only sends a message elsewhere and cannot re-enter the
+        // scheduler while this `recv` holds `&mut self`, so it can never
+        // observe the order mid-change.
+        for pending in due {
+            (pending.dispatch)().await;
+        }
 
         Ok(())
     }
 }
 
-/// A cloneable handle to the resident `SchedulerProcess`.
+/// A cloneable handle to the resident [`SchedulerProcess`].
 ///
-/// Injected into a saga via [`crate::SagaProps::with_scheduler`], or into every
-/// instance a manager spawns via
-/// [`crate::SagaManagerProps::with_scheduler`].  The methods
-/// are the named timer operations the saga effect interpreter and lifecycle
-/// hooks drive.
+/// Obtained by converting the proxy
+/// [`ProcessSystem::spawn_resident`](nitinol_runtime::ProcessSystem::spawn_resident)
+/// hands back, then injected into a saga via
+/// [`crate::SagaProps::with_scheduler`], or into every instance a manager
+/// spawns via [`crate::SagaManagerProps::with_scheduler`].  The methods are the
+/// named timer operations the saga effect interpreter and lifecycle hooks
+/// drive.
 #[derive(Clone)]
 pub struct SchedulerProxy {
     inner: ProcessProxy<SchedulerProcess>,
+}
+
+impl From<ProcessProxy<SchedulerProcess>> for SchedulerProxy {
+    fn from(inner: ProcessProxy<SchedulerProcess>) -> Self {
+        SchedulerProxy { inner }
+    }
 }
 
 impl SchedulerProxy {
@@ -322,159 +425,272 @@ impl SchedulerProxy {
     }
 }
 
-/// Spawn the system-wide resident `SchedulerProcess` and return a proxy to it.
-///
-/// The process is persistent (never idle-times-out) because it must outlive
-/// individual sagas to keep their timers running.
-pub async fn spawn_scheduler(system: &ProcessSystem) -> SchedulerProxy {
-    let props = Props::new(SchedulerProcess::new).with_idle_timeout(IdleTimeout::Persistent);
-    let inner = system.spawn(props).await;
-    SchedulerProxy { inner }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::scheduler::token::TimerName;
 
-    /// A token in a namespace of its own, so wheel tests never collide.
-    fn token(name: &str) -> ScheduleToken {
+    fn token(saga: &str, name: &str) -> ScheduleToken {
         ScheduleToken {
-            saga_id: SagaId::new("wheel-test"),
+            saga_id: SagaId::new(saga),
             name: TimerName::new(name),
         }
     }
 
-    /// A dispatch that does nothing: these tests observe *when* the wheel hands
-    /// a dispatch back, never what the dispatch does.
+    /// A dispatch that does nothing: these tests observe *which* deadlines the
+    /// order hands back and when, never what a firing does.
     fn noop_dispatch() -> DispatchFn {
         Arc::new(|| -> BoxFuture<'static, ()> { Box::pin(async {}) })
     }
 
-    /// Drive the wheel until it hands back at least one dispatch and report the
-    /// tick that happened on.  `limit` bounds the search, so a *late* firing
-    /// surfaces as a larger tick (or `None`) instead of hanging the test.
-    fn tick_until_fire(wheel: &mut SchedulerProcess, limit: u64) -> Option<u64> {
-        (1..=limit).find(|_| !wheel.advance().is_empty())
+    fn register(scheduler: &mut SchedulerProcess, token: ScheduleToken, after: Duration) {
+        scheduler.insert(token, after, noop_dispatch());
     }
 
-    /// Regression tests for `duration_to_ticks`.
-    ///
-    /// The contract: a timer registered with `after` must NOT fire before
-    /// `after` has elapsed.  This requires **ceiling** division, not floor.
-    /// The cases below cover zero, exact-tick boundaries, and non-aligned
-    /// values that previously produced wrong tick counts with floor division.
-    #[test]
-    fn duration_to_ticks_never_fires_before_deadline() {
-        let tick_ms = u64::try_from(TICK_INTERVAL.as_millis())
-            .expect("tick interval in milliseconds must fit in u64");
-
-        // (after_ms, expected_ticks, description)
-        let cases: &[(u64, u64, &str)] = &[
-            (0, 1, "0ms → min 1 tick"),
-            (1, 1, "1ms → 1 tick (fires after 10ms, still safe)"),
-            (9, 1, "9ms → 1 tick (fires after 10ms, safe)"),
-            (10, 1, "10ms → exactly 1 tick"),
-            (
-                11,
-                2,
-                "11ms → 2 ticks (was 1 with floor division — regression)",
-            ),
-            (
-                19,
-                2,
-                "19ms → 2 ticks (was 1 with floor division — regression)",
-            ),
-            (20, 2, "20ms → exactly 2 ticks"),
-            (21, 3, "21ms → 3 ticks"),
-        ];
-
-        for &(after_ms, expected_ticks, desc) in cases {
-            let ticks = duration_to_ticks(Duration::from_millis(after_ms));
-            assert_eq!(ticks, expected_ticks, "{desc}");
-
-            // Core invariant: the timer fires no earlier than `after` ms.
-            let fire_ms = ticks * tick_ms;
-            assert!(
-                fire_ms >= after_ms,
-                "{desc}: fire_ms={fire_ms} < after_ms={after_ms} — deadline violated!"
-            );
-        }
-    }
-
-    /// Regression test: slot calculation must not overflow when
-    /// `ticks_until` is saturated to [`u64::MAX`] (i.e., `Duration::MAX`).
-    ///
-    /// Before the fix, `self.current_tick + ticks_until` would overflow for any
-    /// `current_tick > 0`.  After the fix, modular decomposition is used:
-    /// `(current_tick % wheel + ticks_until % wheel) % wheel`.
-    #[test]
-    fn slot_calculation_does_not_overflow_with_max_duration() {
-        // duration_to_ticks(Duration::MAX) must saturate to u64::MAX.
-        let ticks_until = duration_to_ticks(Duration::MAX);
-        assert_eq!(
-            ticks_until,
-            u64::MAX,
-            "Duration::MAX must saturate to u64::MAX"
+    /// Put `token` at an exact place in the order, which registering by delay
+    /// cannot express: `insert` hands out serials in call order.
+    fn place(scheduler: &mut SchedulerProcess, token: ScheduleToken, key: DeadlineKey) {
+        scheduler.placed.insert(token.clone(), key);
+        scheduler.deadlines.insert(
+            key,
+            Pending {
+                token,
+                dispatch: noop_dispatch(),
+            },
         );
+    }
 
-        // Registering a `u64::MAX`-tick timer while `current_tick > 0` is the
-        // state that used to overflow, so drive the wheel one tick first.
-        let mut wheel = SchedulerProcess::new();
-        assert!(wheel.advance().is_empty(), "an empty wheel fires nothing");
+    fn due_names(scheduler: &mut SchedulerProcess) -> Vec<String> {
+        scheduler
+            .take_due()
+            .into_iter()
+            .map(|pending| pending.token.name.as_str().to_owned())
+            .collect()
+    }
 
-        wheel.insert(token("max"), Duration::MAX, noop_dispatch());
+    /// Put the scheduler in the state it is in while waiting for `deadline`.
+    ///
+    /// The receiver is handed back because dropping it is what the production
+    /// path reads as the sleep ending: a test that let it go would be
+    /// observing a sleep that is already over.
+    fn waiting_for(scheduler: &mut SchedulerProcess, deadline: Instant) -> oneshot::Receiver<()> {
+        let (cancel, cancelled) = oneshot::channel::<()>();
+        scheduler.sleep = Sleep::Waiting {
+            deadline,
+            _cancel: cancel,
+        };
+        cancelled
+    }
+
+    /// A scheduler holding no deadline starts no sleep, so no wakeup can
+    /// happen while it is idle — the cost the retired wheel's 10 ms tick paid
+    /// whether or not anything was registered.
+    #[test]
+    fn an_idle_scheduler_starts_no_sleep() {
+        let scheduler = SchedulerProcess::new();
 
         assert!(
-            wheel.advance().is_empty(),
-            "a Duration::MAX timer must not fire on the tick after it is registered"
+            matches!(scheduler.sleep_change(), SleepChange::Leave),
+            "a scheduler with no deadline and no sleep must ask for neither"
         );
     }
 
-    /// The wheel's slot and `remaining_rounds` arithmetic must fire a timer
-    /// registered for `ticks_until` ticks on **exactly** tick `ticks_until` —
-    /// not earlier (the deadline would be violated) and not later (a lost
-    /// revolution).
-    ///
-    /// The cases straddle the wheel-revolution boundary, where an off-by-one in
-    /// either formula costs a whole revolution.  Driven through
-    /// [`SchedulerProcess::insert`] / [`SchedulerProcess::advance`], so changing
-    /// either production formula turns this test red.
+    /// Cancelling the last deadline ends the outstanding sleep rather than
+    /// leaving it to wake for a deadline that is gone.
     #[test]
-    fn wheel_slot_and_rounds_formula_is_correct() {
-        let wheel_size = WHEEL_SIZE as u64;
-        let tick_ms = u64::try_from(TICK_INTERVAL.as_millis())
-            .expect("tick interval in milliseconds must fit in u64");
+    fn cancelling_the_last_deadline_ends_the_sleep() {
+        let mut scheduler = SchedulerProcess::new();
+        register(
+            &mut scheduler,
+            token("saga", "only"),
+            Duration::from_secs(60),
+        );
+        let _cancelled = waiting_for(&mut scheduler, deadline_in(Duration::from_secs(60)));
 
-        let cases: &[u64] = &[
-            1,
-            wheel_size - 1,
-            wheel_size,
-            wheel_size + 1,
-            2 * wheel_size,
-            360_000, // 1-hour timer at 10 ms/tick
-        ];
+        scheduler.remove(&token("saga", "only"));
 
-        for &ticks_until in cases {
-            let mut wheel = SchedulerProcess::new();
-            // A whole number of tick intervals, so `ticks_until` is exactly what
-            // `duration_to_ticks` yields and the expected tick needs no rounding.
-            wheel.insert(
-                token("formula"),
-                Duration::from_millis(ticks_until * tick_ms),
-                noop_dispatch(),
-            );
+        assert!(
+            matches!(scheduler.sleep_change(), SleepChange::End),
+            "with the order empty the scheduler must stop waiting at all"
+        );
+    }
 
-            // Searching one full revolution past the deadline exposes a late
-            // firing as a concrete tick number rather than a hang.
-            let fired_at = tick_until_fire(&mut wheel, ticks_until + wheel_size);
+    /// A deadline nearer than the one being waited for ends that sleep, so the
+    /// nearer one is not missed.
+    #[test]
+    fn a_nearer_deadline_ends_the_outstanding_sleep() {
+        let mut scheduler = SchedulerProcess::new();
+        let _cancelled = waiting_for(&mut scheduler, deadline_in(Duration::from_secs(60)));
 
-            assert_eq!(
-                fired_at,
-                Some(ticks_until),
-                "a timer registered for {ticks_until} ticks must fire on tick {ticks_until}"
-            );
-        }
+        register(&mut scheduler, token("saga", "sooner"), Duration::ZERO);
+
+        assert!(
+            matches!(scheduler.sleep_change(), SleepChange::End),
+            "a deadline nearer than the sleep must not be left to a wakeup 60s away"
+        );
+    }
+
+    /// A sleep that has already been told to end settles the order itself when
+    /// its wakeup lands, so nothing starts a second one in the meantime —
+    /// which is what keeps exactly one outstanding however often the order
+    /// changes.
+    #[test]
+    fn a_sleep_on_its_way_back_is_not_joined_by_another() {
+        let mut scheduler = SchedulerProcess::new();
+        scheduler.sleep = Sleep::Ending;
+
+        register(&mut scheduler, token("saga", "sooner"), Duration::ZERO);
+
+        assert!(
+            matches!(scheduler.sleep_change(), SleepChange::Leave),
+            "a deadline arriving while a wakeup is on the way must wait for it"
+        );
+    }
+
+    /// Only the deadlines that have been reached are handed back; the rest keep
+    /// their place in the order.
+    #[test]
+    fn only_the_deadlines_that_came_due_are_taken() {
+        let mut scheduler = SchedulerProcess::new();
+        register(&mut scheduler, token("saga", "now"), Duration::ZERO);
+        register(
+            &mut scheduler,
+            token("saga", "later"),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(
+            due_names(&mut scheduler),
+            vec!["now".to_owned()],
+            "a deadline already reached is due; one 60s out is not"
+        );
+        assert!(
+            matches!(scheduler.sleep_change(), SleepChange::StartFor(_)),
+            "the deadline left behind must still be waited for"
+        );
+    }
+
+    /// Deadlines are handed back earliest first, whatever order they were
+    /// registered in.
+    #[test]
+    fn due_deadlines_come_back_in_deadline_order() {
+        let mut scheduler = SchedulerProcess::new();
+        let now = Instant::now();
+        let a_second_ago = now
+            .checked_sub(Duration::from_secs(1))
+            .expect("the monotonic clock has been running for at least a second");
+
+        // The earlier deadline carries the *higher* serial, so registration
+        // order and deadline order disagree and only the deadline can produce
+        // the expectation below.
+        place(&mut scheduler, token("saga", "second"), (now, 0));
+        place(&mut scheduler, token("saga", "first"), (a_second_ago, 1));
+
+        assert_eq!(
+            due_names(&mut scheduler),
+            vec!["first".to_owned(), "second".to_owned()],
+            "the earlier deadline must be handed back first"
+        );
+    }
+
+    /// Re-registering a name replaces the deadline held under it instead of
+    /// adding a second one that would fire as well.
+    #[test]
+    fn registering_a_name_again_replaces_its_deadline() {
+        let mut scheduler = SchedulerProcess::new();
+        register(
+            &mut scheduler,
+            token("saga", "reminder"),
+            Duration::from_secs(60),
+        );
+        register(&mut scheduler, token("saga", "reminder"), Duration::ZERO);
+
+        assert_eq!(
+            due_names(&mut scheduler),
+            vec!["reminder".to_owned()],
+            "the new deadline is due and the one it replaced must be gone"
+        );
+        assert!(
+            matches!(scheduler.sleep_change(), SleepChange::Leave),
+            "nothing of the replaced 60s deadline may be left in the order"
+        );
+    }
+
+    /// Cancelling by name takes that deadline out and leaves the saga's others
+    /// alone.
+    #[test]
+    fn cancelling_by_name_takes_out_only_that_deadline() {
+        let mut scheduler = SchedulerProcess::new();
+        register(&mut scheduler, token("saga", "cancelled"), Duration::ZERO);
+        register(&mut scheduler, token("saga", "kept"), Duration::ZERO);
+
+        scheduler.remove(&token("saga", "cancelled"));
+
+        assert_eq!(
+            due_names(&mut scheduler),
+            vec!["kept".to_owned()],
+            "a cancelled deadline must not be handed back when its instant arrives"
+        );
+    }
+
+    /// Lifecycle teardown releases one saga's deadlines without touching
+    /// another saga's, even where both used the same timer name.
+    #[test]
+    fn cancelling_a_saga_leaves_another_sagas_deadlines() {
+        let mut scheduler = SchedulerProcess::new();
+        register(
+            &mut scheduler,
+            token("stopping", "reminder"),
+            Duration::ZERO,
+        );
+        register(&mut scheduler, token("running", "reminder"), Duration::ZERO);
+
+        scheduler.remove_all_owned_by(&SagaId::new("stopping"));
+
+        let due = scheduler.take_due();
+        let owners: Vec<&str> = due
+            .iter()
+            .map(|pending| pending.token.saga_id.as_str())
+            .collect();
+        assert_eq!(
+            owners,
+            vec!["running"],
+            "cancelling one saga's deadlines must be scoped to that saga"
+        );
+    }
+
+    /// A delay no monotonic clock can represent must leave the one timer core
+    /// standing: it is placed far ahead rather than overflowing the add.
+    #[test]
+    fn a_delay_past_the_clocks_range_is_placed_far_ahead() {
+        let mut scheduler = SchedulerProcess::new();
+        register(&mut scheduler, token("saga", "absurd"), Duration::MAX);
+
+        assert!(
+            due_names(&mut scheduler).is_empty(),
+            "a deadline that far ahead must not be treated as already reached"
+        );
+    }
+
+    /// A deadline hours out is a later key and nothing else — no revolution
+    /// counting, and no horizon past which it is lost.
+    #[test]
+    fn a_deadline_hours_out_is_held_like_any_other() {
+        let mut scheduler = SchedulerProcess::new();
+        register(
+            &mut scheduler,
+            token("saga", "hours"),
+            Duration::from_secs(6 * 60 * 60),
+        );
+
+        assert!(
+            due_names(&mut scheduler).is_empty(),
+            "a deadline six hours out must not come due now"
+        );
+        assert!(
+            matches!(scheduler.sleep_change(), SleepChange::StartFor(_)),
+            "it must still be the deadline the scheduler waits for"
+        );
     }
 }

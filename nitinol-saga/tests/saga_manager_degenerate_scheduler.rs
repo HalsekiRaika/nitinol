@@ -154,7 +154,7 @@ async fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
 async fn manager_with_scheduler_fires_the_degenerate_instances_timer() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_trigger(

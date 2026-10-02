@@ -55,9 +55,7 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{
-    spawn_scheduler, Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent, TimerName,
-};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent, TimerName};
 
 /// Stream key reported by the always-failing tell target.  The hook must
 /// receive exactly this value as its `target` argument.
@@ -844,7 +842,7 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
 async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

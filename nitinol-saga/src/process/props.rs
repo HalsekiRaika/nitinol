@@ -10,7 +10,7 @@ use nitinol_runtime::ProcessSystem;
 use crate::dead_letter::{self, DeadLetterEvent, DlqChildSpawn, EnqueuePolicy};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
-use crate::process::instance::SagaInstanceSpec;
+use crate::process::instance::{SagaInstanceSpec, ScheduleDelivery};
 use crate::process::proxy::SagaProxy;
 #[cfg(test)]
 use crate::process::saga_process::TellState;
@@ -135,8 +135,9 @@ impl<S: Saga, Sub> SagaProps<S, Sub> {
         self
     }
 
-    /// Inject the resident [`SchedulerProxy`] (from
-    /// [`crate::spawn_scheduler`]) so this saga's [`SagaEffect::schedule`] and
+    /// Inject the resident [`SchedulerProxy`] — the proxy
+    /// `system.spawn_resident::<`[`SchedulerProcess`](crate::SchedulerProcess)`>()`
+    /// answers with, converted — so this saga's [`SagaEffect::schedule`] and
     /// [`SagaEffect::cancel_schedule`] effects drive real timers.
     ///
     /// Without it, schedule markers are still persisted but no timer fires until
@@ -237,6 +238,10 @@ impl<S: Saga> SagaProps<S, SubscriptionSet<S>> {
             }),
             crash_restart_factory: self.crash_restart_factory,
             scheduler: self.scheduler,
+            // Nothing fronts this saga, so a deadline's firing is addressed to
+            // the process itself; there is no manager to restore it from its
+            // own stream.
+            delivery: ScheduleDelivery::ToTheInstance,
             decode_failure_route_fn: self.decode_failure_route_fn,
             dlq_child_spawn: self.dead_letter_subscriber,
             #[cfg(test)]

@@ -81,15 +81,20 @@
 //!   and advances past a record no instance claims so one unclaimed record
 //!   cannot stall the rest.  A [`Saga::correlate`] that always answers the same
 //!   id reduces the manager to the single resident saga [`SagaProps`] spawns.
-//! - Deadline scheduling: call [`spawn_scheduler`] once at startup to obtain a
-//!   [`SchedulerProxy`], then pass it to [`SagaProps::with_scheduler`] for a
+//! - Deadline scheduling: ask the runtime for the resident timer core —
+//!   `system.spawn_resident::<`[`SchedulerProcess`]`>().await.into()` — and pass
+//!   the resulting [`SchedulerProxy`] to [`SagaProps::with_scheduler`] for a
 //!   standalone saga, or to
 //!   [`SagaManagerProps::with_scheduler`] so every instance the manager spawns
-//!   gets the same wiring.  The saga can then emit [`SagaEffect::schedule`] /
-//!   [`SagaEffect::CancelSchedule`] effects and override
-//!   [`crate::Saga::on_scheduled`] to handle fired timers.  Timers are
-//!   persisted in the saga's own event stream (`SagaPersisted::Schedule`) and
-//!   re-registered on restart (at-least-once delivery; handlers must be idempotent).
+//!   gets the same wiring.  The ask is keyed on the type, so however many
+//!   places make it, one scheduler exists and they all name it.  The saga can
+//!   then emit [`SagaEffect::schedule`] / [`SagaEffect::CancelSchedule`]
+//!   effects and override [`crate::Saga::on_scheduled`] to handle fired
+//!   timers.  Deadlines are persisted in the saga's own event stream
+//!   (`SagaPersisted::Schedule`), which is where they durably live: the
+//!   scheduler restores nothing of its own after a restart, and an unfired
+//!   deadline is re-armed when the instance that set it is next activated
+//!   (at-least-once delivery; handlers must be idempotent).
 //! - Dead-letter queue (DLQ): each saga failure kind is persisted as a
 //!   [`DeadLetterEvent`] on the saga's own EventStore stream, mixed into the
 //!   same envelope as domain events.
@@ -299,5 +304,5 @@ pub use self::process::{
     SagaManagerProps, SagaManagerProxy, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset,
 };
 pub use self::saga::Saga;
-pub use self::scheduler::{spawn_scheduler, ScheduleToken, SchedulerProxy, TimerName};
+pub use self::scheduler::{ScheduleToken, SchedulerProcess, SchedulerProxy, TimerName};
 pub use self::system_ext::{SagaDefaultStoreExt, SagaSpawn, SagaSystemExt, Subscription};

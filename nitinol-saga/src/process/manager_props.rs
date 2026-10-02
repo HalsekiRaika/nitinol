@@ -127,8 +127,10 @@ impl<S: Saga, Sub> SagaManagerProps<S, Sub> {
         self
     }
 
-    /// Inject the resident [`SchedulerProxy`](crate::SchedulerProxy) (from
-    /// [`crate::spawn_scheduler`]) so every instance this manager spawns has its
+    /// Inject the resident [`SchedulerProxy`](crate::SchedulerProxy) — the
+    /// proxy
+    /// `system.spawn_resident::<`[`SchedulerProcess`](crate::SchedulerProcess)`>()`
+    /// answers with, converted — so every instance this manager spawns has its
     /// [`SagaEffect::schedule`](crate::SagaEffect::schedule) and
     /// [`SagaEffect::cancel_schedule`](crate::SagaEffect::cancel_schedule)
     /// effects drive real timers — the same wiring

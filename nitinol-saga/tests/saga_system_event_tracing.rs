@@ -576,7 +576,7 @@ async fn a_registered_and_a_fired_timer_are_reported_with_distinct_arms() {
     let capture = Capture::installed();
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = nitinol_saga::spawn_scheduler(system.process_system()).await;
+    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "tracing-schedule-upstream", 1, "tick").await;
