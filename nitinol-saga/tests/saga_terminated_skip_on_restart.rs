@@ -28,13 +28,13 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 // Domain types
 
@@ -70,6 +70,13 @@ impl Event for ReservationRequested {
 /// saga at all.
 const SAGA_ID: &str = "terminated-skip-saga";
 
+/// The whole alphabet both sagas in this file react to: one observed source, no
+/// deadline.  Shared, because the two types observe the same upstream event.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 /// Records every `handle` call and never terminates.  Used to observe whether
 /// the upstream subscription was wired up at all.
 struct RecordingSaga {
@@ -79,20 +86,17 @@ struct RecordingSaga {
 
 #[async_trait]
 impl Saga for RecordingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         self.handle_count.fetch_add(1, Ordering::SeqCst);
@@ -110,22 +114,20 @@ struct EndOnFirstSaga {
 
 #[async_trait]
 impl Saga for EndOnFirstSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.handle_count.fetch_add(1, Ordering::SeqCst);
         Ok(SagaEffect::persist(ReservationRequested { sku: event.sku }).then_end())
     }
@@ -194,19 +196,15 @@ async fn spawn_recording_saga(
     handle_count: Arc<AtomicUsize>,
     handled: Arc<Notify>,
 ) -> nitinol_saga::SagaProxy<RecordingSaga> {
-    SagaProps::<RecordingSaga>::new(SagaId::new(SAGA_ID), Arc::clone(saga_store), move || {
-        RecordingSaga {
+    SagaProps::<RecordingSaga>::new(
+        SagaId::new(SAGA_ID),
+        Arc::clone(saga_store),
+        move |_components| RecordingSaga {
             handle_count: Arc::clone(&handle_count),
             handled: Arc::clone(&handled),
-        }
-    })
-    .with_subscription(
-        Arc::clone(upstream_store),
-        SequenceCursor::Stream {
-            key: upstream_key.to_owned(),
-            after: 0,
         },
     )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(upstream_store, upstream_key))
     .spawn(system.process_system())
     .await
 }
@@ -310,21 +308,16 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     // First incarnation: handle the first event and terminate via End.
     let first_count = Arc::new(AtomicUsize::new(0));
     let first_count_clone = Arc::clone(&first_count);
-    let first_proxy =
-        SagaProps::<EndOnFirstSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            EndOnFirstSaga {
-                handle_count: Arc::clone(&first_count_clone),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let first_proxy = SagaProps::<EndOnFirstSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| EndOnFirstSaga {
+            handle_count: Arc::clone(&first_count_clone),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+    .spawn(system.process_system())
+    .await;
 
     // Wait until the End interpretation has durably persisted the Ended marker.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

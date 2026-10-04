@@ -16,8 +16,7 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    DeadLetterEvent, SagaEffect, SagaFailure, SagaId, ScheduleSpec, SchedulerProcess,
-    SchedulerProxy, TellIntent, TimerName,
+    DeadLetterEvent, SagaEffect, SagaFailure, SagaId, ScheduleSpec, TellIntent, TimerName,
 };
 
 // JsonCodec — shared across all integration tests
@@ -36,18 +35,11 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     }
 }
 
-// The one way a test reaches the system-wide scheduler.
-
-/// Resolve the resident `SchedulerProcess` and hand back the proxy the saga
-/// builders take.
-///
-/// `spawn_resident` keys on the type, so this is idempotent: a test may call it
-/// once and clone, or call it again, and either way names the one scheduler the
-/// system holds.  The `.into()` is the only step between what the runtime hands
-/// back and what `with_scheduler` accepts.
-pub async fn resident_scheduler(system: &ProcessSystem) -> SchedulerProxy {
-    system.spawn_resident::<SchedulerProcess>().await.into()
-}
+// A saga's own time needs no helper: the host resolves the one resident
+// `SchedulerProcess` from the saga's alphabet, so a test that wants deadlines
+// declares a `#[subscribe(deadline)]` variant and asks the components for a
+// `Deadline<M>`. There is no proxy for a test to hold, which is the point —
+// holding one would make "arm a timer without writing the fact" expressible.
 
 // Minimal aggregate used only to obtain an AggregateProxy for Tell tests.
 

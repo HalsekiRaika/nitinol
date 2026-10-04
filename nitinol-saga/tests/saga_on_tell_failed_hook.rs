@@ -18,7 +18,8 @@
 //! - Failures surfaced by replay keep flowing through
 //!   `SagaContext::failed_tell_ids`; the hook is not involved.
 //! - A failure the hook consumed is withheld from **both** readers of
-//!   `SagaContext::failed_tell_ids` — `on_scheduled` as well as `handle`.
+//!   `SagaContext::failed_tell_ids` — the deadline arm of `handle` as well as
+//!   its observed-record arm.
 //! - A hook returning `Err` is recorded as a `tell_failed_hook_failed` dead
 //!   letter rather than logged and discarded.
 //!
@@ -44,9 +45,9 @@ use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
-    SequenceCursor, TellError,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
@@ -55,7 +56,10 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent, TimerName};
+use nitinol_saga::{
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe,
+    Subscription, TellIntent, TimerName,
+};
 
 /// Stream key reported by the always-failing tell target.  The hook must
 /// receive exactly this value as its `target` argument.
@@ -229,6 +233,13 @@ type SharedRecorder = Arc<Recorder>;
 
 // Sagas under test
 
+/// The whole alphabet the sagas below react to, except the one that also owns a
+/// deadline: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    OrderPlaced(OrderPlaced),
+}
+
 /// Dispatches one always-failing tell on its first upstream event and
 /// compensates from `on_tell_failed`.
 ///
@@ -248,22 +259,20 @@ const TELL_FAILURE_SAGA_ID: &str = "on-tell-failed-running-target";
 
 #[async_trait]
 impl Saga for TellFailureSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = SagaLog;
-    type ScheduledMessage = ();
     type Error = Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(TELL_FAILURE_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: SagaLog) {}
-
     async fn handle(
         &mut self,
-        _event: OrderPlaced,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::OrderPlaced(_event) = input;
         self.recorder.record_handle(ctx);
 
         let intent = TellIntent::new(self.target.clone(), Reserve);
@@ -304,22 +313,20 @@ const REPLAY_OBSERVING_SAGA_ID: &str = "on-tell-failed-replay";
 
 #[async_trait]
 impl Saga for ReplayObservingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = SagaLog;
-    type ScheduledMessage = ();
     type Error = Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(REPLAY_OBSERVING_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: SagaLog) {}
-
     async fn handle(
         &mut self,
-        _event: OrderPlaced,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::OrderPlaced(_event) = input;
         self.recorder.record_handle(ctx);
         Ok(SagaEffect::None)
     }
@@ -334,21 +341,52 @@ impl Saga for ReplayObservingSaga {
     }
 }
 
-/// Payload of the timer the hook registers.  It carries nothing: the timer
-/// exists only to reach `on_scheduled`, the second reader of
-/// `SagaContext::failed_tell_ids`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Payload of the deadline the hook registers.  It carries nothing: the
+/// deadline exists only to reach the deadline arm of `handle`, the second
+/// reader of `SagaContext::failed_tell_ids`.
+#[derive(Clone, Debug)]
 struct Recheck;
 
-/// Dispatches one always-failing tell, then schedules a timer from inside
+/// A deadline message is persisted inside the schedule fact, so it names the
+/// format that writes it down.  `Recheck` carries nothing, so its bytes are
+/// empty.
+struct RecheckCodec;
+
+impl Codec<Recheck> for RecheckCodec {
+    type Error = Infallible;
+
+    fn encode(_value: &Recheck) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Recheck, Self::Error> {
+        Ok(Recheck)
+    }
+}
+
+impl DeadlineMessage for Recheck {
+    type Codec = RecheckCodec;
+}
+
+/// The alphabet of [`ScheduleAfterFailureSaga`]: the one observed source, plus
+/// the saga's own time.
+#[derive(SagaSubscribe)]
+enum RecheckInput {
+    OrderPlaced(OrderPlaced),
+    #[subscribe(deadline)]
+    Recheck(Recheck),
+}
+
+/// Dispatches one always-failing tell, then sets a deadline from inside
 /// `on_tell_failed`.
 ///
-/// Because the timer is registered by the hook itself, the `on_scheduled` call
-/// it produces is necessarily later than the failure the hook consumed — which
-/// is what makes the drain observable from that entry point without relying on
+/// Because the deadline is registered by the hook itself, the firing it
+/// produces is necessarily later than the failure the hook consumed — which is
+/// what makes the drain observable from that entry point without relying on
 /// wall-clock ordering between two independent effects.
 struct ScheduleAfterFailureSaga {
     target: FailingTellTarget<Inventory>,
+    deadline: Deadline<Recheck>,
     recorder: SharedRecorder,
 }
 
@@ -358,29 +396,39 @@ const SCHEDULE_AFTER_FAILURE_SAGA_ID: &str = "on-tell-failed-timer-drain";
 
 #[async_trait]
 impl Saga for ScheduleAfterFailureSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = RecheckInput;
     type Event = SagaLog;
-    type ScheduledMessage = Recheck;
     type Error = Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(SCHEDULE_AFTER_FAILURE_SAGA_ID))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            RecheckInput::OrderPlaced(_) => Some(SagaId::new(SCHEDULE_AFTER_FAILURE_SAGA_ID)),
+            // A deadline firing is addressed to the instance that set it and
+            // never travels the subscription path.
+            RecheckInput::Recheck(_) => None,
+        }
     }
-
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        _event: OrderPlaced,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        self.recorder.record_handle(ctx);
+        match input {
+            RecheckInput::OrderPlaced(_event) => {
+                self.recorder.record_handle(ctx);
 
-        let intent = TellIntent::new(self.target.clone(), Reserve);
-        Ok(SagaEffect::persist(SagaLog {
-            note: STARTED_NOTE.to_owned(),
-        })
-        .combine(SagaEffect::tell_intent(intent)))
+                let intent = TellIntent::new(self.target.clone(), Reserve);
+                Ok(SagaEffect::persist(SagaLog {
+                    note: STARTED_NOTE.to_owned(),
+                })
+                .combine(SagaEffect::tell_intent(intent)))
+            }
+            RecheckInput::Recheck(_) => {
+                self.recorder.record_scheduled(ctx);
+                Ok(SagaEffect::None)
+            }
+        }
     }
 
     async fn on_tell_failed(
@@ -389,20 +437,11 @@ impl Saga for ScheduleAfterFailureSaga {
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
         self.recorder.record_hook(&target, ctx);
-        Ok(SagaEffect::schedule(
+        Ok(self.deadline.set(
             TimerName::new(RECHECK_TIMER),
             Duration::from_millis(50),
             Recheck,
         ))
-    }
-
-    async fn on_scheduled(
-        &mut self,
-        _message: Recheck,
-        ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        self.recorder.record_scheduled(ctx);
-        Ok(SagaEffect::None)
     }
 }
 
@@ -429,22 +468,20 @@ const REJECTING_HOOK_SAGA_ID: &str = "on-tell-failed-hook-rejects";
 
 #[async_trait]
 impl Saga for RejectingHookSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = SagaLog;
-    type ScheduledMessage = ();
     type Error = HookRejected;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(REJECTING_HOOK_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: SagaLog) {}
-
     async fn handle(
         &mut self,
-        _event: OrderPlaced,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::OrderPlaced(_event) = input;
         let intent = TellIntent::new(self.target.clone(), Reserve);
         Ok(SagaEffect::persist(SagaLog {
             note: STARTED_NOTE.to_owned(),
@@ -629,23 +666,18 @@ async fn run_tell_failure_scenario(saga_key: &str, terminate_after_tell: bool) -
     let recorder: SharedRecorder = Arc::new(Recorder::default());
 
     let recorder_for_saga = Arc::clone(&recorder);
-    let _saga_proxy =
-        SagaProps::<TellFailureSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            TellFailureSaga {
-                target: FailingTellTarget::new(TELL_TARGET_ID),
-                recorder: Arc::clone(&recorder_for_saga),
-                terminate_after_tell,
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.clone(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<TellFailureSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| TellFailureSaga {
+            target: FailingTellTarget::new(TELL_TARGET_ID),
+            recorder: Arc::clone(&recorder_for_saga),
+            terminate_after_tell,
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
+    .spawn(system.process_system())
+    .await;
 
     // The terminal failure bookkeeping is unconditional, so it is the common
     // synchronisation point for both lifecycles.
@@ -728,23 +760,18 @@ async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
     let recorder: SharedRecorder = Arc::new(Recorder::default());
 
     let recorder_for_saga = Arc::clone(&recorder);
-    let _saga_proxy =
-        SagaProps::<TellFailureSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            TellFailureSaga {
-                target: FailingTellTarget::new(TELL_TARGET_ID),
-                recorder: Arc::clone(&recorder_for_saga),
-                terminate_after_tell: false,
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.clone(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<TellFailureSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| TellFailureSaga {
+            target: FailingTellTarget::new(TELL_TARGET_ID),
+            recorder: Arc::clone(&recorder_for_saga),
+            terminate_after_tell: false,
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
+    .spawn(system.process_system())
+    .await;
 
     // The terminal marker is written before the dead letter is attempted, so it
     // is the synchronisation point that proves the rejected append was reached.
@@ -802,17 +829,11 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
     let _saga_proxy = SagaProps::<ReplayObservingSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || ReplayObservingSaga {
+        move |_components| ReplayObservingSaga {
             recorder: Arc::clone(&recorder_for_saga),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: upstream_key.clone(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
     .spawn(system.process_system())
     .await;
 
@@ -838,11 +859,10 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
 }
 
 /// Run one upstream event through [`ScheduleAfterFailureSaga`] and wait until
-/// the timer its hook registered has fired.
+/// the deadline its hook registered has fired.
 async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -856,23 +876,17 @@ async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
     let _saga_proxy = SagaProps::<ScheduleAfterFailureSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || ScheduleAfterFailureSaga {
+        move |components| ScheduleAfterFailureSaga {
             target: FailingTellTarget::new(TELL_TARGET_ID),
+            deadline: components.deadline(),
             recorder: Arc::clone(&recorder_for_saga),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: upstream_key.clone(),
-            after: 0,
-        },
-    )
-    .with_scheduler(scheduler)
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
     .spawn(system.process_system())
     .await;
 
-    // Only one upstream event is ever published, so the timer can only exist
+    // Only one upstream event is ever published, so the deadline can only exist
     // because the hook ran and its effect was interpreted.
     let deadline = Instant::now() + Duration::from_secs(10);
     while recorder.scheduled_calls().is_empty() && Instant::now() < deadline {
@@ -900,21 +914,16 @@ async fn run_rejecting_hook_scenario(saga_key: &str) -> Vec<LoadedEvent> {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(REJECTING_HOOK_SAGA_ID);
 
-    let _saga_proxy =
-        SagaProps::<RejectingHookSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            RejectingHookSaga {
-                target: FailingTellTarget::new(TELL_TARGET_ID),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.clone(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<RejectingHookSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| RejectingHookSaga {
+            target: FailingTellTarget::new(TELL_TARGET_ID),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
+    .spawn(system.process_system())
+    .await;
 
     wait_for_dead_letter(
         &saga_store,
@@ -1101,12 +1110,12 @@ async fn hook_is_not_notified_when_the_failure_could_not_be_recorded() {
 // The other reader of `failed_tell_ids`
 
 /// Given a tell failure already consumed by `on_tell_failed`,
-/// When a timer registered by that hook fires afterwards,
-/// Then `on_scheduled` — the second reader of `ctx.failed_tell_ids()` — sees an
-/// empty slice, so the failure is withheld from every drain entry point rather
-/// than from `handle` alone.
+/// When a deadline registered by that hook fires afterwards,
+/// Then the deadline arm of `handle` — the second reader of
+/// `ctx.failed_tell_ids()` — sees an empty slice, so the failure is withheld
+/// from every drain entry point rather than from the observed-record arm alone.
 #[tokio::test]
-async fn failure_consumed_by_the_hook_is_not_repeated_to_on_scheduled() {
+async fn failure_consumed_by_the_hook_is_not_repeated_to_the_deadline_arm() {
     let obs = run_timer_after_failure_scenario("on-tell-failed-timer-drain").await;
 
     assert_eq!(
@@ -1118,13 +1127,13 @@ async fn failure_consumed_by_the_hook_is_not_repeated_to_on_scheduled() {
     );
     assert!(
         !obs.scheduled_calls.is_empty(),
-        "the timer the hook scheduled must have fired, otherwise the second \
+        "the deadline the hook set must have fired, otherwise the second \
          drain entry point was never reached; saga stream held: {:?}",
         event_types(&obs.saga_events)
     );
     assert!(
         obs.scheduled_calls.iter().all(|ids| ids.is_empty()),
-        "`on_scheduled` must not be told about a failure the hook already \
+        "the deadline arm must not be told about a failure the hook already \
          consumed; it saw {:?}",
         obs.scheduled_calls
     );

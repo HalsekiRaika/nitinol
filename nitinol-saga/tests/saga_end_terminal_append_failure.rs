@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
@@ -39,7 +39,7 @@ use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 // Domain types
 
@@ -106,24 +106,28 @@ struct TellThenEndSaga {
 /// effect — never a correlation mismatch.
 const TELL_THEN_END_SAGA_ID: &str = "term-fail-saga";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Upstream(UpstreamTrigger),
+}
+
 #[async_trait]
 impl Saga for TellThenEndSaga {
-    type SubscribedEvent = UpstreamTrigger;
+    type Subscribe = Observed;
     type Event = SagaMarker;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(TELL_THEN_END_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: SagaMarker) {}
-
     async fn handle(
         &mut self,
-        event: UpstreamTrigger,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaMarker>, Self::Error> {
+        let Observed::Upstream(event) = input;
         *self.handle_count.lock().expect(
             "handle_count mutex is never poisoned: no holder panics while the guard is alive",
         ) += 1;
@@ -229,23 +233,18 @@ async fn saga_stops_after_end_even_when_terminal_append_fails() {
     let handled_first_clone = Arc::clone(&handled_first);
     let target_proxy_clone = target_proxy.clone();
 
-    let _saga_proxy =
-        SagaProps::<TellThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            TellThenEndSaga {
-                target: target_proxy_clone.clone(),
-                handle_count: Arc::clone(&handle_count_clone),
-                handled_first: Arc::clone(&handled_first_clone),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: agg_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<TellThenEndSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| TellThenEndSaga {
+            target: target_proxy_clone.clone(),
+            handle_count: Arc::clone(&handle_count_clone),
+            handled_first: Arc::clone(&handled_first_clone),
+        },
+    )
+    .subscribed_to::<UpstreamTrigger>(Subscription::stream(&upstream_store, &agg_id))
+    .spawn(system.process_system())
+    .await;
 
     // Push the first upstream event to trigger handle().
     append_upstream(&upstream_store, &agg_id, 1, "first").await;

@@ -15,24 +15,36 @@
 //! handled again on redelivery.
 //!
 //! An input can also be consumed without ever producing a `handle` decision:
-//! a record whose upstream bytes fail to decode, a record that arrives while
-//! an earlier record from the same correlation is already draining to a dead
-//! letter, and a record for which `handle` returns `Err`, are each settled by
-//! a dead-letter append that carries the same position instead.  That append
-//! landing is what makes the input consumed in these cases — see
-//! `Saga::handle` for the rule these settle paths are exceptions to.
+//! a record that arrives while an earlier record from the same correlation is
+//! already draining to a dead letter, and a record for which `handle` returns
+//! `Err`, are each settled by a dead-letter append that carries the same
+//! position instead.  That append landing is what makes the input consumed in
+//! these cases — see `Saga::handle` for the rule these settle paths are
+//! exceptions to.
+//!
+//! A record whose upstream bytes fail to decode writes no position at all: it
+//! is reported and skipped, and the subscription's cursor advances past it
+//! without anything durable being recorded.  A decode failure is deterministic
+//! and permanent, so re-reading the record after a restart repeats the report
+//! rather than the decision.
 //!
 //! Either way, de-duplication of the input is moved off the user's `handle`
 //! and onto the framework, and nothing here decides *when* to write a
 //! position on its own; the interpreter or the dead-letter path hands one to
 //! whichever append site is closing out the input.
 //!
-//! # Why a position per source
+//! # Why a position per declared source
 //!
-//! A position names the upstream stream it was read from.  A saga that observes
-//! several sources therefore holds one position per source, and one source's
-//! progress can never mask a record of another — the shape a subscription over
-//! several upstream streams needs.
+//! A position names both the upstream stream it was read from *and* the
+//! declared source — the event type — it settled.  The stream key alone is not
+//! enough: two declared sources can live on one stream (an aggregate emitting
+//! two event types, a saga observing another saga's stream), and keyed by the
+//! stream alone the higher of the two positions would cover the other source's
+//! records, so one source's progress would silently drop the other's input.
+//!
+//! A saga that observes several sources therefore holds one position per
+//! (stream, source) pair, and one source's progress can never mask a record of
+//! another.
 
 use std::collections::HashMap;
 
@@ -80,11 +92,60 @@ struct MissingConsumedKind;
 #[error("consumed position `source` must not be empty or within the reserved namespace")]
 struct InvalidConsumedSource;
 
-/// One upstream record the saga has consumed: the source it was read from and
-/// its sequence in that source.
+/// Which declared source a consumed position settled.
+///
+/// The framework always writes [`PositionSource::Declared`]: a record reaches
+/// `handle` as one variant of the saga's alphabet, so the source it belongs to
+/// is known at the moment the position is built.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PositionSource {
+    /// The declared source, named by the canonical path of its event type.
+    Declared(String),
+    /// A row written before positions named a source.
+    ///
+    /// Such a row cannot say which source it settled, so it is read as covering
+    /// every source of its stream.  Covering is the safe reading: treating it
+    /// as covering nothing would re-deliver input whose decision is already
+    /// durable.
+    WholeStream,
+}
+
+impl PositionSource {
+    /// The declared source an event type names.
+    pub(crate) fn of(event_type: EventType) -> Self {
+        // `Display` on `EventType` is the canonical wire string — the same one
+        // `to_path().to_string()` produces — so both sides of the column agree
+        // on the encoding without this module restating it.
+        Self::Declared(event_type.to_string())
+    }
+
+    /// The wire form: the canonical path, or the empty string for a row that
+    /// names no source.
+    fn as_wire(&self) -> &str {
+        match self {
+            Self::Declared(path) => path,
+            Self::WholeStream => "",
+        }
+    }
+
+    /// Read the wire form back.  Proto3 decodes an unset field as the empty
+    /// string, which is exactly the shape a row written before sources were
+    /// named has.
+    fn from_wire(wire: String) -> Self {
+        if wire.is_empty() {
+            Self::WholeStream
+        } else {
+            Self::Declared(wire)
+        }
+    }
+}
+
+/// One upstream record the saga has consumed: the stream it was read from, the
+/// declared source it belongs to, and its sequence in that stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConsumedPositionEvent {
     pub(crate) source: AggregateId,
+    pub(crate) source_event_type: PositionSource,
     pub(crate) sequence: u64,
 }
 
@@ -96,6 +157,7 @@ impl SystemEvent for ConsumedPositionEvent {
             kind: Some(Kind::Consumed(Consumed {
                 source: self.source.as_str().to_owned(),
                 sequence: self.sequence,
+                source_event_type: self.source_event_type.as_wire().to_owned(),
             })),
         };
         Bytes::from(prost::Message::encode_to_vec(&marker))
@@ -121,6 +183,11 @@ impl SystemEvent for ConsumedPositionEvent {
                 }
                 Ok(Self {
                     source: AggregateId::new(m.source),
+                    // An empty `source_event_type`, unlike an empty `source`,
+                    // is a row the framework really did write — before
+                    // positions named a source — so it is read rather than
+                    // refused.
+                    source_event_type: PositionSource::from_wire(m.source_event_type),
                     sequence: m.sequence,
                 })
             }
@@ -142,43 +209,63 @@ impl nitinol_eventsource::DeclaresEventType for ConsumedPositionEvent {
     const EVENT_TYPE: EventType = <Self as SystemEvent>::EVENT_TYPE;
 }
 
-/// How far each upstream source has been consumed.
+/// How far each declared source of each upstream stream has been consumed.
 ///
 /// Rebuilt by folding the saga's own stream and advanced by every batch that
 /// lands, so the running incarnation and a replayed one answer the same
 /// question the same way.
 #[derive(Default)]
-pub(crate) struct ConsumedPositions(HashMap<String, u64>);
+pub(crate) struct ConsumedPositions(HashMap<String, HashMap<PositionSource, u64>>);
 
 impl ConsumedPositions {
-    /// Record that `sequence` of `source` is consumed.
+    /// Record that `sequence` of `source` on stream `stream` is consumed.
     ///
     /// A position moves forward only: the stream may hold a later row naming a
     /// lower sequence — an input redelivered while an earlier incarnation was
     /// still writing — and letting it win would re-open inputs whose decisions
     /// are already durable.
-    pub(crate) fn record(&mut self, source: &str, sequence: u64) {
+    pub(crate) fn record(&mut self, stream: &str, source: PositionSource, sequence: u64) {
         self.0
-            .entry(source.to_owned())
+            .entry(stream.to_owned())
+            .or_default()
+            .entry(source)
             .and_modify(|highest| *highest = (*highest).max(sequence))
             .or_insert(sequence);
     }
 
-    /// Has `sequence` of `source` already been consumed?
+    /// Has `sequence` of the declared source `source` on stream `stream`
+    /// already been consumed?
     ///
-    /// Answers for the named source alone; a position of another source says
-    /// nothing about this record.
-    pub(crate) fn covers(&self, source: &str, sequence: u64) -> bool {
-        self.0
-            .get(source)
-            .is_some_and(|highest| *highest >= sequence)
+    /// Answers for the named source alone, plus whatever a source-less row of
+    /// the same stream covers: a position of *another* declared source says
+    /// nothing about this record, and neither does a position of another
+    /// stream.
+    pub(crate) fn covers(&self, stream: &str, source: &PositionSource, sequence: u64) -> bool {
+        self.highest(stream, source)
+            .is_some_and(|highest| highest >= sequence)
     }
 
-    /// Where a subscription configured with `cursor` should resume.
+    /// The highest sequence of `source` on `stream` that is consumed, or `None`
+    /// when nothing of it has been.
     ///
-    /// A stream subscription reads one source, so its position is the one this
-    /// saga holds for that source — which is what frees a restart from
-    /// re-reading the whole upstream history.  The configured `after` is a
+    /// A source-less row of the same stream contributes too: it cannot say
+    /// which source it settled, so it covers them all.
+    fn highest(&self, stream: &str, source: &PositionSource) -> Option<u64> {
+        let of_stream = self.0.get(stream)?;
+        let named = of_stream.get(source).copied();
+        let whole_stream = of_stream.get(&PositionSource::WholeStream).copied();
+        match (named, whole_stream) {
+            (None, None) => None,
+            (named, whole_stream) => Some(named.unwrap_or(0).max(whole_stream.unwrap_or(0))),
+        }
+    }
+
+    /// Where a subscription over the declared source `source` configured with
+    /// `cursor` should resume.
+    ///
+    /// A stream subscription reads one source of one stream, so its position is
+    /// the one this saga holds for that pair — which is what frees a restart
+    /// from re-reading the whole upstream history.  The configured `after` is a
     /// floor rather than a starting point: it says "do not deliver these", and
     /// a consumed position is a second reason to skip, never a reason to start
     /// delivering.
@@ -187,10 +274,10 @@ impl ConsumedPositions {
     /// store-wide ordering that a per-source sequence cannot be translated
     /// into, and guessing one would skip records nobody consumed.  There,
     /// de-duplication is the position's job rather than the cursor's.
-    pub(crate) fn resume(&self, cursor: SequenceCursor) -> SequenceCursor {
+    pub(crate) fn resume(&self, cursor: SequenceCursor, source: &PositionSource) -> SequenceCursor {
         match cursor {
             SequenceCursor::Stream { key, after } => {
-                let consumed = self.0.get(&key).copied().unwrap_or(0);
+                let consumed = self.highest(&key, source).unwrap_or(0);
                 SequenceCursor::Stream {
                     after: after.max(consumed),
                     key,
@@ -206,8 +293,8 @@ impl ConsumedPositions {
 ///
 /// Called from two kinds of call site: the interpreter, closing out a
 /// `handle` decision, and the dead-letter path, settling a record that never
-/// produced one (a decode failure, a record dropped while draining, a
-/// `handle` error, or a failure the policy decided to ignore). One `handle`
+/// produced one (a record dropped while draining, a `handle` error, or a
+/// failure the policy decided to ignore). One `handle`
 /// invocation's decisions can reach the store as more than one atomic
 /// append — a `CancelSchedule` or `End` is a hard boundary the
 /// `Persist × Persist` fold does not cross — so on that call site the
@@ -228,7 +315,11 @@ pub(crate) fn append_consumed_position(
     now: jiff::Timestamp,
 ) -> Option<ConsumedPositionEvent> {
     let position = input_position?;
-    if consumed.covers(position.source.as_str(), position.sequence) {
+    if consumed.covers(
+        position.source.as_str(),
+        &position.source_event_type,
+        position.sequence,
+    ) {
         return None;
     }
     *next_seq += 1;
@@ -250,12 +341,17 @@ pub(crate) fn finalize_consumed_position(
     recorded: Option<ConsumedPositionEvent>,
 ) {
     if let Some(position) = recorded {
-        consumed.record(position.source.as_str(), position.sequence);
+        consumed.record(
+            position.source.as_str(),
+            position.source_event_type.clone(),
+            position.sequence,
+        );
         report_system_event!(
             ConsumedPositionEvent::EVENT_TYPE,
             CONSUMED_ARM,
             saga_id,
             source = position.source.as_str(),
+            source_event_type = position.source_event_type.as_wire(),
             upstream_sequence = position.sequence,
         );
     }
@@ -265,9 +361,23 @@ pub(crate) fn finalize_consumed_position(
 mod tests {
     use super::*;
 
+    use nitinol_persistence::{Family, TypeName};
+
+    const ALPHA: EventType = EventType::new(Family::new("consumed_test"), TypeName::new("Alpha"));
+    const BETA: EventType = EventType::new(Family::new("consumed_test"), TypeName::new("Beta"));
+
+    fn alpha() -> PositionSource {
+        PositionSource::of(ALPHA)
+    }
+
+    fn beta() -> PositionSource {
+        PositionSource::of(BETA)
+    }
+
     fn position(source: &str, sequence: u64) -> ConsumedPositionEvent {
         ConsumedPositionEvent {
             source: AggregateId::new(source),
+            source_event_type: alpha(),
             sequence,
         }
     }
@@ -300,11 +410,24 @@ mod tests {
         match ConsumedPositionEvent::decode(&written.encode()) {
             Ok(read) => assert_eq!(
                 read, written,
-                "both the source and the sequence must survive the round trip; \
-                 a position that lost its source would cover every source"
+                "the stream, the declared source and the sequence must all \
+                 survive the round trip; a position that lost its source would \
+                 cover every source of its stream"
             ),
             Err(e) => panic!("decode failed: {e}"),
         }
+    }
+
+    /// The declared source travels as the canonical path of its event type, so
+    /// a reader that has only the wire string can still tell two sources of one
+    /// stream apart.
+    #[test]
+    fn the_declared_source_travels_as_its_canonical_path() {
+        assert_eq!(
+            PositionSource::of(ALPHA).as_wire(),
+            ALPHA.to_path().to_string(),
+            "the wire form must be the event type's canonical path"
+        );
     }
 
     /// A payload with no `oneof` must not read as a position of the empty
@@ -326,6 +449,7 @@ mod tests {
             kind: Some(Kind::Consumed(Consumed {
                 source: String::new(),
                 sequence: 5,
+                source_event_type: ALPHA.to_string(),
             })),
         };
         let payload = Bytes::from(prost::Message::encode_to_vec(&marker));
@@ -335,6 +459,31 @@ mod tests {
             "an empty source is proto3's default for an unset field, not a \
              real position; decode must not read it as one"
         );
+    }
+
+    /// An empty `source_event_type`, unlike an empty `source`, is a row the
+    /// framework itself wrote before positions named a source.  It reads as a
+    /// position that covers the whole stream rather than as a decode error.
+    #[test]
+    fn a_row_naming_no_source_reads_as_covering_the_whole_stream() {
+        let marker = ConsumedPositionMarker {
+            kind: Some(Kind::Consumed(Consumed {
+                source: "order-stream".to_owned(),
+                sequence: 5,
+                source_event_type: String::new(),
+            })),
+        };
+        let payload = Bytes::from(prost::Message::encode_to_vec(&marker));
+
+        match ConsumedPositionEvent::decode(&payload) {
+            Ok(read) => assert_eq!(
+                read.source_event_type,
+                PositionSource::WholeStream,
+                "a row from before sources were named must be readable, and \
+                 what it covers is the whole stream"
+            ),
+            Err(e) => panic!("decode failed: {e}"),
+        }
     }
 
     /// `encode` only ever writes a position built from an already-valid
@@ -348,6 +497,7 @@ mod tests {
             kind: Some(Kind::Consumed(Consumed {
                 source: "nitinol.saga.poisoned".to_owned(),
                 sequence: 5,
+                source_event_type: ALPHA.to_string(),
             })),
         };
         let payload = Bytes::from(prost::Message::encode_to_vec(&marker));
@@ -362,12 +512,12 @@ mod tests {
     #[test]
     fn a_recorded_position_covers_itself_and_everything_below_it() {
         let mut positions = ConsumedPositions::default();
-        positions.record("order-stream", 3);
+        positions.record("order-stream", alpha(), 3);
 
-        assert!(positions.covers("order-stream", 1));
-        assert!(positions.covers("order-stream", 3));
+        assert!(positions.covers("order-stream", &alpha(), 1));
+        assert!(positions.covers("order-stream", &alpha(), 3));
         assert!(
-            !positions.covers("order-stream", 4),
+            !positions.covers("order-stream", &alpha(), 4),
             "the next record is not consumed until its own decision is durable"
         );
     }
@@ -375,36 +525,69 @@ mod tests {
     #[test]
     fn a_later_lower_position_does_not_move_the_position_backwards() {
         let mut positions = ConsumedPositions::default();
-        positions.record("order-stream", 3);
-        positions.record("order-stream", 1);
+        positions.record("order-stream", alpha(), 3);
+        positions.record("order-stream", alpha(), 1);
 
         assert!(
-            positions.covers("order-stream", 3),
+            positions.covers("order-stream", &alpha(), 3),
             "a stale row must not re-open an input whose decision is already durable"
         );
     }
 
     #[test]
-    fn a_position_of_one_source_covers_no_other() {
+    fn a_position_of_one_stream_covers_no_other() {
         let mut positions = ConsumedPositions::default();
-        positions.record("source-a", 3);
+        positions.record("source-a", alpha(), 3);
 
         assert!(
-            !positions.covers("source-b", 1),
-            "a single position shared by every source would swallow records of \
-             sources this saga has never consumed from"
+            !positions.covers("source-b", &alpha(), 1),
+            "a single position shared by every stream would swallow records of \
+             streams this saga has never consumed from"
+        );
+    }
+
+    /// The invariant the per-source key exists for: two declared sources on one
+    /// stream key must not cover each other.
+    #[test]
+    fn a_position_of_one_declared_source_covers_no_other_source_of_the_same_stream() {
+        let mut positions = ConsumedPositions::default();
+        positions.record("shared", alpha(), 3);
+
+        assert!(
+            !positions.covers("shared", &beta(), 2),
+            "keyed by the stream alone, source A's progress would drop source \
+             B's record at a lower sequence — input no incarnation ever consumed"
+        );
+    }
+
+    /// A row that names no source cannot say which source it settled, so it
+    /// covers them all.  The alternative — covering nothing — would re-deliver
+    /// input whose decision is already durable.
+    #[test]
+    fn a_source_less_position_covers_every_source_of_its_stream() {
+        let mut positions = ConsumedPositions::default();
+        positions.record("shared", PositionSource::WholeStream, 3);
+
+        assert!(positions.covers("shared", &alpha(), 3));
+        assert!(positions.covers("shared", &beta(), 2));
+        assert!(
+            !positions.covers("shared", &beta(), 4),
+            "it covers up to its own sequence and no further"
         );
     }
 
     #[test]
     fn a_stream_subscription_resumes_past_the_consumed_position() {
         let mut positions = ConsumedPositions::default();
-        positions.record("order-stream", 3);
+        positions.record("order-stream", alpha(), 3);
 
-        let resumed = positions.resume(SequenceCursor::Stream {
-            key: "order-stream".to_owned(),
-            after: 0,
-        });
+        let resumed = positions.resume(
+            SequenceCursor::Stream {
+                key: "order-stream".to_owned(),
+                after: 0,
+            },
+            &alpha(),
+        );
 
         assert!(
             matches!(resumed, SequenceCursor::Stream { ref key, after }
@@ -414,15 +597,41 @@ mod tests {
         );
     }
 
+    /// Two declared sources on one stream resume independently: one source's
+    /// progress must not move the other's subscription past records it never
+    /// consumed.
+    #[test]
+    fn each_declared_source_resumes_from_its_own_position() {
+        let mut positions = ConsumedPositions::default();
+        positions.record("shared", alpha(), 3);
+
+        let resumed = positions.resume(
+            SequenceCursor::Stream {
+                key: "shared".to_owned(),
+                after: 0,
+            },
+            &beta(),
+        );
+
+        assert!(
+            matches!(resumed, SequenceCursor::Stream { after, .. } if after == 0),
+            "source B has consumed nothing, so its subscription starts where it \
+             was configured; got {resumed:?}"
+        );
+    }
+
     #[test]
     fn the_configured_floor_survives_a_lower_consumed_position() {
         let mut positions = ConsumedPositions::default();
-        positions.record("order-stream", 1);
+        positions.record("order-stream", alpha(), 1);
 
-        let resumed = positions.resume(SequenceCursor::Stream {
-            key: "order-stream".to_owned(),
-            after: 3,
-        });
+        let resumed = positions.resume(
+            SequenceCursor::Stream {
+                key: "order-stream".to_owned(),
+                after: 3,
+            },
+            &alpha(),
+        );
 
         assert!(
             matches!(resumed, SequenceCursor::Stream { after, .. } if after == 3),
@@ -434,12 +643,15 @@ mod tests {
     #[test]
     fn a_subscription_over_an_unconsumed_source_keeps_its_configured_position() {
         let mut positions = ConsumedPositions::default();
-        positions.record("other-stream", 9);
+        positions.record("other-stream", alpha(), 9);
 
-        let resumed = positions.resume(SequenceCursor::Stream {
-            key: "order-stream".to_owned(),
-            after: 2,
-        });
+        let resumed = positions.resume(
+            SequenceCursor::Stream {
+                key: "order-stream".to_owned(),
+                after: 2,
+            },
+            &alpha(),
+        );
 
         assert!(
             matches!(resumed, SequenceCursor::Stream { after, .. } if after == 2),
@@ -450,9 +662,9 @@ mod tests {
     #[test]
     fn a_global_subscription_keeps_its_configured_cursor() {
         let mut positions = ConsumedPositions::default();
-        positions.record("order-stream", 3);
+        positions.record("order-stream", alpha(), 3);
 
-        let resumed = positions.resume(SequenceCursor::Global { after: 0 });
+        let resumed = positions.resume(SequenceCursor::Global { after: 0 }, &alpha());
 
         assert!(
             matches!(resumed, SequenceCursor::Global { after } if after == 0),

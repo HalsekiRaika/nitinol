@@ -22,14 +22,14 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 // Domain types
 
@@ -94,6 +94,12 @@ impl Decider<TriggerCmd> for TargetAggregate {
 /// `UpstreamEvent` in this test belongs to.
 const TELL_THEN_END_SAGA_ID: &str = "persist-tell-end-saga";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Upstream(UpstreamEvent),
+}
+
 struct TellThenEndSaga {
     target: AggregateProxy<TargetAggregate>,
     handled: Arc<Mutex<bool>>,
@@ -101,22 +107,20 @@ struct TellThenEndSaga {
 
 #[async_trait]
 impl Saga for TellThenEndSaga {
-    type SubscribedEvent = UpstreamEvent;
+    type Subscribe = Observed;
     type Event = SagaDomainEvent;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(TELL_THEN_END_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: SagaDomainEvent) {}
-
     async fn handle(
         &mut self,
-        event: UpstreamEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaDomainEvent>, Self::Error> {
+        let Observed::Upstream(event) = input;
         *self
             .handled
             .lock()
@@ -193,22 +197,17 @@ async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
     let handled_clone = Arc::clone(&handled);
     let target_proxy_clone = target_proxy.clone();
 
-    let _saga_proxy =
-        SagaProps::<TellThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            TellThenEndSaga {
-                target: target_proxy_clone.clone(),
-                handled: Arc::clone(&handled_clone),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: agg_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<TellThenEndSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| TellThenEndSaga {
+            target: target_proxy_clone.clone(),
+            handled: Arc::clone(&handled_clone),
+        },
+    )
+    .subscribed_to::<UpstreamEvent>(Subscription::stream(&upstream_store, &agg_id))
+    .spawn(system.process_system())
+    .await;
 
     // Publish the upstream event that triggers TellThenEndSaga::handle.
     append_upstream(&upstream_store, &agg_id, 1, "order-1").await;

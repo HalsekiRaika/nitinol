@@ -22,13 +22,11 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct OrderPlaced {
@@ -95,6 +93,12 @@ impl Decider<Reserve> for Inventory {
 /// instance every `OrderPlaced` in this test belongs to.
 const RESERVATION_SAGA_ID: &str = "saga-tell-mock-1";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 struct ReservationSaga {
     inventory: MockAggregateProxy<Inventory>,
     done_notify: Arc<Notify>,
@@ -102,22 +106,20 @@ struct ReservationSaga {
 
 #[async_trait]
 impl Saga for ReservationSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RESERVATION_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         let effect = SagaEffect::tell(
             self.inventory.clone(),
             Reserve {
@@ -199,17 +201,13 @@ async fn saga_tell_to_mock_dispatches_command_observable_via_drain_captured() {
     let done_for_saga = Arc::clone(&done);
 
     let _saga_proxy =
-        SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || ReservationSaga {
-            inventory: mock_for_saga.clone(),
-            done_notify: Arc::clone(&done_for_saga),
+        SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move |_components| {
+            ReservationSaga {
+                inventory: mock_for_saga.clone(),
+                done_notify: Arc::clone(&done_for_saga),
+            }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 

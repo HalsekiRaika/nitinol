@@ -21,7 +21,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor, SystemEvent};
+use nitinol_eventsource::{system::EventSourceSystem, Event, SystemEvent};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
@@ -30,6 +30,7 @@ use nitinol_persistence::{
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
     DeadLetterEvent, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaManagerProps,
+    SagaSubscribe, Subscription,
 };
 
 /// Instance-id prefix used by [`HoldSaga`].
@@ -76,6 +77,13 @@ impl std::fmt::Display for HandleBoom {
 
 impl std::error::Error for HandleBoom {}
 
+/// The whole alphabet every saga in this file reacts to: one observed source, no
+/// deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 // Sagas.  Correlation belongs to the saga type, so each rule needs its own type.
 
 /// Always rejects the event.  Paired with a store whose appends fail, so the
@@ -88,22 +96,22 @@ struct HoldSaga {
 
 #[async_trait]
 impl Saga for HoldSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = HandleBoom;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(format!("{HOLD_PREFIX}{}", event.order)))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Order(event) => Some(SagaId::new(format!("{HOLD_PREFIX}{}", event.order))),
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         record(&self.seen, &self.notify, event.order);
         Err(HandleBoom)
     }
@@ -118,25 +126,25 @@ struct SelectiveSaga {
 
 #[async_trait]
 impl Saga for SelectiveSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        event
-            .order
-            .starts_with("MATCH-")
-            .then(|| SagaId::new(format!("{SELECTIVE_PREFIX}{}", event.order)))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Order(event) => event
+                .order
+                .starts_with("MATCH-")
+                .then(|| SagaId::new(format!("{SELECTIVE_PREFIX}{}", event.order))),
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         record(&self.seen, &self.notify, event.order);
         Ok(SagaEffect::None)
     }
@@ -151,22 +159,22 @@ struct FanOutSaga {
 
 #[async_trait]
 impl Saga for FanOutSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(format!("{FANOUT_PREFIX}{}", event.order)))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Order(event) => Some(SagaId::new(format!("{FANOUT_PREFIX}{}", event.order))),
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         record(&self.seen, &self.notify, event.order);
         Ok(SagaEffect::None)
     }
@@ -319,17 +327,11 @@ async fn instance_handler_error_holds_the_shared_cursor() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _manager_proxy =
-        SagaManagerProps::<HoldSaga>::new(Arc::clone(&saga_store), move || HoldSaga {
+        SagaManagerProps::<HoldSaga>::new(Arc::clone(&saga_store), move |_components| HoldSaga {
             seen: Arc::clone(&seen_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 
@@ -370,17 +372,13 @@ async fn uncorrelated_event_advances_the_cursor() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _manager_proxy =
-        SagaManagerProps::<SelectiveSaga>::new(Arc::clone(&saga_store), move || SelectiveSaga {
-            seen: Arc::clone(&seen_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        SagaManagerProps::<SelectiveSaga>::new(Arc::clone(&saga_store), move |_components| {
+            SelectiveSaga {
+                seen: Arc::clone(&seen_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 
@@ -420,17 +418,13 @@ async fn ended_instance_does_not_stall_the_shared_subscription() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _manager_proxy =
-        SagaManagerProps::<FanOutSaga>::new(Arc::clone(&saga_store), move || FanOutSaga {
-            seen: Arc::clone(&seen_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        SagaManagerProps::<FanOutSaga>::new(Arc::clone(&saga_store), move |_components| {
+            FanOutSaga {
+                seen: Arc::clone(&seen_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 

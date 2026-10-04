@@ -32,14 +32,14 @@ use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 // Domain types
 
@@ -74,22 +74,29 @@ struct AlwaysEndSaga {
 /// same process instance, so both must reach `handle`.
 const ALWAYS_END_SAGA_ID: &str = "ended-fail-saga";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+// The observed payload is decoded and delivered as the variant it belongs to;
+// what this saga decides does not read it, which `dead_code` cannot tell apart
+// from a field nothing fills.
+#[allow(dead_code)]
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderEvent),
+}
+
 #[async_trait]
 impl Saga for AlwaysEndSaga {
-    type SubscribedEvent = OrderEvent;
+    type Subscribe = Observed;
     type Event = SagaEvent;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(ALWAYS_END_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: SagaEvent) {}
-
     async fn handle(
         &mut self,
-        _event: OrderEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaEvent>, Self::Error> {
         self.handle_count.fetch_add(1, Ordering::SeqCst);
@@ -169,22 +176,17 @@ async fn saga_stays_alive_when_ended_append_fails() {
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_clone = Arc::clone(&handled);
 
-    let _saga_proxy =
-        SagaProps::<AlwaysEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            AlwaysEndSaga {
-                handle_count: Arc::clone(&handle_count_clone),
-                handled: Arc::clone(&handled_clone),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<AlwaysEndSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| AlwaysEndSaga {
+            handle_count: Arc::clone(&handle_count_clone),
+            handled: Arc::clone(&handled_clone),
+        },
+    )
+    .subscribed_to::<OrderEvent>(Subscription::stream(&upstream_store, &order_id))
+    .spawn(system.process_system())
+    .await;
 
     // Wait for at least one handle call to confirm event delivery works.
     tokio::time::timeout(Duration::from_secs(3), handled.notified())

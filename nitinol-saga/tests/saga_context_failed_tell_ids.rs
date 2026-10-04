@@ -32,14 +32,26 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
-    SequenceCursor, TellError,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription, TellIntent,
+};
+
+/// The whole alphabet both sagas in this file react to: one observed source, no
+/// deadline.
+// The observed payload is decoded and delivered as the variant it belongs to;
+// what this saga decides does not read it, which `dead_code` cannot tell apart
+// from a field nothing fills.
+#[allow(dead_code)]
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
 
 // Domain types
 
@@ -153,20 +165,17 @@ const RECORDING_SAGA_ID: &str = "failed-tell-replay-saga-1";
 
 #[async_trait]
 impl Saga for RecordingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = OrderProcessed;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RECORDING_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: OrderProcessed) {}
-
     async fn handle(
         &mut self,
-        _event: OrderPlaced,
+        _input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<OrderProcessed>, Self::Error> {
         self.captured
@@ -203,20 +212,17 @@ const RUNTIME_SAGA_ID: &str = "failed-tell-runtime-saga-1";
 
 #[async_trait]
 impl Saga for RuntimeSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = OrderProcessed;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RUNTIME_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: OrderProcessed) {}
-
     async fn handle(
         &mut self,
-        _event: OrderPlaced,
+        _input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<OrderProcessed>, Self::Error> {
         self.captured
@@ -319,21 +325,16 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let captured_for_saga = Arc::clone(&captured);
 
-    let _saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            RecordingSaga {
-                captured: Arc::clone(&captured_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<RecordingSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| RecordingSaga {
+            captured: Arc::clone(&captured_for_saga),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, "upstream"))
+    .spawn(system.process_system())
+    .await;
 
     // Allow on_start (replay) to complete before publishing the upstream event.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -412,21 +413,16 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     // Spawn without crash-restart factory and without pre-populated PendingIntents.
     // The replay path must append synthetic TellFailed(tell_id=5) AND push tell_id
     // to the shared accumulator.
-    let _saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            RecordingSaga {
-                captured: Arc::clone(&captured_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<RecordingSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| RecordingSaga {
+            captured: Arc::clone(&captured_for_saga),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, "upstream"))
+    .spawn(system.process_system())
+    .await;
 
     // Allow on_start (replay + synthetic TellFailed append) to complete before
     // triggering the first handle call.
@@ -489,19 +485,14 @@ async fn runtime_tell_failed_is_not_repeated_to_the_next_handle_via_context() {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let captured_for_saga = Arc::clone(&captured);
 
-    let _saga_proxy =
-        SagaProps::<RuntimeSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            RuntimeSaga::new(Arc::clone(&captured_for_saga))
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<RuntimeSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| RuntimeSaga::new(Arc::clone(&captured_for_saga)),
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, "upstream"))
+    .spawn(system.process_system())
+    .await;
 
     // First event: saga emits a tell that always fails.
     publish_order_placed(&upstream_store, "order-runtime-1", 1).await;

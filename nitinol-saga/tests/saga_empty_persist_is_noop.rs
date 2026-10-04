@@ -35,7 +35,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
@@ -43,7 +43,7 @@ use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -251,6 +251,13 @@ async fn wait_for_recorded_events(
     }
 }
 
+/// The whole alphabet both sagas in this file react to: one observed source,
+/// no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 /// Returns `persist_all(vec![])` for [`EMPTY_SKU`] and a real event otherwise.
 struct EmptyThenRealSaga {
     handled: Arc<AtomicUsize>,
@@ -260,22 +267,20 @@ const EMPTY_THEN_REAL_SAGA_ID: &str = "empty-then-real-saga";
 
 #[async_trait]
 impl Saga for EmptyThenRealSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(EMPTY_THEN_REAL_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.handled.fetch_add(1, Ordering::SeqCst);
         Ok(if event.sku == EMPTY_SKU {
             SagaEffect::persist_all(vec![])
@@ -295,22 +300,20 @@ const TELL_ONLY_SAGA_ID: &str = "tell-only-saga";
 
 #[async_trait]
 impl Saga for TellOnlySaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(TELL_ONLY_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.handled.fetch_add(1, Ordering::SeqCst);
         Ok(SagaEffect::tell(
             self.inventory.clone(),
@@ -371,17 +374,11 @@ async fn all_empty_persist_writes_only_the_consumed_position() {
     let _saga_proxy = SagaProps::<EmptyThenRealSaga>::new(
         SagaId::new(EMPTY_THEN_REAL_SAGA_ID),
         Arc::clone(&saga_store),
-        move || EmptyThenRealSaga {
+        move |_components| EmptyThenRealSaga {
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
     .spawn(system.process_system())
     .await;
 
@@ -468,18 +465,12 @@ async fn persist_with_no_events_but_a_tell_is_not_a_noop() {
     let _saga_proxy = SagaProps::<TellOnlySaga>::new(
         SagaId::new(TELL_ONLY_SAGA_ID),
         Arc::clone(&saga_store),
-        move || TellOnlySaga {
+        move |_components| TellOnlySaga {
             inventory: inventory_clone.clone(),
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
     .spawn(system.process_system())
     .await;
 

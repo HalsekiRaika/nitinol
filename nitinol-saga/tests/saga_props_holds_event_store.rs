@@ -7,11 +7,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Triggered;
@@ -35,25 +35,28 @@ impl Event for Recorded {
 /// `Triggered` belongs to.
 const TRIVIAL_SAGA_ID: &str = "saga-props-direct";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Triggered(Triggered),
+}
+
 #[derive(Default)]
 struct TrivialSaga;
 
 #[async_trait]
 impl Saga for TrivialSaga {
-    type SubscribedEvent = Triggered;
+    type Subscribe = Observed;
     type Event = Recorded;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(TRIVIAL_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         Ok(SagaEffect::None)
@@ -69,8 +72,8 @@ async fn saga_props_spawns_with_arc_dyn_event_store() {
 
     let saga_id = SagaId::new(TRIVIAL_SAGA_ID);
 
-    let _proxy = SagaProps::<TrivialSaga>::new(saga_id, saga_store, TrivialSaga::default)
-        .with_subscription(upstream_store, SequenceCursor::Global { after: 0 })
+    let _proxy = SagaProps::<TrivialSaga>::new(saga_id, saga_store, |_| TrivialSaga)
+        .subscribed_to::<Triggered>(Subscription::global(&upstream_store))
         .spawn(system.process_system())
         .await;
 }

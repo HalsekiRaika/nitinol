@@ -2,32 +2,35 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_eventsource::SequenceCursor;
+use nitinol_eventsource::Event;
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::AggregateId;
 use nitinol_runtime::process::{Process, ProcessProxy, Receive, SupervisionStrategy};
 use nitinol_runtime::{IdleTimeout, ProcessSystem, Props};
 
+use crate::components::SagaComponents;
 use crate::dead_letter::{self, DeadLetterEvent, DlqChildSpawn, EnqueuePolicy};
 use crate::effect::TellIntent;
-use crate::id::SagaId;
+use crate::process::instance::SagaProducer;
 use crate::process::manager::SagaManagerProcess;
-use crate::process::props::{SubscriptionSet, SubscriptionUnset};
 use crate::process::proxy::SagaManagerProxy;
-use crate::process::saga_process::{self, CrashRestartFactory, DecodeFailureRouteFn, SagaProcess};
+use crate::process::saga_process::{self, CrashRestartFactory, SagaProcess};
 use crate::saga::Saga;
-use crate::scheduler::SchedulerProxy;
+use crate::scheduler;
+use crate::subscribe::{AllSourcesSubscribed, BindSource, SourceBinding, SourceBindings};
+use crate::subscription::Subscription;
 
 /// Builder for the saga instance manager.
 ///
 /// Where [`SagaProps`](crate::SagaProps) spawns one saga bound to one
-/// [`SagaId`](crate::SagaId), this spawns a manager that holds a single
-/// upstream subscription and derives the instance for each record from
-/// [`Saga::correlate`]: an id with no resident instance is spawned and replayed
-/// on the spot, an id already resident is handed the record directly.
+/// [`SagaId`](crate::SagaId), this spawns a manager that holds one upstream
+/// subscription per declared source — shared by every instance of the saga
+/// type — and derives the instance for each record from [`Saga::correlate`]:
+/// an id with no resident instance is spawned and replayed on the spot, an id
+/// already resident is handed the record directly.
 ///
-/// The state parameter mirrors [`SagaProps`](crate::SagaProps):
-/// - `Sub` — subscription configuration (`SubscriptionUnset` / `SubscriptionSet<S>`)
+/// The binding typestate mirrors [`SagaProps`](crate::SagaProps): `B` carries one
+/// slot per declared source, [`subscribed_to`](Self::subscribed_to) moves one,
+/// and [`spawn`](Self::spawn) exists only once every slot is filled.
 ///
 /// # Relationship to a single resident saga
 ///
@@ -40,82 +43,82 @@ use crate::scheduler::SchedulerProxy;
 ///
 /// | On [`SagaProps`](crate::SagaProps) | Here |
 /// |---|---|
-/// | [`with_scheduler`](crate::SagaProps::with_scheduler) | [`with_scheduler`](Self::with_scheduler) |
 /// | [`with_enqueue_policy`](crate::SagaProps::with_enqueue_policy) | [`with_enqueue_policy`](Self::with_enqueue_policy) |
 /// | [`with_dead_letter_subscriber`](crate::SagaProps::with_dead_letter_subscriber) | [`with_dead_letter_subscriber`](Self::with_dead_letter_subscriber) |
 /// | [`with_crash_restart_factory`](crate::SagaProps::with_crash_restart_factory) | [`with_crash_restart_factory`](Self::with_crash_restart_factory) |
-/// | [`with_decode_failure_route`](crate::SagaProps::with_decode_failure_route) | [`with_decode_failure_route`](Self::with_decode_failure_route) |
+///
+/// A saga's own time needs no entry in that table: the host resolves the resident
+/// timer core from the saga's alphabet, so a manager's instances get it on
+/// exactly the same terms a standalone saga does.
 ///
 /// That is the migration path: the resident saga is the degenerate case of the
 /// manager, not a separate mechanism.
-pub struct SagaManagerProps<S: Saga, Sub = SubscriptionUnset> {
+pub struct SagaManagerProps<S: Saga, B = SourceBindings<S>> {
     store: Arc<dyn EventStore>,
-    producer: Arc<dyn Fn() -> S + Send + Sync>,
-    subscription: Sub,
+    producer: SagaProducer<S>,
+    bindings: B,
     instance_idle_timeout: IdleTimeout,
-    scheduler: Option<SchedulerProxy>,
     enqueue_policy: Option<Arc<dyn EnqueuePolicy>>,
     dead_letter_subscriber: Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>,
     crash_restart_factory: Option<CrashRestartFactory>,
-    decode_failure_route_fn: Option<DecodeFailureRouteFn>,
 }
 
-impl<S: Saga> SagaManagerProps<S, SubscriptionUnset> {
-    /// Begin a manager spawn.
+impl<S: Saga> SagaManagerProps<S, SourceBindings<S>> {
+    /// Begin a manager spawn, with every declared source still unbound.
     ///
     /// `store` is the EventStore every instance persists its own events to;
     /// each one uses the [`SagaId`](crate::SagaId) `Saga::correlate` named as
-    /// its stream key.  `producer` constructs a saga instance and is called once
-    /// per spawned instance, so anything the saga captures (e.g. an
-    /// `AggregateProxy` to tell) must be re-acquirable.
+    /// its stream key.  `producer` builds a saga instance from the capabilities
+    /// the framework resolved for it and is called once per spawned instance, so
+    /// anything the saga captures (e.g. an `AggregateProxy` to tell) must be
+    /// re-acquirable.
     pub fn new(
         store: Arc<dyn EventStore>,
-        producer: impl Fn() -> S + Send + Sync + 'static,
+        producer: impl Fn(SagaComponents<S>) -> S + Send + Sync + 'static,
     ) -> Self {
         Self {
             store,
             producer: Arc::new(producer),
-            subscription: SubscriptionUnset,
+            bindings: SourceBindings::<S>::default(),
             instance_idle_timeout: IdleTimeout::Inherit,
-            scheduler: None,
             enqueue_policy: None,
             dead_letter_subscriber: None,
             crash_restart_factory: None,
-            decode_failure_route_fn: None,
         }
     }
 }
 
-impl<S: Saga> SagaManagerProps<S, SubscriptionUnset> {
-    /// Subscribe the manager to an upstream `EventStore`.
+impl<S: Saga, B> SagaManagerProps<S, B> {
+    /// Observe the declared source `E` through `subscription`, for the whole
+    /// fan-out.
     ///
-    /// This is the only subscription in the whole fan-out: the manager runs one
-    /// `DirectPollerProcess` and decodes each upstream record once, then routes
-    /// the decoded event by [`Saga::correlate`].
-    pub fn with_subscription(
+    /// These are the only subscriptions in the fan-out: the manager runs one
+    /// `DirectPollerProcess` per declared source and decodes each record once,
+    /// then routes it by [`Saga::correlate`].  An instance the manager spawns
+    /// opens none of its own.
+    pub fn subscribed_to<E>(
         self,
-        upstream_store: Arc<dyn EventStore>,
-        cursor: SequenceCursor,
-    ) -> SagaManagerProps<S, SubscriptionSet<S>> {
+        subscription: Subscription,
+    ) -> SagaManagerProps<S, <B as BindSource<E>>::Bound>
+    where
+        E: Event,
+        B: BindSource<E>,
+    {
+        let (upstream_store, cursor) = subscription.into_parts();
         SagaManagerProps {
             store: self.store,
             producer: self.producer,
-            subscription: SubscriptionSet {
-                upstream_store,
-                cursor,
-                _saga: std::marker::PhantomData,
-            },
+            bindings: <B as BindSource<E>>::bind(
+                self.bindings,
+                SourceBinding::new(upstream_store, cursor),
+            ),
             instance_idle_timeout: self.instance_idle_timeout,
-            scheduler: self.scheduler,
             enqueue_policy: self.enqueue_policy,
             dead_letter_subscriber: self.dead_letter_subscriber,
             crash_restart_factory: self.crash_restart_factory,
-            decode_failure_route_fn: self.decode_failure_route_fn,
         }
     }
-}
 
-impl<S: Saga, Sub> SagaManagerProps<S, Sub> {
     /// Passivate an instance that has been idle for `after`.
     ///
     /// The instance is stopped and leaves the manager's registry; a later event
@@ -124,26 +127,6 @@ impl<S: Saga, Sub> SagaManagerProps<S, Sub> {
     /// the manager's lifetime.
     pub fn with_instance_passivation(mut self, after: Duration) -> Self {
         self.instance_idle_timeout = IdleTimeout::After(after);
-        self
-    }
-
-    /// Inject the resident [`SchedulerProxy`](crate::SchedulerProxy) — the
-    /// proxy
-    /// `system.spawn_resident::<`[`SchedulerProcess`](crate::SchedulerProcess)`>()`
-    /// answers with, converted — so every instance this manager spawns has its
-    /// [`SagaEffect::schedule`](crate::SagaEffect::schedule) and
-    /// [`SagaEffect::cancel_schedule`](crate::SagaEffect::cancel_schedule)
-    /// effects drive real timers — the same wiring
-    /// [`SagaProps::with_scheduler`](crate::SagaProps::with_scheduler) gives a
-    /// standalone saga.
-    ///
-    /// Without it, schedule markers are still persisted on each instance's own
-    /// stream but no timer fires until a scheduler-equipped incarnation replays
-    /// them — which also means a manager whose `Saga::correlate` is constant
-    /// (the degenerate single-instance case) does not reproduce
-    /// `SagaProps::with_scheduler` unless this is called too.
-    pub fn with_scheduler(mut self, scheduler: SchedulerProxy) -> Self {
-        self.scheduler = Some(scheduler);
         self
     }
 
@@ -206,64 +189,51 @@ impl<S: Saga, Sub> SagaManagerProps<S, Sub> {
         self.crash_restart_factory = Some(Arc::new(factory));
         self
     }
-
-    /// Determine which spawned instance owns an upstream record the codec
-    /// could not decode, so that instance's
-    /// [`SagaFailure::DecodeFailed`](crate::SagaFailure::DecodeFailed) dead
-    /// letter is recorded on its own stream.
-    ///
-    /// A decode failure carries no typed event, so `Saga::correlate` cannot
-    /// name an owner for it the way it does for a decoded event.  Without this
-    /// call the manager has nowhere to attribute a corrupt record and skips it
-    /// — logged, the shared cursor still advances past it, same as an event
-    /// `Saga::correlate` claims for no instance.  Returning `Some(saga_id)`
-    /// routes the failure to that instance instead — spawning and replaying it
-    /// first if it is not resident — through the same
-    /// `SagaFailure::DecodeFailed` path a standalone
-    /// [`SagaProps`](crate::SagaProps) records.  Returning `None` skips the
-    /// record, same as leaving this unset.
-    pub fn with_decode_failure_route<F>(mut self, route: F) -> Self
-    where
-        F: Fn(&AggregateId, u64) -> Option<SagaId> + Send + Sync + 'static,
-    {
-        self.decode_failure_route_fn = Some(Arc::new(route));
-        self
-    }
 }
 
-impl<S: Saga> SagaManagerProps<S, SubscriptionSet<S>> {
+impl<S: Saga, B> SagaManagerProps<S, B>
+where
+    B: AllSourcesSubscribed<S::Subscribe>,
+{
     /// Spawn the manager process.
     ///
-    /// The upstream poller and every saga instance are runtime **children** of
-    /// the manager, so stopping the manager cascade-stops the whole fan-out.
+    /// Every declared source's poller and every saga instance are runtime
+    /// **children** of the manager, so stopping the manager cascade-stops the
+    /// whole fan-out.
+    ///
+    /// A saga whose alphabet declares a deadline also has the system's one
+    /// resident timer core resolved here, and every instance the manager spawns
+    /// is handed it — so the degenerate single-instance manager reproduces a
+    /// standalone saga's deadlines with no extra wiring.
     pub async fn spawn(self, system: &ProcessSystem) -> SagaManagerProxy<S> {
         let store = self.store;
         // The proxy hands out dead letter queues over the very store the
         // manager writes to, so it keeps its own handle to it.
         let store_for_proxy = Arc::clone(&store);
         let producer = self.producer;
-        let upstream = saga_process::upstream_subscription::<S>(self.subscription.upstream_store);
-        let cursor = self.subscription.cursor;
+        let upstream: Vec<_> = self
+            .bindings
+            .into_sources()
+            .into_iter()
+            .map(saga_process::source_subscription)
+            .collect();
         let instance_idle_timeout = self.instance_idle_timeout;
-        let scheduler = self.scheduler;
+        let scheduler = scheduler::resolve_for::<S>(system).await;
         let enqueue_policy = self
             .enqueue_policy
             .unwrap_or_else(dead_letter::default_enqueue_policy);
         let dead_letter_subscriber = self.dead_letter_subscriber;
         let crash_restart_factory = self.crash_restart_factory;
-        let decode_failure_route_fn = self.decode_failure_route_fn;
 
         let props = Props::new(move || SagaManagerProcess::<S> {
             store: Arc::clone(&store),
             producer: Arc::clone(&producer),
             enqueue_policy: Arc::clone(&enqueue_policy),
             upstream: upstream.clone(),
-            cursor: cursor.clone(),
             instance_idle_timeout,
             scheduler: scheduler.clone(),
             dlq_child_spawn: dead_letter_subscriber.clone(),
             crash_restart_factory: crash_restart_factory.clone(),
-            decode_failure_route_fn: decode_failure_route_fn.clone(),
             instances: HashMap::new(),
         })
         // An instance that could not settle a record is reported by holding the
@@ -272,7 +242,7 @@ impl<S: Saga> SagaManagerProps<S, SubscriptionSet<S>> {
         .with_supervision_strategy(SupervisionStrategy::Resume)
         // Idleness is a per-instance signal — `with_instance_passivation` is
         // what acts on it.  The manager itself is the sole owner of the
-        // subscription and the registry with nothing left to revive it, so
+        // subscriptions and the registry with nothing left to revive it, so
         // letting a system-wide default idle timeout reach it would silently
         // and permanently stop the whole fan-out during a quiet upstream.
         .with_idle_timeout(IdleTimeout::Persistent);

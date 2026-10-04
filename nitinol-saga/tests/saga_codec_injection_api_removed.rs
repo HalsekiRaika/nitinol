@@ -1,10 +1,11 @@
 //! The saga builders must lose their codec typestate along with the rest of the
 //! codec injection API.
 //!
-//! A saga's journal is written in `S::Event` and its upstream is read as
-//! `S::SubscribedEvent`; both are `Event`, so both already name the codec that
-//! reads and writes them. Keeping a `with_codec` step here would leave a way to
-//! journal a saga in a format other than the one its own event type named.
+//! A saga's journal is written in `S::Event` and its upstream is read as the
+//! event types the external variants of `S::Subscribe` name; all of them are
+//! `Event`, so all of them already name the codec that reads and writes them.
+//! Keeping a `with_codec` step here would leave a way to journal a saga in a
+//! format other than the one its own event type named.
 //!
 //! The contract is observed the way `saga_snapshot_type_removed.rs` observes
 //! its own: the crate's public namespace and a local `probe` namespace are both

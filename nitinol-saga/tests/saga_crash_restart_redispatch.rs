@@ -18,13 +18,13 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription, TellIntent,
+};
 
 // Domain types — minimal; Reserve is a unit struct so the crash-restart
 // bytes can be anything (the factory ignores them and always returns Reserve).
@@ -51,6 +51,16 @@ impl Event for ReservationRequested {
         TypeName::new("ReservationRequested"),
     );
     type Codec = JsonCodec;
+}
+
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+// The observed payload is decoded and delivered as the variant it belongs to;
+// what this saga decides does not read it, which `dead_code` cannot tell apart
+// from a field nothing fills.
+#[allow(dead_code)]
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -103,20 +113,17 @@ const INERT_SAGA_ID: &str = "crash-restart-saga-1";
 
 #[async_trait]
 impl Saga for InertSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(INERT_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         Ok(SagaEffect::None)
@@ -194,17 +201,13 @@ async fn crash_restart_factory_redispatches_unacked_tell_and_produces_tell_acked
     // No PendingIntents provided — the default is a fresh empty registry,
     // which simulates a crash restart (in-memory state is gone).
     let _saga_proxy =
-        SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
-            .with_subscription(
-                Arc::clone(&upstream_store),
-                SequenceCursor::Stream {
-                    key: "no-such-stream".to_owned(),
-                    after: 0,
-                },
-            )
-            .with_crash_restart_factory(factory)
-            .spawn(system.process_system())
-            .await;
+        SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), |_components| {
+            InertSaga
+        })
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, "no-such-stream"))
+        .with_crash_restart_factory(factory)
+        .spawn(system.process_system())
+        .await;
 
     // Wait for the crash-restart re-dispatch to produce TellAcked.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);

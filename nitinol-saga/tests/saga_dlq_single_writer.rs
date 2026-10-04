@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{Event, SequenceCursor, SystemEvent};
+use nitinol_eventsource::{Event, SystemEvent};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
@@ -44,7 +44,7 @@ use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
     DeadLetterEntry, DeadLetterEvent, DeadLetterQuery, DeadLetterQueue, DeadLetterQueueError, Saga,
     SagaContext, SagaEffect, SagaFailure, SagaId, SagaManagerProps, SagaManagerProxy,
-    SourceContext,
+    SagaSubscribe, SourceContext, Subscription,
 };
 
 /// The one correlation id every `Ping` routes to, so "the resident instance"
@@ -104,24 +104,28 @@ struct LedgerSaga {
     notify: Arc<Notify>,
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Ping(Ping),
+}
+
 #[async_trait]
 impl Saga for LedgerSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = Noted;
-    type ScheduledMessage = ();
     type Error = HandleBoom;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RESIDENT_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Ping(event) = input;
         if event.tag == BOOM_TAG {
             return Err(HandleBoom(event.tag));
         }
@@ -197,22 +201,17 @@ async fn spawn_harness(saga_store: Arc<dyn EventStore>, upstream_name: &str) -> 
     let notify_for_producer = Arc::clone(&notify);
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let manager = SagaManagerProps::<LedgerSaga>::new(Arc::clone(&saga_store), move || {
-        spawned_for_producer.fetch_add(1, Ordering::SeqCst);
-        LedgerSaga {
-            handled: Arc::clone(&handled_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        }
-    })
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: upstream_key.as_str().to_owned(),
-            after: 0,
-        },
-    )
-    .spawn(system.process_system())
-    .await;
+    let manager =
+        SagaManagerProps::<LedgerSaga>::new(Arc::clone(&saga_store), move |_components| {
+            spawned_for_producer.fetch_add(1, Ordering::SeqCst);
+            LedgerSaga {
+                handled: Arc::clone(&handled_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
+        })
+        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, &upstream_key))
+        .spawn(system.process_system())
+        .await;
 
     Harness {
         manager,

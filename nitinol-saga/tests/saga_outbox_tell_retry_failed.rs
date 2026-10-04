@@ -23,8 +23,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
-    SequenceCursor, TellError,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
@@ -32,7 +31,7 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 // A custom TellTarget that always returns Err(TellError::Send(SendError)).
 // Counts every dispatch attempt so the test can verify the retry executor
@@ -146,6 +145,12 @@ impl Decider<Reserve> for Inventory {
 /// `OrderPlaced` in this test belongs to.
 const FAILING_SAGA_ID: &str = "retry-saga-1";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 struct FailingSaga {
     target: FailingTellTarget<Inventory>,
     handled: Arc<Notify>,
@@ -153,22 +158,20 @@ struct FailingSaga {
 
 #[async_trait]
 impl Saga for FailingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(FAILING_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         let effect = SagaEffect::tell(self.target.clone(), Reserve);
         let full = SagaEffect::persist(ReservationRequested { sku: event.sku }).combine(effect);
         self.handled.notify_one();
@@ -261,22 +264,17 @@ async fn tell_failing_every_attempt_yields_tell_failed_outbox_event_and_no_ack()
     let target_for_saga = target.clone();
     let handled_for_saga = Arc::clone(&handled);
 
-    let _saga_proxy =
-        SagaProps::<FailingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            FailingSaga {
-                target: target_for_saga.clone(),
-                handled: Arc::clone(&handled_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<FailingSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| FailingSaga {
+            target: target_for_saga.clone(),
+            handled: Arc::clone(&handled_for_saga),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await

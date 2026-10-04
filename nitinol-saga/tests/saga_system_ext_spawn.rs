@@ -27,7 +27,9 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSystemExt, Subscription,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -57,6 +59,12 @@ impl Event for ReservationRequested {
 /// reservation process each test in this file spawns.
 const RECORDING_SAGA_ID: &str = "saga-system-ext-reservation";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 struct RecordingSaga {
     handled: Arc<Mutex<Vec<String>>>,
     notify: Arc<Notify>,
@@ -64,22 +72,20 @@ struct RecordingSaga {
 
 #[async_trait]
 impl Saga for RecordingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RECORDING_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.handled
             .lock()
             .expect("handled mutex is never poisoned: no holder panics while the guard is alive")
@@ -197,11 +203,13 @@ async fn spawn_saga_uses_the_codecs_its_events_name() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy = system
-        .spawn_saga(saga_id.clone(), saga_store, move || RecordingSaga {
-            handled: Arc::clone(&handled_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        .spawn_saga(saga_id.clone(), saga_store, move |_components| {
+            RecordingSaga {
+                handled: Arc::clone(&handled_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
-        .subscribed_to(Subscription::stream(&order_store, &order_id))
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
         .spawn()
         .await;
 
@@ -240,13 +248,15 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy = system
-        .spawn_saga(SagaId::new(RECORDING_SAGA_ID), saga_store, move || {
-            RecordingSaga {
+        .spawn_saga(
+            SagaId::new(RECORDING_SAGA_ID),
+            saga_store,
+            move |_components| RecordingSaga {
                 handled: Arc::clone(&handled_for_producer),
                 notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .subscribed_to(Subscription::stream(&order_store, &order_id))
+            },
+        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
         .spawn()
         .await;
 
@@ -275,13 +285,15 @@ async fn stream_subscription_after_override_skips_records_up_to_that_position() 
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy = system
-        .spawn_saga(SagaId::new(RECORDING_SAGA_ID), saga_store, move || {
-            RecordingSaga {
+        .spawn_saga(
+            SagaId::new(RECORDING_SAGA_ID),
+            saga_store,
+            move |_components| RecordingSaga {
                 handled: Arc::clone(&handled_for_producer),
                 notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .subscribed_to(Subscription::stream(&order_store, &order_id).with_after(1))
+            },
+        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id).with_after(1))
         .spawn()
         .await;
 

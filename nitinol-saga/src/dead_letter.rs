@@ -164,12 +164,24 @@ mod tests {
     use nitinol_persistence::{AppendOutcome, AppendingEvent, LoadQuery};
 
     use super::{enqueue_dead_letter, EnqueueOutcome};
-    use crate::consumed::{ConsumedPositionEvent, ConsumedPositions};
+    use crate::consumed::{ConsumedPositionEvent, ConsumedPositions, PositionSource};
     use crate::dead_letter::event::SourceContext;
     use crate::dead_letter::policy::{EnqueueAll, EnqueuePolicy};
     use crate::dead_letter::{DeadLetterQuery, DeadLetterQueue, EnqueueDecision, SagaFailure};
     use crate::id::SagaId;
     use nitinol_persistence::AggregateId;
+
+    /// The declared source the positions in these tests settle.  A position
+    /// names one, and these tests are about whether it is written at all rather
+    /// than about which source it belongs to, so one stand-in serves throughout.
+    const SETTLED_SOURCE: nitinol_persistence::EventType = nitinol_persistence::EventType::new(
+        nitinol_persistence::Family::new("dead_letter_test"),
+        nitinol_persistence::TypeName::new("Observed"),
+    );
+
+    fn settled_source() -> PositionSource {
+        PositionSource::of(SETTLED_SOURCE)
+    }
 
     struct AlwaysFailStore;
 
@@ -245,6 +257,7 @@ mod tests {
         let mut consumed = ConsumedPositions::default();
         let position = ConsumedPositionEvent {
             source: AggregateId::new("upstream-order"),
+            source_event_type: settled_source(),
             sequence: 7,
         };
 
@@ -272,7 +285,7 @@ mod tests {
             "the position-only append must still advance the sequence"
         );
         assert!(
-            consumed.covers("upstream-order", 7),
+            consumed.covers("upstream-order", &settled_source(), 7),
             "the position must be recorded in memory, the same as a written \
              dead letter's would be"
         );

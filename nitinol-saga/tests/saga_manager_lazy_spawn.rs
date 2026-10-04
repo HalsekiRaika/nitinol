@@ -19,11 +19,13 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 /// Prefix of every instance id [`TracingSaga::correlate`] derives.  The order
 /// key is appended verbatim, so one upstream stream fans out to one instance
@@ -76,15 +78,24 @@ impl TracingSaga {
     }
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 #[async_trait]
 impl Saga for TracingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(format!("{INSTANCE_PREFIX}{}", event.order)))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Order(event) => {
+                Some(SagaId::new(format!("{INSTANCE_PREFIX}{}", event.order)))
+            }
+        }
     }
 
     fn apply(&mut self, event: Self::Event) {
@@ -93,9 +104,10 @@ impl Saga for TracingSaga {
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.record(format!("handle:{}:{}", ctx.saga_id().as_str(), event.order));
         Ok(SagaEffect::None)
     }
@@ -209,17 +221,13 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _manager_proxy =
-        SagaManagerProps::<TracingSaga>::new(Arc::clone(&saga_store), move || TracingSaga {
-            trace: Arc::clone(&trace_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        SagaManagerProps::<TracingSaga>::new(Arc::clone(&saga_store), move |_components| {
+            TracingSaga {
+                trace: Arc::clone(&trace_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 
@@ -257,22 +265,17 @@ async fn known_correlation_id_reuses_the_running_instance() {
     let notify_for_producer = Arc::clone(&notify);
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let _manager_proxy = SagaManagerProps::<TracingSaga>::new(Arc::clone(&saga_store), move || {
-        spawned_for_producer.fetch_add(1, Ordering::SeqCst);
-        TracingSaga {
-            trace: Arc::clone(&trace_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        }
-    })
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: upstream_key.as_str().to_owned(),
-            after: 0,
-        },
-    )
-    .spawn(system.process_system())
-    .await;
+    let _manager_proxy =
+        SagaManagerProps::<TracingSaga>::new(Arc::clone(&saga_store), move |_components| {
+            spawned_for_producer.fetch_add(1, Ordering::SeqCst);
+            TracingSaga {
+                trace: Arc::clone(&trace_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
+        })
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
+        .spawn(system.process_system())
+        .await;
 
     append_order_placed(&upstream_store, &upstream_key, 1, "B").await;
     append_order_placed(&upstream_store, &upstream_key, 2, "B").await;

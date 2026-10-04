@@ -21,13 +21,13 @@ use crate::saga::Saga;
 ///
 /// `Clone`-able like `AggregateProxy<A>`.  Per the MVP scope the proxy
 /// exposes only the saga's pid — sagas are reactive and are driven by their
-/// subscription, not by direct calls from application code.
+/// subscriptions, not by direct calls from application code.
 ///
-/// The upstream `DirectPollerProcess` is spawned during the saga's `on_start`
-/// as a runtime **child** of the saga process, so its lifetime is bound to
-/// the saga's. Dropping every copy of this handle does not affect
-/// the subscription — only stopping the saga (e.g. via [`Self::stop`] or
-/// supervision) cascade-stops the upstream poller.
+/// Each declared source's `DirectPollerProcess` is spawned during the saga's
+/// `on_start` as a runtime **child** of the saga process, so its lifetime is
+/// bound to the saga's. Dropping every copy of this handle does not affect
+/// the subscriptions — only stopping the saga (e.g. via [`Self::stop`] or
+/// supervision) cascade-stops every upstream poller.
 pub struct SagaProxy<S: Saga> {
     inner: ProcessProxy<SagaProcess<S>>,
 }
@@ -48,8 +48,9 @@ impl<S: Saga> SagaProxy<S> {
 
     /// Stops the underlying saga process.
     ///
-    /// Stopping the process cascade-stops the upstream catchup poller, which
-    /// was spawned as a runtime child during the saga's `on_start`.
+    /// Stopping the process cascade-stops every upstream catchup poller — one
+    /// per declared source — each spawned as a runtime child during the
+    /// saga's `on_start`.
     pub async fn stop(&self) -> Result<(), nitinol_runtime::error::SendError> {
         self.inner.stop().await
     }
@@ -63,10 +64,11 @@ impl<S: Saga> From<ProcessProxy<SagaProcess<S>>> for SagaProxy<S> {
 
 /// A typed handle to a running saga instance manager.
 ///
-/// The manager's upstream poller and every instance it spawned are runtime
-/// children of the manager process, so its lifetime bounds the whole fan-out.
-/// Dropping every copy of this handle does not affect them — only stopping the
-/// manager (e.g. via [`Self::stop`] or supervision) does.
+/// The manager's upstream pollers — one per declared source — and every
+/// instance it spawned are runtime children of the manager process, so its
+/// lifetime bounds the whole fan-out. Dropping every copy of this handle does
+/// not affect them — only stopping the manager (e.g. via [`Self::stop`] or
+/// supervision) does.
 pub struct SagaManagerProxy<S: Saga> {
     inner: ProcessProxy<SagaManagerProcess<S>>,
     /// The store the manager persists its instances' streams to.
@@ -99,8 +101,8 @@ impl<S: Saga> SagaManagerProxy<S> {
         self.inner.pid()
     }
 
-    /// Stops the manager, cascade-stopping its upstream poller and every saga
-    /// instance it currently holds.
+    /// Stops the manager, cascade-stopping every upstream poller — one per
+    /// declared source — and every saga instance it currently holds.
     pub async fn stop(&self) -> Result<(), nitinol_runtime::error::SendError> {
         self.inner.stop().await
     }

@@ -8,7 +8,7 @@
 //!
 //! Three ways that can be got wrong are all observable below:
 //! - the firing is addressed to the instance's own proxy → the `tell` lands in
-//!   a dead process and `on_scheduled` never runs;
+//!   a dead process and the deadline arm never runs;
 //! - the instance's stop releases its timers unconditionally → the deadline is
 //!   gone from the scheduler before it can elapse, and nothing fires at all;
 //! - the firing is dropped when the addressee is not resident → same silence,
@@ -28,7 +28,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{resident_scheduler, JsonCodec};
+use common::JsonCodec;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,11 +39,15 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, TimerName};
+use nitinol_saga::{
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
+    SagaSubscribe, Subscription, TimerName,
+};
 
 /// The one instance every `Ping` correlates to.
 const INSTANCE_ID: &str = "sched-passivation-instance";
@@ -85,10 +89,41 @@ impl Event for Recorded {
     type Codec = JsonCodec;
 }
 
-/// The saga's `Self::ScheduledMessage`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// What the deadline carries.  It names the `Codec` that writes it into the
+/// schedule fact, which is what the firing is read back through after the
+/// instance that set it is gone.
+#[derive(Clone, Debug, PartialEq)]
 struct Reminder {
     note: String,
+}
+
+struct ReminderCodec;
+
+impl Codec<Reminder> for ReminderCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(value: &Reminder) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from(value.note.clone().into_bytes()))
+    }
+
+    fn decode(payload: &[u8]) -> Result<Reminder, Self::Error> {
+        Ok(Reminder {
+            note: String::from_utf8_lossy(payload).into_owned(),
+        })
+    }
+}
+
+impl DeadlineMessage for Reminder {
+    type Codec = ReminderCodec;
+}
+
+/// The whole alphabet this saga reacts to: one observed source, and its own
+/// time — the two that cross in this file.
+#[derive(SagaSubscribe)]
+enum ReminderInput {
+    Ping(Ping),
+    #[subscribe(deadline)]
+    Reminder(Reminder),
 }
 
 // Saga under test
@@ -105,43 +140,48 @@ enum Step {
 }
 
 struct ReminderSaga {
+    deadline: Deadline<Reminder>,
     steps: Arc<Mutex<Vec<Step>>>,
     notify: Arc<Notify>,
 }
 
 #[async_trait]
 impl Saga for ReminderSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = ReminderInput;
     type Event = Recorded;
-    type ScheduledMessage = Reminder;
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(INSTANCE_ID))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            ReminderInput::Ping(_) => Some(SagaId::new(INSTANCE_ID)),
+            // A firing is addressed to the instance that set it — here, through
+            // the manager that restores it — and never travels the subscription
+            // path correlation answers for.
+            ReminderInput::Reminder(_) => None,
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        self.record(Step::Scheduled);
-        Ok(SagaEffect::schedule(
-            TimerName::new("reminder"),
-            DEADLINE,
-            Reminder { note: event.note },
-        ))
-    }
-
-    async fn on_scheduled(
-        &mut self,
-        message: Self::ScheduledMessage,
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        self.record(Step::Fired { note: message.note });
-        Ok(SagaEffect::persist(Recorded))
+        match input {
+            ReminderInput::Ping(ping) => {
+                self.record(Step::Scheduled);
+                Ok(self.deadline.set(
+                    TimerName::new("reminder"),
+                    DEADLINE,
+                    Reminder { note: ping.note },
+                ))
+            }
+            ReminderInput::Reminder(reminder) => {
+                self.record(Step::Fired {
+                    note: reminder.note,
+                });
+                Ok(SagaEffect::persist(Recorded))
+            }
+        }
     }
 }
 
@@ -234,7 +274,6 @@ async fn scheduler_firing_activates_a_passivated_instance() {
     // Given
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -250,22 +289,16 @@ async fn scheduler_firing_activates_a_passivated_instance() {
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
     let _manager_proxy =
-        SagaManagerProps::<ReminderSaga>::new(Arc::clone(&saga_store), move || {
+        SagaManagerProps::<ReminderSaga>::new(Arc::clone(&saga_store), move |components| {
             spawned_for_producer.fetch_add(1, Ordering::SeqCst);
             ReminderSaga {
+                deadline: components.deadline(),
                 steps: Arc::clone(&steps_for_producer),
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: UPSTREAM_KEY.to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
         .with_instance_passivation(PASSIVATE_AFTER)
-        .with_scheduler(scheduler.clone())
         .spawn(system.process_system())
         .await;
 

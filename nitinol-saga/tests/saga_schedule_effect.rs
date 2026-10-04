@@ -1,149 +1,32 @@
-//! Construction / Builder tests for the DeadlineScheduler effect surface.
+//! What the deadline effects still look like from outside the crate.
 //!
-//! These pin the public effect API introduced by the scheduler:
-//! - `ScheduleSpec { name, after, payload }` replaces the old `Schedule { at }`.
-//! - `SagaEffect::Persist { schedules }` now carries `Vec<ScheduleSpec>`.
-//! - `SagaEffect::schedule(name, after, msg)` is the typed convenience builder
-//!   that serialises the scheduled message into the `ScheduleSpec`'s `payload`.
-//! - `SagaEffect::CancelSchedule(TimerName)` is the new name-scoped cancel
-//!   variant, reachable via `SagaEffect::cancel_schedule(name)`.
+//! A deadline is set and cancelled through the `Deadline<M>` component the
+//! producer is handed, so neither `SagaEffect::schedule` nor a `ScheduleSpec`
+//! literal exists any more: the only way to name a timer is to ask for the
+//! component, which is what leaves effect → append → arm as the one expressible
+//! path. The construction surface those builders had is therefore pinned where
+//! the values can be built:
 //!
-//! The tests are intentionally self-contained (no `mod common`) so they do not
-//! couple to the shared `Shape` helper, which still mirrors the older
-//! `Schedule { at }` layout and is migrated separately.
+//! - `Deadline::set` / `Deadline::cancel`'s shape, and the message being written
+//!   through the codec its own type names — `src/components/deadline.rs`.
+//! - the schedule-carrying cases of the effect algebra — `src/effect/helper.rs`.
+//! - the whole path from setting a deadline to its firing reaching `handle` —
+//!   `saga_deadline_scheduler.rs`.
+//!
+//! What stays observable from out here is the cancellation leaf itself:
+//! `SagaEffect::CancelSchedule(TimerName)` is a public variant, and it is a leaf
+//! of its own — never absorbed into a `Persist`, never swallowed like the
+//! identity.
+//!
+//! Run with: `cargo test -p nitinol-saga --test saga_schedule_effect`.
 
-use std::time::Duration;
-
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-
-use nitinol_saga::{SagaEffect, ScheduleSpec, TimerName};
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct Reminder {
-    note: String,
-}
-
-/// Borrow the single `Persist` branch of an effect, failing loudly otherwise.
-fn persist_schedules<E>(effect: &SagaEffect<E>) -> &[ScheduleSpec] {
-    match effect {
-        SagaEffect::Persist { schedules, .. } => schedules,
-        _ => panic!("expected a Persist branch carrying schedules"),
-    }
-}
+use nitinol_saga::{SagaEffect, TimerName};
 
 #[test]
-fn schedule_spec_holds_name_after_and_payload_verbatim() {
-    // Given a name, a relative delay and an opaque payload
-    let name = TimerName::new("reminder");
-    let after = Duration::from_secs(30);
-    let payload = Bytes::from_static(b"opaque-bytes");
-
-    // When a ScheduleSpec is constructed
-    let spec = ScheduleSpec {
-        name: name.clone(),
-        after,
-        payload: payload.clone(),
-    };
-
-    // Then each field is retained exactly as supplied
-    assert_eq!(spec.name, name, "ScheduleSpec must retain its TimerName");
-    assert_eq!(
-        spec.after, after,
-        "ScheduleSpec must retain the relative `after` duration (not an absolute instant)"
-    );
-    assert_eq!(
-        spec.payload, payload,
-        "ScheduleSpec must retain the payload bytes verbatim"
-    );
-}
-
-#[test]
-fn schedule_builder_serialises_message_into_payload() {
-    // Given a typed scheduled message
-    let msg = Reminder {
-        note: "ping".to_owned(),
-    };
-    let after = Duration::from_secs(5);
-
-    // When the typed convenience builder is used
-    let effect = SagaEffect::<u32>::schedule(TimerName::new("reminder"), after, msg.clone());
-
-    // Then it yields a Persist branch with exactly one schedule entry whose payload is the
-    // serialised message, carrying the given name and delay
-    let schedules = persist_schedules(&effect);
-    assert_eq!(
-        schedules.len(),
-        1,
-        "schedule() must produce exactly one schedule entry"
-    );
-    assert_eq!(schedules[0].name, TimerName::new("reminder"));
-    assert_eq!(schedules[0].after, after);
-
-    let decoded: Reminder =
-        serde_json::from_slice(&schedules[0].payload).expect("payload must decode to the message");
-    assert_eq!(
-        decoded, msg,
-        "schedule() must serialise the message round-trippably into the payload"
-    );
-}
-
-#[test]
-fn schedule_builder_produces_no_user_events_or_tells() {
-    // Given a scheduled message
-    let effect = SagaEffect::<u32>::schedule(
-        TimerName::new("reminder"),
-        Duration::from_secs(1),
-        Reminder {
-            note: "x".to_owned(),
-        },
-    );
-
-    // Then the branch carries only the schedule — no events, no tells
-    match &effect {
-        SagaEffect::Persist {
-            events,
-            tells,
-            schedules,
-        } => {
-            assert!(
-                events.is_empty(),
-                "schedule() must not persist a user event"
-            );
-            assert!(tells.is_empty(), "schedule() must not attach a tell");
-            assert_eq!(schedules.len(), 1);
-        }
-        _ => panic!("schedule() must return a Persist branch"),
-    }
-}
-
-#[test]
-fn cancel_schedule_builder_returns_cancel_variant_with_name() {
-    // Given a timer name
-    let name = TimerName::new("reminder");
-
-    // When cancel_schedule is built
-    let effect = SagaEffect::<u32>::cancel_schedule(name.clone());
-
-    // Then it is the CancelSchedule variant carrying that name
-    match effect {
-        SagaEffect::CancelSchedule(carried) => assert_eq!(
-            carried, name,
-            "cancel_schedule(name) must carry the requested TimerName"
-        ),
-        _ => panic!("cancel_schedule must return SagaEffect::CancelSchedule"),
-    }
-}
-
-#[test]
-fn cancel_schedule_combines_after_persist_preserving_order() {
-    // Given a persist and a cancel
-    let persist = SagaEffect::persist(1u32).combine(SagaEffect::schedule_spec(ScheduleSpec {
-        name: TimerName::new("keep"),
-        after: Duration::from_secs(1),
-        payload: Bytes::new(),
-    }));
-    let cancel = SagaEffect::<u32>::cancel_schedule(TimerName::new("drop"));
+fn cancel_combines_after_persist_preserving_order() {
+    // Given a decision and a cancellation
+    let persist = SagaEffect::persist(1u32);
+    let cancel = SagaEffect::<u32>::CancelSchedule(TimerName::new("drop"));
 
     // When combined via the Monoid operation
     let combined = persist.combine(cancel);
@@ -160,11 +43,11 @@ fn cancel_schedule_combines_after_persist_preserving_order() {
 }
 
 #[test]
-fn cancel_schedule_survives_flatten_unchanged() {
+fn cancel_survives_flatten_unchanged() {
     // Given a nested sequence around a CancelSchedule
     let nested = SagaEffect::<u32>::Sequence(vec![
         SagaEffect::None,
-        SagaEffect::Sequence(vec![SagaEffect::cancel_schedule(TimerName::new("x"))]),
+        SagaEffect::Sequence(vec![SagaEffect::CancelSchedule(TimerName::new("x"))]),
     ]);
 
     // When flattened

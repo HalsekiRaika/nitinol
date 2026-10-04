@@ -12,6 +12,10 @@ name = "saga-fanout-pattern"
 path = "src/main.rs"
 
 [dependencies]
+# The code `#[derive(SagaSubscribe)]` writes names the framework through the
+# umbrella crate, as `#[derive(Event)]` does, so a crate that declares a saga
+# alphabet has to resolve that path.
+nitinol = { path = "../../..", features = ["saga"] }
 nitinol-saga = { path = "../../../nitinol-saga" }
 nitinol-eventsource = { path = "../../../nitinol-eventsource" }
 nitinol-persistence = { path = "../../../nitinol-persistence" }

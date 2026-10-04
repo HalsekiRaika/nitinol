@@ -11,15 +11,13 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Triggered;
@@ -66,6 +64,12 @@ impl Event for DomainEvt {
 /// each test in this file wires it to.
 const ENVELOPE_SAGA_ID: &str = "envelope-transparency-saga";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Triggered(Triggered),
+}
+
 struct EnvelopeSaga {
     applied: Arc<Mutex<Vec<DomainEvt>>>,
     persisted: Arc<Notify>,
@@ -74,12 +78,11 @@ struct EnvelopeSaga {
 
 #[async_trait]
 impl Saga for EnvelopeSaga {
-    type SubscribedEvent = Triggered;
+    type Subscribe = Observed;
     type Event = DomainEvt;
-    type ScheduledMessage = ();
     type Error = Infallible;
 
-    fn correlate(_event: &Triggered) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(ENVELOPE_SAGA_ID))
     }
 
@@ -92,7 +95,7 @@ impl Saga for EnvelopeSaga {
 
     async fn handle(
         &mut self,
-        _event: Triggered,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<DomainEvt>, Self::Error> {
         let effect = SagaEffect::persist(DomainEvt {
@@ -132,18 +135,14 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
     let persisted_for_saga = Arc::clone(&persisted);
 
     let _saga_proxy =
-        SagaProps::<EnvelopeSaga>::new(saga_id.clone(), Arc::clone(&store), move || EnvelopeSaga {
-            applied: Arc::clone(&applied_for_saga),
-            persisted: Arc::clone(&persisted_for_saga),
-            note: "persisted-by-handle".to_owned(),
+        SagaProps::<EnvelopeSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
+            EnvelopeSaga {
+                applied: Arc::clone(&applied_for_saga),
+                persisted: Arc::clone(&persisted_for_saga),
+                note: "persisted-by-handle".to_owned(),
+            }
         })
-        .with_subscription(
-            Arc::clone(&store),
-            SequenceCursor::Stream {
-                key: upstream_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<Triggered>(Subscription::stream(&store, &upstream_id))
         .spawn(system.process_system())
         .await;
 
@@ -245,18 +244,14 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let _saga_proxy =
-        SagaProps::<EnvelopeSaga>::new(saga_id.clone(), Arc::clone(&store), move || EnvelopeSaga {
-            applied: Arc::clone(&applied_for_saga),
-            persisted: Arc::clone(&persisted_for_saga),
-            note: "unused-on-replay".to_owned(),
+        SagaProps::<EnvelopeSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
+            EnvelopeSaga {
+                applied: Arc::clone(&applied_for_saga),
+                persisted: Arc::clone(&persisted_for_saga),
+                note: "unused-on-replay".to_owned(),
+            }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "no-such-upstream".to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<Triggered>(Subscription::stream(&upstream_store, "no-such-upstream"))
         .spawn(system.process_system())
         .await;
 

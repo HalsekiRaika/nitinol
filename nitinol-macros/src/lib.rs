@@ -1,5 +1,12 @@
 //! Derive macros for the `nitinol` event-sourcing framework.
 //!
+//! Two derives live here, and they differ in kind. `#[derive(Event)]` is sugar:
+//! it writes an impl a person could have written, and a hand-written one is
+//! equally valid. `#[derive(SagaSubscribe)]` writes a *type* as well — the
+//! binding typestate carrying one slot per declared source — because the orphan
+//! rule leaves no way to express that typestate over tuples in the declaring
+//! crate. Both are documented on their own derive.
+//!
 //! `#[derive(Event)]` is pure sugar for the hand-written `impl Event` pattern:
 //! it generates the `EVENT_TYPE` const and the associated `Codec`. It provides
 //! no macro-specific behaviour — hand-written implementations remain equally
@@ -50,6 +57,8 @@
 //! error of a different shape, not a documentation-only convention. The one way
 //! past either enforcement point is `nitinol_persistence::__private`, reserved
 //! for the framework's own records and not a user surface.
+
+mod subscribe;
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -112,6 +121,48 @@ use nitinol_persistence::{is_within_reserved_namespace, RESERVED_NAMESPACE};
 pub fn derive_event(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derives `nitinol::saga::SagaSubscribe` for an enum declaring the whole
+/// alphabet of inputs a saga reacts to.
+///
+/// Each newtype variant names one input type: an event type the saga observes
+/// as a source of its own, or — with `#[subscribe(deadline)]`, at most once —
+/// the message a deadline of the saga's own carries.
+///
+/// ```text
+/// #[derive(SagaSubscribe)]
+/// enum ReservationInput {
+///     Order(OrderPlaced),
+///     Stock(StockReserved),
+///     #[subscribe(deadline)]
+///     PaymentDue(PaymentDeadline),
+/// }
+/// ```
+///
+/// # What it writes
+///
+/// Alongside the `SagaSubscribe` impl it declares `{Enum}Bindings` — the
+/// binding typestate carrying one slot per declared external source — and the
+/// slot transitions over it.  That struct has to be generated in the declaring
+/// crate: the transition trait is foreign there, so the orphan rule rules out
+/// expressing the typestate as a tuple of markers.
+///
+/// # What it refuses
+///
+/// A struct or union (an alphabet is a choice between inputs), a generic enum (a
+/// declared source is resolved to one event type at declaration time), a variant
+/// naming other than exactly one input type, more than one
+/// `#[subscribe(deadline)]` variant (a saga has one clock), no external source at
+/// all (there would be nothing to subscribe to, and "spawning with no
+/// subscription is a compile error" would stop holding), and two variants naming
+/// the same event type (they could not have a cursor each).
+#[proc_macro_derive(SagaSubscribe, attributes(subscribe))]
+pub fn derive_saga_subscribe(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    subscribe::expand(input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

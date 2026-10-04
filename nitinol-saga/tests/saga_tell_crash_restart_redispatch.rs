@@ -24,13 +24,13 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription, TellIntent,
+};
 
 // Domain types
 
@@ -96,6 +96,13 @@ impl Decider<Reserve> for Inventory {
     }
 }
 
+/// The whole alphabet both sagas below react to: one observed source, no
+/// deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 // Inert saga — only the on_start replay path is exercised.
 
 /// Correlation rule of [`InertSaga`]: the single crash-restart process instance
@@ -118,22 +125,20 @@ struct ActiveSaga {
 
 #[async_trait]
 impl Saga for ActiveSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(ACTIVE_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         Ok(SagaEffect::tell(
             self.inventory.clone(),
             Reserve { sku: event.sku },
@@ -143,20 +148,17 @@ impl Saga for ActiveSaga {
 
 #[async_trait]
 impl Saga for InertSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(INERT_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         Ok(SagaEffect::None)
@@ -274,17 +276,13 @@ async fn saga_tell_crash_restart_bytes_enable_redispatch_via_factory() {
 
     // No PendingIntents — simulates a full OS-process crash (in-memory state gone).
     let _saga_proxy =
-        SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), InertSaga::default)
-            .with_subscription(
-                Arc::clone(&upstream_store),
-                SequenceCursor::Stream {
-                    key: "no-such-stream".to_owned(),
-                    after: 0,
-                },
-            )
-            .with_crash_restart_factory(factory)
-            .spawn(system.process_system())
-            .await;
+        SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&saga_store), |_components| {
+            InertSaga
+        })
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, "no-such-stream"))
+        .with_crash_restart_factory(factory)
+        .spawn(system.process_system())
+        .await;
 
     // Wait for the crash-restart re-dispatch to produce TellAcked.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -369,21 +367,16 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     append_order_placed(&upstream_store, upstream_key, 1, "SKU-PAYLOAD-CHECK").await;
 
     let mock_for_saga = mock_p1.clone();
-    let _saga_proxy_p1 =
-        SagaProps::<ActiveSaga>::new(saga_id_p1.clone(), Arc::clone(&saga_store_p1), move || {
-            ActiveSaga {
-                inventory: mock_for_saga.clone(),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy_p1 = SagaProps::<ActiveSaga>::new(
+        saga_id_p1.clone(),
+        Arc::clone(&saga_store_p1),
+        move |_components| ActiveSaga {
+            inventory: mock_for_saga.clone(),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, upstream_key))
+    .spawn(system.process_system())
+    .await;
 
     // Wait for TellAcked to confirm that SagaEffect::tell completed its path.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -473,15 +466,9 @@ async fn saga_tell_produces_correct_crash_restart_payload_format_and_enables_red
     let _saga_proxy_p2 = SagaProps::<InertSaga>::new(
         saga_id_p2.clone(),
         Arc::clone(&saga_store_p2),
-        InertSaga::default,
+        |_components| InertSaga,
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: "no-such-upstream-p2".to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, "no-such-upstream-p2"))
     .with_crash_restart_factory(factory)
     .spawn(system.process_system())
     .await;

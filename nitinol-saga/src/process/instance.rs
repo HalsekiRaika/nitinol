@@ -9,14 +9,14 @@ use nitinol_persistence::store::EventStore;
 use nitinol_runtime::process::{ProcessContext, ProcessProxy};
 use nitinol_runtime::Props;
 
+use crate::components::SagaComponents;
 use crate::consumed::ConsumedPositions;
 use crate::dead_letter::{DlqChildSpawn, EnqueuePolicy};
 use crate::id::SagaId;
 use crate::outbox::RetryPolicy;
 use crate::process::manager::{DeliverScheduled, SagaManagerProcess};
 use crate::process::saga_process::{
-    CrashRestartFactory, DecodeFailureRouteFn, FireScheduled, Lifecycle, OwnedUpstream,
-    SagaProcess, TellState,
+    CrashRestartFactory, FireScheduled, Lifecycle, OwnedUpstream, SagaProcess, TellState,
 };
 use crate::saga::Saga;
 use crate::scheduler::{DispatchFn, SchedulerProxy, TimerName};
@@ -136,17 +136,30 @@ impl<S: Saga> ScheduleDelivery<S> {
 pub(crate) struct SagaInstanceSpec<S: Saga> {
     pub(crate) saga_id: SagaId,
     pub(crate) store: Arc<dyn EventStore>,
-    pub(crate) producer: Arc<dyn Fn() -> S + Send + Sync>,
+    /// How one incarnation of the saga is built, from the capabilities the
+    /// framework resolved for it.
+    ///
+    /// Called once per incarnation rather than once per instance, because a
+    /// capability is bound to the incarnation that holds it: the pending-deadline
+    /// view a `Deadline` reads belongs to the process that writes it.
+    pub(crate) producer: SagaProducer<S>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
-    pub(crate) upstream: Option<OwnedUpstream<S::SubscribedEvent>>,
+    /// One subscription per declared source.  Empty on an instance a manager
+    /// fronts, which observes through the manager's subscriptions instead.
+    pub(crate) upstream: Vec<OwnedUpstream<S::Subscribe>>,
     pub(crate) crash_restart_factory: Option<CrashRestartFactory>,
     pub(crate) scheduler: Option<SchedulerProxy>,
     pub(crate) delivery: ScheduleDelivery<S>,
-    pub(crate) decode_failure_route_fn: Option<DecodeFailureRouteFn>,
     pub(crate) dlq_child_spawn: Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>,
     #[cfg(test)]
     pub(crate) initial_tell_states: HashMap<u64, TellState>,
 }
+
+/// How a saga instance is built: the capabilities in, the saga out.
+///
+/// Shared because the runtime rebuilds the process from it on every supervised
+/// restart, and a manager hands the same one to every instance it spawns.
+pub(crate) type SagaProducer<S> = Arc<dyn Fn(SagaComponents<S>) -> S + Send + Sync>;
 
 impl<S: Saga> SagaInstanceSpec<S> {
     /// Declare the runtime process for this instance.
@@ -160,11 +173,14 @@ impl<S: Saga> SagaInstanceSpec<S> {
             let tell_states: HashMap<u64, TellState> = HashMap::new();
             #[cfg(test)]
             let tell_states: HashMap<u64, TellState> = self.initial_tell_states.clone();
+            // One cell per incarnation, shared between the saga's own `Deadline`
+            // and the process that writes it: the saga reads the journal's
+            // answer, and only the process can put one there.
+            let pending_deadlines = crate::components::PendingDeadlineCell::default();
             SagaProcess::<S> {
-                state: (self.producer)(),
+                state: (self.producer)(SagaComponents::new(Arc::clone(&pending_deadlines))),
                 saga_id: self.saga_id.clone(),
                 store: Arc::clone(&self.store),
-                decode_failure_route_fn: self.decode_failure_route_fn.clone(),
                 sequence: 0,
                 // Both are restored from the saga's own stream in `on_start`:
                 // a freshly built process knows nothing of what it consumed.
@@ -175,6 +191,7 @@ impl<S: Saga> SagaInstanceSpec<S> {
                 lifecycle: Lifecycle::Running,
                 upstream: self.upstream.clone(),
                 scheduler: self.scheduler.clone(),
+                pending_deadlines,
                 delivery: self.delivery.clone(),
                 enqueue_policy: Arc::clone(&self.enqueue_policy),
                 dlq_child_spawn: self.dlq_child_spawn.clone(),

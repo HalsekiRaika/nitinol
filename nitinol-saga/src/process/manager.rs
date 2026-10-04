@@ -1,11 +1,15 @@
-//! The saga instance manager: one upstream subscription in front of every
-//! instance of a saga type.
+//! The saga instance manager: one subscription per declared source in front of
+//! every instance of a saga type.
 //!
 //! The manager is the machine that interprets [`Saga::correlate`] at runtime.
-//! It holds the only subscription, so an upstream record is decoded once no
-//! matter how many instances the correlation fans out to, and it owns the
-//! single cursor over that subscription — which makes "do not advance on
-//! failure" a manager decision rather than an instance one.
+//! It holds the only subscriptions, so an observed record is decoded once no
+//! matter how many instances the correlation fans out to, and it owns the one
+//! cursor of each source — which makes "do not advance on failure" a manager
+//! decision rather than an instance one.
+//!
+//! Sources stay independent under a manager exactly as they are under a
+//! standalone saga: one cursor each, no order between them, and a stalled source
+//! holding up nothing but itself.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -13,7 +17,7 @@ use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
-use nitinol_eventsource::{DurableSubscription, SequenceCursor, SystemEvent};
+use nitinol_eventsource::SystemEvent;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadQuery;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Terminated};
@@ -26,32 +30,33 @@ use crate::dead_letter::{
 use crate::error::SagaUpstreamHandlerError;
 use crate::id::SagaId;
 use crate::observability::report_system_event;
-use crate::process::instance::{SagaInstanceSpec, ScheduleDelivery};
+use crate::process::instance::{SagaInstanceSpec, SagaProducer, ScheduleDelivery};
 use crate::process::saga_process::{
-    CrashRestartFactory, DecodeFailureRouteFn, FireScheduled, SagaProcess, UpstreamMessage,
+    CrashRestartFactory, FireScheduled, OwnedUpstream, SagaProcess, UpstreamMessage,
 };
 use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
 
 pub(crate) struct SagaManagerProcess<S: Saga> {
     pub(crate) store: Arc<dyn EventStore>,
-    pub(crate) producer: Arc<dyn Fn() -> S + Send + Sync>,
+    pub(crate) producer: SagaProducer<S>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
-    pub(crate) upstream: DurableSubscription<UpstreamMessage<S::SubscribedEvent>>,
-    /// Where the one shared subscription starts.
+    /// One subscription per declared source, shared by every instance the
+    /// manager fronts.
     ///
-    /// Left exactly as configured, unlike the cursor of a saga that owns its
-    /// subscription: this one is shared by every instance the manager fronts,
-    /// so no single instance's consumed position can speak for it, and the
-    /// sweep from the configured position is what activates the instances that
-    /// are not resident.  Each instance still drops the records it has already
-    /// consumed, so the sweep costs no second decision.
-    pub(crate) cursor: SequenceCursor,
+    /// Each starts exactly where it was configured, unlike the cursor of a saga
+    /// that owns its subscriptions: a shared cursor is spoken for by no single
+    /// instance's consumed position, and the sweep from the configured position
+    /// is what activates the instances that are not resident.  Each instance
+    /// still drops the records it has already consumed, so the sweep costs no
+    /// second decision.
+    pub(crate) upstream: Vec<OwnedUpstream<S::Subscribe>>,
     /// Passivation window handed to every instance this manager spawns.
     pub(crate) instance_idle_timeout: IdleTimeout,
-    /// Resident scheduler handed to every instance this manager spawns, so its
-    /// `SagaEffect::schedule` / `cancel_schedule` effects drive real timers —
-    /// mirrors `SagaProps::with_scheduler` on the standalone builder.
+    /// The resident timer core handed to every instance this manager spawns,
+    /// resolved at the manager's spawn boundary from the saga's own alphabet —
+    /// so a manager's instances get their deadlines on the same terms a
+    /// standalone saga does.
     pub(crate) scheduler: Option<SchedulerProxy>,
     /// DLQ subscriber wiring handed to every instance this manager spawns, so
     /// each one starts its own poller over its own stream — mirrors
@@ -62,10 +67,6 @@ pub(crate) struct SagaManagerProcess<S: Saga> {
     /// reconstructed from its persisted payload on revival — mirrors
     /// `SagaProps::with_crash_restart_factory` on the standalone builder.
     pub(crate) crash_restart_factory: Option<CrashRestartFactory>,
-    /// Determines which instance owns an upstream record the codec could not
-    /// decode.  `None` (unset, or the function declining) means no instance is
-    /// attributed and the record is skipped — see `recv` below.
-    pub(crate) decode_failure_route_fn: Option<DecodeFailureRouteFn>,
     /// The instances currently resident, keyed by the id `Saga::correlate`
     /// named.  An id absent here is not an id that never existed — it is one
     /// with no *running* process, which is why a miss replays rather than
@@ -101,9 +102,9 @@ impl<S: Saga> SagaManagerProcess<S> {
             store: Arc::clone(&self.store),
             producer: Arc::clone(&self.producer),
             enqueue_policy: Arc::clone(&self.enqueue_policy),
-            // This manager is the subscription; an instance that opened its own
-            // would decode every upstream record a second time.
-            upstream: None,
+            // This manager holds the subscriptions; an instance that opened its
+            // own would decode every observed record a second time.
+            upstream: Vec::new(),
             crash_restart_factory: self.crash_restart_factory.clone(),
             scheduler: self.scheduler.clone(),
             // A deadline this instance registers outlives it: the firing is
@@ -111,9 +112,6 @@ impl<S: Saga> SagaManagerProcess<S> {
             // after passivation brings the instance back instead of landing in
             // a stopped process.
             delivery: ScheduleDelivery::ThroughTheManager(ctx.self_proxy().clone()),
-            // Routing a corrupt record is the manager's call, not an
-            // instance-level one — see the `DecodeFailed` arm below.
-            decode_failure_route_fn: None,
             dlq_child_spawn: self.dlq_child_spawn.clone(),
             #[cfg(test)]
             initial_tell_states: HashMap::new(),
@@ -197,7 +195,12 @@ impl<S: Saga> SagaManagerProcess<S> {
 
 impl<S: Saga> Process for SagaManagerProcess<S> {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
-        self.upstream.spawn_child(ctx, self.cursor.clone()).await;
+        // One poller per declared source, each from its own configured position:
+        // the fan-out observes exactly what a standalone saga would, and a
+        // source whose upstream has stalled holds up only itself.
+        for source in self.upstream.clone() {
+            source.config.spawn_child(ctx, source.cursor).await;
+        }
     }
 
     async fn on_terminated(&mut self, terminated: Terminated, _ctx: &mut ProcessContext<Self>) {
@@ -210,55 +213,22 @@ impl<S: Saga> Process for SagaManagerProcess<S> {
     }
 }
 
-impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaManagerProcess<S> {
+impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaManagerProcess<S> {
     type Response = ();
-    /// Returning `Err` stops the `DirectPoller` (via `ask()`) from advancing the
-    /// one shared cursor, so a record the addressed instance could not settle is
-    /// redelivered rather than skipped.
+    /// Returning `Err` stops that source's `DirectPoller` (via `ask()`) from
+    /// advancing its shared cursor, so a record the addressed instance could not
+    /// settle is redelivered rather than skipped.
     type Error = SagaUpstreamHandlerError;
 
     async fn recv(
         &mut self,
-        msg: UpstreamMessage<S::SubscribedEvent>,
+        msg: UpstreamMessage<S::Subscribe>,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), SagaUpstreamHandlerError> {
-        let correlated = match &msg {
-            UpstreamMessage::Decoded { event, .. } => S::correlate(event),
-            UpstreamMessage::DecodeFailed {
-                aggregate_id,
-                sequence,
-                error,
-            } => {
-                // A corrupt record carries no typed event, so `Saga::correlate`
-                // cannot name an owner.  `decode_failure_route_fn`, when
-                // configured, resolves an owner from the wire key and sequence
-                // instead — the same shape as `SagaProps::with_decode_failure_route`,
-                // whose `Some`/`None` answer this reuses verbatim.  With no
-                // owner resolved the manager has nowhere to record it, so it is
-                // reported and — like an uncorrelated `Decoded` record below —
-                // skipped rather than holding the shared cursor for every
-                // instance behind it.
-                let owner = self
-                    .decode_failure_route_fn
-                    .as_ref()
-                    .and_then(|route| route(aggregate_id, *sequence));
-                if owner.is_none() {
-                    tracing::error!(
-                        upstream_key = aggregate_id.as_str(),
-                        upstream_sequence = sequence,
-                        error = %error,
-                        "saga manager cannot attribute an undecodable upstream record \
-                         to an instance; skipping it"
-                    );
-                }
-                owner
-            }
-        };
-
         // A record belonging to no instance is nobody's work.  Advancing past it
         // is what keeps one unclaimed record from stalling every instance behind
-        // it on the shared subscription.
-        let Some(saga_id) = correlated else {
+        // it on that source's shared subscription.
+        let Some(saga_id) = S::correlate(&msg.input) else {
             return Ok(());
         };
 
@@ -266,8 +236,8 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaManagerProces
         instance.ask(msg).await.map_err(|e| {
             tracing::warn!(
                 error = %e,
-                "saga manager: instance did not settle the upstream record; \
-                 holding the shared cursor so it is redelivered"
+                "saga manager: instance did not settle the observed record; \
+                 holding that source's shared cursor so it is redelivered"
             );
             SagaUpstreamHandlerError
         })

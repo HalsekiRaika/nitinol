@@ -2,31 +2,24 @@
 //!
 //! Covers the public surface:
 //! - `empty()` / `end()` / `persist()` / `persist_all()` / `tell()`
-//! - `tell_intent(..)` / `schedule_spec(..)`
+//! - `tell_intent(..)`
 //! - `then_end()`
 //!
 //! Every constructor here builds a `Persist` branch from scratch, so composing
 //! them is `combine`'s job — there is no receiver whose variant could make an
 //! attachment illegal.  That the attachment is variant-agnostic is pinned in
 //! `effect_attach_is_variant_agnostic.rs`.
+//!
+//! The schedule-carrying counterparts of these cases are not writable from out
+//! here — a `ScheduleSpec` is only built by `Deadline::set`, which needs the
+//! component the producer is handed — so they sit beside `combine` in
+//! `nitinol-saga/src/effect/helper.rs`.
 
 #[path = "common/helpers.rs"]
 mod common;
 use common::{shape_of, Shape};
 
-use std::time::Duration;
-
-use bytes::Bytes;
-use nitinol_saga::{SagaEffect, ScheduleSpec, TimerName};
-
-/// Build a `ScheduleSpec` from a name and delay with an empty payload.
-fn spec(name: &str, after: Duration) -> ScheduleSpec {
-    ScheduleSpec {
-        name: TimerName::new(name),
-        after,
-        payload: Bytes::new(),
-    }
-}
+use nitinol_saga::{SagaEffect, TimerName};
 
 #[test]
 fn empty_returns_none_variant() {
@@ -128,25 +121,6 @@ async fn tell_intent_returns_persist_carrying_only_that_intent() {
     );
 }
 
-#[test]
-fn schedule_spec_returns_persist_carrying_only_that_spec() {
-    let s = spec("raw", Duration::from_secs(30));
-
-    let effect = SagaEffect::<u32>::schedule_spec(s.clone());
-
-    assert_eq!(
-        shape_of(&effect),
-        Shape::Persist {
-            events: vec![],
-            tells: 0,
-            schedules: vec![s],
-        },
-        "schedule_spec(s) must return Persist {{ events: [], tells: [], schedules: [s] }} — \
-         a spec with raw payload bytes must reach the batch without going through \
-         SagaEffect::schedule's serde serialization"
-    );
-}
-
 #[tokio::test]
 async fn persist_combined_with_tell_intent_yields_one_persist() {
     let intent = common::make_tell_intent().await;
@@ -162,24 +136,6 @@ async fn persist_combined_with_tell_intent_yields_one_persist() {
         },
         "persist(e).combine(tell_intent(i)) must fold into ONE Persist so the event and \
          its TellRequested marker share a single atomic append batch"
-    );
-}
-
-#[test]
-fn persist_combined_with_schedule_spec_yields_one_persist() {
-    let s = spec("deadline", Duration::from_secs(60));
-
-    let effect = SagaEffect::persist(13u32).combine(SagaEffect::schedule_spec(s.clone()));
-
-    assert_eq!(
-        shape_of(&effect),
-        Shape::Persist {
-            events: vec![13u32],
-            tells: 0,
-            schedules: vec![s],
-        },
-        "persist(e).combine(schedule_spec(s)) must fold into ONE Persist so the event and \
-         its scheduled marker share a single atomic append batch"
     );
 }
 
@@ -208,47 +164,6 @@ async fn combining_two_tell_intents_concatenates_rather_than_replaces() {
     );
 }
 
-#[test]
-fn combining_two_schedule_specs_concatenates_in_left_to_right_order() {
-    let a = spec("a", Duration::from_secs(30));
-    let b = spec("b", Duration::from_secs(60));
-
-    let effect = SagaEffect::persist(2u32)
-        .combine(SagaEffect::schedule_spec(a.clone()))
-        .combine(SagaEffect::schedule_spec(b.clone()));
-
-    assert_eq!(
-        shape_of(&effect),
-        Shape::Persist {
-            events: vec![2u32],
-            tells: 0,
-            schedules: vec![a, b],
-        },
-        "chained schedule_spec combines must keep both specs in left-to-right order"
-    );
-}
-
-#[tokio::test]
-async fn tell_intent_and_schedule_spec_combine_onto_the_same_persist() {
-    let intent = common::make_tell_intent().await;
-    let s = spec("reminder", Duration::from_secs(5));
-
-    let effect = SagaEffect::persist(99u32)
-        .combine(SagaEffect::tell_intent(intent))
-        .combine(SagaEffect::schedule_spec(s.clone()));
-
-    assert_eq!(
-        shape_of(&effect),
-        Shape::Persist {
-            events: vec![99u32],
-            tells: 1,
-            schedules: vec![s],
-        },
-        "an event, a tell and a schedule attached through combine must land on ONE \
-         Persist branch — all three categories share the single atomic batch"
-    );
-}
-
 #[tokio::test]
 async fn merged_persist_pair_combined_with_tell_intent_stays_one_persist() {
     // A pair of `Persist` branches already folded into one by the junction
@@ -269,25 +184,6 @@ async fn merged_persist_pair_combined_with_tell_intent_stays_one_persist() {
         "persist(1).combine(persist(2)).combine(tell_intent(i)) must stay ONE Persist; \
          folding the pair into a Sequence instead would split the tell marker out of \
          the events' append batch"
-    );
-}
-
-#[test]
-fn merged_persist_pair_combined_with_schedule_spec_stays_one_persist() {
-    let s = spec("after-merge", Duration::from_secs(3));
-
-    let merged = SagaEffect::persist(1u32).combine(SagaEffect::persist(2u32));
-    let effect = merged.combine(SagaEffect::schedule_spec(s.clone()));
-
-    assert_eq!(
-        shape_of(&effect),
-        Shape::Persist {
-            events: vec![1u32, 2],
-            tells: 0,
-            schedules: vec![s],
-        },
-        "persist(1).combine(persist(2)).combine(schedule_spec(s)) must stay ONE Persist, \
-         keeping the merged events alongside the scheduled marker"
     );
 }
 
@@ -324,7 +220,7 @@ fn then_end_on_none_collapses_to_end() {
 fn then_end_on_sequence_appends_end_to_existing_sequence() {
     // `Persist.combine(Persist)` folds into a single `Persist`, so the Sequence
     // premise is built from leaves that never merge.
-    let seq = SagaEffect::persist(1u32).combine(SagaEffect::cancel_schedule(TimerName::new("t")));
+    let seq = SagaEffect::persist(1u32).combine(SagaEffect::CancelSchedule(TimerName::new("t")));
     let effect = seq.then_end();
 
     assert_eq!(

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
 use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, TellIntent};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, TellIntent};
 
 use crate::codec::JsonCodec;
 use crate::order::OrderPlaced;
@@ -47,6 +47,19 @@ impl Event for ReservationRequested {
     );
 
     type Codec = JsonCodec;
+}
+
+/// The whole alphabet this saga reacts to: the order's fact event, and no
+/// deadline of its own.
+///
+/// Everything the saga reacts to is declared here, and everything reaches it
+/// through the one [`Saga::handle`] entry point.  A saga that later had to
+/// notice the stock item's reply, or give the reservation a deadline to arrive
+/// within, would gain a variant here — and the `match`es that answer the
+/// alphabet would stop compiling until it was handled.
+#[derive(SagaSubscribe)]
+pub enum Observed {
+    OrderPlaced(OrderPlaced),
 }
 
 /// Asks the stock item to reserve what a placed order owes it.
@@ -105,21 +118,20 @@ impl ReservationSaga {
 
 #[async_trait]
 impl Saga for ReservationSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        let Observed::OrderPlaced(event) = input;
         Some(Self::instance_id(&event.order_id))
     }
 
-    /// The saga keeps no state.
-    ///
-    /// Whether the reservation was applied is already recorded — the stock
-    /// item's own stream says so.  Mirroring it here would give the same fact
-    /// two owners that a crash between the two writes could leave disagreeing.
-    fn apply(&mut self, _event: Self::Event) {}
+    // The saga keeps no state, so `apply` is left to its no-op default.
+    //
+    // Whether the reservation was applied is already recorded — the stock item's
+    // own stream says so.  Mirroring it here would give the same fact two owners
+    // that a crash between the two writes could leave disagreeing.
 
     /// Nothing here suppresses a repeat, on purpose.
     ///
@@ -132,9 +144,10 @@ impl Saga for ReservationSaga {
     /// here.  The operation id is what lets the stock item recognise that repeat.
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::OrderPlaced(event) = input;
         let reservation = Self::reservation_id(&event);
         let stock = StockItem::stream_key(&event.sku);
 

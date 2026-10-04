@@ -19,11 +19,11 @@
 //! so that an implementation which dead-letters every event it declines is
 //! rejected rather than passing on the delivery assertion alone.
 //!
-//! `CT-02`: every spawn here calls `with_subscription` with two arguments
-//! (`upstream_store`, `cursor`) — the upstream format is named by
-//! `Saga::SubscribedEvent` itself, not handed to the builder.  A builder that
-//! still takes a routing argument — positionally or as a trailing `Option` —
-//! fails to compile against these call sites.
+//! `CT-02`: every spawn here calls `subscribed_to::<OrderPlaced>` with one
+//! argument (a [`Subscription`]) — the upstream format is named by the declared
+//! source itself, not handed to the builder.  A builder that still takes a
+//! routing argument — positionally or as a trailing `Option` — fails to compile
+//! against these call sites.
 
 #[path = "common/helpers.rs"]
 mod common;
@@ -40,13 +40,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{Event, SequenceCursor};
+use nitinol_eventsource::Event;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 // Correlation rule — one definition point, shared by `correlate` and by the
 // spawn sites below.  The spawned instance is `OWN_SAGA_ID`; `FOREIGN_SAGA_ID`
@@ -81,6 +81,12 @@ impl Event for ReservationRequested {
     type Codec = JsonCodec;
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 /// Records every event that actually reaches `handle`.
 struct CorrelationSaga {
     captured: Arc<Mutex<Vec<String>>>,
@@ -89,30 +95,32 @@ struct CorrelationSaga {
 
 #[async_trait]
 impl Saga for CorrelationSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
     /// Derives the owning instance from the SKU prefix so that one upstream
     /// stream can carry all three correlation outcomes.
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        if event.sku.starts_with("MINE-") {
-            Some(SagaId::new(OWN_SAGA_ID))
-        } else if event.sku.starts_with("OTHER-") {
-            Some(SagaId::new(FOREIGN_SAGA_ID))
-        } else {
-            None
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Order(event) => {
+                if event.sku.starts_with("MINE-") {
+                    Some(SagaId::new(OWN_SAGA_ID))
+                } else if event.sku.starts_with("OTHER-") {
+                    Some(SagaId::new(FOREIGN_SAGA_ID))
+                } else {
+                    None
+                }
+            }
         }
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.captured
             .lock()
             .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
@@ -218,22 +226,17 @@ async fn spawn_correlation_saga(
     let captured_for_producer = Arc::clone(captured);
     let notify_for_producer = Arc::clone(notify);
 
-    let _saga_proxy =
-        SagaProps::<CorrelationSaga>::new(SagaId::new(OWN_SAGA_ID), saga_store, move || {
-            CorrelationSaga {
-                captured: Arc::clone(&captured_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .with_subscription(
-            Arc::clone(upstream_store),
-            SequenceCursor::Stream {
-                key: agg_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<CorrelationSaga>::new(
+        SagaId::new(OWN_SAGA_ID),
+        saga_store,
+        move |_components| CorrelationSaga {
+            captured: Arc::clone(&captured_for_producer),
+            notify: Arc::clone(&notify_for_producer),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(upstream_store, agg_id))
+    .spawn(system.process_system())
+    .await;
 }
 
 // Tests

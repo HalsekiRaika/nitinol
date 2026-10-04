@@ -25,8 +25,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
@@ -34,7 +35,10 @@ use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TimerName};
+use nitinol_saga::{
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe,
+    Subscription, TimerName,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -206,6 +210,13 @@ fn describe(batches: &[Vec<RecordedEvent>]) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The alphabet every saga in this file but [`PersistCombineScheduleSaga`]
+/// reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    OrderPlaced(OrderPlaced),
+}
+
 /// Correlation rule of [`PersistCombineTellSaga`]: the single reservation
 /// process every `OrderPlaced` in this test belongs to.
 const PERSIST_COMBINE_TELL_SAGA_ID: &str = "combine-single-saga";
@@ -219,22 +230,20 @@ struct PersistCombineTellSaga {
 
 #[async_trait]
 impl Saga for PersistCombineTellSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(PERSIST_COMBINE_TELL_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::OrderPlaced(event) = input;
         let persist = SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
         });
@@ -260,22 +269,20 @@ const PERSIST_SEQUENCED_WITH_TELL_SAGA_ID: &str = "sequence-single-saga";
 
 #[async_trait]
 impl Saga for PersistSequencedWithTellSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(PERSIST_SEQUENCED_WITH_TELL_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::OrderPlaced(event) = input;
         let persist = SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
         });
@@ -303,24 +310,22 @@ const PERSIST_SEQUENCED_WITH_EMPTY_NESTED_SEQUENCE_SAGA_ID: &str = "sequence-emp
 
 #[async_trait]
 impl Saga for PersistSequencedWithEmptyNestedSequenceSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(
             PERSIST_SEQUENCED_WITH_EMPTY_NESTED_SEQUENCE_SAGA_ID,
         ))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::OrderPlaced(event) = input;
         let persist = SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
         });
@@ -351,22 +356,20 @@ const PERSIST_SEQUENCED_WITH_NONE_LEAF_SAGA_ID: &str = "sequence-none-leaf-saga"
 
 #[async_trait]
 impl Saga for PersistSequencedWithNoneLeafSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(PERSIST_SEQUENCED_WITH_NONE_LEAF_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::OrderPlaced(event) = input;
         let persist = SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
         });
@@ -391,22 +394,20 @@ const PERSIST_COMBINE_TWO_TELLS_SAGA_ID: &str = "combine-order-saga";
 
 #[async_trait]
 impl Saga for PersistCombineTwoTellsSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(PERSIST_COMBINE_TWO_TELLS_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::OrderPlaced(event) = input;
         let effect = SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
         })
@@ -427,53 +428,104 @@ impl Saga for PersistCombineTwoTellsSaga {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// The saga's promise to its future self, carried inside the schedule fact.
+/// It is persisted but is not an event, so it names the `Codec` that writes it
+/// down rather than relying on serde.
+#[derive(Clone, Debug, PartialEq)]
 struct Reminder {
     note: String,
 }
 
-/// A persist combined with a schedule — the third category the merge
-/// concatenates.  No scheduler is injected, so the interpreter persists the
-/// `scheduled` marker and logs that no timer could be registered; the durable
-/// batch boundary is what this saga exists to expose.
+/// The bytes a `Reminder` is written as are the note itself — deliberately not
+/// a JSON shape, so a payload produced by anything but this codec would be
+/// visibly different on the stream.
+struct ReminderCodec;
+
+impl Codec<Reminder> for ReminderCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(value: &Reminder) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from(value.note.clone().into_bytes()))
+    }
+
+    fn decode(payload: &[u8]) -> Result<Reminder, Self::Error> {
+        Ok(Reminder {
+            note: String::from_utf8_lossy(payload).into_owned(),
+        })
+    }
+}
+
+impl DeadlineMessage for Reminder {
+    type Codec = ReminderCodec;
+}
+
+/// The alphabet of [`PersistCombineScheduleSaga`]: the one observed source, and
+/// the saga's own time.  Declaring the deadline variant is the whole of the
+/// scheduler wiring — the host resolves its resident timer core from it.
+#[derive(SagaSubscribe)]
+enum ScheduleInput {
+    OrderPlaced(OrderPlaced),
+    #[subscribe(deadline)]
+    Reminder(Reminder),
+}
+
+/// A persist combined with a deadline — the third category the merge
+/// concatenates.  The deadline is set an hour out, so within this test only the
+/// `scheduled` marker ever reaches the store; the durable batch boundary it
+/// shares with the domain event is what this saga exists to expose.
 struct PersistCombineScheduleSaga {
+    deadline: Deadline<Reminder>,
     handled: Arc<Notify>,
 }
 
 /// Correlation rule of [`PersistCombineScheduleSaga`]: the single reservation
-/// process every `OrderPlaced` in this test belongs to.
+/// process every `OrderPlaced` in this test belongs to.  A deadline firing
+/// never travels the subscription path, so its arm answers `None`.
 const PERSIST_COMBINE_SCHEDULE_SAGA_ID: &str = "combine-schedule-saga";
 
 #[async_trait]
 impl Saga for PersistCombineScheduleSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = ScheduleInput;
     type Event = ReservationRequested;
-    type ScheduledMessage = Reminder;
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(PERSIST_COMBINE_SCHEDULE_SAGA_ID))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            ScheduleInput::OrderPlaced(_) => Some(SagaId::new(PERSIST_COMBINE_SCHEDULE_SAGA_ID)),
+            ScheduleInput::Reminder(_) => None,
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        let effect = SagaEffect::persist(ReservationRequested {
-            sku: event.sku.clone(),
-        })
-        .combine(SagaEffect::schedule(
-            TimerName::new("reservation-deadline"),
-            Duration::from_secs(3600),
-            Reminder {
-                note: event.sku.clone(),
-            },
-        ));
-        self.handled.notify_one();
-        Ok(effect)
+        match input {
+            ScheduleInput::OrderPlaced(event) => {
+                let effect = SagaEffect::persist(ReservationRequested {
+                    sku: event.sku.clone(),
+                })
+                .combine(self.deadline.set(
+                    TimerName::new("reservation-deadline"),
+                    Duration::from_secs(3600),
+                    Reminder {
+                        note: event.sku.clone(),
+                    },
+                ));
+                self.handled.notify_one();
+                Ok(effect)
+            }
+            ScheduleInput::Reminder(reminder) => {
+                // The deadline is an hour out, so no scenario in this file
+                // reaches here. Naming the note keeps the firing's payload part
+                // of the alphabet rather than a field nothing ever reads, and
+                // the arm writes nothing so a firing could not disturb the
+                // batch assertions below.
+                let _never_due = reminder.note;
+                Ok(SagaEffect::None)
+            }
+        }
     }
 }
 
@@ -568,18 +620,12 @@ async fn persist_combined_with_tell_is_written_in_one_append_batch() {
     let _saga_proxy = SagaProps::<PersistCombineTellSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || PersistCombineTellSaga {
+        move |_components| PersistCombineTellSaga {
             inventory: inventory_clone.clone(),
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
     .spawn(system.process_system())
     .await;
 
@@ -678,18 +724,12 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
     let _saga_proxy = SagaProps::<PersistSequencedWithTellSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || PersistSequencedWithTellSaga {
+        move |_components| PersistSequencedWithTellSaga {
             inventory: inventory_clone.clone(),
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
     .spawn(system.process_system())
     .await;
 
@@ -788,18 +828,12 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
     let _saga_proxy = SagaProps::<PersistSequencedWithEmptyNestedSequenceSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || PersistSequencedWithEmptyNestedSequenceSaga {
+        move |_components| PersistSequencedWithEmptyNestedSequenceSaga {
             inventory: inventory_clone.clone(),
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
     .spawn(system.process_system())
     .await;
 
@@ -899,18 +933,12 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
     let _saga_proxy = SagaProps::<PersistSequencedWithNoneLeafSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || PersistSequencedWithNoneLeafSaga {
+        move |_components| PersistSequencedWithNoneLeafSaga {
             inventory: inventory_clone.clone(),
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
     .spawn(system.process_system())
     .await;
 
@@ -1008,19 +1036,13 @@ async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
     let _saga_proxy = SagaProps::<PersistCombineTwoTellsSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || PersistCombineTwoTellsSaga {
+        move |_components| PersistCombineTwoTellsSaga {
             first: first_clone.clone(),
             second: second_clone.clone(),
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
     .spawn(system.process_system())
     .await;
 
@@ -1075,7 +1097,7 @@ async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
     );
 }
 
-/// Given a saga returning `persist(e).combine(schedule(..))`,
+/// Given a saga returning `persist(e).combine(deadline.set(..))`,
 /// When the upstream event is handled,
 /// Then the domain event and the `scheduled` marker are written by a single
 /// `store::append` call — a split append could lose the timer's durable record
@@ -1099,17 +1121,12 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
     let _saga_proxy = SagaProps::<PersistCombineScheduleSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || PersistCombineScheduleSaga {
+        move |components| PersistCombineScheduleSaga {
+            deadline: components.deadline(),
             handled: Arc::clone(&handled_clone),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
     .spawn(system.process_system())
     .await;
 
@@ -1118,8 +1135,8 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
         .expect("Saga::handle must run within 3 seconds");
 
     // domain event + the `scheduled` marker + the consumed position; the timer
-    // itself is an hour out and no scheduler is injected, so nothing else
-    // reaches the store.
+    // the host armed is an hour out, so no firing — and so no `fired` marker —
+    // reaches the store inside this test.
     let recorded = wait_for_recorded_events(&batches, 3).await;
 
     let domain_batches: Vec<&Vec<RecordedEvent>> = recorded
@@ -1137,7 +1154,7 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
     assert_eq!(
         atomic_batch.len(),
         3,
-        "persist(e).combine(schedule(..)) must append the domain event, the \
+        "persist(e).combine(deadline.set(..)) must append the domain event, the \
          scheduled marker and the position of the input they were decided from \
          together; batches: {:?}",
         describe(&recorded)

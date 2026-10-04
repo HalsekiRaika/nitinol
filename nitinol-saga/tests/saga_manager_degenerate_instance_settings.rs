@@ -32,16 +32,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::{ProcessSystem, Props};
 use nitinol_saga::{
     DeadLetterEvent, EnqueueDecision, EnqueuePolicy, Saga, SagaContext, SagaEffect, SagaFailure,
-    SagaId, SagaManagerProps, TellIntent,
+    SagaId, SagaManagerProps, SagaSubscribe, Subscription, TellIntent,
 };
 
 /// The single instance every upstream event correlates to — the degenerate case
@@ -79,6 +77,13 @@ impl std::fmt::Display for SagaBoom {
 
 impl std::error::Error for SagaBoom {}
 
+/// The whole alphabet every saga in this file reacts to: one observed source, no
+/// deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Ping(Ping),
+}
+
 /// A saga whose `handle` always fails, counting invocations so a test can prove
 /// the failure actually occurred even when no dead letter is enqueued.
 struct AlwaysFailSaga {
@@ -88,20 +93,17 @@ struct AlwaysFailSaga {
 
 #[async_trait]
 impl Saga for AlwaysFailSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = SagaBoom;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RESIDENT_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: SagaLog) {}
-
     async fn handle(
         &mut self,
-        _event: Ping,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
         self.handle_count.fetch_add(1, Ordering::SeqCst);
@@ -276,18 +278,17 @@ async fn manager_with_dead_letter_subscriber_delivers_the_instances_dead_letter(
     let handle_count_for_saga = Arc::clone(&handle_count);
 
     let _manager_proxy =
-        SagaManagerProps::<AlwaysFailSaga>::new(Arc::clone(&saga_store), move || AlwaysFailSaga {
-            handled: Arc::clone(&handled_for_saga),
-            handle_count: Arc::clone(&handle_count_for_saga),
+        SagaManagerProps::<AlwaysFailSaga>::new(Arc::clone(&saga_store), move |_components| {
+            AlwaysFailSaga {
+                handled: Arc::clone(&handled_for_saga),
+                handle_count: Arc::clone(&handle_count_for_saga),
+            }
         })
         .with_dead_letter_subscriber(subscriber_proxy)
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "mgr-dlq-sub-upstream".to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<Ping>(Subscription::stream(
+            &upstream_store,
+            "mgr-dlq-sub-upstream",
+        ))
         .spawn(system.process_system())
         .await;
 
@@ -342,18 +343,17 @@ async fn manager_with_enqueue_policy_suppresses_the_instances_dead_letter() {
     let handle_count_for_saga = Arc::clone(&handle_count);
 
     let _manager_proxy =
-        SagaManagerProps::<AlwaysFailSaga>::new(Arc::clone(&saga_store), move || AlwaysFailSaga {
-            handled: Arc::clone(&handled_for_saga),
-            handle_count: Arc::clone(&handle_count_for_saga),
+        SagaManagerProps::<AlwaysFailSaga>::new(Arc::clone(&saga_store), move |_components| {
+            AlwaysFailSaga {
+                handled: Arc::clone(&handled_for_saga),
+                handle_count: Arc::clone(&handle_count_for_saga),
+            }
         })
         .with_enqueue_policy(Arc::new(IgnoreAll))
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "mgr-dlq-policy-upstream".to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<Ping>(Subscription::stream(
+            &upstream_store,
+            "mgr-dlq-policy-upstream",
+        ))
         .spawn(system.process_system())
         .await;
 
@@ -397,20 +397,17 @@ struct InertSaga;
 
 #[async_trait]
 impl Saga for InertSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = Infallible;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RESIDENT_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: SagaLog) {}
-
     async fn handle(
         &mut self,
-        _event: Ping,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
         Ok(SagaEffect::None)
@@ -456,20 +453,17 @@ async fn manager_with_crash_restart_factory_redispatches_the_instances_pending_t
 
     let mock_for_factory = mock.clone();
     let _manager_proxy =
-        SagaManagerProps::<InertSaga>::new(Arc::clone(&saga_store), InertSaga::default)
+        SagaManagerProps::<InertSaga>::new(Arc::clone(&saga_store), |_components| InertSaga)
             .with_crash_restart_factory(move |_bytes: &[u8]| -> Option<TellIntent> {
                 Some(TellIntent::new::<Inventory, Reserve, _>(
                     mock_for_factory.clone(),
                     Reserve,
                 ))
             })
-            .with_subscription(
-                Arc::clone(&upstream_store),
-                SequenceCursor::Stream {
-                    key: "mgr-crash-restart-upstream".to_owned(),
-                    after: 0,
-                },
-            )
+            .subscribed_to::<Ping>(Subscription::stream(
+                &upstream_store,
+                "mgr-crash-restart-upstream",
+            ))
             .spawn(system.process_system())
             .await;
 
@@ -539,15 +533,12 @@ async fn manager_dead_letter_subscriber_receives_an_ended_instances_dead_letter(
     seed_ended_marker(&saga_store, &saga_id, 1).await;
 
     let _manager_proxy =
-        SagaManagerProps::<InertSaga>::new(Arc::clone(&saga_store), InertSaga::default)
+        SagaManagerProps::<InertSaga>::new(Arc::clone(&saga_store), |_components| InertSaga)
             .with_dead_letter_subscriber(subscriber_proxy)
-            .with_subscription(
-                Arc::clone(&upstream_store),
-                SequenceCursor::Stream {
-                    key: "mgr-dlq-ended-upstream".to_owned(),
-                    after: 0,
-                },
-            )
+            .subscribed_to::<Ping>(Subscription::stream(
+                &upstream_store,
+                "mgr-dlq-ended-upstream",
+            ))
             .spawn(system.process_system())
             .await;
 

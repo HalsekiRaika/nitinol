@@ -22,7 +22,7 @@ use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery,
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDefaultStoreExt, SagaManagerProxy};
 
-use saga_fanout_pattern::payroll_run::PayrollRun;
+use saga_fanout_pattern::payroll_run::{PayrollRun, PayrollRunApproved};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
 use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 
@@ -128,9 +128,8 @@ pub async fn spawn_manager(
     let system_for_factory = system.clone();
 
     system
-        .saga_manager_props(system.subscription(run_id), move || {
-            FanOutSaga::new(system_for_producer.clone())
-        })
+        .saga_manager_props(move |_components| FanOutSaga::new(system_for_producer.clone()))
+        .subscribed_to::<PayrollRunApproved>(system.subscription(run_id))
         .with_crash_restart_factory(move |payload: &[u8]| {
             FanOutSaga::crash_restart_intent(&system_for_factory, payload)
         })

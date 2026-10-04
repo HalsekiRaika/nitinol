@@ -58,9 +58,9 @@ use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Metadata, Subscriber};
 
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
-    SequenceCursor, TellError,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
@@ -68,7 +68,10 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TimerName};
+use nitinol_saga::{
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe,
+    Subscription, TimerName,
+};
 
 // The capture
 
@@ -257,6 +260,13 @@ impl Event for SagaLog {
     type Codec = JsonCodec;
 }
 
+/// The alphabet of every saga below but the one that owns a deadline: one
+/// observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Ping(Ping),
+}
+
 #[derive(Debug)]
 struct SagaBoom;
 
@@ -333,21 +343,20 @@ struct HandleFailSaga;
 
 #[async_trait]
 impl Saga for HandleFailSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = SagaBoom;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(HANDLE_FAIL_SAGA_ID))
     }
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        _event: Ping,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::Ping(_event) = input;
         Err(SagaBoom)
     }
 }
@@ -367,16 +376,13 @@ async fn a_dead_letter_is_reported_with_its_event_type_arm_and_stream() {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(HANDLE_FAIL_SAGA_ID);
 
-    let _proxy = SagaProps::<HandleFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || {
+    let _proxy = SagaProps::<HandleFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), |_| {
         HandleFailSaga
     })
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: "tracing-handle-upstream".to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<Ping>(Subscription::stream(
+        &upstream_store,
+        "tracing-handle-upstream",
+    ))
     .spawn(system.process_system())
     .await;
 
@@ -458,21 +464,20 @@ struct TellFailSaga {
 
 #[async_trait]
 impl Saga for TellFailSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = std::convert::Infallible;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(TELL_FAIL_SAGA_ID))
     }
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        _event: Ping,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::Ping(_event) = input;
         Ok(SagaEffect::tell(self.target.clone(), Reserve))
     }
 }
@@ -496,22 +501,20 @@ async fn each_marker_of_a_failing_tell_is_reported_with_its_own_arm() {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(TELL_FAIL_SAGA_ID);
 
-    let _proxy =
-        SagaProps::<TellFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || TellFailSaga {
+    let _proxy = SagaProps::<TellFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), |_| {
+        TellFailSaga {
             target: FailingTellTarget {
                 target_id: AggregateId::new(TELL_FAIL_TARGET_ID),
                 _phantom: PhantomData,
             },
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "tracing-tell-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+        }
+    })
+    .subscribed_to::<Ping>(Subscription::stream(
+        &upstream_store,
+        "tracing-tell-upstream",
+    ))
+    .spawn(system.process_system())
+    .await;
 
     wait_for_rows(&saga_store, &saga_id, DEAD_LETTER_MARKER, 1).await;
 
@@ -530,45 +533,79 @@ async fn each_marker_of_a_failing_tell_is_reported_with_its_own_arm() {
 
 const SCHEDULE_SAGA_ID: &str = "tracing-schedule-saga";
 
+/// What the deadline below carries.  It carries nothing — the records the test
+/// reads are about the registration and the firing, not about a payload — so
+/// the format it names writes no bytes.
+#[derive(Clone, Debug)]
+struct Reminder;
+
+struct ReminderCodec;
+
+impl Codec<Reminder> for ReminderCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_value: &Reminder) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Reminder, Self::Error> {
+        Ok(Reminder)
+    }
+}
+
+impl DeadlineMessage for Reminder {
+    type Codec = ReminderCodec;
+}
+
+/// The alphabet of [`ScheduleSaga`]: the observed source, plus the saga's own
+/// time.
+#[derive(SagaSubscribe)]
+enum TimerInput {
+    Ping(Ping),
+    #[subscribe(deadline)]
+    Reminder(Reminder),
+}
+
 struct ScheduleSaga {
+    deadline: Deadline<Reminder>,
     fired: Arc<Notify>,
 }
 
 #[async_trait]
 impl Saga for ScheduleSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = TimerInput;
     type Event = SagaLog;
     type Error = std::convert::Infallible;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
-        Some(SagaId::new(SCHEDULE_SAGA_ID))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            TimerInput::Ping(_) => Some(SagaId::new(SCHEDULE_SAGA_ID)),
+            // A deadline firing is addressed to the instance that set it and
+            // never travels the subscription path.
+            TimerInput::Reminder(_) => None,
+        }
     }
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        _event: Ping,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        Ok(SagaEffect::schedule(
-            TimerName::new("reminder"),
-            Duration::from_millis(80),
-            (),
-        ))
-    }
-
-    async fn on_scheduled(
-        &mut self,
-        _message: (),
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        self.fired.notify_one();
-        Ok(SagaEffect::None)
+        match input {
+            TimerInput::Ping(_event) => Ok(self.deadline.set(
+                TimerName::new("reminder"),
+                Duration::from_millis(80),
+                Reminder,
+            )),
+            TimerInput::Reminder(Reminder) => {
+                self.fired.notify_one();
+                Ok(SagaEffect::None)
+            }
+        }
     }
 }
 
-/// Given a saga that registers a timer, When the registration and the firing are
+/// Given a saga that sets a deadline, When the registration and the firing are
 /// each written to its stream, Then both are reported under the schedule event
 /// type with the arm each recorded.
 #[tokio::test]
@@ -576,7 +613,6 @@ async fn a_registered_and_a_fired_timer_are_reported_with_distinct_arms() {
     let capture = Capture::installed();
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "tracing-schedule-upstream", 1, "tick").await;
@@ -586,22 +622,20 @@ async fn a_registered_and_a_fired_timer_are_reported_with_distinct_arms() {
     let fired = Arc::new(Notify::new());
     let fired_for_saga = Arc::clone(&fired);
 
-    let _proxy =
-        SagaProps::<ScheduleSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            ScheduleSaga {
-                fired: Arc::clone(&fired_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "tracing-schedule-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .with_scheduler(scheduler.clone())
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaProps::<ScheduleSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |components| ScheduleSaga {
+            deadline: components.deadline(),
+            fired: Arc::clone(&fired_for_saga),
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(
+        &upstream_store,
+        "tracing-schedule-upstream",
+    ))
+    .spawn(system.process_system())
+    .await;
 
     // Two schedule rows: the registration and the firing.
     wait_for_rows(&saga_store, &saga_id, SCHEDULE_MARKER, 2).await;
@@ -624,21 +658,20 @@ struct PositionSaga {
 
 #[async_trait]
 impl Saga for PositionSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = std::convert::Infallible;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(POSITION_SAGA_ID))
     }
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        event: Ping,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::Ping(event) = input;
         self.handled.notify_one();
         Ok(SagaEffect::persist(SagaLog { note: event.tag }))
     }
@@ -664,21 +697,16 @@ async fn the_position_a_batch_consumed_is_reported_with_its_own_arm() {
     let handled = Arc::new(Notify::new());
     let handled_for_saga = Arc::clone(&handled);
 
-    let _proxy =
-        SagaProps::<PositionSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            PositionSaga {
-                handled: Arc::clone(&handled_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: POSITION_UPSTREAM_KEY.to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaProps::<PositionSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| PositionSaga {
+            handled: Arc::clone(&handled_for_saga),
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(&upstream_store, POSITION_UPSTREAM_KEY))
+    .spawn(system.process_system())
+    .await;
 
     // The row has to be on the stream before the record about it means
     // anything: a record claiming a write that never happened would be worse
@@ -716,21 +744,20 @@ struct DomainOnlySaga {
 
 #[async_trait]
 impl Saga for DomainOnlySaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = std::convert::Infallible;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(DOMAIN_ONLY_SAGA_ID))
     }
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        event: Ping,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::Ping(event) = input;
         self.handled.notify_one();
         Ok(SagaEffect::persist(SagaLog { note: event.tag }))
     }
@@ -756,21 +783,19 @@ async fn a_user_event_is_not_reported_as_a_framework_record() {
     let handled = Arc::new(Notify::new());
     let handled_for_saga = Arc::clone(&handled);
 
-    let _proxy =
-        SagaProps::<DomainOnlySaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            DomainOnlySaga {
-                handled: Arc::clone(&handled_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "tracing-domain-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaProps::<DomainOnlySaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| DomainOnlySaga {
+            handled: Arc::clone(&handled_for_saga),
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(
+        &upstream_store,
+        "tracing-domain-upstream",
+    ))
+    .spawn(system.process_system())
+    .await;
 
     // The domain row has to be on the stream before its absence from the
     // capture means anything.

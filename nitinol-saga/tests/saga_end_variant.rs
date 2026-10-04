@@ -20,13 +20,13 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -53,6 +53,12 @@ impl Event for ReservationRequested {
 /// process, so every `OrderPlaced` names that single instance.
 const PERSIST_THEN_END_SAGA_ID: &str = "end-saga-1";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 /// A saga that emits `Persist.combine(End)` so we can verify both:
 /// 1. The user event is persisted before End is interpreted
 /// 2. Effects after End in the same handle call must not be interpreted
@@ -63,22 +69,20 @@ struct PersistThenEndSaga {
 
 #[async_trait]
 impl Saga for PersistThenEndSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(PERSIST_THEN_END_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         *self.handle_count.lock().expect(
             "handle_count mutex is never poisoned: no holder panics while the guard is alive",
         ) += 1;
@@ -151,22 +155,17 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_first_clone = Arc::clone(&handled_first);
 
-    let _saga_proxy =
-        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            PersistThenEndSaga {
-                handle_count: Arc::clone(&handle_count_clone),
-                handled_first: Arc::clone(&handled_first_clone),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<PersistThenEndSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| PersistThenEndSaga {
+            handle_count: Arc::clone(&handle_count_clone),
+            handled_first: Arc::clone(&handled_first_clone),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled_first.notified())
         .await

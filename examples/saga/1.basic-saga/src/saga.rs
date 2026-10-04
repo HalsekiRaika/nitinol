@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
 use nitinol_eventsource::AggregateProxy;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe};
 
 use crate::codec::JsonCodec;
 use crate::inventory::{Inventory, Reserve};
@@ -13,6 +13,19 @@ use crate::order::OrderPlaced;
 #[event(family = "saga.example", codec = JsonCodec)]
 pub struct ReservationRequested {
     pub sku: String,
+}
+
+/// The whole alphabet this saga reacts to: one observed source, and no deadline
+/// of its own.
+///
+/// Everything a saga reacts to is declared here, in one enum, and everything
+/// reaches it through the one [`Saga::handle`] entry point.  Declaring it this
+/// way is what makes a forgotten reaction a compile error rather than a silent
+/// gap: adding a variant leaves the `match` in `handle` non-exhaustive, and the
+/// spawn site owes the new source a subscription before `spawn` exists at all.
+#[derive(SagaSubscribe)]
+pub enum Observed {
+    OrderPlaced(OrderPlaced),
 }
 
 pub struct ReservationSaga {
@@ -31,22 +44,24 @@ impl ReservationSaga {
 
 #[async_trait]
 impl Saga for ReservationSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(Self::instance_id())
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
+    // `apply` is left to its default: this saga keeps no state, because the
+    // reservation it asked for is already recorded on the inventory's own
+    // stream and mirroring it here would give one fact two owners.
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::OrderPlaced(event) = input;
         let persist = SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
         });

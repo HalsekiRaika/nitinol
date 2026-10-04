@@ -16,7 +16,7 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaDefaultStoreExt;
 
-use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun};
+use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun, PayrollRunApproved};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
 use saga_fanout_pattern::saga::FanOutSaga;
 
@@ -55,11 +55,12 @@ async fn main() {
 
     // The manager, not `spawn_saga`, is what turns a subscription into one saga
     // instance per correlation key, spawning it on the first event that
-    // correlates to it.
+    // correlates to it.  One `subscribed_to` call per source the saga's alphabet
+    // declares — here the run's stream, read as `PayrollRunApproved` — and
+    // `spawn` exists only once every declared source has one.
     let _manager = system
-        .saga_manager_props(system.subscription(&run_id), move || {
-            FanOutSaga::new(system_for_producer.clone())
-        })
+        .saga_manager_props(move |_components| FanOutSaga::new(system_for_producer.clone()))
+        .subscribed_to::<PayrollRunApproved>(system.subscription(&run_id))
         .with_crash_restart_factory(move |payload: &[u8]| {
             FanOutSaga::crash_restart_intent(&system_for_factory, payload)
         })

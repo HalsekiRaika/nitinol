@@ -1,32 +1,45 @@
-//! End-to-end behaviour of the DeadlineScheduler.
+//! End-to-end behaviour of a saga's own time, declared as a `Deadline<M>`
+//! component and a `#[subscribe(deadline)]` variant of its alphabet.
 //!
-//! These integration tests exercise the full data flow across modules:
-//! `SagaEffect::schedule` / `cancel_schedule` → interpreter → `SchedulerProcess`
-//! timer → `Saga::on_scheduled` dispatch → `SagaPersisted::Schedule` events on
-//! the saga's own `EventStore` stream.
+//! ```gherkin
+//!   Scenario: a deadline from setting to firing
+//!     Given a saga with a #[subscribe(deadline)] variant and a Deadline<M>
+//!     When handle returns the deadline-setting effect in the same batch as its decision
+//!     And the deadline elapses
+//!     Then the firing message reaches the deadline arm of the same handle
+//! ```
 //!
-//! ## API contract assumed by these tests
+//! The data flow exercised: `Deadline::set` / `Deadline::cancel` → interpreter
+//! → resident `SchedulerProcess` timer → the deadline arm of `Saga::handle` →
+//! `nitinol.saga.schedule` markers on the saga's own `EventStore` stream.
 //!
-//! - `Saga::ScheduledMessage` associated type; `on_scheduled(msg:
-//!   Self::ScheduledMessage, ctx)`.
-//! - `SagaEffect::schedule(TimerName, Duration, msg)` and
-//!   `SagaEffect::cancel_schedule(TimerName)`.
-//! - `ProcessSystem::spawn_resident::<nitinol_saga::SchedulerProcess>()`
-//!   (the system-wide resident scheduler, resolved by type) whose
-//!   `ProcessProxy` converts into `nitinol_saga::SchedulerProxy`, and
-//!   `SagaProps::with_scheduler(SchedulerProxy)` to inject it.  The two steps
-//!   are spelled once in `common::resident_scheduler`.
-//! - Schedule events are appended to the saga stream under the event type
+//! ## API contract assumed by this file
+//!
+//! - `#[derive(SagaSubscribe)]` with one `#[subscribe(deadline)]` newtype
+//!   variant whose payload type implements `DeadlineMessage` (`type Codec`).
+//! - `SagaComponents::deadline::<M>() -> Deadline<M>`, obtainable only from the
+//!   producer the spawn builder calls: `Fn(SagaComponents<S>) -> S`.
+//! - `Deadline::set(TimerName, Duration, M) -> SagaEffect<E>` and
+//!   `Deadline::cancel(TimerName) -> SagaEffect<E>` — effect constructors, so
+//!   the fact is written before any timer is armed.
+//! - **No scheduler wiring.**  A saga whose alphabet declares a deadline gets
+//!   the system's resident `SchedulerProcess` resolved for it at spawn; there is
+//!   no `with_scheduler` to call.  That resolution is pinned on its own in
+//!   `saga_host_owns_scheduler.rs`.
+//! - Schedule markers are appended under the event type
 //!   `nitinol.saga.schedule`; which transition a marker records
 //!   (`scheduled` / `cancelled` / `fired`) is carried by its payload's `oneof`.
 //!
 //! If a name differs in the implementation, only the wiring lines below need to
 //! be reconciled — the asserted behaviour is the requirement.
+//!
+//! Run with: `cargo test -p nitinol-saga --test saga_deadline_scheduler`.
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{schedule_kind_of, schedule_transition};
+use common::{encode_schedule_scheduled, schedule_kind_of, schedule_transition};
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,17 +48,23 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
-use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TimerName};
-
-// Local JSON codec — self-contained so this file does not couple to the shared
-// `common` module.
+use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::Event;
+use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::{
+    AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+};
+use nitinol_runtime::ProcessSystem;
+use nitinol_saga::{
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription,
+    TimerName,
+};
 
-#[derive(Default)]
+// Local JSON codec for the domain events — self-contained so this file does not
+// couple to the shared `common` module for its domain.
+
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de> + 'static> Codec<E> for JsonCodec {
@@ -67,6 +86,34 @@ struct Trigger {
     note: String,
     after_millis: u64,
     cancel: bool,
+    with_decision: bool,
+}
+
+impl Trigger {
+    fn setting(note: &str, after_millis: u64) -> Self {
+        Self {
+            note: note.to_owned(),
+            after_millis,
+            cancel: false,
+            with_decision: false,
+        }
+    }
+
+    fn deciding_and_setting(note: &str, after_millis: u64) -> Self {
+        Self {
+            with_decision: true,
+            ..Self::setting(note, after_millis)
+        }
+    }
+
+    fn cancelling() -> Self {
+        Self {
+            note: String::new(),
+            after_millis: 0,
+            cancel: true,
+            with_decision: false,
+        }
+    }
 }
 
 impl Event for Trigger {
@@ -86,12 +133,53 @@ impl Event for Recorded {
     type Codec = JsonCodec;
 }
 
-/// The saga's `Self::ScheduledMessage` — a typed payload that must survive the
-/// serialize → persist → deserialize → `on_scheduled` round trip.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// The saga's promise to its future self.  It is persisted inside the schedule
+/// fact, which is why it names the format that writes it down — and why that
+/// format is a `Codec`, like every other persisted value's, rather than serde.
+#[derive(Clone, Debug, PartialEq)]
 struct Reminder {
     note: String,
 }
+
+/// Deliberately *not* a JSON shape: the bytes a `Reminder` is written as are
+/// the note itself, so a payload produced by `serde_json` instead of this codec
+/// is visibly different on the stream.
+struct ReminderCodec;
+
+impl Codec<Reminder> for ReminderCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(value: &Reminder) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from(value.note.clone().into_bytes()))
+    }
+
+    fn decode(payload: &[u8]) -> Result<Reminder, Self::Error> {
+        Ok(Reminder {
+            note: String::from_utf8_lossy(payload).into_owned(),
+        })
+    }
+}
+
+impl DeadlineMessage for Reminder {
+    type Codec = ReminderCodec;
+}
+
+/// The whole alphabet this saga reacts to: one external source, and its own
+/// time.
+#[derive(SagaSubscribe)]
+enum TimerInput {
+    Trigger(Trigger),
+    #[subscribe(deadline)]
+    Reminder(Reminder),
+}
+
+/// How many times `correlate` was asked about a deadline firing.
+///
+/// Binary-wide, because `correlate` is an associated function with no receiver
+/// to hang state off.  Every test in this file requires it to stay at zero: a
+/// firing is addressed to the instance that set it and never travels the
+/// subscription path correlation answers for.
+static CORRELATE_ASKED_ABOUT_A_DEADLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// Correlation rule of [`TimerSaga`]: every test below drives a single timer
 /// process against its own stores, so one id names the instance a `Trigger`
@@ -99,58 +187,212 @@ struct Reminder {
 const TIMER_SAGA_ID: &str = "deadline-fires-1";
 
 struct TimerSaga {
+    deadline: Deadline<Reminder>,
     fired: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait]
 impl Saga for TimerSaga {
-    type SubscribedEvent = Trigger;
+    type Subscribe = TimerInput;
     type Event = Recorded;
     type Error = std::convert::Infallible;
-    type ScheduledMessage = Reminder;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(TIMER_SAGA_ID))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            TimerInput::Trigger(_) => Some(SagaId::new(TIMER_SAGA_ID)),
+            TimerInput::Reminder(_) => {
+                CORRELATE_ASKED_ABOUT_A_DEADLINE.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
     }
-
-    fn apply(&mut self, _event: Recorded) {}
 
     async fn handle(
         &mut self,
-        event: Trigger,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<Recorded>, Self::Error> {
-        if event.cancel {
-            return Ok(SagaEffect::cancel_schedule(TimerName::new("reminder")));
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        match input {
+            TimerInput::Trigger(trigger) if trigger.cancel => {
+                Ok(self.deadline.cancel(TimerName::new("reminder")))
+            }
+            TimerInput::Trigger(trigger) => {
+                let set = self.deadline.set(
+                    TimerName::new("reminder"),
+                    Duration::from_millis(trigger.after_millis),
+                    Reminder {
+                        note: trigger.note.clone(),
+                    },
+                );
+                if trigger.with_decision {
+                    return Ok(SagaEffect::persist(Recorded {
+                        label: format!("decided:{}", trigger.note),
+                    })
+                    .combine(set));
+                }
+                Ok(set)
+            }
+            TimerInput::Reminder(reminder) => {
+                self.fired
+                    .lock()
+                    .expect("fired mutex")
+                    .push(reminder.note.clone());
+                Ok(SagaEffect::persist(Recorded {
+                    label: format!("fired:{}", reminder.note),
+                }))
+            }
         }
-        Ok(SagaEffect::schedule(
-            TimerName::new("reminder"),
-            Duration::from_millis(event.after_millis),
-            Reminder { note: event.note },
-        ))
+    }
+}
+
+/// A saga whose deadline arm re-sets the deadline under the **same**
+/// `TimerName` exactly once, controlled by the payload rather than by a
+/// per-instance counter so the behaviour is incarnation-independent.
+struct OnceRescheduleSaga {
+    deadline: Deadline<GenerationReminder>,
+    fires: Arc<Mutex<Vec<String>>>,
+}
+
+/// Payload for the marker-ordering regression saga.  `generation` controls
+/// whether the deadline arm re-sets: generation 0 re-sets under the same name
+/// with generation 1; generation 1 is a no-op.
+#[derive(Clone, Debug, PartialEq)]
+struct GenerationReminder {
+    note: String,
+    generation: u32,
+}
+
+struct GenerationReminderCodec;
+
+impl Codec<GenerationReminder> for GenerationReminderCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(value: &GenerationReminder) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from(format!("{}|{}", value.generation, value.note)))
     }
 
-    async fn on_scheduled(
+    fn decode(payload: &[u8]) -> Result<GenerationReminder, Self::Error> {
+        let text = String::from_utf8_lossy(payload).into_owned();
+        let (generation, note) = text.split_once('|').unwrap_or(("0", text.as_str()));
+        Ok(GenerationReminder {
+            generation: generation.parse().unwrap_or(0),
+            note: note.to_owned(),
+        })
+    }
+}
+
+impl DeadlineMessage for GenerationReminder {
+    type Codec = GenerationReminderCodec;
+}
+
+#[derive(SagaSubscribe)]
+enum RepeatInput {
+    Trigger(Trigger),
+    #[subscribe(deadline)]
+    Repeat(GenerationReminder),
+}
+
+/// Correlation rule of [`OnceRescheduleSaga`]: both incarnations of the
+/// regression below are the same process instance, so they answer alike.
+const ONCE_RESCHEDULE_SAGA_ID: &str = "deadline-arch004-1";
+
+#[async_trait]
+impl Saga for OnceRescheduleSaga {
+    type Subscribe = RepeatInput;
+    type Event = Recorded;
+    type Error = std::convert::Infallible;
+
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            RepeatInput::Trigger(_) => Some(SagaId::new(ONCE_RESCHEDULE_SAGA_ID)),
+            RepeatInput::Repeat(_) => {
+                CORRELATE_ASKED_ABOUT_A_DEADLINE.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
+    }
+
+    async fn handle(
         &mut self,
-        message: Reminder,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<Recorded>, Self::Error> {
-        self.fired
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        match input {
+            RepeatInput::Trigger(trigger) => Ok(self.deadline.set(
+                TimerName::new("repeat"),
+                Duration::from_millis(trigger.after_millis),
+                GenerationReminder {
+                    note: trigger.note,
+                    generation: 0,
+                },
+            )),
+            RepeatInput::Repeat(reminder) => {
+                self.fires
+                    .lock()
+                    .expect("fires mutex")
+                    .push(reminder.note.clone());
+                if reminder.generation == 0 {
+                    return Ok(self.deadline.set(
+                        TimerName::new("repeat"),
+                        Duration::from_millis(300),
+                        GenerationReminder {
+                            note: format!("{}-2nd", reminder.note),
+                            generation: 1,
+                        },
+                    ));
+                }
+                Ok(SagaEffect::empty())
+            }
+        }
+    }
+}
+
+// Stores
+
+#[derive(Clone, Debug)]
+struct RecordedRow {
+    event_type: EventType,
+}
+
+type Batches = Arc<Mutex<Vec<Vec<RecordedRow>>>>;
+
+/// Records one entry per successful `append`, preserving the batch boundary —
+/// the only place "the decision and its deadline reached the store together" is
+/// observable.
+struct RecordingStore {
+    inner: InMemoryEventStore,
+    batches: Batches,
+}
+
+#[async_trait]
+impl EventStore for RecordingStore {
+    async fn append(
+        &self,
+        key: &str,
+        events: Vec<AppendingEvent>,
+    ) -> Result<AppendOutcome, AppendError> {
+        let recorded: Vec<RecordedRow> = events
+            .iter()
+            .map(|event| RecordedRow {
+                event_type: event.event_type,
+            })
+            .collect();
+        let outcome = self.inner.append(key, events).await?;
+        self.batches
             .lock()
-            .expect("fired mutex")
-            .push(message.note.clone());
-        Ok(SagaEffect::persist(Recorded {
-            label: format!("fired:{}", message.note),
-        }))
+            .expect("recorded batches must not be poisoned")
+            .push(recorded);
+        Ok(outcome)
+    }
+
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        self.inner.load(query).await
     }
 }
 
 // Helpers
 
 /// The transitions recorded on this stream, in the order they were written.
-///
-/// Every schedule marker carries the one `nitinol.saga.schedule` path, so which
-/// transition a marker records is read from its payload.
 fn schedule_transitions(events: &[LoadedEvent]) -> Vec<&'static str> {
     events
         .iter()
@@ -212,27 +454,54 @@ async fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
     }
 }
 
+/// Spawn a [`TimerSaga`] with no scheduler wiring: the alphabet declaring a
+/// deadline variant is the whole of the declaration, and the host resolves the
+/// resident timer core from it.
+async fn spawn_timer_saga(
+    ps: &ProcessSystem,
+    saga_id: &SagaId,
+    saga_store: &Arc<dyn EventStore>,
+    upstream_store: &Arc<dyn EventStore>,
+    upstream_key: &str,
+    fired: &Arc<Mutex<Vec<String>>>,
+) -> nitinol_saga::SagaProxy<TimerSaga> {
+    let fired = Arc::clone(fired);
+    SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(saga_store), move |components| {
+        TimerSaga {
+            deadline: components.deadline(),
+            fired: Arc::clone(&fired),
+        }
+    })
+    .subscribed_to::<Trigger>(Subscription::stream(upstream_store, upstream_key))
+    .spawn(ps)
+    .await
+}
+
+fn assert_correlate_was_never_asked_about_a_deadline() {
+    assert_eq!(
+        CORRELATE_ASKED_ABOUT_A_DEADLINE.load(Ordering::SeqCst),
+        0,
+        "a deadline firing is addressed to the instance that set it, so the \
+         framework must never route one through `correlate`"
+    );
+}
+
 // Tests
 
-/// Given a saga that schedules a `Reminder` after a short delay,
-/// When the timer elapses,
-/// Then `on_scheduled` is invoked with the deserialised typed payload.
+/// Given a saga whose handle sets a `Reminder` deadline a short way out,
+/// When the deadline elapses,
+/// Then the firing reaches the deadline arm of the same `handle`, carrying the
+/// message that was set.
 #[tokio::test]
-async fn schedule_fires_and_delivers_typed_message() {
+async fn a_deadline_fires_into_the_deadline_arm_of_handle() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_trigger(
         &upstream_store,
         "deadline-upstream-1",
         1,
-        Trigger {
-            note: "hello".to_owned(),
-            after_millis: 150,
-            cancel: false,
-        },
+        Trigger::setting("hello", 150),
     )
     .await;
 
@@ -240,21 +509,14 @@ async fn schedule_fires_and_delivers_typed_message() {
     let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let fired_producer = Arc::clone(&fired);
-    let _proxy = SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-        TimerSaga {
-            fired: Arc::clone(&fired_producer),
-        }
-    })
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: "deadline-upstream-1".to_owned(),
-            after: 0,
-        },
+    let _proxy = spawn_timer_saga(
+        &ps,
+        &saga_id,
+        &saga_store,
+        &upstream_store,
+        "deadline-upstream-1",
+        &fired,
     )
-    .with_scheduler(scheduler.clone())
-    .spawn(system.process_system())
     .await;
 
     let fired_check = Arc::clone(&fired);
@@ -264,59 +526,51 @@ async fn schedule_fires_and_delivers_typed_message() {
     .await;
 
     let seen = fired.lock().expect("fired mutex").clone();
-    assert!(
-        ok,
-        "the scheduled reminder must fire within 5s; fired={seen:?}"
-    );
+    assert!(ok, "the deadline must fire within 5s; fired={seen:?}");
     assert_eq!(
         seen,
         vec!["hello".to_owned()],
-        "on_scheduled must receive exactly the scheduled typed payload"
+        "the deadline arm must receive exactly the message that was set"
     );
+    assert_correlate_was_never_asked_about_a_deadline();
 }
 
-/// Given a schedule and its subsequent firing,
-/// Then the saga's own stream carries a `scheduled` marker (on schedule) and a
-/// `fired` marker (on dispatch), both under the `nitinol.saga.schedule` type
-/// key.
+/// Acceptance scenario: the deadline is set in the same batch as the decision.
+///
+/// Given a handle that returns its decision combined with a deadline-setting
+/// effect,
+/// When the result is persisted,
+/// Then one append carries both the decision and the `scheduled` marker:
+/// neither is ever in the store without the other.
 #[tokio::test]
-async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
+async fn a_decision_and_the_deadline_it_sets_reach_the_store_in_one_append() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_trigger(
         &upstream_store,
-        "deadline-upstream-2",
+        "deadline-upstream-batch",
         1,
-        Trigger {
-            note: "mark".to_owned(),
-            after_millis: 150,
-            cancel: false,
-        },
+        Trigger::deciding_and_setting("batched", 150),
     )
     .await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let batches: Batches = Arc::new(Mutex::new(Vec::new()));
+    let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore {
+        inner: InMemoryEventStore::default(),
+        batches: Arc::clone(&batches),
+    });
     let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let fired_producer = Arc::clone(&fired);
-    let _proxy = SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-        TimerSaga {
-            fired: Arc::clone(&fired_producer),
-        }
-    })
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: "deadline-upstream-2".to_owned(),
-            after: 0,
-        },
+    let _proxy = spawn_timer_saga(
+        &ps,
+        &saga_id,
+        &saga_store,
+        &upstream_store,
+        "deadline-upstream-batch",
+        &fired,
     )
-    .with_scheduler(scheduler.clone())
-    .spawn(system.process_system())
     .await;
 
     let fired_check = Arc::clone(&fired);
@@ -324,16 +578,91 @@ async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
         !fired_check.lock().expect("fired mutex").is_empty()
     })
     .await;
-    assert!(ok, "the reminder must fire so a `fired` marker is written");
+    assert!(ok, "the batched deadline must still fire");
 
-    // Allow the post-fire persist to settle.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let recorded = batches
+        .lock()
+        .expect("recorded batches must not be poisoned")
+        .clone();
+    let opening = recorded
+        .first()
+        .expect("the decision's batch must have been recorded");
+    let types: Vec<String> = opening
+        .iter()
+        .map(|row| row.event_type.to_string())
+        .collect();
 
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    assert!(
+        types.iter().any(|t| t == &Recorded::EVENT_TYPE.to_string())
+            && types
+                .iter()
+                .any(|t| t == &common::SCHEDULE_MARKER.to_string()),
+        "the decision and the deadline fact must share one atomic batch, so no \
+         crash can leave a timer armed against a decision no store holds; the \
+         opening batch held {types:?}"
+    );
+}
+
+/// Given a deadline and its subsequent firing,
+/// Then the saga's own stream carries a `scheduled` marker (on setting) and a
+/// `fired` marker (on delivery), both under the `nitinol.saga.schedule` type
+/// key.
+#[tokio::test]
+async fn setting_and_firing_persist_schedule_markers_on_the_saga_stream() {
+    let ps = ProcessSystem::new().await;
+
+    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    append_trigger(
+        &upstream_store,
+        "deadline-upstream-2",
+        1,
+        Trigger::setting("mark", 150),
+    )
+    .await;
+
+    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_id = SagaId::new(TIMER_SAGA_ID);
+    let fired = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let _proxy = spawn_timer_saga(
+        &ps,
+        &saga_id,
+        &saga_store,
+        &upstream_store,
+        "deadline-upstream-2",
+        &fired,
+    )
+    .await;
+
+    let fired_check = Arc::clone(&fired);
+    let ok = wait_until(Duration::from_secs(5), || {
+        !fired_check.lock().expect("fired mutex").is_empty()
+    })
+    .await;
+    assert!(ok, "the deadline must fire so a `fired` marker is written");
+
+    // The `fired:` decision is the barrier for the post-fire append: it is the
+    // effect the deadline arm returned, so once it is on the stream the fire's
+    // own marker is too.
+    let deadline_for_rows = Instant::now() + Duration::from_secs(5);
+    let events = loop {
+        let events = load_saga_events(&saga_store, &saga_id).await;
+        if count_schedule_transition(&events, "fired") >= 1 {
+            break events;
+        }
+        assert!(
+            Instant::now() < deadline_for_rows,
+            "timed out waiting for the `fired` marker; stream held {:?}",
+            schedule_transitions(&events)
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
     assert_eq!(
         count_schedule_transition(&events, "scheduled"),
         1,
-        "scheduling must append exactly one `nitinol.saga.schedule.scheduled` marker"
+        "setting a deadline must append exactly one \
+         `nitinol.saga.schedule.scheduled` marker"
     );
     assert_eq!(
         count_schedule_transition(&events, "fired"),
@@ -347,37 +676,25 @@ async fn schedule_and_fire_persist_schedule_markers_on_saga_stream() {
     );
 }
 
-/// `startSingleTimer` semantics: re-scheduling the same `TimerName`
-/// auto-cancels the earlier registration, so only the latest schedule fires.
+/// `startSingleTimer` semantics: re-setting the same `TimerName` auto-cancels
+/// the earlier registration, so only the latest deadline fires.
 #[tokio::test]
-async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
+async fn resetting_the_same_name_auto_cancels_the_earlier_deadline() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    // First: a long delay under name "reminder".
     append_trigger(
         &upstream_store,
         "deadline-upstream-3",
         1,
-        Trigger {
-            note: "stale".to_owned(),
-            after_millis: 1_500,
-            cancel: false,
-        },
+        Trigger::setting("stale", 1_500),
     )
     .await;
-    // Second: a short delay under the SAME name — must replace the first.
     append_trigger(
         &upstream_store,
         "deadline-upstream-3",
         2,
-        Trigger {
-            note: "fresh".to_owned(),
-            after_millis: 150,
-            cancel: false,
-        },
+        Trigger::setting("fresh", 150),
     )
     .await;
 
@@ -385,71 +702,54 @@ async fn rescheduling_same_name_auto_cancels_the_earlier_timer() {
     let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let fired_producer = Arc::clone(&fired);
-    let _proxy = SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-        TimerSaga {
-            fired: Arc::clone(&fired_producer),
-        }
-    })
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: "deadline-upstream-3".to_owned(),
-            after: 0,
-        },
+    let _proxy = spawn_timer_saga(
+        &ps,
+        &saga_id,
+        &saga_store,
+        &upstream_store,
+        "deadline-upstream-3",
+        &fired,
     )
-    .with_scheduler(scheduler.clone())
-    .spawn(system.process_system())
     .await;
 
-    // Wait for the fresh timer to fire.
     let fired_check = Arc::clone(&fired);
     let ok = wait_until(Duration::from_secs(5), || {
         !fired_check.lock().expect("fired mutex").is_empty()
     })
     .await;
-    assert!(ok, "the re-scheduled (fresh) timer must fire");
+    assert!(ok, "the re-set (fresh) deadline must fire");
 
-    // Wait past the stale timer's original deadline to prove it was cancelled.
+    // Wait past the stale deadline's original due time to prove it was cancelled.
     tokio::time::sleep(Duration::from_millis(1_800)).await;
 
     let seen = fired.lock().expect("fired mutex").clone();
     assert_eq!(
         seen,
         vec!["fresh".to_owned()],
-        "only the latest schedule under a re-used name may fire (the stale one is auto-cancelled)"
+        "only the latest deadline under a re-used name may fire (the stale one \
+         is auto-cancelled)"
     );
 }
 
-/// `cancel_schedule(name)` cancels a pending timer so it never fires, and
+/// `Deadline::cancel(name)` cancels a pending deadline so it never fires, and
 /// records a `cancelled` marker on the saga stream.
 #[tokio::test]
-async fn cancel_schedule_prevents_the_timer_from_firing() {
+async fn cancel_prevents_the_deadline_from_firing() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_trigger(
         &upstream_store,
         "deadline-upstream-4",
         1,
-        Trigger {
-            note: "doomed".to_owned(),
-            after_millis: 600,
-            cancel: false,
-        },
+        Trigger::setting("doomed", 600),
     )
     .await;
     append_trigger(
         &upstream_store,
         "deadline-upstream-4",
         2,
-        Trigger {
-            note: String::new(),
-            after_millis: 0,
-            cancel: true,
-        },
+        Trigger::cancelling(),
     )
     .await;
 
@@ -457,182 +757,155 @@ async fn cancel_schedule_prevents_the_timer_from_firing() {
     let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let fired_producer = Arc::clone(&fired);
-    let _proxy = SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-        TimerSaga {
-            fired: Arc::clone(&fired_producer),
-        }
-    })
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: "deadline-upstream-4".to_owned(),
-            after: 0,
-        },
+    let _proxy = spawn_timer_saga(
+        &ps,
+        &saga_id,
+        &saga_store,
+        &upstream_store,
+        "deadline-upstream-4",
+        &fired,
     )
-    .with_scheduler(scheduler.clone())
-    .spawn(system.process_system())
     .await;
 
-    // Wait past the original deadline; the cancel must have won.
-    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    // The `cancelled` marker is the barrier for the negative claim below: it is
+    // appended by the second trigger, so once it is on the stream both triggers
+    // have been handled and the only thing left to outlast is the doomed
+    // deadline's own due window.  A bare sleep would assert `cancelled == 1`
+    // against a stream the poller may not have reached yet.
+    let deadline_for_rows = Instant::now() + Duration::from_secs(5);
+    let events = loop {
+        let events = load_saga_events(&saga_store, &saga_id).await;
+        if count_schedule_transition(&events, "cancelled") >= 1 {
+            break events;
+        }
+        assert!(
+            Instant::now() < deadline_for_rows,
+            "timed out waiting for the `cancelled` marker; stream held {:?}",
+            schedule_transitions(&events)
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+
+    assert_eq!(
+        count_schedule_transition(&events, "cancelled"),
+        1,
+        "cancel must append exactly one `nitinol.saga.schedule.cancelled` marker"
+    );
+
+    // The cancel was handled after the deadline was set, so outlasting the full
+    // 600ms due window from here proves the timer was disarmed rather than late.
+    tokio::time::sleep(Duration::from_millis(700)).await;
 
     let seen = fired.lock().expect("fired mutex").clone();
     assert!(
         seen.is_empty(),
-        "a cancelled schedule must never fire; fired={seen:?}"
+        "a cancelled deadline must never fire; fired={seen:?}"
     );
 
     let events = load_saga_events(&saga_store, &saga_id).await;
     assert_eq!(
-        count_schedule_transition(&events, "cancelled"),
-        1,
-        "cancel_schedule must append exactly one `nitinol.saga.schedule.cancelled` marker"
-    );
-    assert_eq!(
         count_schedule_transition(&events, "fired"),
         0,
-        "a cancelled schedule must not produce a `fired` marker"
+        "a cancelled deadline must not produce a `fired` marker"
     );
 }
 
-/// A fresh saga incarnation started against a store that already holds an
-/// unfired `scheduled` marker must re-register the timer from replay and fire
-/// it — even though this incarnation never receives the upstream trigger itself.
+/// A fresh incarnation started against a store that already holds an unfired
+/// `scheduled` marker must re-arm the deadline from replay and fire it — even
+/// though this incarnation never receives the upstream trigger itself.
+///
+/// The seeded payload is written with `ReminderCodec`, which is also what the
+/// derive has to read the schedule fact back through: a replay that reached for
+/// serde instead would not recover the note.
 #[tokio::test]
-async fn replay_reregisters_unfired_schedule_and_fires_it() {
+async fn replay_rearms_an_unfired_deadline_and_fires_it() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(TIMER_SAGA_ID);
+    let name = TimerName::new("reminder");
+    let survivor = Reminder {
+        note: "survivor".to_owned(),
+    };
+    let payload = <ReminderCodec as Codec<Reminder>>::encode(&survivor)
+        .expect("encoding a Reminder must succeed");
 
-    // Incarnation #1 receives the trigger and persists a `scheduled` marker with
-    // a delay long enough that it has not yet fired when #2 starts.
-    let upstream_a: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    append_trigger(
-        &upstream_a,
-        "deadline-upstream-5a",
-        1,
-        Trigger {
-            note: "survivor".to_owned(),
-            after_millis: 2_000,
-            cancel: false,
-        },
+    // The state a crash leaves behind: an unfired schedule fact whose due time
+    // is still ahead.
+    saga_store
+        .append(
+            saga_id.as_str(),
+            vec![AppendingEvent {
+                sequence: 1,
+                event_type: common::SCHEDULE_MARKER,
+                payload: encode_schedule_scheduled(
+                    &saga_id,
+                    &name,
+                    Duration::from_millis(400),
+                    &payload,
+                    jiff::Timestamp::now().as_millisecond(),
+                ),
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("seeding an unfired schedule fact must succeed");
+
+    // An empty upstream, so the only way this incarnation can learn about the
+    // deadline is replay.
+    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let fired = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let _proxy = spawn_timer_saga(
+        &ps,
+        &saga_id,
+        &saga_store,
+        &upstream_store,
+        "deadline-upstream-5-empty",
+        &fired,
     )
     .await;
 
-    let fired_1 = Arc::new(Mutex::new(Vec::<String>::new()));
-    let fired_1_producer = Arc::clone(&fired_1);
-    let _proxy_1 =
-        SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            TimerSaga {
-                fired: Arc::clone(&fired_1_producer),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_a),
-            SequenceCursor::Stream {
-                key: "deadline-upstream-5a".to_owned(),
-                after: 0,
-            },
-        )
-        .with_scheduler(scheduler.clone())
-        .spawn(system.process_system())
-        .await;
-
-    // Wait until the `scheduled` marker is durably on the saga stream.
-    let store_for_wait = Arc::clone(&saga_store);
-    let id_for_wait = saga_id.clone();
-    let mut scheduled_seen = false;
-    for _ in 0..200 {
-        let events = load_saga_events(&store_for_wait, &id_for_wait).await;
-        if count_schedule_transition(&events, "scheduled") >= 1 {
-            scheduled_seen = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(
-        scheduled_seen,
-        "incarnation #1 must persist a `scheduled` marker"
-    );
-
-    // Incarnation #2 shares the same saga id + store + scheduler but subscribes
-    // to an EMPTY upstream, so it can only learn about the schedule via replay.
-    let upstream_b: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let fired_2 = Arc::new(Mutex::new(Vec::<String>::new()));
-    let fired_2_producer = Arc::clone(&fired_2);
-    let _proxy_2 =
-        SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            TimerSaga {
-                fired: Arc::clone(&fired_2_producer),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_b),
-            SequenceCursor::Stream {
-                key: "deadline-upstream-5b-empty".to_owned(),
-                after: 0,
-            },
-        )
-        .with_scheduler(scheduler.clone())
-        .spawn(system.process_system())
-        .await;
-
-    // Incarnation #2 must fire the re-registered timer even though it never saw
-    // the upstream trigger.
-    let fired_2_check = Arc::clone(&fired_2);
+    let fired_check = Arc::clone(&fired);
     let ok = wait_until(Duration::from_secs(8), || {
-        !fired_2_check.lock().expect("fired mutex").is_empty()
+        !fired_check.lock().expect("fired mutex").is_empty()
     })
     .await;
 
-    let seen = fired_2.lock().expect("fired mutex").clone();
+    let seen = fired.lock().expect("fired mutex").clone();
     assert!(
         ok,
-        "the replaying incarnation must re-register and fire the unfired schedule; fired={seen:?}"
+        "the replaying incarnation must re-arm and fire the unfired deadline; \
+         fired={seen:?}"
     );
     assert_eq!(
         seen,
         vec!["survivor".to_owned()],
-        "the re-registered timer must carry the original scheduled payload"
+        "the re-armed deadline must carry the message the schedule fact holds, \
+         read back through the codec the message type names"
     );
 }
 
 /// A delay far past the horizon one revolution of the retired hashed wheel
-/// covered (512 slots x 10 ms = 5.12 s).  A wheel reached such a deadline only
+/// covered (512 slots x 10 ms = 5.12 s).  A wheel reached such a due time only
 /// by counting revolutions per entry; a deadline-ordered timer waits for the
-/// deadline itself.
+/// due time itself.
 const BEYOND_OLD_WHEEL_HORIZON: u64 = 6_000;
 
-/// Given a schedule whose delay is longer than the retired wheel's single
+/// Given a deadline whose delay is longer than the retired wheel's single
 /// revolution,
 /// when that delay elapses,
-/// then the timer fires once and records one `fired` marker.
-///
-/// This is the horizon half of the replacement: a timer core that clamps a long
-/// delay to a bound of its own fires early and writes its marker before the
-/// 6 s mark; one that loses the overflow never fires and the wait below times
-/// out.  Neither failure is visible to the sub-second schedules the rest of
-/// this file uses.
+/// then it fires once and records one `fired` marker.
 #[tokio::test]
 async fn a_deadline_beyond_the_old_wheel_horizon_fires() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_trigger(
         &upstream_store,
         "deadline-upstream-horizon",
         1,
-        Trigger {
-            note: "beyond-horizon".to_owned(),
-            after_millis: BEYOND_OLD_WHEEL_HORIZON,
-            cancel: false,
-        },
+        Trigger::setting("beyond-horizon", BEYOND_OLD_WHEEL_HORIZON),
     )
     .await;
 
@@ -640,22 +913,15 @@ async fn a_deadline_beyond_the_old_wheel_horizon_fires() {
     let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let fired_producer = Arc::clone(&fired);
-    let scheduled_at = Instant::now();
-    let _proxy = SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-        TimerSaga {
-            fired: Arc::clone(&fired_producer),
-        }
-    })
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: "deadline-upstream-horizon".to_owned(),
-            after: 0,
-        },
+    let set_at = Instant::now();
+    let _proxy = spawn_timer_saga(
+        &ps,
+        &saga_id,
+        &saga_store,
+        &upstream_store,
+        "deadline-upstream-horizon",
+        &fired,
     )
-    .with_scheduler(scheduler.clone())
-    .spawn(system.process_system())
     .await;
 
     let fired_check = Arc::clone(&fired);
@@ -664,227 +930,114 @@ async fn a_deadline_beyond_the_old_wheel_horizon_fires() {
     })
     .await;
 
-    let waited = scheduled_at.elapsed();
+    let waited = set_at.elapsed();
     let seen = fired.lock().expect("fired mutex").clone();
     assert!(
         ok,
-        "a {BEYOND_OLD_WHEEL_HORIZON}ms schedule must still fire; fired={seen:?}"
+        "a {BEYOND_OLD_WHEEL_HORIZON}ms deadline must still fire; fired={seen:?}"
     );
     assert_eq!(
         seen,
         vec!["beyond-horizon".to_owned()],
-        "the long schedule must deliver its own payload, exactly once"
+        "the long deadline must deliver its own message, exactly once"
     );
     assert!(
         waited >= Duration::from_millis(BEYOND_OLD_WHEEL_HORIZON),
-        "the timer fired after {waited:?}, before its {BEYOND_OLD_WHEEL_HORIZON}ms deadline"
-    );
-
-    // Allow the post-fire persist to settle, the way the marker tests above do.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let events = load_saga_events(&saga_store, &saga_id).await;
-    assert_eq!(
-        count_schedule_transition(&events, "fired"),
-        1,
-        "firing a long schedule must append exactly one `fired` marker"
+        "the deadline fired after {waited:?}, before its \
+         {BEYOND_OLD_WHEEL_HORIZON}ms due time"
     );
 }
 
-// Regression: Fired marker ordering when on_scheduled re-schedules
-
-/// Typed payload for the marker-ordering regression saga.  `generation` controls
-/// whether `on_scheduled` re-schedules: generation 0 triggers a re-schedule
-/// under the same name with generation 1; generation 1 is a no-op.  This
-/// keeps the behaviour identical regardless of which incarnation handles the
-/// timer so the test never loops.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct GenerationReminder {
-    note: String,
-    generation: u32,
-}
-
-/// A saga whose `on_scheduled` re-schedules under the **same** `TimerName`
-/// exactly once (controlled by `generation` in the payload, not by a
-/// per-instance counter, so the semantics are incarnation-independent).
+/// Regression: when the deadline arm re-sets under the same `TimerName`, the
+/// second incarnation (replay) must still see the re-set deadline as pending
+/// and eventually fire it.
 ///
-/// This exercises the marker ordering rule: `Fired` must be persisted before
-/// the new `Scheduled` so that replay folds the stream as:
-///   insert(name) → remove(name) → insert(name)  ⟹  active
-/// rather than:
-///   insert(name) → insert(name) → remove(name)  ⟹  gone  (broken ordering)
-struct OnceRescheduleSaga {
-    fires: Arc<Mutex<Vec<String>>>,
-}
-
-/// Correlation rule of [`OnceRescheduleSaga`]: both incarnations of the
-/// regression below are the same process instance, so they answer alike.
-const ONCE_RESCHEDULE_SAGA_ID: &str = "deadline-arch004-1";
-
-#[async_trait]
-impl Saga for OnceRescheduleSaga {
-    type SubscribedEvent = Trigger;
-    type Event = Recorded;
-    type Error = std::convert::Infallible;
-    type ScheduledMessage = GenerationReminder;
-
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(ONCE_RESCHEDULE_SAGA_ID))
-    }
-
-    fn apply(&mut self, _event: Recorded) {}
-
-    async fn handle(
-        &mut self,
-        event: Trigger,
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<Recorded>, Self::Error> {
-        Ok(SagaEffect::schedule(
-            TimerName::new("repeat"),
-            Duration::from_millis(event.after_millis),
-            GenerationReminder {
-                note: event.note,
-                generation: 0,
-            },
-        ))
-    }
-
-    async fn on_scheduled(
-        &mut self,
-        message: GenerationReminder,
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<Recorded>, Self::Error> {
-        self.fires
-            .lock()
-            .expect("fires mutex")
-            .push(message.note.clone());
-        // Re-schedule under the same name only for generation 0.
-        if message.generation == 0 {
-            return Ok(SagaEffect::schedule(
-                TimerName::new("repeat"),
-                Duration::from_millis(300),
-                GenerationReminder {
-                    note: format!("{}-2nd", message.note),
-                    generation: 1,
-                },
-            ));
-        }
-        Ok(SagaEffect::empty())
-    }
-}
-
-/// Regression: when `on_scheduled` re-schedules under the same
-/// `TimerName`, the second incarnation (replay) must still see the
-/// re-scheduled timer as active and eventually fire it.
-///
-/// Without the fix, the event stream order is:
-///   Scheduled → (new) Scheduled → Fired
-/// and replay's `Fired` handler removes the new schedule by name, leaving it
-/// invisible to the second incarnation.
-///
-/// With the fix, the order is:
-///   Scheduled → Fired → (new) Scheduled
-/// and replay correctly leaves the new schedule active for re-registration.
+/// Without the ordering fix the stream reads `Scheduled → (new) Scheduled →
+/// Fired`, and replay's `Fired` handling removes the new schedule by name,
+/// leaving it invisible to the second incarnation.  With it the order is
+/// `Scheduled → Fired → (new) Scheduled`.
 #[tokio::test]
-async fn on_scheduled_reschedule_same_name_survives_replay() {
+async fn a_deadline_reset_from_its_own_firing_survives_replay() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    // A single trigger that starts the first "repeat" timer.
     append_trigger(
         &upstream_store,
         "deadline-upstream-arch004",
         1,
-        Trigger {
-            note: "first".to_owned(),
-            after_millis: 150,
-            cancel: false,
-        },
+        Trigger::setting("first", 150),
     )
     .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(ONCE_RESCHEDULE_SAGA_ID);
 
-    // Incarnation #1: receives trigger, fires first timer, re-schedules.
     let fires_1 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_1_producer = Arc::clone(&fires_1);
-    let _proxy_1 =
-        SagaProps::<OnceRescheduleSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            OnceRescheduleSaga {
-                fires: Arc::clone(&fires_1_producer),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "deadline-upstream-arch004".to_owned(),
-                after: 0,
-            },
-        )
-        .with_scheduler(scheduler.clone())
-        .spawn(system.process_system())
-        .await;
+    let _proxy_1 = SagaProps::<OnceRescheduleSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |components| OnceRescheduleSaga {
+            deadline: components.deadline(),
+            fires: Arc::clone(&fires_1_producer),
+        },
+    )
+    .subscribed_to::<Trigger>(Subscription::stream(
+        &upstream_store,
+        "deadline-upstream-arch004",
+    ))
+    .spawn(&ps)
+    .await;
 
-    // Wait for incarnation #1 to fire the first timer and persist the
-    // re-scheduled "repeat" timer.
     let fires_1_check = Arc::clone(&fires_1);
     let ok = wait_until(Duration::from_secs(5), || {
         !fires_1_check.lock().expect("fires mutex").is_empty()
     })
     .await;
-    assert!(ok, "incarnation #1 must fire the first timer");
+    assert!(ok, "incarnation #1 must fire the first deadline");
 
-    // Allow the Fired marker and new Scheduled marker to be written.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The three markers landing is the barrier for the ordering assertion.
+    let deadline_for_rows = Instant::now() + Duration::from_secs(5);
+    let events = loop {
+        let events = load_saga_events(&saga_store, &saga_id).await;
+        if schedule_transitions(&events).len() >= 3 {
+            break events;
+        }
+        assert!(
+            Instant::now() < deadline_for_rows,
+            "timed out waiting for three schedule markers; stream held {:?}",
+            schedule_transitions(&events)
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
 
-    // Verify stream has: 1 scheduled (initial), 1 fired, 1 scheduled (re-schedule).
-    // The key invariant: Fired appears before the second Scheduled in the stream.
-    let events = load_saga_events(&saga_store, &saga_id).await;
-    assert_eq!(
-        count_schedule_transition(&events, "scheduled"),
-        2,
-        "must have exactly 2 scheduled markers (initial + re-schedule)"
-    );
-    assert_eq!(
-        count_schedule_transition(&events, "fired"),
-        1,
-        "first fire must produce exactly 1 fired marker"
-    );
-
-    // Verify event ordering: Fired must come BEFORE the second Scheduled.
     assert_eq!(
         schedule_transitions(&events),
         vec!["scheduled", "fired", "scheduled"],
-        "the stream must hold the re-schedule after the fire it followed, and nothing between"
+        "the stream must hold the re-set deadline after the fire it followed, \
+         and nothing between"
     );
 
-    // Incarnation #2: shares the same store but subscribes to an empty
-    // upstream, so it can only learn about the re-schedule via replay.
-    // It must re-register and eventually fire the second timer.
+    // Incarnation #2 shares the store but subscribes to an empty upstream, so
+    // it can only learn about the re-set deadline via replay.
     let upstream_empty: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let fires_2 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_2_producer = Arc::clone(&fires_2);
-    let _proxy_2 =
-        SagaProps::<OnceRescheduleSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            OnceRescheduleSaga {
-                fires: Arc::clone(&fires_2_producer),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_empty),
-            SequenceCursor::Stream {
-                key: "deadline-upstream-arch004-empty".to_owned(),
-                after: 0,
-            },
-        )
-        .with_scheduler(scheduler.clone())
-        .spawn(system.process_system())
-        .await;
+    let _proxy_2 = SagaProps::<OnceRescheduleSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |components| OnceRescheduleSaga {
+            deadline: components.deadline(),
+            fires: Arc::clone(&fires_2_producer),
+        },
+    )
+    .subscribed_to::<Trigger>(Subscription::stream(
+        &upstream_empty,
+        "deadline-upstream-arch004-empty",
+    ))
+    .spawn(&ps)
+    .await;
 
-    // Incarnation #2 must fire the re-scheduled timer (the "first-2nd" one).
     let fires_2_check = Arc::clone(&fires_2);
     let ok = wait_until(Duration::from_secs(8), || {
         !fires_2_check.lock().expect("fires mutex").is_empty()
@@ -894,11 +1047,14 @@ async fn on_scheduled_reschedule_same_name_survives_replay() {
     let seen_2 = fires_2.lock().expect("fires mutex").clone();
     assert!(
         ok,
-        "incarnation #2 must re-register and fire the re-scheduled timer after replay; fired={seen_2:?}"
+        "incarnation #2 must re-arm and fire the re-set deadline after replay; \
+         fired={seen_2:?}"
     );
     assert_eq!(
         seen_2,
         vec!["first-2nd".to_owned()],
-        "the re-scheduled timer must carry the payload set by on_scheduled (not the original)"
+        "the re-set deadline must carry the message its own arm set, not the \
+         original"
     );
+    assert_correlate_was_never_asked_about_a_deadline();
 }

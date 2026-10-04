@@ -2,126 +2,132 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nitinol_eventsource::SequenceCursor;
+use nitinol_eventsource::Event;
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
+use crate::components::SagaComponents;
 use crate::dead_letter::{self, DeadLetterEvent, DlqChildSpawn, EnqueuePolicy};
 use crate::effect::TellIntent;
 use crate::id::SagaId;
-use crate::process::instance::{SagaInstanceSpec, ScheduleDelivery};
+use crate::process::instance::{SagaInstanceSpec, SagaProducer, ScheduleDelivery};
 use crate::process::proxy::SagaProxy;
 #[cfg(test)]
 use crate::process::saga_process::TellState;
-use crate::process::saga_process::{
-    self, CrashRestartFactory, DecodeFailureRouteFn, OwnedUpstream, SagaProcess,
-};
+use crate::process::saga_process::{self, CrashRestartFactory, SagaProcess};
 use crate::saga::Saga;
-use crate::scheduler::SchedulerProxy;
+use crate::scheduler;
+use crate::subscribe::{AllSourcesSubscribed, BindSource, SourceBinding, SourceBindings};
+use crate::subscription::Subscription;
 use nitinol_runtime::process::{Process, ProcessProxy, Receive};
-
-/// Marker: the upstream subscription has not yet been provided.
-pub struct SubscriptionUnset;
-
-/// Marker: the upstream subscription has been provided.
-pub struct SubscriptionSet<S: Saga> {
-    pub(crate) upstream_store: Arc<dyn EventStore>,
-    pub(crate) cursor: SequenceCursor,
-    pub(crate) _saga: std::marker::PhantomData<fn() -> S>,
-}
 
 /// Builder for a saga spawn.
 ///
-/// State parameter:
-/// - `Sub` — subscription configuration (`SubscriptionUnset` / `SubscriptionSet<S>`)
+/// # The binding typestate
 ///
-/// There is no codec stage: `S::Event` and `S::SubscribedEvent` each name the
-/// codec that writes and reads them, so a saga has no format of its own to be
+/// `B` carries one slot per source the saga's alphabet declares, and
+/// [`subscribed_to`](Self::subscribed_to) moves exactly the slot of the event
+/// type it is given.  [`spawn`](Self::spawn) exists only on the shape where every
+/// slot is filled, so a declared source left unbound is a compile error rather
+/// than a saga that silently never hears from it.  A `#[subscribe(deadline)]`
+/// variant is allotted no slot: a deadline is addressed to the instance that set
+/// it rather than observed, so there is nothing to subscribe to.
+///
+/// Binding the same source twice, and binding a source the alphabet never
+/// declared, are compile errors for the same reason: neither has a slot the move
+/// could apply to.
+///
+/// There is no codec stage: every type in `S::Subscribe` and `S::Event` names the
+/// codec that writes and reads it, so a saga has no format of its own to be
 /// handed and no way to journal itself in one its event type never named.
-pub struct SagaProps<S: Saga, Sub = SubscriptionUnset> {
+///
+/// There is no scheduler stage either.  Whether this saga has its own time is
+/// settled by whether its alphabet declares a deadline, so the host resolves the
+/// resident timer core from the declaration — see [`SagaComponents::deadline`].
+pub struct SagaProps<S: Saga, B = SourceBindings<S>> {
     saga_id: SagaId,
     store: Arc<dyn EventStore>,
-    producer: Arc<dyn Fn() -> S + Send + Sync>,
-    subscription: Sub,
+    producer: SagaProducer<S>,
+    bindings: B,
     crash_restart_factory: Option<CrashRestartFactory>,
-    scheduler: Option<SchedulerProxy>,
     enqueue_policy: Option<Arc<dyn EnqueuePolicy>>,
     dead_letter_subscriber: Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>,
-    decode_failure_route_fn: Option<DecodeFailureRouteFn>,
     #[cfg(test)]
     initial_tell_states: HashMap<u64, TellState>,
 }
 
-impl<S: Saga> SagaProps<S, SubscriptionUnset> {
-    /// Begin a saga spawn.
+impl<S: Saga> SagaProps<S, SourceBindings<S>> {
+    /// Begin a saga spawn, with every declared source still unbound.
     ///
-    /// `producer` constructs the saga instance.  Closure form is required so
-    /// dependencies that the saga captures (e.g. an `AggregateProxy` to tell)
-    /// can be re-acquired if the runtime restarts the process under a
-    /// `Restart` supervision strategy.
+    /// `producer` builds the saga instance from the capabilities the framework
+    /// resolved for it, and is called again whenever the runtime rebuilds the
+    /// process — so anything the saga captures (e.g. an `AggregateProxy` to tell)
+    /// must be re-acquirable.  A saga that needs no capability is built by
+    /// `|_| S::default()`.
     pub fn new(
         saga_id: SagaId,
         store: Arc<dyn EventStore>,
-        producer: impl Fn() -> S + Send + Sync + 'static,
+        producer: impl Fn(SagaComponents<S>) -> S + Send + Sync + 'static,
     ) -> Self {
         Self {
             saga_id,
             store,
             producer: Arc::new(producer),
-            subscription: SubscriptionUnset,
+            bindings: SourceBindings::<S>::default(),
             crash_restart_factory: None,
-            scheduler: None,
             enqueue_policy: None,
             dead_letter_subscriber: None,
-            decode_failure_route_fn: None,
             #[cfg(test)]
             initial_tell_states: HashMap::new(),
         }
     }
 }
 
-impl<S: Saga> SagaProps<S, SubscriptionUnset> {
-    /// Subscribe this saga instance to an upstream `EventStore`.
+impl<S: Saga, B> SagaProps<S, B> {
+    /// Observe the declared source `E` through `subscription`.
     ///
-    /// At spawn time the saga starts a runtime child `DirectPollerProcess`
-    /// (catchup + live, at-least-once).  The poller is cascade-stopped when
-    /// the saga stops.
+    /// At spawn time each bound source starts a runtime child
+    /// `DirectPollerProcess` of its own (catchup + live, at-least-once), with its
+    /// own cursor.  The pollers are cascade-stopped when the saga stops.
     ///
-    /// `cursor` is where the poller starts *at the latest*: a stream cursor is
-    /// carried forward to the position the saga's own stream records for that
-    /// stream, so a restart does not re-read what it has already consumed.  The
-    /// configured position still holds as a floor.
+    /// Sources are independent: there is no order across them, and a source
+    /// whose upstream has stalled does not stop another from progressing.  Two
+    /// sources may read one stream key — each takes only the rows naming its own
+    /// event type.
+    ///
+    /// `subscription`'s position is where this source's poller starts *at the
+    /// latest*: it is carried forward to the position the saga's own stream
+    /// records for this source, so a restart does not re-read what it has already
+    /// consumed.  The configured position still holds as a floor.
     ///
     /// Which of the delivered events belong to this instance is decided by
     /// [`Saga::correlate`], not here — correlation is domain knowledge carried
     /// by the saga type.
-    pub fn with_subscription(
+    pub fn subscribed_to<E>(
         self,
-        upstream_store: Arc<dyn EventStore>,
-        cursor: SequenceCursor,
-    ) -> SagaProps<S, SubscriptionSet<S>> {
+        subscription: Subscription,
+    ) -> SagaProps<S, <B as BindSource<E>>::Bound>
+    where
+        E: Event,
+        B: BindSource<E>,
+    {
+        let (upstream_store, cursor) = subscription.into_parts();
         SagaProps {
             saga_id: self.saga_id,
             store: self.store,
             producer: self.producer,
-            subscription: SubscriptionSet {
-                upstream_store,
-                cursor,
-                _saga: std::marker::PhantomData,
-            },
+            bindings: <B as BindSource<E>>::bind(
+                self.bindings,
+                SourceBinding::new(upstream_store, cursor),
+            ),
             crash_restart_factory: self.crash_restart_factory,
-            scheduler: self.scheduler,
             enqueue_policy: self.enqueue_policy,
             dead_letter_subscriber: self.dead_letter_subscriber,
-            decode_failure_route_fn: self.decode_failure_route_fn,
             #[cfg(test)]
             initial_tell_states: self.initial_tell_states,
         }
     }
-}
 
-impl<S: Saga, Sub> SagaProps<S, Sub> {
     /// Register a factory for crash-restart re-dispatch.
     ///
     /// Which pending tells this recovers, which it cannot, and what the factory
@@ -132,21 +138,6 @@ impl<S: Saga, Sub> SagaProps<S, Sub> {
         F: Fn(&[u8]) -> Option<TellIntent> + Send + Sync + 'static,
     {
         self.crash_restart_factory = Some(Arc::new(factory));
-        self
-    }
-
-    /// Inject the resident [`SchedulerProxy`] — the proxy
-    /// `system.spawn_resident::<`[`SchedulerProcess`](crate::SchedulerProcess)`>()`
-    /// answers with, converted — so this saga's [`SagaEffect::schedule`] and
-    /// [`SagaEffect::cancel_schedule`] effects drive real timers.
-    ///
-    /// Without it, schedule markers are still persisted but no timer fires until
-    /// a scheduler-equipped incarnation replays them.
-    ///
-    /// [`SagaEffect::schedule`]: crate::SagaEffect::schedule
-    /// [`SagaEffect::cancel_schedule`]: crate::SagaEffect::cancel_schedule
-    pub fn with_scheduler(mut self, scheduler: SchedulerProxy) -> Self {
-        self.scheduler = Some(scheduler);
         self
     }
 
@@ -178,38 +169,6 @@ impl<S: Saga, Sub> SagaProps<S, Sub> {
         self
     }
 
-    /// Override the decode-failure routing behaviour.
-    ///
-    /// When two or more saga instances subscribe to the same upstream event
-    /// type, a corrupt event that cannot be decoded is forwarded to every
-    /// subscriber as `UpstreamMessage::DecodeFailed`.  Without a route
-    /// function every subscriber records a DLQ entry.  Providing this function
-    /// lets the saga decide which instance is the intended recipient:
-    /// - Return `Some(saga_id)` to accept the failure (DLQ recorded only when
-    ///   `saga_id == self.saga_id`).
-    /// - Return `None` to decline the failure (no DLQ recorded for this saga).
-    ///
-    /// Without this call the legacy behaviour applies: every `DecodeFailed` is
-    /// recorded against this saga regardless of other subscribers.
-    ///
-    /// # Why this stays on the builder while correlation lives on `Saga`
-    ///
-    /// [`Saga::correlate`] derives a process instance's identity from a typed
-    /// domain event.  A decode failure has no typed event — this function is
-    /// handed only the upstream stream key and sequence, so it decides *which
-    /// subscriber owns a corrupt wire record*, which is routing rather than
-    /// correlation.  Keeping it here also keeps the setting per-instance: two
-    /// instances of the same saga type subscribed to one upstream stream can
-    /// attribute the same corrupt record differently, which a static associated
-    /// function on the type could not express.
-    pub fn with_decode_failure_route<F>(mut self, route: F) -> Self
-    where
-        F: Fn(&AggregateId, u64) -> Option<SagaId> + Send + Sync + 'static,
-    {
-        self.decode_failure_route_fn = Some(Arc::new(route));
-        self
-    }
-
     #[cfg(test)]
     pub(crate) fn with_initial_tell_states(mut self, tell_states: HashMap<u64, TellState>) -> Self {
         self.initial_tell_states = tell_states;
@@ -217,14 +176,22 @@ impl<S: Saga, Sub> SagaProps<S, Sub> {
     }
 }
 
-impl<S: Saga> SagaProps<S, SubscriptionSet<S>> {
+impl<S: Saga, B> SagaProps<S, B>
+where
+    B: AllSourcesSubscribed<S::Subscribe>,
+{
     /// Spawn the saga process.
     ///
-    /// The saga's upstream subscription is wired as a direct poller child
-    /// process — no shared [`nitinol_eventsource::DurableStream`] fan-out
-    /// channel is created.  The poller's lifetime is bound to the saga
-    /// process; when the saga stops the runtime cascade-stops the poller.
+    /// Each declared source is wired as a direct poller child process of its own
+    /// — no shared [`nitinol_eventsource::DurableStream`] fan-out channel is
+    /// created.  Their lifetimes are bound to the saga process; when the saga
+    /// stops the runtime cascade-stops every poller.
+    ///
+    /// A saga whose alphabet declares a deadline also has the system's one
+    /// resident timer core resolved for it here, which is the whole of its
+    /// scheduler wiring.
     pub async fn spawn(self, system: &ProcessSystem) -> SagaProxy<S> {
+        let scheduler = scheduler::resolve_for::<S>(system).await;
         let spec = SagaInstanceSpec::<S> {
             saga_id: self.saga_id,
             store: self.store,
@@ -232,17 +199,18 @@ impl<S: Saga> SagaProps<S, SubscriptionSet<S>> {
             enqueue_policy: self
                 .enqueue_policy
                 .unwrap_or_else(dead_letter::default_enqueue_policy),
-            upstream: Some(OwnedUpstream {
-                config: saga_process::upstream_subscription::<S>(self.subscription.upstream_store),
-                cursor: self.subscription.cursor,
-            }),
+            upstream: self
+                .bindings
+                .into_sources()
+                .into_iter()
+                .map(saga_process::source_subscription)
+                .collect(),
             crash_restart_factory: self.crash_restart_factory,
-            scheduler: self.scheduler,
+            scheduler,
             // Nothing fronts this saga, so a deadline's firing is addressed to
             // the process itself; there is no manager to restore it from its
             // own stream.
             delivery: ScheduleDelivery::ToTheInstance,
-            decode_failure_route_fn: self.decode_failure_route_fn,
             dlq_child_spawn: self.dead_letter_subscriber,
             #[cfg(test)]
             initial_tell_states: self.initial_tell_states,

@@ -22,7 +22,7 @@ use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaDefaultStoreExt;
 
-use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment};
+use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment, Incremented};
 use eventsource_aggregate_communication::saga::RelaySaga;
 
 /// How long the relay is given before it is called a failure.
@@ -61,10 +61,10 @@ async fn a_fact_of_one_aggregate_reaches_another_as_a_command() {
 
     let target = proxy_b.clone();
     let _saga = system
-        .spawn_saga(RelaySaga::instance_id(), move || RelaySaga {
+        .spawn_saga(RelaySaga::instance_id(), move |_components| RelaySaga {
             target: target.clone(),
         })
-        .subscribed_to(system.subscription(&id_a))
+        .subscribed_to::<Incremented>(system.subscription(&id_a))
         .spawn()
         .await;
 

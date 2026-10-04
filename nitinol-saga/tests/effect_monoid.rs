@@ -9,25 +9,18 @@
 //! These tests do not assert anything about the interpreter — only the
 //! algebra of effect composition.  The interpreter-level batch boundary is
 //! covered by `saga_combine_persist_single_append.rs`.
+//!
+//! The laws hold for the `schedules` category of a `Persist` too, but a
+//! `ScheduleSpec` cannot be named from out here — `Deadline::set` is its only
+//! constructor, and a `Deadline` only exists inside the producer the spawn
+//! builder calls — so those cases sit beside `combine` in
+//! `nitinol-saga/src/effect/helper.rs`.
 
 #[path = "common/helpers.rs"]
 mod common;
 use common::{shape_of, Shape};
 
-use std::time::Duration;
-
-use bytes::Bytes;
-use nitinol_saga::{SagaEffect, ScheduleSpec, TimerName};
-
-/// Build a distinguishable `ScheduleSpec` so that a reversed concatenation is
-/// observable through `Shape` (`ScheduleSpec` is `PartialEq`).
-fn spec(name: &str, secs: u64) -> ScheduleSpec {
-    ScheduleSpec {
-        name: TimerName::new(name),
-        after: Duration::from_secs(secs),
-        payload: Bytes::new(),
-    }
-}
+use nitinol_saga::{SagaEffect, TimerName};
 
 fn persist_shape(events: Vec<u32>) -> Shape<u32> {
     Shape::Persist {
@@ -232,7 +225,7 @@ fn combine_is_associative_when_end_separates_two_persists() {
 
 #[test]
 fn combine_is_associative_when_cancel_schedule_separates_two_persists() {
-    let mk_cancel = || SagaEffect::<u32>::cancel_schedule(TimerName::new("t"));
+    let mk_cancel = || SagaEffect::<u32>::CancelSchedule(TimerName::new("t"));
 
     let left = SagaEffect::persist(1u32)
         .combine(mk_cancel())
@@ -279,33 +272,6 @@ async fn combine_merges_persist_with_tell_shaped_persist() {
     );
 }
 
-#[tokio::test]
-async fn combine_concatenates_events_tells_and_schedules_left_to_right() {
-    let left_spec = spec("left", 1);
-    let right_spec = spec("right", 2);
-    let left_intent = common::make_tell_intent().await;
-    let right_intent = common::make_tell_intent().await;
-
-    let left = SagaEffect::persist_all(vec![1u32, 2])
-        .combine(SagaEffect::tell_intent(left_intent))
-        .combine(SagaEffect::schedule_spec(left_spec.clone()));
-    let right = SagaEffect::persist(3u32)
-        .combine(SagaEffect::tell_intent(right_intent))
-        .combine(SagaEffect::schedule_spec(right_spec.clone()));
-
-    assert_eq!(
-        shape_of(&left.combine(right)),
-        Shape::Persist {
-            events: vec![1u32, 2, 3],
-            tells: 2,
-            schedules: vec![left_spec, right_spec],
-        },
-        "the merge must concatenate events, tells AND schedules — each in \
-         left-to-right order; dropping or reordering any of the three categories \
-         silently loses saga intent"
-    );
-}
-
 #[test]
 fn combine_preserves_left_to_right_order() {
     let result = SagaEffect::persist(10u32)
@@ -341,7 +307,7 @@ fn combine_does_not_merge_persists_separated_by_end() {
 #[test]
 fn combine_does_not_merge_persists_separated_by_cancel_schedule() {
     let result = SagaEffect::persist(1u32)
-        .combine(SagaEffect::cancel_schedule(TimerName::new("drop")))
+        .combine(SagaEffect::CancelSchedule(TimerName::new("drop")))
         .combine(SagaEffect::persist(2u32));
 
     assert_eq!(

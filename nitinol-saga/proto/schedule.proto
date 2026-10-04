@@ -16,10 +16,10 @@ message ScheduleMarker {
 
 // A registered timer.  `after_nanos` + `scheduled_at_unix_millis` are used to
 // recompute the remaining delay across restarts
-// (`remaining = scheduled_at + after - now`).  `payload` is the serialized
-// `Saga::ScheduledMessage`.  `after_nanos` stores the full-precision nanosecond
-// duration so that sub-millisecond timers and durations up to ~584 years round-
-// trip without loss.
+// (`remaining = scheduled_at + after - now`).  `payload` is the deadline
+// message encoded with its `DeadlineMessage::Codec`.  `after_nanos` stores the
+// full-precision nanosecond duration so that sub-millisecond timers and
+// durations up to ~584 years round-trip without loss.
 message Scheduled {
   string saga_id = 1;
   string name = 2;
@@ -35,7 +35,8 @@ message Cancelled {
   int64 cancelled_at_unix_millis = 3;
 }
 
-// A fired timer — the scheduled message was dispatched to `on_scheduled`.
+// A fired timer — the deadline message was read back and dispatched to the
+// `#[subscribe(deadline)]` arm of `Saga::handle`.
 message Fired {
   string saga_id = 1;
   string name = 2;

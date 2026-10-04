@@ -37,14 +37,16 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription, TellIntent,
+};
 
 // Domain types
 
@@ -110,24 +112,28 @@ struct DrainGuardSaga {
 /// process instance — the guard, not correlation, is what must drop the second.
 const DRAIN_GUARD_SAGA_ID: &str = "drain-guard-saga";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Upstream(UpstreamDrainEvent),
+}
+
 #[async_trait]
 impl Saga for DrainGuardSaga {
-    type SubscribedEvent = UpstreamDrainEvent;
+    type Subscribe = Observed;
     type Event = DrainSagaEvent;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(DRAIN_GUARD_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: DrainSagaEvent) {}
-
     async fn handle(
         &mut self,
-        event: UpstreamDrainEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<DrainSagaEvent>, Self::Error> {
+        let Observed::Upstream(event) = input;
         self.handle_count.fetch_add(1, Ordering::SeqCst);
 
         let intent = TellIntent::new(
@@ -229,22 +235,17 @@ async fn draining_saga_ignores_upstream_event_before_tell_settles() {
     let handle_count_clone = Arc::clone(&handle_count);
     let target_proxy_clone = target_proxy.clone();
 
-    let _saga_proxy =
-        SagaProps::<DrainGuardSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            DrainGuardSaga {
-                target: target_proxy_clone.clone(),
-                handle_count: Arc::clone(&handle_count_clone),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: agg_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<DrainGuardSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| DrainGuardSaga {
+            target: target_proxy_clone.clone(),
+            handle_count: Arc::clone(&handle_count_clone),
+        },
+    )
+    .subscribed_to::<UpstreamDrainEvent>(Subscription::stream(&upstream_store, &agg_id))
+    .spawn(system.process_system())
+    .await;
 
     // Wait until the durable Ended marker appears — confirms event-1 was
     // processed and the lifecycle entered Draining.

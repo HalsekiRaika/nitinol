@@ -4,7 +4,7 @@
 //! Two facts are pinned here:
 //!
 //! 1. **`correlate` is a member of the `Saga` trait** with the signature
-//!    `fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId>`.  If the
+//!    `fn correlate(input: &Self::Subscribe) -> Option<SagaId>`.  If the
 //!    trait carries no such item, `MinimalCorrelatedSaga`'s `correlate` is not
 //!    a trait member (E0407) and this test binary fails to build — which is
 //!    equally true of an implementation that keeps the correlation decision
@@ -31,7 +31,7 @@ use bytes::Bytes;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::{EventType, Family, TypeName};
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe};
 
 /// The format the events below name.  Nothing in this file writes to a store —
 /// `correlate` is called directly — but `Event` names the codec that would
@@ -90,6 +90,12 @@ impl Event for Noted {
     type Codec = UnitCodec;
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Signal(Signal),
+}
+
 /// A saga that implements exactly the required trait items — including
 /// `correlate`, which answers "which instance is this event about?" from the
 /// event alone.
@@ -97,24 +103,25 @@ struct MinimalCorrelatedSaga;
 
 #[async_trait]
 impl Saga for MinimalCorrelatedSaga {
-    type SubscribedEvent = Signal;
+    type Subscribe = Observed;
     type Event = Noted;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        if event.owner == OWNER {
-            Some(SagaId::new(OWNER))
-        } else {
-            None
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Signal(event) => {
+                if event.owner == OWNER {
+                    Some(SagaId::new(OWNER))
+                } else {
+                    None
+                }
+            }
         }
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         Ok(SagaEffect::None)
@@ -131,7 +138,7 @@ fn correlate_names_the_owning_saga_without_an_instance() {
     };
 
     assert_eq!(
-        <MinimalCorrelatedSaga as Saga>::correlate(&event),
+        <MinimalCorrelatedSaga as Saga>::correlate(&Observed::Signal(event)),
         Some(SagaId::new(OWNER)),
         "correlate must be reachable as an associated function on the saga \
          type — no saga instance exists at the point the runtime has to decide \
@@ -149,7 +156,7 @@ fn correlate_declines_an_event_that_belongs_to_no_instance() {
     };
 
     assert_eq!(
-        <MinimalCorrelatedSaga as Saga>::correlate(&event),
+        <MinimalCorrelatedSaga as Saga>::correlate(&Observed::Signal(event)),
         None,
         "correlate must be able to decline an event; a bare `SagaId` return \
          type would force every upstream event to name some instance"

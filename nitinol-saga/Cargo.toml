@@ -22,6 +22,9 @@ tracing = "0.1"
 nitinol-runtime = { path = "../nitinol-runtime" }
 nitinol-persistence = { path = "../nitinol-persistence" }
 nitinol-eventsource = { path = "../nitinol-eventsource" }
+# `#[derive(SagaSubscribe)]` is re-exported from here beside the trait it
+# implements, so one `use nitinol::saga::SagaSubscribe;` brings both into scope.
+nitinol-macros = { path = "../nitinol-macros" }
 
 # `protox` parses the `.proto` schema in pure Rust so codegen needs no system
 # `protoc`. Pinned to the 0.13-compatible line to share prost with the runtime
@@ -37,3 +40,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 nitinol-eventsource = { path = "../nitinol-eventsource", features = ["test-helpers"] }
+# The code `#[derive(SagaSubscribe)]` writes names the framework through the
+# umbrella crate, as `#[derive(Event)]` does, so a test that derives an alphabet
+# has to resolve that path. The dev-dependency cycle this closes
+# (`nitinol-saga` -> `nitinol` -> `nitinol-saga`) is the same one
+# `nitinol-macros` already has, and Cargo permits it: a dev-dependency is not
+# part of the library's own build.
+nitinol = { path = "..", features = ["saga"] }

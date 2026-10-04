@@ -12,14 +12,16 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription, TellIntent,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UpstreamTrigger {
@@ -67,6 +69,12 @@ impl Decider<TargetCmd> for TargetAgg {
     }
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Upstream(UpstreamTrigger),
+}
+
 /// Correlation rule of [`TwoTellsThenEndSaga`]: each scenario runs one instance
 /// against its own stores, so every `UpstreamTrigger` names that instance.
 const TWO_TELLS_THEN_END_SAGA_ID: &str = "multi-tell-gapfree-saga";
@@ -78,22 +86,20 @@ struct TwoTellsThenEndSaga {
 
 #[async_trait]
 impl Saga for TwoTellsThenEndSaga {
-    type SubscribedEvent = UpstreamTrigger;
+    type Subscribe = Observed;
     type Event = SagaMarker;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(TWO_TELLS_THEN_END_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: SagaMarker) {}
-
     async fn handle(
         &mut self,
-        event: UpstreamTrigger,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaMarker>, Self::Error> {
+        let Observed::Upstream(event) = input;
         self.handle_count.fetch_add(1, Ordering::SeqCst);
 
         let intent_a = TellIntent::new(
@@ -203,18 +209,12 @@ async fn spawn_two_tells_then_end_saga(
     let saga_proxy = SagaProps::<TwoTellsThenEndSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || TwoTellsThenEndSaga {
+        move |_components| TwoTellsThenEndSaga {
             target: target_proxy_clone.clone(),
             handle_count: Arc::clone(&handle_count_clone),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: agg_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<UpstreamTrigger>(Subscription::stream(&upstream_store, &agg_id))
     .spawn(system.process_system())
     .await;
 
