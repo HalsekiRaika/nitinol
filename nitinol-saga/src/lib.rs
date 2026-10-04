@@ -20,6 +20,10 @@
 //! | Handle | [`SagaProxy`] |
 //! | Instance-manager spawn builder | [`SagaManagerProps`] |
 //! | Instance-manager handle | [`SagaManagerProxy`] |
+//! | Delivery mapping | [`Saga::dispatch`] answering [`SagaDelivery`] |
+//! | Delivery-host spawn builder | [`SagaDeliveryProps`] |
+//! | Delivery-host handle | [`SagaDeliveryProxy`] |
+//! | Delivery-host identifier | [`SagaDeliveryId`] |
 //!
 //! The runtime `Process` trait is intentionally hidden — the user only
 //! implements [`Saga`].
@@ -87,6 +91,22 @@
 //!   instance claims so one unclaimed record cannot stall the rest.  A
 //!   [`Saga::correlate`] that always answers the same id reduces the manager to
 //!   the single resident saga [`SagaProps`] spawns.
+//! - Delivery of what a saga decided: [`Saga::dispatch`] is a pure mapping from
+//!   one of the saga's own events to the commands it implies and whom each is
+//!   addressed to, and [`SagaDeliveryProps`] starts the host that carries them.
+//!   The host subscribes across every instance of the saga type — it names the
+//!   declared event type to the store together with the position it has
+//!   finished with, so no row of another type is fetched to be discarded — and
+//!   delivers with `ask`, because the receiver's answer is the only thing that
+//!   says a command was carried out. A record counts as finished only once
+//!   every delivery it implied has landed; nothing is passed over for failing,
+//!   however permanently, so what a receiver refuses is held and said out loud
+//!   rather than lost. [`SagaDeliveryProps::with_partitions`] confines a hold
+//!   to the instances of one partition, each with its own progress, and
+//!   [`SagaDeliveryProxy::advance_checkpoint`] is the operator's way past one.
+//!   Delivery is at-least-once with no mode to choose: a repeat is recognised
+//!   by the receiver, from the operation id the domain put on the command.
+//!   The host runs beside the tell path rather than replacing it.
 //! - A saga's own time: declaring a `#[subscribe(deadline)]` variant in the
 //!   alphabet is the whole of the wiring.  The host reads that declaration at
 //!   spawn and resolves the system's one resident timer core
@@ -292,6 +312,7 @@ mod components;
 mod consumed;
 mod context;
 mod dead_letter;
+mod delivery;
 mod effect;
 mod error;
 mod id;
@@ -311,6 +332,10 @@ pub use self::context::SagaContext;
 pub use self::dead_letter::{
     DeadLetterEntry, DeadLetterEvent, DeadLetterQuery, DeadLetterQueue, DeadLetterQueueError,
     EnqueueDecision, EnqueuePolicy, SagaFailure, SourceContext,
+};
+pub use self::delivery::{
+    partition_of, SagaDelivery, SagaDeliveryError, SagaDeliveryId, SagaDeliveryProps,
+    SagaDeliveryProxy, SagaDeliveryScope,
 };
 pub use self::effect::{SagaEffect, ScheduleSpec, TellIntent};
 pub use self::id::SagaId;

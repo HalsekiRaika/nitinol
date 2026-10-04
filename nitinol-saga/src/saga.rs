@@ -6,6 +6,7 @@ use nitinol_eventsource::Event;
 use nitinol_persistence::AggregateId;
 
 use crate::context::SagaContext;
+use crate::delivery::SagaDelivery;
 use crate::effect::SagaEffect;
 use crate::id::SagaId;
 use crate::subscribe::SagaSubscribe;
@@ -206,6 +207,48 @@ pub trait Saga: Send + Sync + 'static {
     /// the fold into state is.
     fn apply(&mut self, event: Self::Event) {
         let _ = event;
+    }
+
+    /// Derive the commands one of the saga's own events implies, and whom each
+    /// is addressed to — "what follows from having decided this?".
+    ///
+    /// The counterpart of [`Saga::apply`]: that one says what a decision means
+    /// to the saga itself, this one says what it means for everybody else. Both
+    /// are pure functions of the decision, and a delivery host is what carries
+    /// what this one answers to its targets.
+    ///
+    /// # Why this is an associated function
+    ///
+    /// A delivery host keeps no saga resident. It reads decisions out of the
+    /// store — including ones persisted by an incarnation that no longer
+    /// exists, or by a different process entirely — so there is no `&self` for
+    /// it to ask. Taking no receiver states that in the type system, the same
+    /// way [`Saga::correlate`] does.
+    ///
+    /// # Why the event is the only argument
+    ///
+    /// Everything a delivery needs has to be in the decision: whom it is
+    /// addressed to, and the operation id the receiver recognises a repeat by.
+    /// A decision that left those out would oblige every consumer to reach back
+    /// to where it came from, and the ones that cannot — a projection replaying
+    /// an archive, a second host on a different subscription — could not act on
+    /// it at all. So the mapping is handed the decision and nothing else, and
+    /// the knowledge of delivery itself — polling, the cursor, the recorded
+    /// progress, holding on a failure — stays with the framework.
+    ///
+    /// # Order, and how many
+    ///
+    /// Zero or more, in the order they are returned: a decision with no
+    /// consequence outside the saga maps to none, and one whose consequences
+    /// live on several streams maps to one delivery each. A host delivers them
+    /// one at a time in this order, and finishes with the decision only once
+    /// every one of them has landed.
+    ///
+    /// The default answers none, so a saga written without a mapping keeps
+    /// compiling and delivers nothing. Its own stream is kept either way.
+    fn dispatch(event: &Self::Event) -> Vec<SagaDelivery> {
+        let _ = event;
+        Vec::new()
     }
 
     /// The single reactive entry point.  Invoked for every observed event that

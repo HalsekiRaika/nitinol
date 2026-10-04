@@ -21,7 +21,9 @@ use nitinol_eventsource::{
     codec::Codec, Event, ProjectionContext, Projector, ProjectorProps, TxProvider,
 };
 use nitinol_persistence::error::CheckpointError;
-use nitinol_persistence::store::{CheckpointStore, EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{
+    CheckpointScope, CheckpointStore, EventStore, InMemoryEventStore,
+};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -123,7 +125,7 @@ impl TxProvider for MockTxProvider {
 /// Records whether save() was called with Some(tx) (ExactlyOnce+TxProvider path)
 /// or None (all other paths).
 pub struct MockCheckpointStore {
-    state: Mutex<HashMap<ProjectionId, u64>>,
+    state: Mutex<HashMap<String, u64>>,
     /// True if save() was ever called with Some(&mut tx).
     saved_with_tx: Arc<AtomicBool>,
 }
@@ -143,20 +145,20 @@ impl MockCheckpointStore {
 impl CheckpointStore for MockCheckpointStore {
     type Tx = MockTx;
 
-    async fn load(&self, id: &ProjectionId) -> Result<Option<u64>, CheckpointError> {
+    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
         Ok(self
             .state
             .lock()
             .expect(
                 "state mutex is never poisoned: no checkpoint operation panics while holding it",
             )
-            .get(id)
+            .get(scope.checkpoint_key())
             .copied())
     }
 
     async fn save(
         &self,
-        id: &ProjectionId,
+        scope: &dyn CheckpointScope,
         seq: u64,
         tx: Option<&mut Self::Tx>,
     ) -> Result<(), CheckpointError> {
@@ -168,7 +170,7 @@ impl CheckpointStore for MockCheckpointStore {
             .expect(
                 "state mutex is never poisoned: no checkpoint operation panics while holding it",
             )
-            .insert(id.clone(), seq);
+            .insert(scope.checkpoint_key().to_owned(), seq);
         Ok(())
     }
 }

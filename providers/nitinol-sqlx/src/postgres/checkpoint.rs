@@ -1,46 +1,50 @@
-//! Where a projection's progress is kept, and the rule that decides which
+//! Where an event consumer's progress is kept, and the rule that decides which
 //! saves are taken.
 //!
 //! A checkpoint moves forward or not at all. A save carrying a sequence the
-//! projection has already reached — or one behind it — is refused as
+//! consumer has already reached — or one behind it — is refused as
 //! [`CheckpointConflict`] rather than absorbed, because the only way a
-//! projection is asked to cover a sequence twice is that something other than
-//! its one consumer has been writing to it. Under `ExactlyOnce` the read-model
+//! consumer is asked to cover a sequence twice is that something other than
+//! its one owner has been writing to it. Under `ExactlyOnce` the read-model
 //! update rides the same transaction, so absorbing the save quietly is what
 //! would turn that broken premise into a counter incremented twice.
 //!
 //! What the rule detects is a duplicate or a checkpoint going backwards. It is
-//! not a claim that every ordering two concurrent projectors could produce is
+//! not a claim that every ordering two concurrent consumers could produce is
 //! caught: a sequence genuinely past the checkpoint is taken whoever saves it.
 //!
 //! The comparison and the write are one statement against one row, so two
-//! writers racing for one projection cannot both be told they won — the second
-//! to arrive waits on the row and then reads what the first left there.
+//! writers racing for one key cannot both be told they won — the second to
+//! arrive waits on the row and then reads what the first left there.
+//!
+//! One table serves every kind of consumer. A
+//! [`CheckpointScope`](nitinol_persistence::store::CheckpointScope) renders the
+//! key, and the kinds render into namespaces that cannot meet, so there is
+//! nothing a second table would keep apart.
 
 use async_trait::async_trait;
 use nitinol_persistence::error::CheckpointError;
-use nitinol_persistence::store::CheckpointStore;
-use nitinol_persistence::ProjectionId;
+use nitinol_persistence::store::{CheckpointScope, CheckpointStore};
 use sqlx::{PgExecutor, PgPool, PgTransaction};
 
 use super::failure::Failure;
 use super::numbering;
 
-/// A save that would not carry a projection's checkpoint forward.
+/// A save that would not carry a consumer's checkpoint forward.
 ///
 /// Published so that a caller reading into a
 /// [`CheckpointError::Backend`](nitinol_persistence::error::CheckpointError::Backend)
 /// can name what it found. A conflict says a premise was broken — a second
-/// writer on a projection that is meant to have one consumer — and retrying
-/// reaches the same refusal. A dropped connection reported in the same place is
-/// cleared by a retry, and the two call for different answers.
+/// writer on a key that is meant to have one owner — and retrying reaches the
+/// same refusal. A dropped connection reported in the same place is cleared by
+/// a retry, and the two call for different answers.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "saving sequence {sequence} for projection {projection_id:?} would not carry its checkpoint \
+    "saving sequence {sequence} for checkpoint key {scope:?} would not carry its checkpoint \
      forward, so another writer has already reached it or passed it"
 )]
 pub struct CheckpointConflict {
-    projection_id: String,
+    scope: String,
     sequence: u64,
 }
 
@@ -71,34 +75,43 @@ impl CheckpointStore for PostgresCheckpointStore {
     /// that covers it land together or not at all.
     type Tx = PgTransaction<'static>;
 
-    async fn load(&self, projection_id: &ProjectionId) -> Result<Option<u64>, CheckpointError> {
-        reached(&self.pool, projection_id).await.map_err(Into::into)
+    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
+        reached(&self.pool, scope.checkpoint_key())
+            .await
+            .map_err(Into::into)
     }
 
     async fn save(
         &self,
-        projection_id: &ProjectionId,
+        scope: &dyn CheckpointScope,
         sequence: u64,
         tx: Option<&mut Self::Tx>,
     ) -> Result<(), CheckpointError> {
+        let key = scope.checkpoint_key();
         // The rule is the same either way: a save the store would refuse on its
         // own is refused inside a caller's transaction too, which is what gives
         // `ExactlyOnce` delivery something to roll the read-model update back
         // for.
         match tx {
-            Some(tx) => carry_forward(&mut **tx, projection_id, sequence).await,
-            None => carry_forward(&self.pool, projection_id, sequence).await,
+            Some(tx) => carry_forward(&mut **tx, key, sequence).await,
+            None => carry_forward(&self.pool, key, sequence).await,
         }
         .map_err(Into::into)
     }
 }
 
-/// The sequence `projection_id` has been carried as far as, or `None` where
-/// nothing has saved for it yet.
-async fn reached(pool: &PgPool, projection_id: &ProjectionId) -> Result<Option<u64>, Failure> {
+/// The sequence `key` has been carried as far as, or `None` where nothing has
+/// saved for it yet.
+///
+/// The column is still named for the one kind of consumer that existed when it
+/// was created; what it holds is a rendered
+/// [`CheckpointScope`](nitinol_persistence::store::CheckpointScope), and a
+/// projection renders verbatim, so every row written before is read back
+/// unchanged.
+async fn reached(pool: &PgPool, key: &str) -> Result<Option<u64>, Failure> {
     let saved: Option<i64> =
         sqlx::query_scalar(r#"SELECT sequence FROM nitinol_checkpoint WHERE projection_id = $1"#)
-            .bind(projection_id.as_str())
+            .bind(key)
             .fetch_optional(pool)
             .await?;
 
@@ -107,7 +120,7 @@ async fn reached(pool: &PgPool, projection_id: &ProjectionId) -> Result<Option<u
         .transpose()?)
 }
 
-/// Carry `projection_id`'s checkpoint to `sequence`, or refuse.
+/// Carry `key`'s checkpoint to `sequence`, or refuse.
 ///
 /// There is no read first and then a check: the row the insert conflicts with
 /// is locked before the condition is evaluated, and a writer that finds the row
@@ -116,7 +129,7 @@ async fn reached(pool: &PgPool, projection_id: &ProjectionId) -> Result<Option<u
 /// told they won.
 async fn carry_forward<'e>(
     executor: impl PgExecutor<'e>,
-    projection_id: &ProjectionId,
+    key: &str,
     sequence: u64,
 ) -> Result<(), Failure> {
     let carried = sqlx::query(
@@ -128,7 +141,7 @@ async fn carry_forward<'e>(
          WHERE nitinol_checkpoint.sequence < EXCLUDED.sequence
         "#,
     )
-    .bind(projection_id.as_str())
+    .bind(key)
     .bind(numbering::to_bigint("sequence", sequence)?)
     .execute(executor)
     .await?
@@ -136,7 +149,7 @@ async fn carry_forward<'e>(
 
     if carried == 0 {
         return Err(CheckpointConflict {
-            projection_id: projection_id.as_str().to_owned(),
+            scope: key.to_owned(),
             sequence,
         }
         .into());

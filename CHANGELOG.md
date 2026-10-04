@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-saga`): a delivery host carries what a saga decided to the
+  aggregates it addressed, as a partitioned pull consumer of the saga's own
+  stream.
+
+  `Saga::dispatch` is the declaration: a pure associated function from one of
+  the saga's own events to the commands it implies, each with the stream key it
+  is addressed to. It is the counterpart of `Saga::apply` — that one says what
+  a decision means to the saga, this one what it means for everybody else — and
+  it is defaulted, so a saga written before it existed keeps compiling and
+  delivers nothing. `SagaDeliveryProps` starts the host that consumes it;
+  polling, the cursor, the recorded progress, holding and backing off are the
+  framework's, and the receiving aggregate needs nothing of the host's on it.
+
+  The subscription is the declared event type as a store-side prefix together
+  with the position finished with, so a host of a saga type crosses every
+  instance of it — one stream per instance — and no row of another type is
+  fetched to be discarded. Delivery is by `ask`, because the receiver's answer
+  is the only thing that says a command was carried out: a refusal is observed
+  and held, and a collision with an aggregate that already exists is **not**
+  read as success, since what such a collision carries says nothing about which
+  operation took the position.
+
+  A record counts as finished only once every delivery it implied has landed,
+  and nothing is ever passed over for failing — a transient failure is retried
+  with a growing pause, a permanent refusal is held and reported with the
+  partition, position, target and classification an operator needs.
+  `SagaDeliveryProps::with_partitions` spreads the subscription over
+  independent processes keyed by `hash(stream key) % N`, so an instance's
+  decisions stay in order in one partition and a hold stops that partition
+  alone; each has its own recorded progress.
+  `SagaDeliveryProxy::advance_checkpoint` is the way past a hold, and it is
+  deliberately a person's to take: it declares that the deliveries passed over
+  will not be made. `with_poll_interval` and `with_delivery_id` are the other
+  deployment choices; the identifier otherwise derives from the declared event
+  type. Delivery is at-least-once with no mode to choose, and the host runs
+  beside the existing tell path rather than replacing it.
+
+- (`nitinol-persistence`): `EventStore::load` now states `LOAD-1` — a query's
+  conditions are a conjunction, so an event-type prefix and a global position
+  named together serve what satisfies both, in ascending global order, and the
+  position includes the row it names. `nitinol-store-conformance` runs it
+  against any backend, from both directions: a prefix every stored row is
+  within still excludes the rows below the position, and a prefix no stored row
+  is within serves nothing whatever the position.
+
+- (`nitinol-sqlx`): an index on the journal's event type together with its
+  global position (`0003_index_journal_event_type.sql`), which is what a
+  consumer of one event type asks against. The prefix condition is now asked as
+  a half-open range over the column rather than as a function of it, because a
+  function of a column cannot reach an index; the range selects exactly the same
+  rows, and `COLLATE "C"` — named both in the statement and on the index — is
+  what makes that so, since the adjacency of the separator and the byte above
+  it is a fact about bytes rather than about a locale.
+
 - (`nitinol-saga`): a saga records the upstream positions it has consumed on its
   own journal, so de-duplicating its input stops being the user's job.
 
@@ -385,6 +439,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indistinguishable here.
 
 ### Changed
+
+- **BREAKING** (`nitinol-persistence`): `CheckpointStore::load` and
+  `CheckpointStore::save` take `&dyn CheckpointScope` instead of
+  `&ProjectionId`. A checkpoint store is the progress cache every event
+  consumer shares, and more than one kind of consumer now files progress in it.
+  `ProjectionId` implements `CheckpointScope` and renders **verbatim**, so
+  stored rows keep the keys they were written under and existing projection
+  behaviour is unchanged; `&ProjectionId` still coerces at the call site, so
+  callers pass what they already passed. Framework-owned consumers render
+  inside the reserved namespace, which every user-facing identifier constructor
+  refuses — so the two key spaces cannot collide and the provider's one table
+  is shared rather than duplicated. `nitinol-sqlx`'s `CheckpointConflict` names
+  the checkpoint key it refused rather than a projection.
 
 - **BREAKING** (`nitinol-saga`, `nitinol-macros`): `Saga::SubscribedEvent` and
   `Saga::ScheduledMessage` / `Saga::on_scheduled` are replaced by one

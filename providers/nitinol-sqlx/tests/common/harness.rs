@@ -159,7 +159,7 @@ impl PostgresBackend {
     /// than one store over it.
     pub async fn migrated_schema(&self) -> MigratedSchema {
         let schema = self.create_schema().await;
-        let pool = pool_on(&self.url, &schema).await;
+        let pool = pool_on(&self.url, &schema, POOL_CONNECTIONS).await;
         PostgresEventStore::migrate(&pool)
             .await
             .expect("the provider's migrations must apply to a database it has reached");
@@ -216,14 +216,26 @@ impl MigratedSchema {
     /// other, so a writer waiting on a row the other holds is waiting on the
     /// row and not on a connection being handed back.
     pub async fn separate_pool(&self) -> PgPool {
-        pool_on(&self.url, &self.schema).await
+        pool_on(&self.url, &self.schema, POOL_CONNECTIONS).await
+    }
+
+    /// A pool of exactly one connection onto the same schema.
+    ///
+    /// What a clause that reads the database's own activity counters needs. A
+    /// backend accumulates what its statements did and publishes it when one of
+    /// its own transactions ends, so a statement measured on one connection and
+    /// a flush asked for on another measure nothing: the counters still hold
+    /// what was published before. One connection makes the statement under
+    /// measurement and the flush that publishes it the same backend's.
+    pub async fn pinned_pool(&self) -> PgPool {
+        pool_on(&self.url, &self.schema, 1).await
     }
 }
 
-async fn pool_on(url: &str, schema: &str) -> PgPool {
+async fn pool_on(url: &str, schema: &str, connections: u32) -> PgPool {
     let schema = schema.to_owned();
     PgPoolOptions::new()
-        .max_connections(POOL_CONNECTIONS)
+        .max_connections(connections)
         .after_connect(move |connection, _| {
             let search_path = format!("SET search_path TO {schema}");
             Box::pin(async move {

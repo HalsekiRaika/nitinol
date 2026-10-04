@@ -1,11 +1,14 @@
-//! The OCC contract every `EventStore` owes, made executable for any backend.
+//! The contract every `EventStore` owes, made executable for any backend.
 //!
 //! [`EventStore::append`](nitinol_persistence::store::EventStore::append)
 //! states the optimistic-concurrency-control contract as clauses `OCC-1` …
-//! `OCC-5`.  Prose binds a backend only as far as someone reads it, so this
-//! crate turns those clauses into a suite you can run against yours — the store
-//! contract's counterpart to what `nitinol-conformance` is for the interpreter
-//! contract, and to what Akka's persistence TCK is for a plugin author.
+//! `OCC-5`, and
+//! [`EventStore::load`](nitinol_persistence::store::EventStore::load) states as
+//! `LOAD-1` what a query naming more than one condition means.  Prose binds a
+//! backend only as far as someone reads it, so this crate turns those clauses
+//! into a suite you can run against yours — the store contract's counterpart to
+//! what `nitinol-conformance` is for the interpreter contract, and to what
+//! Akka's persistence TCK is for a plugin author.
 //!
 //! ```rust,ignore
 //! # use std::sync::Arc;
@@ -82,7 +85,7 @@ pub use self::concurrency::verify_under_concurrency;
 pub use self::deterministic::verify_deterministic;
 pub use self::under_test::{Executor, StoreUnderTest};
 
-/// Put a store through every clause of the OCC contract.
+/// Put a store through every clause of the store contract.
 ///
 /// The deterministic clauses run first, so a store that breaks one of them is
 /// reported on what it broke rather than on the concurrent reader that then

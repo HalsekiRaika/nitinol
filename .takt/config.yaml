@@ -3,8 +3,8 @@ workflow_command_gates:
 
 takt_providers:
   assistant:
-    provider: claude
-    model: claude-fable-5
+    provider: codex
+    model: gpt-6-astra
 
 provider_routing:
   tags:
