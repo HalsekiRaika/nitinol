@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
 use nitinol_eventsource::AggregateProxy;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe};
 
 use crate::codec::JsonCodec;
 use crate::counter::{Counter, Increment, Incremented};
@@ -24,6 +24,18 @@ use crate::counter::{Counter, Increment, Incremented};
 #[derive(Clone, Debug, Serialize, Deserialize, Event)]
 #[event(family = "agg_comm.saga", codec = JsonCodec)]
 pub struct RelayRequested;
+
+/// The whole alphabet this saga reacts to: counter A's fact, and no deadline of
+/// its own.
+///
+/// Everything the saga reacts to is declared here, and everything reaches it
+/// through the one [`Saga::handle`] entry point.  A relay that later had to
+/// notice B's reply, or a timeout of its own, would gain a variant here — and
+/// the `match` in `handle` would stop compiling until it was answered.
+#[derive(SagaSubscribe)]
+pub enum Observed {
+    Incremented(Incremented),
+}
 
 /// Relays every increment of counter A into an increment of counter B.
 pub struct RelaySaga {
@@ -41,22 +53,27 @@ impl RelaySaga {
 
 #[async_trait]
 impl Saga for RelaySaga {
-    type SubscribedEvent = Incremented;
+    type Subscribe = Observed;
     type Event = RelayRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(Self::instance_id())
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
+    // `apply` is left to its default: the relay keeps no state.  Whether B was
+    // incremented is recorded on B's own stream, and the outbox marker on the
+    // saga's journal is what says whether the dispatch still owes delivery.
 
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        // The alphabet has one variant, so this binding is exhaustive — and it
+        // is what a second variant would make the compiler reject.  A's fact
+        // carries nothing the relay needs: that it happened is the whole input.
+        let Observed::Incremented(_fact) = input;
         let persist = SagaEffect::persist(RelayRequested);
         let tell = SagaEffect::tell(self.target.clone(), Increment);
         Ok(persist.combine(tell))

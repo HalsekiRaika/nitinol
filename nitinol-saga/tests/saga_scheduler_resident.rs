@@ -7,34 +7,21 @@
 //! sharing is what this file observes — two asks, one process.
 //!
 //! The runtime's own `spawn_resident` contracts (type keying, concurrent
-//! convergence, persistence) are pinned in `nitinol-runtime/tests/spawn_resident.rs`.
-//! What belongs here is that `nitinol-saga` declares its scheduler as a
-//! resident at all, and that the proxy the ask hands back converts into the
-//! `SchedulerProxy` the saga builders take.
+//! convergence, persistence) are pinned in
+//! `nitinol-runtime/tests/spawn_resident.rs`.  What belongs here is that
+//! `nitinol-saga` declares its scheduler as a resident at all.
 //!
-//! The functional half of that conversion — a timer registered through the
-//! converted proxy actually firing — is `saga_deadline_scheduler.rs`, which
-//! reaches its scheduler through this same path.
+//! Who makes that ask is no longer the caller's business: a saga whose alphabet
+//! declares a `#[subscribe(deadline)]` variant has the resident core resolved
+//! for it at spawn, which is pinned in `saga_host_owns_scheduler.rs` — including
+//! that several such sagas converge on the one core this file asks for twice.
+//! The functional half — a deadline registered through the resolved core
+//! actually firing — is `saga_deadline_scheduler.rs`.
 //!
 //! Run with: `cargo test -p nitinol-saga --test saga_scheduler_resident`.
 
-use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SchedulerProcess, SchedulerProxy};
-
-/// The one step between what the ask hands back and what the saga builders
-/// take.
-///
-/// Pinned on its own because every runtime assertion below still passes without
-/// it: removing `spawn_scheduler` leaves `SchedulerProxy` with no public
-/// constructor, and then `with_scheduler` — which this task keeps — has nothing
-/// to be given.
-#[test]
-fn a_resident_scheduler_proxy_converts_into_the_builders_handle() {
-    fn accepts<P: Into<SchedulerProxy>>() {}
-
-    accepts::<ProcessProxy<SchedulerProcess>>();
-}
+use nitinol_saga::SchedulerProcess;
 
 /// Given a system that has never been asked for a scheduler,
 /// when the resident scheduler is asked for twice — once through the system and
@@ -55,9 +42,9 @@ async fn spawn_resident_resolves_one_scheduler() {
     let first = system.spawn_resident::<SchedulerProcess>().await;
     let second = handle.spawn_resident::<SchedulerProcess>().await;
 
-    // Then: identity is read off the runtime proxy rather than off
-    // `SchedulerProxy`, which deliberately exposes none — it is a
-    // timer-operations handle, not an addressable process.
+    // Then: identity is read off the runtime proxy, which is the only handle
+    // this ask hands out — the timer-operations handle it wraps is the hosting
+    // machinery's and is not part of the crate's surface.
     assert_eq!(
         first.pid(),
         second.pid(),

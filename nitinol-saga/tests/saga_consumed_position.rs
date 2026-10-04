@@ -64,8 +64,9 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, SequenceCursor,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
@@ -73,7 +74,10 @@ use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TimerName};
+use nitinol_saga::{
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe,
+    Subscription, TimerName,
+};
 
 // Domain
 
@@ -141,6 +145,51 @@ impl Decider<Reserve> for Inventory {
 /// Every `OrderPlaced` in this file belongs to the one saga each test spawns.
 const SAGA_ID: &str = "consumed-position-saga";
 
+/// The whole alphabet every saga in this file reacts to, bar the scheduling one:
+/// a single observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
+/// The scheduling saga's promise to its future self.  It carries nothing — the
+/// test only asks whether the firing happened at all — but it still names the
+/// format it is written into the schedule fact as, because that is what a
+/// persisted value owes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Reminder;
+
+struct ReminderCodec;
+
+impl Codec<Reminder> for ReminderCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_value: &Reminder) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Reminder, Self::Error> {
+        Ok(Reminder)
+    }
+}
+
+impl DeadlineMessage for Reminder {
+    type Codec = ReminderCodec;
+}
+
+/// The alphabet of [`SchedulingSaga`]: one observed source, plus the saga's own
+/// time — the entry point with no upstream record behind it.
+// The observed payload is decoded and delivered as the variant it belongs to;
+// what this saga decides does not read it, which `dead_code` cannot tell apart
+// from a field nothing fills.
+#[allow(dead_code)]
+#[derive(SagaSubscribe)]
+enum TimerObserved {
+    Order(OrderPlaced),
+    #[subscribe(deadline)]
+    Reminder(Reminder),
+}
+
 /// What one `Saga::handle` invocation saw.  The upstream coordinates identify
 /// *which* record reached it, which is the whole question these tests ask.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,22 +226,20 @@ struct DecidingSaga {
 
 #[async_trait]
 impl Saga for DecidingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         record(&self.handled, ctx);
         Ok(SagaEffect::persist(ReservationRequested { sku: event.sku }))
     }
@@ -207,22 +254,20 @@ struct DecidingAndTellingSaga {
 
 #[async_trait]
 impl Saga for DecidingAndTellingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         record(&self.handled, ctx);
         Ok(SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
@@ -242,20 +287,17 @@ struct EmptyPersistSaga {
 
 #[async_trait]
 impl Saga for EmptyPersistSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         record(&self.handled, ctx);
@@ -272,28 +314,29 @@ struct TwoBatchSaga {
 
 #[async_trait]
 impl Saga for TwoBatchSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         record(&self.handled, ctx);
+        // This saga's alphabet declares no deadline, so it holds no
+        // `Deadline<M>` to build the cancellation from — the public
+        // `CancelSchedule` variant is the form a saga with no component has.
         Ok(SagaEffect::Sequence(vec![
             SagaEffect::persist(ReservationRequested {
                 sku: event.sku.clone(),
             }),
-            SagaEffect::cancel_schedule(TimerName::new("no-such-timer")),
+            SagaEffect::CancelSchedule(TimerName::new("no-such-timer")),
             SagaEffect::persist(ReservationRequested { sku: event.sku }),
         ]))
     }
@@ -309,22 +352,20 @@ struct PersistThenEndSaga {
 
 #[async_trait]
 impl Saga for PersistThenEndSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         record(&self.handled, ctx);
         Ok(SagaEffect::persist(ReservationRequested {
             sku: event.sku.clone(),
@@ -336,48 +377,48 @@ impl Saga for PersistThenEndSaga {
     }
 }
 
-/// Schedules a timer from the upstream record it handles, then persists a
-/// decision when that timer fires.  `handle` itself persists nothing, so the
-/// one `ReservationRequested` on the stream is the timer's — the entry point
-/// with no upstream record behind it, and so no position to commit.
+/// Sets a deadline from the upstream record it handles, then persists a
+/// decision when that deadline fires.  The observed arm persists nothing, so
+/// the one `ReservationRequested` on the stream is the deadline's — the entry
+/// point with no upstream record behind it, and so no position to commit.
 struct SchedulingSaga {
+    deadline: Deadline<Reminder>,
     fired: Arc<AtomicU64>,
 }
 
 #[async_trait]
 impl Saga for SchedulingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = TimerObserved;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(SAGA_ID))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            TimerObserved::Order(_) => Some(SagaId::new(SAGA_ID)),
+            // A firing is addressed to the instance that set it and never
+            // travels the subscription path, so this arm is unreachable.
+            TimerObserved::Reminder(_) => None,
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        Ok(SagaEffect::schedule(
-            TimerName::new("reminder"),
-            Duration::from_millis(50),
-            (),
-        ))
-    }
-
-    async fn on_scheduled(
-        &mut self,
-        _message: Self::ScheduledMessage,
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        self.fired.fetch_add(1, Ordering::SeqCst);
-        Ok(SagaEffect::persist(ReservationRequested {
-            sku: "SKU-FROM-TIMER".to_owned(),
-        }))
+        match input {
+            TimerObserved::Order(_) => Ok(self.deadline.set(
+                TimerName::new("reminder"),
+                Duration::from_millis(50),
+                Reminder,
+            )),
+            TimerObserved::Reminder(_) => {
+                self.fired.fetch_add(1, Ordering::SeqCst);
+                Ok(SagaEffect::persist(ReservationRequested {
+                    sku: "SKU-FROM-TIMER".to_owned(),
+                }))
+            }
+        }
     }
 }
 
@@ -842,26 +883,38 @@ async fn wait_for_saga_rows(
 async fn spawn_deciding(
     ps: &ProcessSystem,
     saga_store: &Arc<dyn EventStore>,
-    upstream_store: &Arc<dyn EventStore>,
-    cursor: SequenceCursor,
+    subscription: Subscription,
     handled: &Handled,
 ) -> nitinol_saga::SagaProxy<DecidingSaga> {
     let handled = Arc::clone(handled);
-    SagaProps::<DecidingSaga>::new(SagaId::new(SAGA_ID), Arc::clone(saga_store), move || {
-        DecidingSaga {
+    SagaProps::<DecidingSaga>::new(
+        SagaId::new(SAGA_ID),
+        Arc::clone(saga_store),
+        move |_components| DecidingSaga {
             handled: Arc::clone(&handled),
-        }
-    })
-    .with_subscription(Arc::clone(upstream_store), cursor)
+        },
+    )
+    .subscribed_to::<OrderPlaced>(subscription)
     .spawn(ps)
     .await
 }
 
-fn stream_cursor(source: &AggregateId, after: u64) -> SequenceCursor {
-    SequenceCursor::Stream {
-        key: source.as_str().to_owned(),
-        after,
-    }
+/// The one declared source of every saga in this file, read from the `source`
+/// stream of `upstream_store` from the beginning.
+fn from_source(upstream_store: &Arc<dyn EventStore>, source: &AggregateId) -> Subscription {
+    Subscription::stream(upstream_store, source)
+}
+
+/// The same source, read from every stream of `upstream_store` at once in the
+/// store's own global order.
+///
+/// A store-wide position is not a stream position, so it is not carried forward
+/// from the consumed positions the saga's own stream records: a source bound
+/// this way really does re-read what it has already consumed after a restart,
+/// which is what lets the tests below put the framework's skip — rather than
+/// the cursor's — under test.
+fn from_every_source(upstream_store: &Arc<dyn EventStore>) -> Subscription {
+    Subscription::global(upstream_store)
 }
 
 // CP-ATOMIC — the decision and the position reach the store as one append
@@ -888,8 +941,7 @@ async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() 
     let _proxy = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -981,12 +1033,12 @@ async fn the_position_is_the_last_row_so_no_tell_id_moves() {
     let _proxy = SagaProps::<DecidingAndTellingSaga>::new(
         SagaId::new(SAGA_ID),
         Arc::clone(&saga_store),
-        move || DecidingAndTellingSaga {
+        move |_components| DecidingAndTellingSaga {
             handled: Arc::clone(&handled_for_producer),
             inventory: inventory.clone(),
         },
     )
-    .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+    .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
     .spawn(system.process_system())
     .await;
 
@@ -1059,8 +1111,7 @@ async fn a_batch_that_never_landed_writes_no_consumed_position() {
     let _proxy = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -1113,8 +1164,7 @@ async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
     let first = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -1128,8 +1178,7 @@ async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
     let _second = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -1189,8 +1238,7 @@ async fn a_consumed_input_never_reaches_handle_after_a_restart() {
     let first = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -1201,8 +1249,7 @@ async fn a_consumed_input_never_reaches_handle_after_a_restart() {
     let _second = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -1249,8 +1296,7 @@ async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it
     let first = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        SequenceCursor::Global { after: 0 },
+        from_every_source(&upstream_store),
         &handled,
     )
     .await;
@@ -1261,8 +1307,7 @@ async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it
     let _second = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        SequenceCursor::Global { after: 0 },
+        from_every_source(&upstream_store),
         &handled,
     )
     .await;
@@ -1287,22 +1332,20 @@ async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it
     );
 }
 
-/// `UpstreamMessage::DecodeFailed` settles the same upstream position a
-/// decoded event does — see `ConsumedPositionEvent` on the `DecodeFailed` arm
-/// in `saga_process.rs` — so a corrupt record already consumed must be
-/// skipped the same way a redelivered decoded record is, instead of
-/// recording a second `decode_failed` dead letter for the position a prior
-/// incarnation already settled.
+/// A corrupt upstream record is skipped, and nothing durable is written for it
+/// — not even a position row of its own where one already names it.
 ///
-/// Given a saga stream already carrying the consumed position of a corrupt
-/// upstream record (as a prior incarnation's decode failure would have left
-/// behind),
-/// When a fresh incarnation subscribes with a `Global` cursor — which keeps
-/// its configured position and so really does redeliver the corrupt record —
-/// Then no `decode_failed` dead letter is appended for it: the position is
-/// already covered.
+/// Given a saga stream already carrying a consumed position for the upstream
+/// position the corrupt record sits at,
+/// When a fresh incarnation subscribes with a `Global` cursor — which keeps its
+/// configured position and so really does redeliver the corrupt record —
+/// Then the record never reaches `handle`, no `decode_failed` dead letter is
+/// appended for it, and the position it sits at is still named by exactly one
+/// row: an undecodable record is reported and skipped in the source's transform,
+/// before the instance sees it, so it settles nothing (see the decode-failure
+/// paragraph on `Saga::handle`).
 #[tokio::test]
-async fn a_redelivered_decode_failure_record_already_consumed_appends_no_dead_letter() {
+async fn a_corrupt_record_redelivered_over_a_global_cursor_writes_nothing() {
     let ps = ProcessSystem::new().await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -1312,16 +1355,16 @@ async fn a_redelivered_decode_failure_record_already_consumed_appends_no_dead_le
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
-    // Stands in for a prior incarnation's decode failure having already
-    // settled this exact upstream position.
+    // A position row already naming the corrupt record's upstream position, so
+    // the count below distinguishes "no row was added for it" from "no row
+    // mentions it at all".
     seed_consumed_position(&saga_store, &saga_id, 1, &source, 1).await;
 
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let _proxy = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        SequenceCursor::Global { after: 0 },
+        from_every_source(&upstream_store),
         &handled,
     )
     .await;
@@ -1342,9 +1385,8 @@ async fn a_redelivered_decode_failure_record_already_consumed_appends_no_dead_le
     assert_eq!(
         count_dead_letter_kind(&events, "decode_failed"),
         0,
-        "the corrupt record's position was already consumed by a prior \
-         incarnation, so redelivering it must not append a second \
-         `decode_failed` dead letter; stream held {:?}",
+        "an undecodable upstream record is reported and skipped, so it must \
+         append no `decode_failed` dead letter; stream held {:?}",
         describe(&events)
     );
     let decode_position_rows = positions(&events)
@@ -1354,9 +1396,9 @@ async fn a_redelivered_decode_failure_record_already_consumed_appends_no_dead_le
     assert_eq!(
         decode_position_rows,
         1,
-        "the corrupt record's position must appear exactly once — the row \
-         seeded in place of a prior incarnation's settlement — not a second \
-         position-only row from the dropped redelivery; stream held {:?}",
+        "the corrupt record's position must appear exactly once — the seeded \
+         row — and gain no second position-only row from the skipped \
+         redelivery; stream held {:?}",
         describe(&events)
     );
 }
@@ -1381,8 +1423,7 @@ async fn the_same_input_delivered_twice_in_one_incarnation_reaches_handle_once()
     let _proxy = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -1449,8 +1490,7 @@ async fn a_skipped_input_does_not_consume_the_failed_tell_report() {
     let _proxy = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        SequenceCursor::Global { after: 0 },
+        from_every_source(&upstream_store),
         &handled,
     )
     .await;
@@ -1495,8 +1535,7 @@ async fn replay_restores_the_consumed_position_from_the_journal_alone() {
     let _proxy = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        SequenceCursor::Global { after: 0 },
+        from_every_source(&upstream_store),
         &handled,
     )
     .await;
@@ -1536,8 +1575,7 @@ async fn a_later_lower_position_does_not_move_the_position_backwards() {
     let _proxy = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        SequenceCursor::Global { after: 0 },
+        from_every_source(&upstream_store),
         &handled,
     )
     .await;
@@ -1584,8 +1622,7 @@ async fn an_unreadable_position_row_is_skipped_rather_than_read_as_a_default() {
     let _proxy = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -1649,8 +1686,7 @@ async fn a_poisoned_position_row_does_not_abort_the_rest_of_the_replay() {
     let _proxy = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        SequenceCursor::Global { after: 0 },
+        from_every_source(&upstream_store),
         &handled,
     )
     .await;
@@ -1691,8 +1727,7 @@ async fn a_position_of_one_source_does_not_cover_another() {
     let _proxy = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        SequenceCursor::Global { after: 0 },
+        from_every_source(&upstream_store),
         &handled,
     )
     .await;
@@ -1742,8 +1777,7 @@ async fn a_stream_subscription_resumes_past_the_folded_position() {
     let first = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -1756,8 +1790,7 @@ async fn a_stream_subscription_resumes_past_the_folded_position() {
     let _second = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -1807,8 +1840,7 @@ async fn the_configured_floor_survives_a_lower_consumed_position() {
     let first = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -1824,8 +1856,7 @@ async fn the_configured_floor_survives_a_lower_consumed_position() {
     let _second = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 3),
+        from_source(&upstream_store, &source).with_after(3),
         &handled,
     )
     .await;
@@ -1868,8 +1899,7 @@ async fn a_global_subscription_keeps_its_configured_cursor() {
     let first = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        SequenceCursor::Global { after: 0 },
+        from_every_source(&upstream_store),
         &handled,
     )
     .await;
@@ -1882,8 +1912,7 @@ async fn a_global_subscription_keeps_its_configured_cursor() {
     let _second = spawn_deciding(
         &ps,
         &saga_store,
-        &upstream_store,
-        SequenceCursor::Global { after: 0 },
+        from_every_source(&upstream_store),
         &handled,
     )
     .await;
@@ -1935,12 +1964,12 @@ async fn an_input_whose_effect_takes_two_appends_is_recorded_as_consumed_once() 
 
     let handled_for_producer = Arc::clone(&handled);
     let _proxy =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             TwoBatchSaga {
                 handled: Arc::clone(&handled_for_producer),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -1990,12 +2019,12 @@ async fn an_input_closed_out_by_end_mid_sequence_is_recorded_as_consumed() {
 
     let handled_for_producer = Arc::clone(&handled);
     let _proxy =
-        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             PersistThenEndSaga {
                 handled: Arc::clone(&handled_for_producer),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -2056,12 +2085,12 @@ async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
 
     let handled_for_first = Arc::clone(&handled);
     let first =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             TwoBatchSaga {
                 handled: Arc::clone(&handled_for_first),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -2092,12 +2121,12 @@ async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
 
     let handled_for_second = Arc::clone(&handled);
     let _second =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             TwoBatchSaga {
                 handled: Arc::clone(&handled_for_second),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -2159,12 +2188,12 @@ async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed()
 
     let handled_for_first = Arc::clone(&handled);
     let first =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             TwoBatchSaga {
                 handled: Arc::clone(&handled_for_first),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -2198,12 +2227,12 @@ async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed()
 
     let handled_for_second = Arc::clone(&handled);
     let _second =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             TwoBatchSaga {
                 handled: Arc::clone(&handled_for_second),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -2266,12 +2295,12 @@ async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritte
 
     let handled_for_first = Arc::clone(&handled);
     let first =
-        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             PersistThenEndSaga {
                 handled: Arc::clone(&handled_for_first),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -2309,12 +2338,12 @@ async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritte
 
     let handled_for_second = Arc::clone(&handled);
     let _second =
-        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             PersistThenEndSaga {
                 handled: Arc::clone(&handled_for_second),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -2387,12 +2416,12 @@ async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed()
 
     let handled_for_first = Arc::clone(&handled);
     let first =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             TwoBatchSaga {
                 handled: Arc::clone(&handled_for_first),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -2422,12 +2451,12 @@ async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed()
 
     let handled_for_second = Arc::clone(&handled);
     let _second =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             TwoBatchSaga {
                 handled: Arc::clone(&handled_for_second),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -2480,12 +2509,12 @@ async fn an_input_that_wrote_nothing_is_still_consumed() {
 
     let handled_for_first = Arc::clone(&handled);
     let first =
-        SagaProps::<EmptyPersistSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<EmptyPersistSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             EmptyPersistSaga {
                 handled: Arc::clone(&handled_for_first),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
 
@@ -2495,12 +2524,12 @@ async fn an_input_that_wrote_nothing_is_still_consumed() {
 
     let handled_for_second = Arc::clone(&handled);
     let _second =
-        SagaProps::<EmptyPersistSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
+        SagaProps::<EmptyPersistSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
             EmptyPersistSaga {
                 handled: Arc::clone(&handled_for_second),
             }
         })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
+        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
         .spawn(&ps)
         .await;
     append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
@@ -2535,11 +2564,12 @@ async fn an_input_that_wrote_nothing_is_still_consumed() {
 
 // CP-NO-INPUT-NO-POSITION — an entry point with no input commits no position
 
-/// Given a saga that has consumed upstream seq 1 and scheduled a timer from it,
-/// When the timer fires and `on_scheduled` persists a decision of its own,
+/// Given a saga that has consumed upstream seq 1 and set a deadline from it,
+/// When the deadline fires and its arm of `handle` persists a decision of its
+/// own,
 /// Then the append that decision reached the store in carries no position row:
-/// a timer firing was decided from no upstream record, so there is no position
-/// it could honestly claim.
+/// a deadline firing was decided from no upstream record, so there is no
+/// position it could honestly claim.
 ///
 /// Why this matters beyond a redundant row: a position is what the framework
 /// skips redelivery on. A position written for a record that was never
@@ -2547,14 +2577,12 @@ async fn an_input_that_wrote_nothing_is_still_consumed() {
 /// silent event loss, and the one failure the per-marker-type counts in
 /// `saga_deadline_scheduler.rs` cannot see.
 ///
-/// The timer's own decision landing is the barrier: it is the only
+/// The deadline's own decision landing is the barrier: it is the only
 /// `ReservationRequested` this saga ever writes, so it cannot be on the stream
-/// before `on_scheduled` ran and its append committed.
+/// before the deadline arm ran and its append committed.
 #[tokio::test]
 async fn a_timer_firing_writes_no_consumed_position() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let source = AggregateId::new("timer-order");
@@ -2569,16 +2597,19 @@ async fn a_timer_firing_writes_no_consumed_position() {
     let saga_id = SagaId::new(SAGA_ID);
 
     let fired_for_producer = Arc::clone(&fired);
-    let _proxy =
-        SagaProps::<SchedulingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            SchedulingSaga {
-                fired: Arc::clone(&fired_for_producer),
-            }
-        })
-        .with_subscription(Arc::clone(&upstream_store), stream_cursor(&source, 0))
-        .with_scheduler(scheduler.clone())
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaProps::<SchedulingSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |components| SchedulingSaga {
+            deadline: components.deadline(),
+            fired: Arc::clone(&fired_for_producer),
+        },
+    )
+    // No scheduler wiring: the alphabet declaring a deadline is the whole
+    // declaration, and the host resolves the resident timer core from it.
+    .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
+    .spawn(&ps)
+    .await;
 
     let events =
         wait_for_saga_rows(&saga_store, &saga_id, ReservationRequested::EVENT_TYPE, 1).await;
@@ -2664,20 +2695,17 @@ impl std::error::Error for HandleBoom {}
 
 #[async_trait]
 impl Saga for AlwaysFailingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = HandleBoom;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         record(&self.handled, ctx);
@@ -2688,17 +2716,18 @@ impl Saga for AlwaysFailingSaga {
 async fn spawn_always_failing(
     ps: &ProcessSystem,
     saga_store: &Arc<dyn EventStore>,
-    upstream_store: &Arc<dyn EventStore>,
-    cursor: SequenceCursor,
+    subscription: Subscription,
     handled: &Handled,
 ) -> nitinol_saga::SagaProxy<AlwaysFailingSaga> {
     let handled = Arc::clone(handled);
-    SagaProps::<AlwaysFailingSaga>::new(SagaId::new(SAGA_ID), Arc::clone(saga_store), move || {
-        AlwaysFailingSaga {
+    SagaProps::<AlwaysFailingSaga>::new(
+        SagaId::new(SAGA_ID),
+        Arc::clone(saga_store),
+        move |_components| AlwaysFailingSaga {
             handled: Arc::clone(&handled),
-        }
-    })
-    .with_subscription(Arc::clone(upstream_store), cursor)
+        },
+    )
+    .subscribed_to::<OrderPlaced>(subscription)
     .spawn(ps)
     .await
 }
@@ -2729,8 +2758,7 @@ async fn a_handle_failed_dead_letter_commits_its_consumed_position() {
     let first = spawn_always_failing(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -2771,8 +2799,7 @@ async fn a_handle_failed_dead_letter_commits_its_consumed_position() {
     let _second = spawn_always_failing(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;
@@ -2831,8 +2858,7 @@ async fn a_dead_letter_and_the_position_it_settles_reach_the_store_in_one_append
     let _proxy = spawn_always_failing(
         &ps,
         &saga_store,
-        &upstream_store,
-        stream_cursor(&source, 0),
+        from_source(&upstream_store, &source),
         &handled,
     )
     .await;

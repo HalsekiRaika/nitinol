@@ -86,9 +86,11 @@ impl JournalState {
             SagaPersisted::Domain(event) => return Some(event),
             SagaPersisted::Outbox(marker) => self.fold_outbox(marker),
             SagaPersisted::Schedule(marker) => self.fold_schedule(marker),
-            SagaPersisted::ConsumedPosition(position) => self
-                .consumed
-                .record(position.source.as_str(), position.sequence),
+            SagaPersisted::ConsumedPosition(position) => self.consumed.record(
+                position.source.as_str(),
+                position.source_event_type,
+                position.sequence,
+            ),
             // Dead letters are not folded into saga state — they are an
             // observability side-channel delivered to subscribers — and neither
             // are the disposition markers the DLQ pull API writes for them,
@@ -173,7 +175,7 @@ mod tests {
 
     use super::*;
 
-    use crate::consumed::ConsumedPositionEvent;
+    use crate::consumed::{ConsumedPositionEvent, PositionSource};
     use crate::id::SagaId;
     use crate::outbox::{
         Ended, OutboxEvent, Scheduled as OutboxScheduled, TellAcked, TellFailed, TellRequested,
@@ -246,9 +248,20 @@ mod tests {
         })
     }
 
+    /// The declared source every position in these tests belongs to.  The fold
+    /// keys on it, so naming one source throughout keeps the assertions about
+    /// *which stream* a position covers rather than which source.
+    fn folded_source() -> PositionSource {
+        PositionSource::of(nitinol_persistence::EventType::new(
+            nitinol_persistence::Family::new("journal_test"),
+            nitinol_persistence::TypeName::new("Observed"),
+        ))
+    }
+
     fn consumed_position(source: &str, sequence: u64) -> SagaPersisted<DomainEvt> {
         SagaPersisted::ConsumedPosition(ConsumedPositionEvent {
             source: AggregateId::new(source),
+            source_event_type: folded_source(),
             sequence,
         })
     }
@@ -603,11 +616,11 @@ mod tests {
             "a position is framework bookkeeping, not a domain event to apply"
         );
         assert!(
-            journal.consumed.covers("order-stream", 2),
+            journal.consumed.covers("order-stream", &folded_source(), 2),
             "the position the stream carries must be what the fold restores"
         );
         assert!(
-            !journal.consumed.covers("other-stream", 1),
+            !journal.consumed.covers("other-stream", &folded_source(), 1),
             "a position covers the source it was read from and nothing else"
         );
         assert!(
@@ -631,7 +644,7 @@ mod tests {
         journal.fold(consumed_position("order-stream", 1));
 
         assert!(
-            journal.consumed.covers("order-stream", 2),
+            journal.consumed.covers("order-stream", &folded_source(), 2),
             "the highest position wins, whatever order the rows are in"
         );
     }
@@ -643,7 +656,7 @@ mod tests {
         journal.fold(tell_requested(7, "target-stream", None));
 
         assert!(
-            !journal.consumed.covers("order-stream", 1),
+            !journal.consumed.covers("order-stream", &folded_source(), 1),
             "with no position on the stream every upstream record is still \
              unconsumed; claiming otherwise would swallow inputs no decision \
              was ever made from"

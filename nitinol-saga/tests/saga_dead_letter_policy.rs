@@ -31,12 +31,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
     EnqueueDecision, EnqueuePolicy, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaProps,
+    SagaSubscribe, Subscription,
 };
 
 // Local codec + domain
@@ -73,6 +74,12 @@ impl Event for SagaLog {
     type Codec = JsonCodec;
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Ping(Ping),
+}
+
 #[derive(Debug)]
 struct SagaBoom;
 
@@ -97,20 +104,17 @@ const ALWAYS_FAIL_SAGA_ID: &str = "dlq-default-saga";
 
 #[async_trait]
 impl Saga for AlwaysFailSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = SagaBoom;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(ALWAYS_FAIL_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: SagaLog) {}
-
     async fn handle(
         &mut self,
-        _event: Ping,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
         self.handle_count.fetch_add(1, Ordering::SeqCst);
@@ -218,22 +222,20 @@ async fn default_policy_enqueues_the_failure() {
 
     let handled_for_saga = Arc::clone(&handled);
     let handle_count_for_saga = Arc::clone(&handle_count);
-    let _proxy =
-        SagaProps::<AlwaysFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            AlwaysFailSaga {
-                handled: Arc::clone(&handled_for_saga),
-                handle_count: Arc::clone(&handle_count_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "dlq-default-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaProps::<AlwaysFailSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| AlwaysFailSaga {
+            handled: Arc::clone(&handled_for_saga),
+            handle_count: Arc::clone(&handle_count_for_saga),
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(
+        &upstream_store,
+        "dlq-default-upstream",
+    ))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
@@ -275,23 +277,18 @@ async fn ignore_all_policy_suppresses_enqueue() {
 
     let handled_for_saga = Arc::clone(&handled);
     let handle_count_for_saga = Arc::clone(&handle_count);
-    let _proxy =
-        SagaProps::<AlwaysFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            AlwaysFailSaga {
-                handled: Arc::clone(&handled_for_saga),
-                handle_count: Arc::clone(&handle_count_for_saga),
-            }
-        })
-        .with_enqueue_policy(Arc::new(IgnoreAll))
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "dlq-ignore-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaProps::<AlwaysFailSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| AlwaysFailSaga {
+            handled: Arc::clone(&handled_for_saga),
+            handle_count: Arc::clone(&handle_count_for_saga),
+        },
+    )
+    .with_enqueue_policy(Arc::new(IgnoreAll))
+    .subscribed_to::<Ping>(Subscription::stream(&upstream_store, "dlq-ignore-upstream"))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await

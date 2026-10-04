@@ -29,15 +29,20 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+
+/// The whole alphabet both sagas in this file react to: one observed source, no
+/// deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct OrderPlaced {
@@ -114,22 +119,20 @@ struct MultiTellSaga {
 
 #[async_trait]
 impl Saga for MultiTellSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(MULTI_TELL_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         let intent_a = nitinol_saga::TellIntent::new(
             self.inventory.clone(),
             Reserve {
@@ -228,23 +231,18 @@ async fn persist_with_two_tells_appends_user_event_and_two_outbox_markers_atomic
     let mock_b_clone = mock_b.clone();
     let handled_clone = Arc::clone(&handled);
 
-    let _saga_proxy =
-        SagaProps::<MultiTellSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            MultiTellSaga {
-                inventory: mock_a_clone.clone(),
-                other_inventory: mock_b_clone.clone(),
-                handled: Arc::clone(&handled_clone),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<MultiTellSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| MultiTellSaga {
+            inventory: mock_a_clone.clone(),
+            other_inventory: mock_b_clone.clone(),
+            handled: Arc::clone(&handled_clone),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
@@ -364,22 +362,20 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
 
     #[async_trait]
     impl Saga for UserOnlySaga {
-        type SubscribedEvent = OrderPlaced;
+        type Subscribe = Observed;
         type Event = ReservationRequested;
-        type ScheduledMessage = ();
         type Error = std::convert::Infallible;
 
-        fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+        fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
             Some(SagaId::new(USER_ONLY_SAGA_ID))
         }
 
-        fn apply(&mut self, _event: Self::Event) {}
-
         async fn handle(
             &mut self,
-            event: Self::SubscribedEvent,
+            input: Self::Subscribe,
             _ctx: &mut SagaContext,
         ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+            let Observed::Order(event) = input;
             self.captured
                 .lock()
                 .expect(
@@ -407,22 +403,17 @@ async fn persist_user_events_alone_does_not_emit_outbox_markers() {
     let notify_clone = Arc::clone(&notify);
     let captured_clone = Arc::clone(&captured);
 
-    let _saga_proxy =
-        SagaProps::<UserOnlySaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            UserOnlySaga {
-                notify: Arc::clone(&notify_clone),
-                captured: Arc::clone(&captured_clone),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaProps::<UserOnlySaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| UserOnlySaga {
+            notify: Arc::clone(&notify_clone),
+            captured: Arc::clone(&captured_clone),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(Duration::from_secs(3), notify.notified())
         .await

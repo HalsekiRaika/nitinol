@@ -28,11 +28,13 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 /// The one instance every `Ping` correlates to.
 const INSTANCE_ID: &str = "mgr-passivation-instance";
@@ -70,6 +72,16 @@ impl Event for Counted {
 
 // Saga under test
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+// The observed payload is decoded and delivered as the variant it belongs to;
+// what this saga decides does not read it, which `dead_code` cannot tell apart
+// from a field nothing fills.
+#[allow(dead_code)]
+#[derive(SagaSubscribe)]
+enum Observed {
+    Ping(Ping),
+}
+
 /// Counts the `Counted` events it has seen.  Because the count is rebuilt only
 /// by `apply`, the value `handle` observes on a revisit is evidence of whether
 /// the instance replayed its own stream.
@@ -81,12 +93,11 @@ struct CountingSaga {
 
 #[async_trait]
 impl Saga for CountingSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = Counted;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(INSTANCE_ID))
     }
 
@@ -96,7 +107,7 @@ impl Saga for CountingSaga {
 
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         self.observed
@@ -181,7 +192,7 @@ async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
     let _manager_proxy =
-        SagaManagerProps::<CountingSaga>::new(Arc::clone(&saga_store), move || {
+        SagaManagerProps::<CountingSaga>::new(Arc::clone(&saga_store), move |_components| {
             spawned_for_producer.fetch_add(1, Ordering::SeqCst);
             CountingSaga {
                 seen: 0,
@@ -189,13 +200,7 @@ async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, &upstream_key))
         .with_instance_passivation(PASSIVATE_AFTER)
         .spawn(system.process_system())
         .await;
@@ -264,18 +269,14 @@ async fn manager_outlives_a_system_default_idle_timeout_during_a_quiet_upstream(
     let notify_for_producer = Arc::clone(&notify);
 
     let _manager_proxy =
-        SagaManagerProps::<CountingSaga>::new(Arc::clone(&saga_store), move || CountingSaga {
-            seen: 0,
-            observed: Arc::clone(&observed_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        SagaManagerProps::<CountingSaga>::new(Arc::clone(&saga_store), move |_components| {
+            CountingSaga {
+                seen: 0,
+                observed: Arc::clone(&observed_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 

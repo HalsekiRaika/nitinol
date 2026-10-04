@@ -321,7 +321,7 @@ mod tests {
 
     use nitinol_eventsource::codec::Codec;
     use nitinol_eventsource::test_helpers::MockAggregateProxy;
-    use nitinol_eventsource::{Aggregate, Decider, Decision, Event, SequenceCursor};
+    use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
     use nitinol_persistence::error::{AppendError, LoadError};
     use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
     use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType, Family, LoadQuery};
@@ -332,7 +332,11 @@ mod tests {
 
     use crate::consumed::ConsumedPositions;
     use crate::outbox::{OutboxAppender, OutboxEvent};
-    use crate::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent};
+    use crate::subscribe::{
+        AllSourcesSubscribed, BindSource, NoDeadline, SagaSubscribe, SourceBinding,
+        SubscribedSource, SubscriptionSet, SubscriptionUnset,
+    };
+    use crate::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription, TellIntent};
 
     struct JsonCodec;
 
@@ -410,25 +414,67 @@ mod tests {
     /// other instance would make the assertion pass for the wrong reason.
     const COUNTING_INERT_SAGA_OWNER: &str = "replay-unit-counting-inert-saga";
 
+    /// The alphabet both fixtures below react to: one observed source, no
+    /// deadline.  Hand-written rather than derived because the derive's
+    /// generated code names the framework through the umbrella crate, which this
+    /// crate's own unit tests do not link.
+    enum Observed {
+        Upstream(UpstreamEvt),
+    }
+
+    impl SagaSubscribe for Observed {
+        type Bindings = ObservedBindings;
+        type Deadline = NoDeadline;
+    }
+
+    struct ObservedBindings<Slot0 = SubscriptionUnset> {
+        slot_0: Slot0,
+    }
+
+    impl Default for ObservedBindings {
+        fn default() -> Self {
+            ObservedBindings {
+                slot_0: SubscriptionUnset,
+            }
+        }
+    }
+
+    impl BindSource<UpstreamEvt> for ObservedBindings<SubscriptionUnset> {
+        type Bound = ObservedBindings<SubscriptionSet>;
+
+        fn bind(self, binding: SourceBinding) -> Self::Bound {
+            let _ = self;
+            ObservedBindings {
+                slot_0: SubscriptionSet(binding),
+            }
+        }
+    }
+
+    impl AllSourcesSubscribed<Observed> for ObservedBindings<SubscriptionSet> {
+        fn into_sources(self) -> Vec<SubscribedSource<Observed>> {
+            vec![SubscribedSource::new::<UpstreamEvt>(
+                self.slot_0,
+                Observed::Upstream,
+            )]
+        }
+    }
+
     #[derive(Default)]
     struct InertSaga;
 
     #[async_trait]
     impl Saga for InertSaga {
-        type SubscribedEvent = UpstreamEvt;
+        type Subscribe = Observed;
         type Event = SagaEvt;
-        type ScheduledMessage = ();
         type Error = std::convert::Infallible;
 
-        fn correlate(_event: &UpstreamEvt) -> Option<SagaId> {
+        fn correlate(_input: &Observed) -> Option<SagaId> {
             Some(SagaId::new(INERT_SAGA_OWNER))
         }
 
-        fn apply(&mut self, _event: SagaEvt) {}
-
         async fn handle(
             &mut self,
-            _event: UpstreamEvt,
+            _input: Observed,
             _ctx: &mut SagaContext,
         ) -> Result<SagaEffect<SagaEvt>, Self::Error> {
             Ok(SagaEffect::None)
@@ -498,20 +544,17 @@ mod tests {
 
     #[async_trait]
     impl Saga for CountingInertSaga {
-        type SubscribedEvent = UpstreamEvt;
+        type Subscribe = Observed;
         type Event = SagaEvt;
-        type ScheduledMessage = ();
         type Error = std::convert::Infallible;
 
-        fn correlate(_event: &UpstreamEvt) -> Option<SagaId> {
+        fn correlate(_input: &Observed) -> Option<SagaId> {
             Some(SagaId::new(COUNTING_INERT_SAGA_OWNER))
         }
 
-        fn apply(&mut self, _event: SagaEvt) {}
-
         async fn handle(
             &mut self,
-            _event: UpstreamEvt,
+            _input: Observed,
             _ctx: &mut SagaContext,
         ) -> Result<SagaEffect<SagaEvt>, Self::Error> {
             self.handle_count.fetch_add(1, Ordering::SeqCst);
@@ -595,16 +638,10 @@ mod tests {
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&inner_store) as Arc<dyn EventStore>,
-            InertSaga::default,
+            |_| InertSaga,
         )
         .with_initial_tell_states(initial_tell_states)
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "no-such-upstream".to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<UpstreamEvt>(Subscription::stream(&upstream_store, "no-such-upstream"))
         .spawn(&ps)
         .await;
 
@@ -661,21 +698,15 @@ mod tests {
         initial_tell_states.insert(1u64, TellState::Pending(intent));
 
         let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-        let _proxy = SagaProps::<InertSaga>::new(
-            saga_id.clone(),
-            Arc::clone(&fail_store),
-            InertSaga::default,
-        )
-        .with_initial_tell_states(initial_tell_states)
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "no-such-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(&ps)
-        .await;
+        let _proxy =
+            SagaProps::<InertSaga>::new(saga_id.clone(), Arc::clone(&fail_store), |_| InertSaga)
+                .with_initial_tell_states(initial_tell_states)
+                .subscribed_to::<UpstreamEvt>(Subscription::stream(
+                    &upstream_store,
+                    "no-such-upstream",
+                ))
+                .spawn(&ps)
+                .await;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -716,16 +747,10 @@ mod tests {
         let _saga_proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&store) as Arc<dyn EventStore>,
-            InertSaga::default,
+            |_| InertSaga,
         )
         .with_initial_tell_states(initial_tell_states)
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "no-such-upstream".to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<UpstreamEvt>(Subscription::stream(&upstream_store, "no-such-upstream"))
         .spawn(&ps)
         .await;
 
@@ -790,16 +815,10 @@ mod tests {
         let _proxy = SagaProps::<InertSaga>::new(
             saga_id.clone(),
             Arc::clone(&inner_store) as Arc<dyn EventStore>,
-            InertSaga::default,
+            |_| InertSaga,
         )
         .with_initial_tell_states(initial_tell_states)
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "no-such-upstream".to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<UpstreamEvt>(Subscription::stream(&upstream_store, "no-such-upstream"))
         .spawn(&ps)
         .await;
 
@@ -926,17 +945,14 @@ mod tests {
         let _proxy = SagaProps::<CountingInertSaga>::new(
             saga_id.clone(),
             Arc::clone(&fail_second),
-            move || CountingInertSaga {
+            move |_| CountingInertSaga {
                 handle_count: Arc::clone(&handle_count_clone),
             },
         )
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "replay-dlq-fail-upstream".to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<UpstreamEvt>(Subscription::stream(
+            &upstream_store,
+            "replay-dlq-fail-upstream",
+        ))
         .spawn(&ps)
         .await;
 
@@ -987,17 +1003,11 @@ mod tests {
             saga_id.clone(),
             // Saga store: load always fails → replay_and_redispatch returns Err.
             Arc::new(FailLoadStore) as Arc<dyn EventStore>,
-            move || CountingInertSaga {
+            move |_| CountingInertSaga {
                 handle_count: Arc::clone(&handle_count_clone),
             },
         )
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "air-004-upstream".to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<UpstreamEvt>(Subscription::stream(&upstream_store, "air-004-upstream"))
         .spawn(&ps)
         .await;
 

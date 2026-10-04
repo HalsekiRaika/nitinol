@@ -1,0 +1,5 @@
+error: #[derive(SagaSubscribe)] allows at most one `#[subscribe(deadline)]` variant
+  --> tests/ui/fail/saga_subscribe_two_deadlines.rs:17:5
+   |
+17 |     Second(Second),
+   |     ^^^^^^

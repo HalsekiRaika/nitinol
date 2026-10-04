@@ -20,14 +20,13 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, Query,
-    SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -62,6 +61,12 @@ impl Event for ReservationRequested {
         TypeName::new("ReservationRequested"),
     );
     type Codec = JsonCodec;
+}
+
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
 }
 
 #[derive(Default)]
@@ -179,22 +184,20 @@ struct ReservationSaga(ReservationWork);
 
 #[async_trait]
 impl Saga for ReservationSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RESERVATION_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         Ok(self.0.reserve(event, ctx))
     }
 }
@@ -207,25 +210,25 @@ struct MatchOnlyReservationSaga(ReservationWork);
 
 #[async_trait]
 impl Saga for MatchOnlyReservationSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        event
-            .sku
-            .starts_with("MATCH-")
-            .then(|| SagaId::new(MATCH_ONLY_SAGA_ID))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Order(event) => event
+                .sku
+                .starts_with("MATCH-")
+                .then(|| SagaId::new(MATCH_ONLY_SAGA_ID)),
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         Ok(self.0.reserve(event, ctx))
     }
 }
@@ -291,22 +294,17 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let captured_for_producer = Arc::clone(&captured);
     let handle_count_for_producer = Arc::clone(&handle_count);
 
-    let _saga_proxy = SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move || {
-        ReservationSaga(ReservationWork {
-            inventory: inventory_for_producer.clone(),
-            captured: Arc::clone(&captured_for_producer),
-            handle_count: Arc::clone(&handle_count_for_producer),
+    let _saga_proxy =
+        SagaProps::<ReservationSaga>::new(saga_id.clone(), saga_store, move |_components| {
+            ReservationSaga(ReservationWork {
+                inventory: inventory_for_producer.clone(),
+                captured: Arc::clone(&captured_for_producer),
+                handle_count: Arc::clone(&handle_count_for_producer),
+            })
         })
-    })
-    .with_subscription(
-        Arc::clone(&order_store),
-        SequenceCursor::Stream {
-            key: order_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
-    .spawn(system.process_system())
-    .await;
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
+        .spawn(system.process_system())
+        .await;
 
     order_proxy
         .ask(PlaceOrder {
@@ -427,7 +425,7 @@ async fn saga_skips_events_that_correlate_to_no_instance() {
     let _saga_proxy = SagaProps::<MatchOnlyReservationSaga>::new(
         SagaId::new(MATCH_ONLY_SAGA_ID),
         saga_store,
-        move || {
+        move |_components| {
             MatchOnlyReservationSaga(ReservationWork {
                 inventory: inventory_for_producer.clone(),
                 captured: Arc::clone(&captured_for_producer),
@@ -435,13 +433,7 @@ async fn saga_skips_events_that_correlate_to_no_instance() {
             })
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: publisher_id.as_str().to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &publisher_id))
     .spawn(system.process_system())
     .await;
 

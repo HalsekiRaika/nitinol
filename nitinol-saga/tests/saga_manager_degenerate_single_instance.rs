@@ -22,12 +22,13 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, Query,
-    SequenceCursor,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 /// The single instance every upstream event correlates to.  Constant
 /// correlation is what makes the manager degenerate to one resident saga.
@@ -137,6 +138,12 @@ impl Query<GetReservedCount> for Inventory {
 
 // Saga under test
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 #[derive(Debug, Clone)]
 struct CapturedContext {
     saga_id: SagaId,
@@ -150,22 +157,20 @@ struct ReservationSaga {
 
 #[async_trait]
 impl Saga for ReservationSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RESIDENT_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.captured
             .lock()
             .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
@@ -256,19 +261,13 @@ async fn single_constant_correlation_reproduces_the_resident_saga() {
     let captured_for_producer = Arc::clone(&captured);
 
     let _manager_proxy =
-        SagaManagerProps::<ReservationSaga>::new(Arc::clone(&saga_store), move || {
+        SagaManagerProps::<ReservationSaga>::new(Arc::clone(&saga_store), move |_components| {
             ReservationSaga {
                 inventory: inventory_for_producer.clone(),
                 captured: Arc::clone(&captured_for_producer),
             }
         })
-        .with_subscription(
-            Arc::clone(&order_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
         .spawn(system.process_system())
         .await;
 

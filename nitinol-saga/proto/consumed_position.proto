@@ -26,4 +26,16 @@ message Consumed {
   string source = 1;
   // Highest sequence of that source the saga has consumed.
   uint64 sequence = 2;
+  // Canonical path of the declared source's event type.
+  //
+  // Two declared sources can be written on one stream key — an aggregate
+  // emitting two event types, a saga observing another saga's stream — so the
+  // stream key alone does not name what a position settled: the higher of the
+  // two positions would cover the other source's records.
+  //
+  // Empty on a row written before positions named a source.  Such a row cannot
+  // say which source it settled, so it is read as covering every source of its
+  // stream: reading it as covering nothing would re-deliver input whose
+  // decision is already durable.
+  string source_event_type = 3;
 }

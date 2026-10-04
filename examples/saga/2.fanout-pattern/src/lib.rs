@@ -55,12 +55,14 @@
 //! rebuild a target from an outbox marker written by an incarnation that is gone.
 //!
 //! A subscription does not need a store of its own either.  The manager is
-//! given a [`nitinol_eventsource::SequenceCursor`], and
-//! `SequenceCursor::Stream { key, .. }` filters the shared store down to the
-//! run's stream by key; `SequenceCursor::Global` is the choice for a
-//! subscription that wants everything in commit order.  Splitting streams
-//! across store instances is a deployment decision — separate backends,
-//! separate retention — not something the pattern requires.
+//! handed one [`nitinol_saga::Subscription`] per source the saga's alphabet
+//! declares, and a subscription is a store plus a stream key plus a start
+//! position: the key filters the shared store down to the run's own stream, and
+//! [`Subscription::with_after`](nitinol_saga::Subscription::with_after) names a
+//! position to resume past.  Splitting streams across store instances is a
+//! deployment decision — separate backends, separate retention — not something
+//! the pattern requires, which is why `system.subscription(key)` takes the
+//! store the system already holds.
 //!
 //! # Choosing the stream that owns the decision
 //!
@@ -96,7 +98,7 @@
 //!
 //! # Make the trigger event self-sufficient
 //!
-//! `Saga::correlate` is handed the decoded event and nothing else — not the
+//! `Saga::correlate` is handed the decoded input and nothing else — not the
 //! stream key it was read from, not its sequence.  An event that leaves out
 //! what its consumers need forces every consumer to reach back to where it came
 //! from, and a consumer that cannot (a projection replaying an archive, a

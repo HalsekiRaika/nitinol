@@ -88,7 +88,7 @@ impl SagaContext {
     /// `tell_id`s of unrecoverable tell failures the saga has not yet been told
     /// about.
     ///
-    /// In [`crate::Saga::handle`] and [`crate::Saga::on_scheduled`] this carries
+    /// In [`crate::Saga::handle`] this carries
     /// the failures recovered by replay on restart — `TellFailed` markers found
     /// on the saga's own stream, and the synthetic ones written for tells that
     /// could not be re-dispatched.  A failure that settles while the saga is

@@ -10,7 +10,7 @@ use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaDefaultStoreExt;
 
 use saga_basic_saga::inventory::{GetReservedCount, Inventory};
-use saga_basic_saga::order::{Order, PlaceOrder};
+use saga_basic_saga::order::{Order, OrderPlaced, PlaceOrder};
 use saga_basic_saga::saga::ReservationSaga;
 
 fn init_tracing() {
@@ -46,11 +46,22 @@ async fn main() {
 
     let inventory_for_producer = inventory_proxy.clone();
 
+    // The producer is handed the capabilities the framework resolved for this
+    // saga; this one needs none of them, so it ignores them.  It is called again
+    // if the runtime restarts the process, which is why the `AggregateProxy` it
+    // captures is a reference that can be re-acquired rather than a live
+    // activation.
+    //
+    // One `subscribed_to` call per source the alphabet declares — here the
+    // order's stream, read as `OrderPlaced` — and `spawn` exists only once every
+    // declared source has one.
     let _saga_proxy = system
-        .spawn_saga(ReservationSaga::instance_id(), move || ReservationSaga {
-            inventory: inventory_for_producer.clone(),
+        .spawn_saga(ReservationSaga::instance_id(), move |_components| {
+            ReservationSaga {
+                inventory: inventory_for_producer.clone(),
+            }
         })
-        .subscribed_to(system.subscription(&order_id))
+        .subscribed_to::<OrderPlaced>(system.subscription(&order_id))
         .spawn()
         .await;
 

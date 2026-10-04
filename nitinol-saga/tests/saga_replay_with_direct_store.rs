@@ -11,13 +11,11 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct OrderPlaced {
@@ -68,6 +66,12 @@ impl Event for ReservationRequested {
 /// one recording instance each test in this file spawns against its own store.
 const RECORDING_SAGA_ID: &str = "direct-store-saga-1";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 struct RecordingSaga {
     captured: Arc<Mutex<Vec<SagaId>>>,
     done: Arc<Notify>,
@@ -75,22 +79,20 @@ struct RecordingSaga {
 
 #[async_trait]
 impl Saga for RecordingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RECORDING_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.captured
             .lock()
             .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
@@ -165,19 +167,13 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     let done_for_producer = Arc::clone(&done);
 
     let _saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
+        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
             RecordingSaga {
                 captured: Arc::clone(&captured_for_producer),
                 done: Arc::clone(&done_for_producer),
             }
         })
-        .with_subscription(
-            Arc::clone(&store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -253,19 +249,13 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let done_for_producer = Arc::clone(&done);
 
     let saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
+        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
             RecordingSaga {
                 captured: Arc::clone(&captured_for_producer),
                 done: Arc::clone(&done_for_producer),
             }
         })
-        .with_subscription(
-            Arc::clone(&store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -320,19 +310,13 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let done_first = Arc::clone(&done);
 
     let saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
+        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
             RecordingSaga {
                 captured: Arc::clone(&captured_first),
                 done: Arc::clone(&done_first),
             }
         })
-        .with_subscription(
-            Arc::clone(&store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -355,19 +339,13 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let done2_for_producer = Arc::clone(&done2);
 
     let _saga_proxy2 =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
+        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
             RecordingSaga {
                 captured: Arc::clone(&captured2),
                 done: Arc::clone(&done2_for_producer),
             }
         })
-        .with_subscription(
-            Arc::clone(&store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
         .await;
 

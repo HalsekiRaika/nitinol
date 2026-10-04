@@ -84,9 +84,13 @@ pub enum SagaFailure {
     /// A message routed to a saga that had already ended (Draining).  `message`
     /// carries the raw payload when available, else empty.
     EndedSagaReceivedMessage { message: Bytes },
-    /// A received message failed to deserialize.
+    /// A deadline's firing could not be read back as the message it carried.
+    ///
+    /// An *upstream* record that does not decode has no instance to attribute it
+    /// to, so it never becomes a dead letter — it is reported and skipped at its
+    /// source (see [`crate::Saga::handle`]).
     DecodeFailed { error: String },
-    /// `Saga::on_scheduled` returned `Self::Error`.
+    /// The deadline arm of `Saga::handle` returned `Self::Error`.
     ScheduledFailed { error: String },
     /// `Saga::on_tell_failed` returned `Self::Error`, so the compensation the
     /// saga would have run never happened.  The tell failure that triggered the

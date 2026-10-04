@@ -19,10 +19,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{
-    encode_schedule_scheduled, resident_scheduler, schedule_kind_of, schedule_transition,
-    SCHEDULE_MARKER,
-};
+use common::{encode_schedule_scheduled, schedule_kind_of, schedule_transition, SCHEDULE_MARKER};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +30,7 @@ use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaId, TimerName};
+use nitinol_saga::{SagaId, SchedulerProcess, TimerName};
 
 /// The saga the seeded marker belongs to.  No process for it is ever started
 /// here — its absence is the point.
@@ -92,7 +89,12 @@ async fn a_resident_scheduler_alone_restores_nothing() {
     let system = EventSourceSystem::builder(ps)
         .with_event_store(Arc::clone(&saga_store))
         .build();
-    let _scheduler = resident_scheduler(system.process_system()).await;
+    // Asked for directly, with no saga in the system: the core comes up on its
+    // own so that what it does at start-up is all that is under test here.
+    let _scheduler = system
+        .process_system()
+        .spawn_resident::<SchedulerProcess>()
+        .await;
 
     // The deadline is reached several times over: a scheduler that had restored
     // it would have fired it by now.

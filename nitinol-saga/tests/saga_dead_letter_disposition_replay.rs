@@ -24,13 +24,13 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor, SystemEvent};
+use nitinol_eventsource::{system::EventSourceSystem, Event, SystemEvent};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
     DeadLetterEvent, DeadLetterQueue, Saga, SagaContext, SagaEffect, SagaFailure, SagaId,
-    SagaProps, SourceContext,
+    SagaProps, SagaSubscribe, SourceContext, Subscription,
 };
 
 // Codecs
@@ -93,6 +93,12 @@ impl Event for Note {
     type Codec = AnyBytesCodec;
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Ping(Ping),
+}
+
 /// Correlation rule of [`NoteSaga`]: one instance owns every `Ping`.
 const NOTE_SAGA_ID: &str = "disposition-replay-saga";
 
@@ -102,12 +108,11 @@ struct NoteSaga {
 
 #[async_trait]
 impl Saga for NoteSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = Note;
     type Error = Infallible;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
+    fn correlate(_input: &Observed) -> Option<SagaId> {
         Some(SagaId::new(NOTE_SAGA_ID))
     }
 
@@ -120,7 +125,7 @@ impl Saga for NoteSaga {
 
     async fn handle(
         &mut self,
-        _event: Ping,
+        _input: Observed,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Note>, Self::Error> {
         Ok(SagaEffect::persist(Note {
@@ -227,19 +232,19 @@ async fn replay_never_hands_a_disposition_marker_to_the_domain_codec() {
     // No upstream events: the only thing this saga does is replay.
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    let _proxy =
-        SagaProps::<NoteSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || NoteSaga {
+    let _proxy = SagaProps::<NoteSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| NoteSaga {
             applied: Arc::clone(&applied_for_saga),
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "disposition-replay-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(
+        &upstream_store,
+        "disposition-replay-upstream",
+    ))
+    .spawn(system.process_system())
+    .await;
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while snapshot(&applied).is_empty() {
@@ -294,19 +299,19 @@ async fn a_disposition_marker_neither_ends_the_saga_nor_desynchronises_its_seque
     let applied = Arc::new(Mutex::new(Vec::<Note>::new()));
     let applied_for_saga = Arc::clone(&applied);
 
-    let _proxy =
-        SagaProps::<NoteSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || NoteSaga {
+    let _proxy = SagaProps::<NoteSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| NoteSaga {
             applied: Arc::clone(&applied_for_saga),
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "disposition-sequence-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(
+        &upstream_store,
+        "disposition-sequence-upstream",
+    ))
+    .spawn(system.process_system())
+    .await;
 
     let deadline = Instant::now() + Duration::from_secs(6);
     let persisted = loop {

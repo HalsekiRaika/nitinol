@@ -19,8 +19,8 @@ impl TimerName {
     }
 }
 
-/// The globally-unique handle a [`crate::SchedulerProxy`] uses to key a
-/// registered timer.
+/// The globally-unique handle the resident timer core uses to key a registered
+/// timer.
 ///
 /// Distinguished by the pair `(saga_id, name)`: two schedules in different
 /// sagas may share a [`TimerName`] without colliding.

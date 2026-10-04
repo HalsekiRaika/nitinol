@@ -4,6 +4,8 @@ use nitinol_eventsource::{Event, SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::EventType;
 
 use crate::consumed::ConsumedPositionEvent;
+#[cfg(test)]
+use crate::consumed::PositionSource;
 use crate::dead_letter::{DeadLetterDispositionEvent, DeadLetterEvent};
 use crate::outbox::OutboxEvent;
 use crate::scheduler::ScheduleEvent;
@@ -204,6 +206,7 @@ mod tests {
     fn consumed_position_path_classifies_as_a_position_never_domain() {
         let position = ConsumedPositionEvent {
             source: AggregateId::new("order-stream"),
+            source_event_type: PositionSource::of(DomainEvt::EVENT_TYPE),
             sequence: 7,
         };
 

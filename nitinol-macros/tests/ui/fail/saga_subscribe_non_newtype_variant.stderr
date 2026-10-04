@@ -1,0 +1,5 @@
+error: #[derive(SagaSubscribe)] requires every variant to name exactly one input type
+  --> tests/ui/fail/saga_subscribe_non_newtype_variant.rs:12:5
+   |
+12 |     Bare,
+   |     ^^^^

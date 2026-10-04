@@ -30,13 +30,15 @@ use crate::scheduler::TimerName;
 ///   with one `TellRequested` outbox marker per tell, and one
 ///   `ScheduleEvent::Scheduled` marker per schedule, **in a single atomic
 ///   batch** on the saga's own event store.  After the append succeeds, each
-///   tell is dispatched via the retry executor and each schedule is registered
-///   with the resident `SchedulerProcess` via the injected [`SchedulerProxy`].
+///   tell is dispatched via the retry executor and each schedule is armed with
+///   the resident [`SchedulerProcess`](crate::SchedulerProcess) the host
+///   resolved.  Appending before arming is the whole order that matters: a timer
+///   can never precede the fact it stands for.
 ///   A branch whose `events`, `tells` and `schedules` are all empty writes no
 ///   batch of its own either, taking the same path as `None` — see
 ///   [`crate::Saga::handle`] for the full contract.
 /// - `End` — single-responsibility termination marker.  Stops the saga
-///   process and tears down its upstream subscription.  Effects placed after
+///   process and tears down its upstream subscriptions.  Effects placed after
 ///   `End` inside a `Sequence` are not interpreted.
 /// - `Sequence(Vec<SagaEffect<E>>)` — Monoid composition.  Interpreted left
 ///   to right with short-circuit on `End`.  All variants are public, so a
@@ -46,9 +48,8 @@ use crate::scheduler::TimerName;
 ///   guarantee documented on `Persist` holds regardless of how the effect was
 ///   constructed.
 /// - `CancelSchedule(TimerName)` — name-scoped timer cancellation.  Persists a
-///   `ScheduleEvent::Cancelled` marker and cancels the pending timer.
-///
-/// [`SchedulerProxy`]: crate::SchedulerProxy
+///   `ScheduleEvent::Cancelled` marker and cancels the pending timer.  Built by
+///   [`Deadline::cancel`](crate::Deadline::cancel).
 pub enum SagaEffect<E> {
     /// The identity element of the Monoid.  See type-level docs for the full
     /// contract.
@@ -61,8 +62,9 @@ pub enum SagaEffect<E> {
         tells: Vec<TellIntent>,
         schedules: Vec<ScheduleSpec>,
     },
-    /// Stop the saga process.  The runtime cascade-stops the upstream
-    /// `DirectPollerProcess` child, preventing further `handle` calls.
+    /// Stop the saga process.  The runtime cascade-stops every upstream
+    /// `DirectPollerProcess` child — one per declared source — preventing
+    /// further `handle` calls.
     End,
     /// An ordered collection of effects executed sequentially.
     Sequence(Vec<SagaEffect<E>>),
@@ -239,15 +241,70 @@ fn checked_target_id(reported: &AggregateId) -> AggregateId {
 /// same atomic batch as the user events, then registers the timer with the
 /// resident scheduler.  The delay is relative (`after: Duration`), not an
 /// absolute instant, so it survives replay via a persisted wall-clock anchor.
-/// `payload` is the serialized `Saga::ScheduledMessage`.  The fields are `pub`
-/// so a saga can build a spec directly and put it on an effect through
-/// [`crate::SagaEffect::schedule_spec`], or let
-/// [`crate::SagaEffect::schedule`] build both from a typed message.
+/// `payload` is the deadline message written through the
+/// [`Codec`](nitinol_eventsource::codec::Codec) its own type named.
+///
+/// # Why there is no public constructor
+///
+/// [`Deadline::set`](crate::Deadline::set) is the only way to build one, and a
+/// [`Deadline`](crate::Deadline) is only obtainable from the producer the spawn
+/// builder calls.  So a saga that did not ask for its own time has no way to
+/// name a timer at all, and the arm of its alphabet that would receive one is a
+/// visible dead branch rather than a silent misconfiguration.
+///
+/// The type stays public because it appears inside [`SagaEffect::Persist`],
+/// whose variants are public: a caller that matches an effect can read what
+/// deadline it carries, and still cannot invent one.
+///
+/// The fields are private, so naming a timer by writing the value down is a
+/// compile error:
+///
+/// ```compile_fail
+/// # use std::time::Duration;
+/// # use bytes::Bytes;
+/// # use nitinol_saga::{ScheduleSpec, TimerName};
+/// let _ = ScheduleSpec {
+///     name: TimerName::new("reminder"),
+///     after: Duration::from_secs(30),
+///     payload: Bytes::new(),
+/// };
+/// ```
+///
+/// And so is reaching for the builder this type used to have, which took a
+/// deadline message the framework serialized itself:
+///
+/// ```compile_fail
+/// # use std::time::Duration;
+/// # use nitinol_saga::{SagaEffect, TimerName};
+/// let _: SagaEffect<u32> =
+///     SagaEffect::schedule(TimerName::new("reminder"), Duration::from_secs(30), ());
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleSpec {
-    pub name: TimerName,
-    pub after: Duration,
-    pub payload: Bytes,
+    pub(crate) name: TimerName,
+    pub(crate) after: Duration,
+    pub(crate) payload: Bytes,
+}
+
+impl ScheduleSpec {
+    pub(crate) fn new(name: TimerName, after: Duration, payload: Bytes) -> Self {
+        Self {
+            name,
+            after,
+            payload,
+        }
+    }
+
+    /// The timer this registration is for.
+    pub fn name(&self) -> &TimerName {
+        &self.name
+    }
+
+    /// How far out the deadline is, measured from the moment the fact is
+    /// written.
+    pub fn after(&self) -> Duration {
+        self.after
+    }
 }
 
 /// A type-safe, object-safe side effect that can be executed asynchronously

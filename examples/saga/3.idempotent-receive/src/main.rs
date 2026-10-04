@@ -59,10 +59,12 @@ async fn main() {
     let system_for_producer = system.clone();
     let system_for_factory = system.clone();
 
+    // One `subscribed_to` call per source the saga's alphabet declares — here
+    // the order's stream, read as `OrderPlaced` — and `spawn` exists only once
+    // every declared source has one.
     let _manager = system
-        .saga_manager_props(system.subscription(&order_id), move || {
-            ReservationSaga::new(system_for_producer.clone())
-        })
+        .saga_manager_props(move |_components| ReservationSaga::new(system_for_producer.clone()))
+        .subscribed_to::<OrderPlaced>(system.subscription(&order_id))
         .with_crash_restart_factory(move |payload: &[u8]| {
             ReservationSaga::crash_restart_intent(&system_for_factory, payload)
         })

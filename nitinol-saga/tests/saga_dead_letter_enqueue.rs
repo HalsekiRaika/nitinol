@@ -12,6 +12,16 @@
 //! | PersistFailed              | `persist_failed`                | after staged retry |
 //! | DecodeFailed               | `decode_failed`                 | immediate     |
 //!
+//! `ScheduledFailed` names the entry the input arrived at, not a method: a
+//! deadline that the deadline arm of `Saga::handle` could not handle is recorded
+//! under that kind, so a policy written against it keeps meaning the same thing.
+//! `DecodeFailed` likewise covers a deadline firing whose persisted payload
+//! cannot be read back through the codec its message type named.  An undecodable
+//! *upstream* record is deliberately absent from this table: it carries no typed
+//! event for `Saga::correlate` to name an owner from, so it is reported and
+//! skipped rather than enqueued — pinned by
+//! `saga_upstream_decode_failure_is_skipped.rs`.
+//!
 //! These tests observe the DLQ purely through its **public** contract: the
 //! bytes that land on the saga stream.  They mirror the marker-observation
 //! style already used by `saga_deadline_scheduler.rs` (schedule markers) and
@@ -39,8 +49,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
-    SequenceCursor, TellError,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
@@ -49,7 +58,10 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, TellIntent, TimerName};
+use nitinol_saga::{
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe,
+    Subscription, TellIntent, TimerName,
+};
 
 // Self-contained JSON codec (kept local like saga_deadline_scheduler.rs).
 
@@ -92,7 +104,14 @@ impl Event for SagaLog {
     type Codec = JsonCodec;
 }
 
-/// A concrete `Saga::Error` so `handle` / `on_scheduled` can fail on demand.
+/// The alphabet of the sagas here that have no time of their own: one observed
+/// source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Ping(Ping),
+}
+
+/// A concrete `Saga::Error` so the handler can fail on demand.
 #[derive(Debug)]
 struct SagaBoom(&'static str);
 
@@ -114,13 +133,6 @@ const TELL_FAIL_SAGA_ID: &str = "dlq-tell-saga";
 const END_ON_FIRST_SAGA_ID: &str = "dlq-ended-saga";
 const PERSIST_FAIL_SAGA_ID: &str = "dlq-persist-saga";
 const DECODE_FAIL_SAGA_ID: &str = "dlq-decode-saga";
-
-/// Correlation rule of `UpstreamDecodeTestSaga`.  Its tests deliver only corrupt
-/// payloads, which carry no typed event, so this answer is never consulted —
-/// which is why those tests can spawn two instances of the one type under
-/// different ids and still tell them apart through
-/// `SagaProps::with_decode_failure_route`.
-const UPSTREAM_DECODE_TEST_SAGA_ID: &str = "dlq-upstream-decode-saga";
 
 /// Dead letters on this stream recording the named failure.
 ///
@@ -173,26 +185,6 @@ async fn append_ping(store: &Arc<dyn EventStore>, stream_key: &str, sequence: u6
         .expect("append Ping must succeed");
 }
 
-/// Append an event with `Ping::EVENT_TYPE` but an invalid JSON payload so the
-/// codec's `decode` call fails.  The `EVENT_TYPE` check in the upstream
-/// transform passes; the subsequent decode fails — exercising the
-/// `UpstreamMessage::DecodeFailed` path.
-async fn append_corrupt_ping(store: &Arc<dyn EventStore>, stream_key: &str, sequence: u64) {
-    store
-        .append(
-            stream_key,
-            vec![AppendingEvent {
-                sequence,
-                event_type: Ping::EVENT_TYPE,
-                // Corrupt bytes: valid UTF-8 but not valid JSON for `Ping`.
-                payload: Bytes::from_static(b"NOT-VALID-JSON"),
-                occurred_at: jiff::Timestamp::now(),
-            }],
-        )
-        .await
-        .expect("append corrupt Ping must succeed");
-}
-
 async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
@@ -240,19 +232,17 @@ struct HandleFailSaga {
 
 #[async_trait]
 impl Saga for HandleFailSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = SagaBoom;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(HANDLE_FAIL_SAGA_ID))
     }
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        _event: Ping,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
         self.handled.notify_one();
@@ -277,21 +267,16 @@ async fn handle_error_enqueues_a_handle_failed_dead_letter() {
     let handled = Arc::new(Notify::new());
 
     let handled_for_saga = Arc::clone(&handled);
-    let _proxy =
-        SagaProps::<HandleFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            HandleFailSaga {
-                handled: Arc::clone(&handled_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "dlq-handle-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaProps::<HandleFailSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| HandleFailSaga {
+            handled: Arc::clone(&handled_for_saga),
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(&upstream_store, "dlq-handle-upstream"))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
@@ -319,49 +304,83 @@ async fn handle_error_enqueues_a_handle_failed_dead_letter() {
 
 // Test 2 — ScheduledFailed → `scheduled_failed` (immediate)
 
-struct ScheduleThenFailSaga;
+/// The deadline message of [`ScheduleThenFailSaga`] — a value persisted inside
+/// the schedule fact, so it names the codec that writes it down.
+struct Reminder;
 
-#[async_trait]
-impl Saga for ScheduleThenFailSaga {
-    type SubscribedEvent = Ping;
-    type Event = SagaLog;
-    type Error = SagaBoom;
-    type ScheduledMessage = ();
+struct ReminderCodec;
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
-        Some(SagaId::new(SCHEDULE_THEN_FAIL_SAGA_ID))
-    }
-    fn apply(&mut self, _event: SagaLog) {}
+impl Codec<Reminder> for ReminderCodec {
+    type Error = std::convert::Infallible;
 
-    async fn handle(
-        &mut self,
-        _event: Ping,
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        Ok(SagaEffect::schedule(
-            TimerName::new("reminder"),
-            Duration::from_millis(120),
-            (),
-        ))
+    fn encode(_value: &Reminder) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from_static(b"reminder"))
     }
 
-    async fn on_scheduled(
-        &mut self,
-        _message: (),
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        Err(SagaBoom("scheduled"))
+    fn decode(_payload: &[u8]) -> Result<Reminder, Self::Error> {
+        Ok(Reminder)
     }
 }
 
-/// Given a saga whose `on_scheduled` returns `Err`,
-/// When the scheduled timer fires,
+impl DeadlineMessage for Reminder {
+    type Codec = ReminderCodec;
+}
+
+/// The alphabet of [`ScheduleThenFailSaga`]: one observed source, plus its own
+/// time — the deadline whose arm fails.
+// The observed payload is decoded and delivered as the variant it belongs to;
+// what this saga decides does not read it, which `dead_code` cannot tell apart
+// from a field nothing fills.
+#[allow(dead_code)]
+#[derive(SagaSubscribe)]
+enum ScheduledInput {
+    Ping(Ping),
+    #[subscribe(deadline)]
+    Reminder(Reminder),
+}
+
+struct ScheduleThenFailSaga {
+    deadline: Deadline<Reminder>,
+}
+
+#[async_trait]
+impl Saga for ScheduleThenFailSaga {
+    type Subscribe = ScheduledInput;
+    type Event = SagaLog;
+    type Error = SagaBoom;
+
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            ScheduledInput::Ping(_) => Some(SagaId::new(SCHEDULE_THEN_FAIL_SAGA_ID)),
+            // A firing is addressed to the instance that set it and never
+            // travels the subscription path.
+            ScheduledInput::Reminder(_) => None,
+        }
+    }
+
+    async fn handle(
+        &mut self,
+        input: Self::Subscribe,
+        _ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        match input {
+            ScheduledInput::Ping(_) => Ok(self.deadline.set(
+                TimerName::new("reminder"),
+                Duration::from_millis(120),
+                Reminder,
+            )),
+            ScheduledInput::Reminder(_) => Err(SagaBoom("scheduled")),
+        }
+    }
+}
+
+/// Given a saga whose deadline arm returns `Err`,
+/// When the deadline it set fires,
 /// Then a `scheduled_failed` dead letter is enqueued on the saga stream.
 #[tokio::test]
-async fn on_scheduled_error_enqueues_a_scheduled_failed_dead_letter() {
+async fn a_failing_deadline_arm_enqueues_a_scheduled_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-sched-upstream", 1, "tick").await;
@@ -372,16 +391,11 @@ async fn on_scheduled_error_enqueues_a_scheduled_failed_dead_letter() {
     let _proxy = SagaProps::<ScheduleThenFailSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || ScheduleThenFailSaga,
-    )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: "dlq-sched-upstream".to_owned(),
-            after: 0,
+        move |components| ScheduleThenFailSaga {
+            deadline: components.deadline(),
         },
     )
-    .with_scheduler(scheduler.clone())
+    .subscribed_to::<Ping>(Subscription::stream(&upstream_store, "dlq-sched-upstream"))
     .spawn(system.process_system())
     .await;
 
@@ -395,7 +409,7 @@ async fn on_scheduled_error_enqueues_a_scheduled_failed_dead_letter() {
 
     assert!(
         count_dead_letter_kind(&events, "scheduled_failed") >= 1,
-        "a failing on_scheduled must enqueue a `scheduled_failed` dead letter"
+        "a failing deadline arm must enqueue a `scheduled_failed` dead letter"
     );
 }
 
@@ -473,21 +487,20 @@ struct TellFailSaga {
 
 #[async_trait]
 impl Saga for TellFailSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = std::convert::Infallible;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(TELL_FAIL_SAGA_ID))
     }
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        event: Ping,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::Ping(event) = input;
         let effect = SagaEffect::tell(self.target.clone(), Reserve);
         let full = SagaEffect::persist(SagaLog { note: event.tag }).combine(effect);
         self.handled.notify_one();
@@ -518,25 +531,20 @@ async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_ret
     let handled = Arc::new(Notify::new());
 
     let handled_for_saga = Arc::clone(&handled);
-    let _proxy =
-        SagaProps::<TellFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            TellFailSaga {
-                target: FailingTellTarget {
-                    target_id: AggregateId::new(TELL_FAIL_TARGET_ID),
-                    _phantom: PhantomData,
-                },
-                handled: Arc::clone(&handled_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "dlq-tell-upstream".to_owned(),
-                after: 0,
+    let _proxy = SagaProps::<TellFailSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| TellFailSaga {
+            target: FailingTellTarget {
+                target_id: AggregateId::new(TELL_FAIL_TARGET_ID),
+                _phantom: PhantomData,
             },
-        )
-        .spawn(system.process_system())
-        .await;
+            handled: Arc::clone(&handled_for_saga),
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(&upstream_store, "dlq-tell-upstream"))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
@@ -647,21 +655,20 @@ struct EndOnFirstSaga {
 
 #[async_trait]
 impl Saga for EndOnFirstSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = std::convert::Infallible;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(END_ON_FIRST_SAGA_ID))
     }
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        event: Ping,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::Ping(event) = input;
         self.handle_count.fetch_add(1, Ordering::SeqCst);
         // persist + one in-flight tell + end → enters Draining (stays alive to
         // receive and drop the second upstream event).
@@ -715,25 +722,20 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
 
     let handle_count_for_saga = Arc::clone(&handle_count);
     let drain_unblock_for_saga = Arc::clone(&drain_unblock);
-    let _proxy =
-        SagaProps::<EndOnFirstSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            EndOnFirstSaga {
-                target: BlockingDrainTellTarget {
-                    notify: Arc::clone(&drain_unblock_for_saga),
-                    aggregate_id: AggregateId::new("dlq-ended-target"),
-                },
-                handle_count: Arc::clone(&handle_count_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "dlq-ended-upstream".to_owned(),
-                after: 0,
+    let _proxy = SagaProps::<EndOnFirstSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| EndOnFirstSaga {
+            target: BlockingDrainTellTarget {
+                notify: Arc::clone(&drain_unblock_for_saga),
+                aggregate_id: AggregateId::new("dlq-ended-target"),
             },
-        )
-        .spawn(system.process_system())
-        .await;
+            handle_count: Arc::clone(&handle_count_for_saga),
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(&upstream_store, "dlq-ended-upstream"))
+    .spawn(system.process_system())
+    .await;
 
     let events = wait_for_dead_letter(
         &saga_store,
@@ -826,21 +828,20 @@ struct PersistFailSaga {
 
 #[async_trait]
 impl Saga for PersistFailSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
     type Error = std::convert::Infallible;
-    type ScheduledMessage = ();
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(PERSIST_FAIL_SAGA_ID))
     }
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        event: Ping,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::Ping(event) = input;
         self.handled.notify_one();
         Ok(SagaEffect::persist(SagaLog { note: event.tag }))
     }
@@ -872,21 +873,19 @@ async fn persist_retry_recovers_domain_event_without_dead_letter() {
     let handled = Arc::new(Notify::new());
 
     let handled_for_saga = Arc::clone(&handled);
-    let _proxy =
-        SagaProps::<PersistFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            PersistFailSaga {
-                handled: Arc::clone(&handled_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "dlq-persist-retry-ok-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaProps::<PersistFailSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| PersistFailSaga {
+            handled: Arc::clone(&handled_for_saga),
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(
+        &upstream_store,
+        "dlq-persist-retry-ok-upstream",
+    ))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
@@ -931,21 +930,19 @@ async fn persist_failure_enqueues_a_persist_failed_dead_letter() {
     let handled = Arc::new(Notify::new());
 
     let handled_for_saga = Arc::clone(&handled);
-    let _proxy =
-        SagaProps::<PersistFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            PersistFailSaga {
-                handled: Arc::clone(&handled_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "dlq-persist-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaProps::<PersistFailSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| PersistFailSaga {
+            handled: Arc::clone(&handled_for_saga),
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(
+        &upstream_store,
+        "dlq-persist-upstream",
+    ))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled.notified())
         .await
@@ -974,76 +971,99 @@ async fn persist_failure_enqueues_a_persist_failed_dead_letter() {
 
 // Test 6 — DecodeFailed → `decode_failed` (immediate)
 
-/// A scheduled-message type whose `Deserialize` always fails regardless of
-/// what bytes it receives.  The `Serialize` implementation produces valid JSON
-/// (`null`) so `SagaEffect::schedule` can store the payload durably; the
-/// decode failure is injected only at the timer-fire path.
+/// A deadline message whose codec writes a payload happily and can never read
+/// one back.  `encode` succeeds so the schedule fact is stored durably; the
+/// decode failure is injected only at the timer-fire path, which is where the
+/// persisted payload is read back through this very codec.
 struct AlwaysDecodeFails;
 
-impl serde::Serialize for AlwaysDecodeFails {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_unit()
+#[derive(Debug)]
+struct DecodeBoom;
+
+impl std::fmt::Display for DecodeBoom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "intentional decode failure for DLQ test")
     }
 }
 
-impl<'de> serde::Deserialize<'de> for AlwaysDecodeFails {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Consume the entire value so the deserializer is not left with
-        // unconsumed input, then unconditionally signal failure.
-        let _ = <serde::de::IgnoredAny as serde::Deserialize<'de>>::deserialize(deserializer)?;
-        Err(serde::de::Error::custom(
-            "intentional decode failure for DLQ test",
-        ))
+impl std::error::Error for DecodeBoom {}
+
+struct AlwaysDecodeFailsCodec;
+
+impl Codec<AlwaysDecodeFails> for AlwaysDecodeFailsCodec {
+    type Error = DecodeBoom;
+
+    fn encode(_value: &AlwaysDecodeFails) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from_static(b"unreadable"))
+    }
+
+    fn decode(_payload: &[u8]) -> Result<AlwaysDecodeFails, Self::Error> {
+        Err(DecodeBoom)
     }
 }
 
-struct DecodeFailSaga;
+impl DeadlineMessage for AlwaysDecodeFails {
+    type Codec = AlwaysDecodeFailsCodec;
+}
+
+/// The alphabet of [`DecodeFailSaga`]: one observed source, plus a deadline
+/// whose message can never be read back.
+// The observed payload is decoded and delivered as the variant it belongs to;
+// what this saga decides does not read it, which `dead_code` cannot tell apart
+// from a field nothing fills.
+#[allow(dead_code)]
+#[derive(SagaSubscribe)]
+enum DecodeInput {
+    Ping(Ping),
+    #[subscribe(deadline)]
+    Unreadable(AlwaysDecodeFails),
+}
+
+struct DecodeFailSaga {
+    deadline: Deadline<AlwaysDecodeFails>,
+}
 
 #[async_trait]
 impl Saga for DecodeFailSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = DecodeInput;
     type Event = SagaLog;
     type Error = std::convert::Infallible;
-    type ScheduledMessage = AlwaysDecodeFails;
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
-        Some(SagaId::new(DECODE_FAIL_SAGA_ID))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            DecodeInput::Ping(_) => Some(SagaId::new(DECODE_FAIL_SAGA_ID)),
+            // A firing never travels the subscription path.
+            DecodeInput::Unreadable(_) => None,
+        }
     }
-    fn apply(&mut self, _event: SagaLog) {}
 
     async fn handle(
         &mut self,
-        _event: Ping,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        // Schedule a timer; the stored payload deserialises to `null`, which
-        // `AlwaysDecodeFails::deserialize` consumes then rejects.
-        Ok(SagaEffect::schedule(
-            TimerName::new("decode-test"),
-            Duration::from_millis(80),
-            AlwaysDecodeFails,
-        ))
-    }
-
-    async fn on_scheduled(
-        &mut self,
-        _msg: AlwaysDecodeFails,
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        // Never reached — the deserialise step fails before this is called.
-        Ok(SagaEffect::None)
+        match input {
+            // Set a deadline; the stored payload is what
+            // `AlwaysDecodeFailsCodec::decode` unconditionally rejects.
+            DecodeInput::Ping(_) => Ok(self.deadline.set(
+                TimerName::new("decode-test"),
+                Duration::from_millis(80),
+                AlwaysDecodeFails,
+            )),
+            // Never reached — the read-back fails before the arm is entered.
+            DecodeInput::Unreadable(_) => Ok(SagaEffect::None),
+        }
     }
 }
 
-/// Given a saga whose `ScheduledMessage` type always fails to deserialise,
-/// When the scheduler fires a timer for that saga,
+/// Given a saga whose deadline message can never be read back,
+/// When the deadline it set fires,
 /// Then a `decode_failed` dead letter is enqueued on the saga stream
 /// immediately.
 #[tokio::test]
 async fn decode_failure_in_scheduled_payload_enqueues_a_decode_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = common::resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-decode-upstream", 1, "decode-test").await;
@@ -1051,20 +1071,16 @@ async fn decode_failure_in_scheduled_payload_enqueues_a_decode_failed_dead_lette
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(DECODE_FAIL_SAGA_ID);
 
-    let _proxy =
-        SagaProps::<DecodeFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            DecodeFailSaga
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "dlq-decode-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .with_scheduler(scheduler.clone())
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaProps::<DecodeFailSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |components| DecodeFailSaga {
+            deadline: components.deadline(),
+        },
+    )
+    .subscribed_to::<Ping>(Subscription::stream(&upstream_store, "dlq-decode-upstream"))
+    .spawn(system.process_system())
+    .await;
 
     let events = wait_for_dead_letter(
         &saga_store,
@@ -1076,177 +1092,7 @@ async fn decode_failure_in_scheduled_payload_enqueues_a_decode_failed_dead_lette
 
     assert!(
         count_dead_letter_kind(&events, "decode_failed") >= 1,
-        "a scheduled-payload decode failure must enqueue a `decode_failed` dead letter"
-    );
-}
-
-// Test 7 — upstream message decode failure → `decode_failed` (immediate)
-
-/// A minimal saga that accepts Ping events and returns no effect.  Used to
-/// verify the `UpstreamMessage::DecodeFailed` DLQ path without scheduling or
-/// error injection in the handler itself.
-struct UpstreamDecodeTestSaga;
-
-#[async_trait]
-impl Saga for UpstreamDecodeTestSaga {
-    type SubscribedEvent = Ping;
-    type Event = SagaLog;
-    type Error = std::convert::Infallible;
-    type ScheduledMessage = ();
-
-    fn correlate(_event: &Ping) -> Option<SagaId> {
-        Some(SagaId::new(UPSTREAM_DECODE_TEST_SAGA_ID))
-    }
-    fn apply(&mut self, _event: SagaLog) {}
-
-    async fn handle(
-        &mut self,
-        _event: Ping,
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        // Must not be called for the corrupt event; returns None for any valid Ping.
-        Ok(SagaEffect::None)
-    }
-}
-
-/// Given an upstream stream carrying an event with the correct `EVENT_TYPE`
-/// (`Ping::EVENT_TYPE`) but an invalid JSON payload,
-/// When a saga subscribes to that stream,
-/// Then the transform decode failure is forwarded to the saga as a
-/// `SagaFailure::DecodeFailed` dead letter, immediately, on the
-/// saga's own stream — not silently discarded.
-#[tokio::test]
-async fn upstream_message_decode_failure_enqueues_a_decode_failed_dead_letter() {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    // Append a corrupt payload that carries Ping's EVENT_TYPE but is not valid
-    // JSON for `Ping` — the type-key filter in the transform passes, then
-    // codec.decode() fails, triggering the DecodeFailed path.
-    append_corrupt_ping(&upstream_store, "dlq-upstream-decode-upstream", 1).await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(UPSTREAM_DECODE_TEST_SAGA_ID);
-
-    let _proxy =
-        SagaProps::<UpstreamDecodeTestSaga>::new(saga_id.clone(), Arc::clone(&saga_store), || {
-            UpstreamDecodeTestSaga
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: "dlq-upstream-decode-upstream".to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
-
-    let events = wait_for_dead_letter(
-        &saga_store,
-        &saga_id,
-        "decode_failed",
-        Duration::from_secs(5),
-    )
-    .await;
-
-    assert!(
-        count_dead_letter_kind(&events, "decode_failed") >= 1,
-        "an upstream message with an invalid payload must enqueue a `decode_failed` dead letter"
-    );
-}
-
-// Test 8 — decode_failure_route_fn: only the routing target records DLQ
-
-/// Two sagas subscribe to the **same** upstream stream, which carries a
-/// corrupt event.  Both configure `decode_failure_route_fn` pointing to
-/// saga-A.  Only saga-A records a `decode_failed` dead letter; saga-B routes
-/// the failure to saga-A and, since that is not saga-B, opts out silently.
-///
-/// This verifies that when multiple sagas subscribe
-/// to the same upstream, a single corrupt event does not produce duplicate DLQ
-/// entries across every subscriber.
-#[tokio::test]
-async fn decode_failure_route_fn_prevents_non_target_saga_from_recording_dead_letter() {
-    use nitinol_persistence::AggregateId;
-
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    // Single corrupt event on a shared upstream stream.
-    append_corrupt_ping(&upstream_store, "dlq-route-shared-upstream", 1).await;
-
-    let saga_a_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_b_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id_a = SagaId::new("dlq-route-saga-a");
-    let saga_id_b = SagaId::new("dlq-route-saga-b");
-
-    // Saga A: route function returns Some(saga_id_a) for any decode failure.
-    // Since saga_id_a == self.saga_id, saga-A records the DLQ entry.
-    let route_target_a = saga_id_a.clone();
-    let _proxy_a = SagaProps::<UpstreamDecodeTestSaga>::new(
-        saga_id_a.clone(),
-        Arc::clone(&saga_a_store),
-        || UpstreamDecodeTestSaga,
-    )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: "dlq-route-shared-upstream".to_owned(),
-            after: 0,
-        },
-    )
-    .with_decode_failure_route(move |_: &AggregateId, _: u64| Some(route_target_a.clone()))
-    .spawn(system.process_system())
-    .await;
-
-    // Saga B: route function also returns Some(saga_id_a) — pointing at saga-A.
-    // Since saga_id_a ≠ self.saga_id (= saga_id_b), saga-B opts out and records
-    // no DLQ entry.
-    let route_target_b = saga_id_a.clone();
-    let _proxy_b = SagaProps::<UpstreamDecodeTestSaga>::new(
-        saga_id_b.clone(),
-        Arc::clone(&saga_b_store),
-        || UpstreamDecodeTestSaga,
-    )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: "dlq-route-shared-upstream".to_owned(),
-            after: 0,
-        },
-    )
-    .with_decode_failure_route(move |_: &AggregateId, _: u64| Some(route_target_b.clone()))
-    .spawn(system.process_system())
-    .await;
-
-    // Saga A must record a DLQ entry for the corrupt event.
-    let events_a = wait_for_dead_letter(
-        &saga_a_store,
-        &saga_id_a,
-        "decode_failed",
-        Duration::from_secs(5),
-    )
-    .await;
-
-    assert!(
-        count_dead_letter_kind(&events_a, "decode_failed") >= 1,
-        "saga-A (routing target) must record a `decode_failed` dead letter \
-         for the corrupt upstream event"
-    );
-
-    // Give saga B ample time to process (or skip) the corrupt event.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    // Saga B must NOT record a DLQ entry.
-    let events_b = load_saga_events(&saga_b_store, &saga_id_b).await;
-    assert_eq!(
-        count_dead_letter_kind(&events_b, "decode_failed"),
-        0,
-        "saga-B must NOT record a `decode_failed` dead letter — its \
-         decode_failure_route_fn routes this failure to saga-A, which is not \
-         saga-B"
+        "a deadline payload that cannot be read back must enqueue a \
+         `decode_failed` dead letter"
     );
 }

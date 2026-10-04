@@ -10,6 +10,7 @@ use nitinol_persistence::store::EventStore;
 use nitinol_persistence::AppendingEvent;
 use nitinol_runtime::process::ProcessContext;
 
+use crate::components::{deadline, PendingDeadlineCell};
 use crate::consumed::{
     append_consumed_position, finalize_consumed_position, ConsumedPositionEvent, ConsumedPositions,
 };
@@ -36,6 +37,10 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     pub(crate) tell_states: &'a mut HashMap<u64, TellState>,
     pub(crate) lifecycle: &'a mut Lifecycle,
     pub(crate) scheduler: Option<SchedulerProxy>,
+    /// What the journal says is still pending, moved here as each schedule
+    /// marker becomes durable so the saga's own `Deadline` view never reports a
+    /// deadline whose fact did not land.
+    pub(crate) pending_deadlines: PendingDeadlineCell,
     /// Where a deadline this effect registers must address its firing.
     pub(crate) delivery: &'a ScheduleDelivery<S>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
@@ -252,6 +257,9 @@ async fn cancel_schedule<S: Saga>(
         // would diverge from the persisted state.  The next effect can retry.
         return InterpretOutcome::AppendFailed;
     }
+    // The marker is durable, so the deadline is no longer pending by the only
+    // account that matters — the journal's.
+    deadline::forget_pending(&ictx.pending_deadlines, &name);
     if let Some(timers) = ictx.timers() {
         timers.cancel(name).await;
     }
@@ -273,9 +281,11 @@ async fn persist_batch<S: Saga>(
     // `append_consumed_position` itself gates on below, so the two agree on
     // when there is nothing left to write.
     let position_pending = ictx.input_position.as_ref().is_some_and(|position| {
-        !ictx
-            .consumed
-            .covers(position.source.as_str(), position.sequence)
+        !ictx.consumed.covers(
+            position.source.as_str(),
+            &position.source_event_type,
+            position.sequence,
+        )
     });
     if events.is_empty() && tells.is_empty() && schedules.is_empty() && !position_pending {
         return InterpretOutcome::Continue;
@@ -383,9 +393,15 @@ async fn persist_batch<S: Saga>(
     finalize_consumed_position(ictx.consumed, ictx.saga_id.as_str(), recorded_position);
 
     // The schedule markers of this batch are durable now, so what they record
-    // can be reported. The timers themselves are registered further below,
-    // after every marker has landed.
+    // can be reported — and only now may the pending view hold them: a batch
+    // that never landed must leave the view exactly as it was. The timers
+    // themselves are registered further below, after every marker has landed.
     for reg in &registrations {
+        deadline::record_pending(
+            &ictx.pending_deadlines,
+            reg.name.clone(),
+            deadline::due_at(reg.scheduled_at_unix_millis, reg.after),
+        );
         report_system_event!(
             ScheduleEvent::EVENT_TYPE,
             SCHEDULED_ARM,
@@ -421,11 +437,19 @@ async fn persist_batch<S: Saga>(
             timers.start_single(reg.name, reg.after, dispatch).await;
         }
     } else if !schedules.is_empty() {
-        tracing::warn!(
-            saga_id = ictx.saga_id.as_str(),
-            "saga persisted schedule markers but no scheduler was injected \
-             (SagaProps::with_scheduler); timers will not fire until replayed \
-             by a scheduler-equipped incarnation"
+        // Unreachable: a `ScheduleSpec` can only come from a `Deadline<M>`,
+        // `SagaComponents::deadline::<M>()` only exists where `S::Subscribe:
+        // SagaSubscribe<Deadline = HasDeadline<M>>`, and `resolve_for` resolves
+        // the resident timer core from that exact same associated type (see
+        // `scheduler::resolve_for`). A saga whose alphabet can produce this
+        // batch's schedules therefore always has `ictx.scheduler` populated —
+        // there is no longer a separately-settable fact the two could disagree
+        // about, including for a hand-written `SagaSubscribe`, since `Deadline`
+        // is sealed to `NoDeadline` and `HasDeadline<M>`.
+        unreachable!(
+            "saga {} persisted schedule markers with no resident timer core resolved; \
+             SagaSubscribe::Deadline and the spawn boundary's resolution disagreed",
+            ictx.saga_id.as_str()
         );
     }
 
@@ -487,6 +511,9 @@ struct PendingRegistration {
     name: TimerName,
     after: std::time::Duration,
     payload: bytes::Bytes,
+    /// The wall-clock anchor written into the fact, so the pending view derives
+    /// the due instant from the same two numbers a replay would.
+    scheduled_at_unix_millis: i64,
 }
 
 /// Append one `ScheduleEvent::Scheduled` marker per requested timer into the
@@ -518,6 +545,7 @@ fn append_schedule_specs(
             name: spec.name.clone(),
             after: spec.after,
             payload: spec.payload.clone(),
+            scheduled_at_unix_millis,
         });
     }
     registrations

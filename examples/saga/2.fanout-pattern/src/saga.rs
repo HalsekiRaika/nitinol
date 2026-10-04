@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
 use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, TellIntent};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, TellIntent};
 
 use crate::codec::JsonCodec;
 use crate::payroll_run::PayrollRunApproved;
@@ -52,6 +52,19 @@ impl Event for FanOutStarted {
     type Codec = JsonCodec;
 }
 
+/// The whole alphabet this fan-out reacts to: the run's fact event, and no
+/// deadline of its own.
+///
+/// Everything the saga reacts to is declared here, and everything reaches it
+/// through the one [`Saga::handle`] entry point.  A fan-out that later had to
+/// notice each payslip's own reply, or give the run a deadline to complete
+/// within, would gain a variant here — and the `match`es that answer the
+/// alphabet would stop compiling until it was handled.
+#[derive(SagaSubscribe)]
+pub enum Observed {
+    PayrollRunApproved(PayrollRunApproved),
+}
+
 /// Delivers one issue command per payslip named by a [`PayrollRunApproved`].
 pub struct FanOutSaga {
     system: PayrollSystem,
@@ -93,22 +106,21 @@ impl FanOutSaga {
 
 #[async_trait]
 impl Saga for FanOutSaga {
-    type SubscribedEvent = PayrollRunApproved;
+    type Subscribe = Observed;
     type Event = FanOutStarted;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        let Observed::PayrollRunApproved(event) = input;
         Some(Self::instance_id(&event.payroll_run))
     }
 
-    /// The saga keeps no state.
-    ///
-    /// How far the fan-out got is already recorded — each payslip's own stream
-    /// says whether it exists.  Mirroring that into the saga would give the
-    /// same fact two owners that a crash between them could leave disagreeing,
-    /// and the disagreement would be invisible until the next replay.
-    fn apply(&mut self, _event: Self::Event) {}
+    // The saga keeps no state, so `apply` is left to its no-op default.
+    //
+    // How far the fan-out got is already recorded — each payslip's own stream
+    // says whether it exists.  Mirroring that into the saga would give the same
+    // fact two owners that a crash between them could leave disagreeing, and the
+    // disagreement would be invisible until the next replay.
 
     /// Nothing here suppresses a repeat, on purpose.
     ///
@@ -120,9 +132,10 @@ impl Saga for FanOutSaga {
     /// a pending outbox marker repeats, which never pass through here.
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::PayrollRunApproved(event) = input;
         let payslips: Vec<String> = event
             .employee_ids
             .iter()

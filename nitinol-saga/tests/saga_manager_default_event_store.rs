@@ -1,13 +1,13 @@
 //! The saga manager entry point on a system that already holds a default
 //! [`EventStore`].
 //!
-//! `system.saga_manager_props(subscription, producer)` returns a manager
-//! builder with everything the system already knows filled in: the store each
-//! instance journals onto.  The two formats are settled by the event types
-//! themselves — each names its codec — so only the subscription stays in the
-//! caller's hands, which makes it also the manager's override point —
-//! `Subscription::stream(&store, &key)` names an upstream store explicitly
-//! where `system.subscription(&key)` takes the default.
+//! `system.saga_manager_props(producer)` returns a manager builder with
+//! everything the system already knows filled in: the store each instance
+//! journals onto.  The two formats are settled by the event types themselves —
+//! each names its codec — so only the subscription handed to `subscribed_to`
+//! stays in the caller's hands, which makes it also the manager's override
+//! point — `Subscription::stream(&store, &key)` names an upstream store
+//! explicitly where `system.subscription(&key)` takes the default.
 //!
 //! The store is stream-keyed, so one default store holds the upstream stream
 //! and every correlated instance's own stream side by side; that is what the
@@ -33,7 +33,9 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaDefaultStoreExt, SagaEffect, SagaId, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaDefaultStoreExt, SagaEffect, SagaId, SagaSubscribe, Subscription,
+};
 
 // Fixtures
 
@@ -63,6 +65,12 @@ impl Event for ReservationRequested {
     type Codec = JsonCodec;
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 /// Prefix of every instance id [`FanoutSaga::correlate`] derives; the order key
 /// is appended verbatim, so the journal assertion observes an id the manager
 /// computed rather than one the test fixed in advance.
@@ -75,22 +83,24 @@ struct FanoutSaga {
 
 #[async_trait]
 impl Saga for FanoutSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(format!("{INSTANCE_PREFIX}{}", event.order)))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Order(event) => {
+                Some(SagaId::new(format!("{INSTANCE_PREFIX}{}", event.order)))
+            }
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.handled
             .lock()
             .expect("handled mutex is never poisoned: no holder panics while the guard is alive")
@@ -197,9 +207,9 @@ async fn wait_for_instance_persisted(store: &Arc<dyn EventStore>, saga_id: &Saga
 
 // Default store: both directions of the manager
 
-/// `system.saga_manager_props(system.subscription(&key), producer)` must resolve
-/// both stores from the system default: the upstream it polls and the journal
-/// each correlated instance writes to.
+/// `system.saga_manager_props(producer).subscribed_to(system.subscription(&key))`
+/// must resolve both stores from the system default: the upstream it polls and
+/// the journal each correlated instance writes to.
 #[tokio::test]
 async fn store_less_manager_props_uses_the_system_default_store_for_upstream_and_journal() {
     // Given: one default store, holding the upstream stream
@@ -218,10 +228,11 @@ async fn store_less_manager_props_uses_the_system_default_store_for_upstream_and
 
     // When: neither store is named at the call site
     let _manager_proxy = system
-        .saga_manager_props(system.subscription(&upstream_key), move || FanoutSaga {
+        .saga_manager_props(move |_components| FanoutSaga {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
+        .subscribed_to::<OrderPlaced>(system.subscription(&upstream_key))
         .spawn(system.process_system())
         .await;
 
@@ -272,13 +283,11 @@ async fn explicit_subscription_store_overrides_the_default_upstream_for_the_mana
 
     // When
     let _manager_proxy = system
-        .saga_manager_props(
-            Subscription::stream(&override_store, &upstream_key),
-            move || FanoutSaga {
-                handled: Arc::clone(&handled_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            },
-        )
+        .saga_manager_props(move |_components| FanoutSaga {
+            handled: Arc::clone(&handled_for_producer),
+            notify: Arc::clone(&notify_for_producer),
+        })
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&override_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 

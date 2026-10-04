@@ -26,28 +26,33 @@
 //!
 //! # Capabilities
 //!
-//! - Subscription-driven: the saga subscribes to an upstream [`nitinol_persistence::store::EventStore`]
-//!   via a runtime child `DirectPollerProcess` (catchup + live, at-least-once delivery).
-//!   The poller's lifetime is bound to the saga process; when the saga stops the runtime
-//!   cascade-stops the child poller automatically.
+//! - Subscription-driven: each source the saga's alphabet declares is observed
+//!   through its own upstream [`nitinol_persistence::store::EventStore`], via a
+//!   runtime child `DirectPollerProcess` of its own (catchup + live, at-least-once
+//!   delivery), with its own cursor. Every poller's lifetime is bound to the saga
+//!   process; when the saga stops the runtime cascade-stops every child poller
+//!   automatically.
 //! - Consumed inputs are de-duplicated by the framework.  Most positions are
 //!   written onto the saga's own stream by the append that closes out the
 //!   `handle` decision the input produced — the last one, when one `handle`
 //!   call reaches the store as more than one atomic append — so the position
 //!   is never durable before every append it depends on is.  A record that
-//!   fails to decode, arrives while an earlier correlated record is draining
-//!   to a dead letter, or gets an `Err` from `handle`, is instead settled by
-//!   a dead-letter append carrying the same position — these inputs are
-//!   consumed without ever producing a `handle` decision.  Either way, replay
-//!   rebuilds those positions from the stream alone, a redelivered record at
-//!   or below one is dropped before [`Saga::handle`] runs again, and a stream
-//!   subscription resumes past it instead of re-reading the upstream history.
-//!   An effect that writes nothing else still commits a consumed-position-only
-//!   append, so a no-op decision is not redelivered either; what the guarantee
-//!   does *not* cover — an append that never landed, and the entry points with
-//!   no input to consume — is stated on [`Saga::handle`].  Positions are held
+//!   arrives while an earlier correlated record is draining to a dead letter,
+//!   or gets an `Err` from `handle`, is instead settled by a dead-letter
+//!   append carrying the same position — these inputs are consumed without
+//!   ever producing a `handle` decision.  Either way, replay rebuilds those
+//!   positions from the stream alone, a redelivered record at or below one is
+//!   dropped before [`Saga::handle`] runs again, and a stream subscription
+//!   resumes past it instead of re-reading the upstream history.  An effect
+//!   that writes nothing else still commits a consumed-position-only append,
+//!   so a no-op decision is not redelivered either; what the guarantee does
+//!   *not* cover — an append that never landed, and the entry points with no
+//!   input to consume — is stated on [`Saga::handle`].  Positions are held
 //!   per source stream, so one upstream stream's progress never covers a
-//!   record of another.
+//!   record of another.  A record that fails to decode is settled by neither
+//!   path: it has no typed input to attribute to an instance, so nothing
+//!   durable is written for it and a restart repeats the same report instead
+//!   of resuming past it — detailed under "Correlation and routing" below.
 //! - Symmetric spawn: [`SagaSystemExt`] extends
 //!   [`nitinol_eventsource::system::EventSourceSystem`] with
 //!   [`spawn_saga`](SagaSystemExt::spawn_saga), the counterpart of
@@ -68,33 +73,38 @@
 //!   [`spawn_saga_with_store`](SagaDefaultStoreExt::spawn_saga_with_store),
 //!   [`Subscription::stream`], [`SagaManagerProps::new`] — which takes
 //!   precedence over the default.
-//! - Instance management: [`SagaManagerProps`] spawns one manager that holds a
-//!   *single* upstream subscription for every instance of a saga type, so an
-//!   upstream record is decoded once no matter how far the correlation fans
-//!   out.  It interprets [`Saga::correlate`] at runtime: a correlation id with
-//!   no resident instance is spawned and replayed on arrival, an id already
-//!   resident is handed the event directly, and
+//! - Instance management: [`SagaManagerProps`] spawns one manager that holds
+//!   one upstream subscription per declared source, shared by every instance
+//!   of a saga type, so an upstream record is decoded once no matter how far
+//!   the correlation fans out.  It interprets [`Saga::correlate`] at runtime: a
+//!   correlation id with no resident instance is spawned and replayed on
+//!   arrival, an id already resident is handed the event directly, and
 //!   [`SagaManagerProps::with_instance_passivation`] stops instances that fall
-//!   idle — a later event revives them from their own stream.  Owning the one
-//!   cursor makes it the manager's decision whether a record is settled: it
-//!   holds the cursor when the addressed instance could not settle the record,
-//!   and advances past a record no instance claims so one unclaimed record
-//!   cannot stall the rest.  A [`Saga::correlate`] that always answers the same
-//!   id reduces the manager to the single resident saga [`SagaProps`] spawns.
-//! - Deadline scheduling: ask the runtime for the resident timer core —
-//!   `system.spawn_resident::<`[`SchedulerProcess`]`>().await.into()` — and pass
-//!   the resulting [`SchedulerProxy`] to [`SagaProps::with_scheduler`] for a
-//!   standalone saga, or to
-//!   [`SagaManagerProps::with_scheduler`] so every instance the manager spawns
-//!   gets the same wiring.  The ask is keyed on the type, so however many
-//!   places make it, one scheduler exists and they all name it.  The saga can
-//!   then emit [`SagaEffect::schedule`] / [`SagaEffect::CancelSchedule`]
-//!   effects and override [`crate::Saga::on_scheduled`] to handle fired
-//!   timers.  Deadlines are persisted in the saga's own event stream
-//!   (`SagaPersisted::Schedule`), which is where they durably live: the
-//!   scheduler restores nothing of its own after a restart, and an unfired
-//!   deadline is re-armed when the instance that set it is next activated
-//!   (at-least-once delivery; handlers must be idempotent).
+//!   idle — a later event revives them from their own stream.  Owning each
+//!   source's cursor makes it the manager's decision whether a record from
+//!   that source is settled: it withholds the cursor when the addressed
+//!   instance could not settle the record, and advances past a record no
+//!   instance claims so one unclaimed record cannot stall the rest.  A
+//!   [`Saga::correlate`] that always answers the same id reduces the manager to
+//!   the single resident saga [`SagaProps`] spawns.
+//! - A saga's own time: declaring a `#[subscribe(deadline)]` variant in the
+//!   alphabet is the whole of the wiring.  The host reads that declaration at
+//!   spawn and resolves the system's one resident timer core
+//!   ([`SchedulerProcess`]) for the saga — the ask is keyed on the type, so
+//!   however many sagas make it, one scheduler exists and they all name it.  The
+//!   saga asks its producer's [`SagaComponents`] for [`Deadline<M>`](Deadline)
+//!   and sets or cancels deadlines with [`Deadline::set`] / [`Deadline::cancel`],
+//!   whose effects the framework interprets as *append the fact, then arm the
+//!   timer*; a firing arrives in the deadline arm of [`Saga::handle`], like any
+//!   other input.  There is deliberately no handle on the timer core in a saga's
+//!   reach: arming a timer no stream knows about would not survive a restart, and
+//!   the restart would have no way to notice it was lost.  Deadlines are
+//!   persisted in the saga's own event stream (`SagaPersisted::Schedule`), which
+//!   is where they durably live: the scheduler restores nothing of its own after
+//!   a restart, and an unfired deadline is re-armed when the instance that set it
+//!   is next activated (at-least-once delivery; handlers must be idempotent).
+//!   What the journal says is still pending is readable through
+//!   [`Deadline::pending`].
 //! - Dead-letter queue (DLQ): each saga failure kind is persisted as a
 //!   [`DeadLetterEvent`] on the saga's own EventStore stream, mixed into the
 //!   same envelope as domain events.
@@ -162,15 +172,15 @@
 //!   [`nitinol_eventsource::Snapshotable`].
 //! - Correlation and routing are separate, and live in different places.
 //!   [`Saga::correlate`] is domain knowledge — it derives a process instance's
-//!   [`SagaId`] from a typed upstream event, so it belongs to the saga type and
-//!   never appears in spawn wiring.  A subscribed event reaches [`Saga::handle`]
-//!   only when that answer equals the instance's own id; anything else is
-//!   ignored silently.  Decode failures carry no typed event to correlate on, so
-//!   attributing them is routing and stays a setting on the spawn builder:
-//!   [`SagaProps::with_decode_failure_route`] for a standalone saga, and
-//!   [`SagaManagerProps::with_decode_failure_route`] for a manager, where the
-//!   route function additionally decides *which* resident instance owns the
-//!   corrupt record.
+//!   [`SagaId`] from a typed input, so it belongs to the saga type and never
+//!   appears in spawn wiring.  An observed event reaches [`Saga::handle`] only
+//!   when that answer equals the instance's own id; anything else is ignored
+//!   silently.  A record whose upstream bytes do not decode has no typed input to
+//!   correlate on, so there is no instance it could be attributed to: it is
+//!   reported through `tracing` and skipped, its source's cursor advances past it,
+//!   and nothing durable is written for it.  A decode failure is deterministic and
+//!   permanent — a stalling escape hatch would stall forever — so re-reading the
+//!   record after a restart repeats the report rather than a decision.
 //! - Side-effect failures and persistence failures are enqueued to the DLQ
 //!   after staged retry, not silently logged and discarded.
 //!
@@ -278,6 +288,7 @@
 //!   key — which is also what makes the command reconstructible from its outbox
 //!   marker after a crash.
 
+mod components;
 mod consumed;
 mod context;
 mod dead_letter;
@@ -291,8 +302,11 @@ mod persisted;
 mod process;
 mod saga;
 mod scheduler;
+mod subscribe;
+mod subscription;
 mod system_ext;
 
+pub use self::components::{Deadline, DeadlineMessage, PendingDeadline, SagaComponents};
 pub use self::context::SagaContext;
 pub use self::dead_letter::{
     DeadLetterEntry, DeadLetterEvent, DeadLetterQuery, DeadLetterQueue, DeadLetterQueueError,
@@ -300,9 +314,31 @@ pub use self::dead_letter::{
 };
 pub use self::effect::{SagaEffect, ScheduleSpec, TellIntent};
 pub use self::id::SagaId;
-pub use self::process::{
-    SagaManagerProps, SagaManagerProxy, SagaProps, SagaProxy, SubscriptionSet, SubscriptionUnset,
-};
+pub use self::process::{SagaManagerProps, SagaManagerProxy, SagaProps, SagaProxy};
 pub use self::saga::Saga;
-pub use self::scheduler::{ScheduleToken, SchedulerProcess, SchedulerProxy, TimerName};
-pub use self::system_ext::{SagaDefaultStoreExt, SagaSpawn, SagaSystemExt, Subscription};
+pub use self::scheduler::{ScheduleToken, SchedulerProcess, TimerName};
+pub use self::subscribe::{
+    DeadlineVariant, DeclaresDeadline, HasDeadline, NoDeadline, ReadDeadline, SagaSubscribe,
+    SourceBindings, SubscriptionSet, SubscriptionUnset,
+};
+pub use self::subscription::Subscription;
+pub use self::system_ext::{SagaDefaultStoreExt, SagaSpawn, SagaSystemExt};
+
+/// `#[derive(SagaSubscribe)]`, co-located with the [`SagaSubscribe`] trait so a
+/// single `use nitinol::saga::SagaSubscribe;` brings both into scope (trait in
+/// the type namespace, derive in the macro namespace — as `serde` does, and as
+/// [`nitinol::contract::Event`](nitinol_eventsource::Event) already does here).
+pub use nitinol_macros::SagaSubscribe;
+
+/// What the code `#[derive(SagaSubscribe)]` writes names, and nothing a person
+/// writes by hand.
+///
+/// The expansion declares the binding typestate of an alphabet, so it needs the
+/// slot-transition traits and the resolved-source type by name.  They are
+/// exported rather than hidden behind a macro-only path because the generated
+/// code lives in the user's crate and has to reach them; nothing below is part
+/// of the surface a saga author reads.
+///
+/// No stability is promised for any of it.
+#[doc(hidden)]
+pub use self::subscribe::{AllSourcesSubscribed, BindSource, SourceBinding, SubscribedSource};

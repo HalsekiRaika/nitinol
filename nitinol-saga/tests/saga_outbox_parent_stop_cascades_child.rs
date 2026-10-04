@@ -36,8 +36,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, Semaphore};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
-    SequenceCursor, TellError,
+    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
@@ -45,7 +44,7 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 // A TellTarget that fails every dispatch attempt.  The first attempt blocks on
 // a semaphore gate until the test releases it; this lets the test deterministe
@@ -188,24 +187,28 @@ struct CascadeSaga {
     handled: Arc<Notify>,
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 #[async_trait]
 impl Saga for CascadeSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(CASCADE_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         // Persist a user event and a single tell.  The tell spawns the outbox
         // executor child; do NOT end the saga so the saga stays alive until the
         // test stops it explicitly.
@@ -284,22 +287,17 @@ async fn parent_stop_cascades_to_in_flight_outbox_executor_child() {
     let target_for_saga = target.clone();
     let handled_for_saga = Arc::clone(&handled);
 
-    let saga_proxy =
-        SagaProps::<CascadeSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            CascadeSaga {
-                target: target_for_saga.clone(),
-                handled: Arc::clone(&handled_for_saga),
-            }
-        })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let saga_proxy = SagaProps::<CascadeSaga>::new(
+        saga_id.clone(),
+        Arc::clone(&saga_store),
+        move |_components| CascadeSaga {
+            target: target_for_saga.clone(),
+            handled: Arc::clone(&handled_for_saga),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+    .spawn(system.process_system())
+    .await;
 
     // The saga handles the upstream event and spawns the outbox executor.
     tokio::time::timeout(Duration::from_secs(3), handled.notified())

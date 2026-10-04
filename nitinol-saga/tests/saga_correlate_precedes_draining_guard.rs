@@ -47,7 +47,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
-    SequenceCursor, SystemEvent, TellError,
+    SystemEvent, TellError,
 };
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
@@ -55,7 +55,8 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    DeadLetterEvent, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaProps, TellIntent,
+    DeadLetterEvent, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaProps, SagaSubscribe,
+    Subscription, TellIntent,
 };
 
 const OWN_SAGA_ID: &str = "correlate-drain-order-saga";
@@ -86,6 +87,12 @@ impl Event for SagaLog {
         TypeName::new("SagaLog"),
     );
     type Codec = JsonCodec;
+}
+
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Ping(Ping),
 }
 
 // Tell target that never settles until the test releases it, holding the saga
@@ -144,25 +151,25 @@ struct EndOnFirstCorrelatedSaga {
 
 #[async_trait]
 impl Saga for EndOnFirstCorrelatedSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = SagaLog;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        event
-            .tag
-            .starts_with("MINE-")
-            .then(|| SagaId::new(OWN_SAGA_ID))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Ping(event) => event
+                .tag
+                .starts_with("MINE-")
+                .then(|| SagaId::new(OWN_SAGA_ID)),
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Ping(event) = input;
         self.handle_count.fetch_add(1, Ordering::SeqCst);
         // persist + one in-flight tell + end → the saga enters Draining rather
         // than stopping outright, and stays there until the tell settles.
@@ -277,7 +284,7 @@ async fn draining_saga_dead_letters_only_events_it_correlates_to() {
     let _proxy = SagaProps::<EndOnFirstCorrelatedSaga>::new(
         saga_id.clone(),
         Arc::clone(&saga_store),
-        move || EndOnFirstCorrelatedSaga {
+        move |_components| EndOnFirstCorrelatedSaga {
             target: BlockingTellTarget {
                 notify: Arc::clone(&drain_unblock_for_saga),
                 aggregate_id: AggregateId::new("correlate-drain-order-target"),
@@ -285,13 +292,7 @@ async fn draining_saga_dead_letters_only_events_it_correlates_to() {
             handle_count: Arc::clone(&handle_count_for_saga),
         },
     )
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: upstream_key.to_owned(),
-            after: 0,
-        },
-    )
+    .subscribed_to::<Ping>(Subscription::stream(&upstream_store, upstream_key))
     .spawn(system.process_system())
     .await;
 

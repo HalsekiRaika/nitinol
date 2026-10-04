@@ -3,14 +3,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use nitinol_eventsource::codec;
 use nitinol_eventsource::{DurableSubscription, SequenceCursor, SystemEvent};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, LoadedEvent};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
-use crate::consumed::{ConsumedPositionEvent, ConsumedPositions};
+use crate::components::{deadline, PendingDeadlineCell};
+use crate::consumed::{ConsumedPositionEvent, ConsumedPositions, PositionSource};
 use crate::context::SagaContext;
 use crate::dead_letter::{
     self, DeadLetterDispositionEvent, DlqChildSpawn, EnqueueOutcome, EnqueuePolicy,
@@ -28,98 +28,114 @@ use crate::process::replay;
 use crate::saga::Saga;
 use crate::scheduler::{self, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName};
+use crate::subscribe::{DeclaresDeadline, SagaSubscribe, SubscribedSource};
 
-/// A typed upstream event delivered to the saga by its `DirectPollerProcess`.
+/// One observed record, decoded as the variant of the saga's alphabet it
+/// belongs to, delivered by the `DirectPollerProcess` of the source that read
+/// it.
 ///
-/// Either the successfully decoded event (carrying both typed and raw bytes for
-/// the draining dead-letter path) or a decode failure that the transform could
-/// not recover — both are forwarded to `SagaProcess`, which decides what each
-/// one means for this instance.
-pub(crate) enum UpstreamMessage<E> {
-    /// Upstream event decoded successfully.
-    Decoded {
-        aggregate_id: AggregateId,
-        sequence: u64,
-        event: E,
-        /// Raw bytes as loaded from the upstream EventStore, preserved through
-        /// the transform so the dead letter carries the actual payload.
-        raw_payload: Bytes,
-    },
-    /// The upstream codec failed to decode the event payload.  Correlation is
-    /// impossible without a typed event to hand to [`Saga::correlate`], so the
-    /// failure is delivered to every subscribed saga; whether it becomes a
-    /// `SagaFailure::DecodeFailed` dead letter here is decided by
-    /// [`DecodeFailureRouteFn`], or by the record-always legacy behaviour when
-    /// no route is configured.
-    DecodeFailed {
-        aggregate_id: AggregateId,
-        sequence: u64,
-        error: String,
-    },
+/// A record whose bytes could not be decoded never becomes one of these: the
+/// transform reports it and answers `None`, which advances the poller's cursor
+/// past it.  A decode failure is deterministic and permanent, and carries no
+/// typed input to correlate, so there is no instance it could be attributed to
+/// and nothing a retry would change.
+pub(crate) struct UpstreamMessage<A> {
+    pub(crate) aggregate_id: AggregateId,
+    pub(crate) sequence: u64,
+    /// Which declared source read this record.
+    ///
+    /// Decided by the transform — the source that matched the row's event type —
+    /// so no later stage has to classify it again.  It travels with the record
+    /// because the consumed position names it: two declared sources can share
+    /// one stream, and the stream key alone would let one source's progress
+    /// cover the other's records.
+    pub(crate) source: PositionSource,
+    pub(crate) input: A,
+    /// Raw bytes as loaded from the upstream EventStore, preserved through
+    /// the transform so the dead letter carries the actual payload.
+    pub(crate) raw_payload: Bytes,
 }
 
-/// Build the subscription that turns each raw upstream record into the
-/// [`UpstreamMessage`] a saga understands.
+/// The subscription one declared source is observed through.
 ///
-/// Owned here rather than at either spawn boundary so a standalone saga and a
-/// manager-fronted one classify the same record — wrong type, decodable,
-/// corrupt — identically.
-pub(crate) fn upstream_subscription<S: Saga>(
-    store: Arc<dyn EventStore>,
-) -> DurableSubscription<UpstreamMessage<S::SubscribedEvent>> {
-    DurableSubscription::new(store, move |loaded: LoadedEvent| {
-        if loaded.event_type != <S::SubscribedEvent as nitinol_eventsource::Event>::EVENT_TYPE {
-            return None;
-        }
-        // Capture the raw payload before decoding so the draining branch can
-        // preserve it in `SagaFailure::EndedSagaReceivedMessage`.
-        let raw_payload = loaded.payload.clone();
-        let aggregate_id = AggregateId::new(loaded.stream_key);
-        let sequence = loaded.sequence;
-        match codec::decode::<<S::SubscribedEvent as nitinol_eventsource::Event>::Codec, _>(
-            &loaded.payload,
-        ) {
-            Ok(event) => Some(UpstreamMessage::Decoded {
-                aggregate_id,
-                sequence,
-                event,
-                raw_payload,
-            }),
-            Err(e) => {
-                // Decoding is not retried: the failure is forwarded as
-                // `UpstreamMessage::DecodeFailed`, and what it means is decided
-                // by whoever receives it.
-                tracing::warn!(
-                    error = %e,
-                    event_type = ?loaded.event_type,
-                    "saga upstream decode failed; forwarding as DecodeFailed",
-                );
-                Some(UpstreamMessage::DecodeFailed {
-                    aggregate_id,
-                    sequence,
-                    error: e.to_string(),
-                })
-            }
-        }
-    })
-}
-
-/// The upstream subscription a saga instance owns and cascade-stops with.
-///
-/// Absent on an instance spawned by a `SagaManagerProps`: the manager holds the
-/// single shared subscription, so an instance that opened its own would decode
-/// every upstream record a second time.
-pub(crate) struct OwnedUpstream<E> {
-    pub(crate) config: DurableSubscription<UpstreamMessage<E>>,
+/// One of these per declared external source: its own transform, its own
+/// cursor.  A saga's sources are independent, so a source whose upstream has
+/// stalled cannot hold up another's progress.
+pub(crate) struct OwnedUpstream<A> {
+    pub(crate) config: DurableSubscription<UpstreamMessage<A>>,
     pub(crate) cursor: SequenceCursor,
+    /// The declared source this subscription reads, so the cursor can be
+    /// resumed past what *this* source has consumed and no other.
+    pub(crate) source: PositionSource,
 }
 
-impl<E> Clone for OwnedUpstream<E> {
+impl<A> Clone for OwnedUpstream<A> {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
             cursor: self.cursor.clone(),
+            source: self.source.clone(),
         }
+    }
+}
+
+/// Build the subscription that turns each raw record of one declared source into
+/// the [`UpstreamMessage`] a saga understands.
+///
+/// Owned here rather than at either spawn boundary so a standalone saga and a
+/// manager-fronted one classify the same record — wrong type, decodable,
+/// corrupt — identically.
+pub(crate) fn source_subscription<A>(source: SubscribedSource<A>) -> OwnedUpstream<A>
+where
+    A: Send + Sync + 'static,
+{
+    let event_type = source.event_type();
+    let position_source = PositionSource::of(event_type);
+    let (decode, store, cursor) = source.into_parts();
+    let of_source = position_source.clone();
+    OwnedUpstream {
+        config: DurableSubscription::new(store, move |loaded: LoadedEvent| {
+            // This source claims the rows of its own event type and no others,
+            // which is what lets several sources read one stream key without
+            // reading each other's records.
+            if loaded.event_type != event_type {
+                return None;
+            }
+            // Capture the raw payload before decoding so the draining branch can
+            // preserve it in `SagaFailure::EndedSagaReceivedMessage`.
+            let raw_payload = loaded.payload.clone();
+            let aggregate_id = AggregateId::new(loaded.stream_key);
+            let sequence = loaded.sequence;
+            match decode(&loaded.payload) {
+                Ok(input) => Some(UpstreamMessage {
+                    aggregate_id,
+                    sequence,
+                    source: of_source.clone(),
+                    input,
+                    raw_payload,
+                }),
+                Err(e) => {
+                    // Reported and skipped, which is the whole of the handling:
+                    // answering `None` advances this source's cursor past the
+                    // record. A codec that refused these bytes once refuses them
+                    // every time, and with no typed input there is no instance
+                    // to attribute the failure to — so there is nothing a
+                    // retry, a dead letter or a held cursor could recover.
+                    // Nothing durable is written, so a restart re-reads the
+                    // record and repeats this report.
+                    tracing::error!(
+                        error = %e,
+                        event_type = %event_type,
+                        upstream_key = aggregate_id.as_str(),
+                        upstream_sequence = sequence,
+                        "saga could not decode an observed record; skipping it",
+                    );
+                    None
+                }
+            }
+        }),
+        cursor,
+        source: position_source,
     }
 }
 
@@ -168,31 +184,10 @@ pub(crate) fn in_flight_count(tell_states: &HashMap<u64, TellState>) -> usize {
 
 pub(crate) type CrashRestartFactory = Arc<dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync>;
 
-/// Optional decode-failure routing function.
-///
-/// When two sagas subscribe to the same upstream stream and a corrupt event
-/// arrives, the transform delivers `UpstreamMessage::DecodeFailed` to every
-/// subscribed saga because the typed event [`Saga::correlate`] needs cannot be
-/// produced.  Providing this function lets a saga opt out of recording a DLQ
-/// entry when the decode failure belongs to a different saga instance.
-///
-/// This is routing, not correlation: it answers "which subscriber owns this
-/// corrupt wire record?" from the stream key and sequence alone, so it stays an
-/// instance-level setting on `SagaProps` rather than moving to the `Saga` trait
-/// alongside `correlate`.
-///
-/// Return `Some(saga_id)` to accept the failure (records DLQ only when
-/// `saga_id == self.saga_id`).  Return `None` to decline (no DLQ).
-/// When absent, every `DecodeFailed` is recorded against this saga (legacy
-/// behaviour).
-pub(crate) type DecodeFailureRouteFn =
-    Arc<dyn Fn(&AggregateId, u64) -> Option<SagaId> + Send + Sync>;
-
 pub struct SagaProcess<S: Saga> {
     pub(crate) state: S,
     pub(crate) saga_id: SagaId,
     pub(crate) store: Arc<dyn EventStore>,
-    pub(crate) decode_failure_route_fn: Option<DecodeFailureRouteFn>,
     pub(crate) sequence: u64,
     /// How far each upstream source this saga reads has been consumed.
     ///
@@ -207,10 +202,22 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) tell_states: HashMap<u64, TellState>,
     pub(crate) crash_restart_factory: Option<CrashRestartFactory>,
     pub(crate) lifecycle: Lifecycle,
-    /// `None` when a `SagaManagerProps` manager owns the subscription and
-    /// delivers this instance's correlated events itself.
-    pub(crate) upstream: Option<OwnedUpstream<S::SubscribedEvent>>,
+    /// One subscription per declared source, each cascade-stopped with this
+    /// process.
+    ///
+    /// Empty on an instance a `SagaManagerProps` manager spawned: the manager
+    /// holds the subscriptions, so an instance that opened its own would decode
+    /// every observed record a second time.  [`Self::owns_its_subscriptions`] is
+    /// how that is read.
+    pub(crate) upstream: Vec<OwnedUpstream<S::Subscribe>>,
+    /// The resident timer core, present exactly when this saga's alphabet
+    /// declares a deadline — resolved at the spawn boundary, never handed in by
+    /// the user.
     pub(crate) scheduler: Option<SchedulerProxy>,
+    /// What the journal says is still pending, shared with the saga's own
+    /// [`Deadline`](crate::Deadline) component so it reads the stream rather
+    /// than its own intent.
+    pub(crate) pending_deadlines: PendingDeadlineCell,
     /// Where a deadline's firing is addressed, and so whether this instance's
     /// deadlines survive it stopping.
     pub(crate) delivery: ScheduleDelivery<S>,
@@ -244,22 +251,53 @@ impl<S: Saga> SagaProcess<S> {
             .map(|s| Timers::new(self.saga_id.clone(), s.clone()))
     }
 
+    /// Does this instance hold its own subscriptions, or does a manager observe
+    /// for it?
+    ///
+    /// The two differ in what a terminated instance may do with itself: one that
+    /// owns its subscriptions can decline to wire them and stop, because then
+    /// nothing can reach it; one a manager fronts keeps receiving whatever the
+    /// manager routes and has to stay resident to record it.
+    fn owns_its_subscriptions(&self) -> bool {
+        !self.upstream.is_empty()
+    }
+
     /// Re-register schedules that replay found still active (persisted
-    /// `Scheduled` with no matching `Cancelled` / `Fired`).  The remaining
-    /// delay is recomputed from the persisted wall-clock anchor; a past
-    /// deadline fires immediately.
+    /// `Scheduled` with no matching `Cancelled` / `Fired`), and make them the
+    /// pending view this incarnation answers from.
+    ///
+    /// The remaining delay is recomputed from the persisted wall-clock anchor; a
+    /// past deadline fires immediately.
     async fn reregister_active_schedules(
         &self,
         active: Vec<ActiveSchedule>,
         ctx: &mut ProcessContext<Self>,
     ) {
+        // A fresh incarnation knows nothing of what it set, so the journal is
+        // the whole of the answer — which is why this replaces the view rather
+        // than adding to it.
+        deadline::restore_pending(
+            &self.pending_deadlines,
+            active.iter().map(|sched| {
+                (
+                    sched.name.clone(),
+                    deadline::due_at(sched.scheduled_at_unix_millis, sched.after),
+                )
+            }),
+        );
+
         let Some(timers) = self.timers() else {
             if !active.is_empty() {
+                // Reachable only where the stream disagrees with the alphabet:
+                // schedule facts written by an incarnation whose alphabet
+                // declared a deadline, replayed by one whose does not. The host
+                // resolves the timer core from the declaration, so a saga that
+                // still declares one always has it.
                 tracing::warn!(
                     saga_id = self.saga_id.as_str(),
                     count = active.len(),
-                    "saga replay found active schedules but no scheduler was injected; \
-                     they will not fire in this incarnation"
+                    "saga replay found active schedules but its alphabet declares no \
+                     deadline; they will not fire"
                 );
             }
             return;
@@ -363,6 +401,7 @@ impl<S: Saga> SagaProcess<S> {
             tell_states: &mut self.tell_states,
             lifecycle: &mut self.lifecycle,
             scheduler: self.scheduler.clone(),
+            pending_deadlines: Arc::clone(&self.pending_deadlines),
             delivery: &self.delivery,
             enqueue_policy: Arc::clone(&self.enqueue_policy),
             consumed: &mut self.consumed,
@@ -575,7 +614,7 @@ impl<S: Saga> Process for SagaProcess<S> {
             // recorded on this saga's own stream, so the instance instead stays
             // resident until the manager passivates it — and its dead letters
             // still need the poller spawned below to reach the subscriber.
-            if self.upstream.is_some() {
+            if self.owns_its_subscriptions() {
                 if let Err(e) = ctx.stop_self().await {
                     tracing::warn!(error = %e, "terminated saga stop_self failed");
                 }
@@ -588,11 +627,14 @@ impl<S: Saga> Process for SagaProcess<S> {
             self.reregister_active_schedules(outcome.active_schedules, ctx)
                 .await;
 
-            if let Some(upstream) = self.upstream.clone() {
-                // Resuming past what the journal says was consumed is what
-                // frees a restart from re-reading the whole upstream history;
-                // the configured position still holds as a floor.
-                let cursor = self.consumed.resume(upstream.cursor);
+            // One poller per declared source, each resuming from its own
+            // position. Resuming past what the journal says *that source*
+            // consumed is what frees a restart from re-reading the whole
+            // upstream history; the configured position still holds as a floor.
+            // Keeping the positions per source is what stops one source's
+            // progress from skipping another's unread records.
+            for upstream in self.upstream.clone() {
+                let cursor = self.consumed.resume(upstream.cursor, &upstream.source);
                 upstream.config.spawn_child(ctx, cursor).await;
             }
         }
@@ -621,7 +663,7 @@ impl<S: Saga> Process for SagaProcess<S> {
         // from a previous incarnation), `lifecycle` is `Draining` and there is
         // no future activation this deadline could still serve — restoring the
         // instance to hand it a firing only produces the dead letter
-        // `on_scheduled` can never run to settle any other way. So a draining
+        // the deadline arm can never run to settle any other way. So a draining
         // stop always releases, manager-fronted or not.
         //
         // Either way this is an in-memory release only — no `Cancelled` marker
@@ -636,7 +678,7 @@ impl<S: Saga> Process for SagaProcess<S> {
     }
 }
 
-impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
+impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
     type Response = ();
     /// Returning `Err(SagaUpstreamHandlerError)` signals the `DirectPoller`
     /// (via `ask()`) to NOT advance the upstream cursor, keeping the saga
@@ -645,92 +687,21 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
 
     async fn recv(
         &mut self,
-        msg: UpstreamMessage<S::SubscribedEvent>,
+        msg: UpstreamMessage<S::Subscribe>,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), SagaUpstreamHandlerError> {
-        // The upstream codec could not decode the event.  Correlation is
-        // impossible without a typed event to hand to `Saga::correlate`, so
-        // the failure is delivered to this saga for DLQ recording unless a
-        // `decode_failure_route_fn` is configured — its routing decides which
-        // subscriber owns the corrupt record, preventing every subscribed
-        // saga from recording a duplicate DLQ entry for the same corrupt
-        // upstream event.
-        let (aggregate_id, sequence, event, raw_payload) = match msg {
-            UpstreamMessage::DecodeFailed {
-                aggregate_id,
-                sequence,
-                error,
-            } => {
-                // When a decode-failure route is configured, honour it.
-                // `None` → this saga opts out; `Some(id)` where id ≠ saga_id
-                // → another saga owns this failure, skip silently.
-                if let Some(ref route) = self.decode_failure_route_fn {
-                    match route(&aggregate_id, sequence) {
-                        Some(ref target_id) if target_id != &self.saga_id => {
-                            return Ok(());
-                        }
-                        None => {
-                            return Ok(());
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Delivery is at-least-once, so a corrupt record whose decode
-                // failure is already durable can arrive again — after a
-                // restart, or while this incarnation is still running. It is
-                // dropped here, before another dead letter is appended for
-                // it: the `Decoded` arm below gives redelivered records the
-                // same guard via `self.consumed.covers`, and a decode failure
-                // settles the same upstream position, so it must not bypass
-                // it.
-                if self.consumed.covers(aggregate_id.as_str(), sequence) {
-                    tracing::debug!(
-                        saga_id = self.saga_id.as_str(),
-                        upstream_key = aggregate_id.as_str(),
-                        upstream_sequence = sequence,
-                        "saga dropped a redelivered decode-failure record it has already consumed"
-                    );
-                    return Ok(());
-                }
-                let source = SourceContext {
-                    aggregate_id: aggregate_id.clone(),
-                    upstream_sequence: sequence,
-                };
-                // This call settles the record with `Ok`, so its position
-                // must become durable in the same append as the dead letter —
-                // see `record_dead_letter`'s doc comment.
-                let input_position = Some(ConsumedPositionEvent {
-                    source: aggregate_id,
-                    sequence,
-                });
-                if !self
-                    .record_dead_letter(SagaFailure::DecodeFailed { error }, source, input_position)
-                    .await
-                {
-                    // Return Err so the DirectPoller (via ask()) does NOT
-                    // advance the upstream cursor — the runtime will stop this
-                    // process via handler-failure supervision.
-                    tracing::error!(
-                        saga_id = self.saga_id.as_str(),
-                        "saga DLQ append failed for DecodeFailed; signalling upstream handler error"
-                    );
-                    return Err(SagaUpstreamHandlerError);
-                }
-                return Ok(());
-            }
-            UpstreamMessage::Decoded {
-                aggregate_id,
-                sequence,
-                event,
-                raw_payload,
-            } => (aggregate_id, sequence, event, raw_payload),
-        };
+        let UpstreamMessage {
+            aggregate_id,
+            sequence,
+            source: declared_source,
+            input,
+            raw_payload,
+        } = msg;
 
         // Correlation is decided before the lifecycle is consulted: an event
         // belonging to another instance is none of this saga's business even
         // while it drains, so it must not become a dead letter here.
-        let Some(target_id) = S::correlate(&event) else {
+        let Some(target_id) = S::correlate(&input) else {
             return Ok(());
         };
         if target_id != self.saga_id {
@@ -745,12 +716,15 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
         // else looks at it: `Saga::handle` must not see an input it has
         // already consumed, and the drop must not spend the lifecycle's dead
         // letter or the one report a failed tell is owed.
-        if self.consumed.covers(aggregate_id.as_str(), sequence) {
+        if self
+            .consumed
+            .covers(aggregate_id.as_str(), &declared_source, sequence)
+        {
             tracing::debug!(
                 saga_id = self.saga_id.as_str(),
                 upstream_key = aggregate_id.as_str(),
                 upstream_sequence = sequence,
-                "saga dropped a redelivered upstream record it has already consumed"
+                "saga dropped a redelivered observed record it has already consumed"
             );
             return Ok(());
         }
@@ -758,6 +732,14 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
         let source = SourceContext {
             aggregate_id: aggregate_id.clone(),
             upstream_sequence: sequence,
+        };
+        // The position every settle path below writes: the stream, the declared
+        // source that read the record, and its sequence. Built once so the three
+        // paths cannot drift on what they claim to have settled.
+        let input_position = ConsumedPositionEvent {
+            source: aggregate_id.clone(),
+            source_event_type: declared_source,
+            sequence,
         };
 
         // Once `End` has been interpreted and the durable
@@ -771,17 +753,13 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             // This call settles the record with `Ok`, so its position must
             // become durable in the same append as the dead letter — see
             // `record_dead_letter`'s doc comment.
-            let input_position = Some(ConsumedPositionEvent {
-                source: aggregate_id.clone(),
-                sequence,
-            });
             if !self
                 .record_dead_letter(
                     SagaFailure::EndedSagaReceivedMessage {
                         message: raw_payload,
                     },
                     source,
-                    input_position,
+                    Some(input_position),
                 )
                 .await
             {
@@ -807,24 +785,20 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
             jiff::Timestamp::now(),
             drained_failed,
         );
-        let effect = match self.state.handle(event, &mut saga_ctx).await {
+        let effect = match self.state.handle(input, &mut saga_ctx).await {
             Ok(effect) => effect,
             Err(e) => {
                 tracing::warn!(error = %e, "saga handle failed");
                 // This call settles the record with `Ok`, so its position
                 // must become durable in the same append as the dead letter —
                 // see `record_dead_letter`'s doc comment.
-                let input_position = Some(ConsumedPositionEvent {
-                    source: aggregate_id.clone(),
-                    sequence,
-                });
                 if !self
                     .record_dead_letter(
                         SagaFailure::HandleFailed {
                             error: e.to_string(),
                         },
                         source,
-                        input_position,
+                        Some(input_position),
                     )
                     .await
                 {
@@ -848,13 +822,7 @@ impl<S: Saga> Receive<UpstreamMessage<S::SubscribedEvent>> for SagaProcess<S> {
         // `Sequence`, only the closing append carries it, and only once every
         // preceding append in the batch has landed — so a decision can become
         // durable without its input's consumed position becoming durable too.
-        let mut ictx = self.interpreter_ctx(
-            ctx,
-            Some(ConsumedPositionEvent {
-                source: aggregate_id,
-                sequence,
-            }),
-        );
+        let mut ictx = self.interpreter_ctx(ctx, Some(input_position));
         // If the interpreter signals DlqFailed (PersistFailed DLQ
         // append also failed), propagate Err so the DirectPoller (via ask())
         // does NOT advance the upstream cursor.
@@ -882,8 +850,8 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         msg: FireScheduled,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
-        // Mirror the `EventEnvelope` guard — timer firings must also
-        // be dropped while draining so `on_scheduled` cannot produce additional
+        // Mirror the observed-record guard — a firing must also be dropped while
+        // draining, so the deadline arm of `Saga::handle` cannot produce further
         // effects after the terminal `Ended` marker has been written.  The
         // dropped firing is recorded as a dead letter (its raw payload retained).
         if matches!(self.lifecycle, Lifecycle::Draining) {
@@ -909,18 +877,38 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         }
 
         let FireScheduled { name, payload } = msg;
-        let message: S::ScheduledMessage = match serde_json::from_slice(&payload) {
-            Ok(message) => message,
-            Err(e) => {
+        // A firing is read back as the alphabet's own deadline variant, through
+        // the codec the message type named — the same one that wrote it into the
+        // schedule fact.
+        //
+        // `READ` is derived from `S::Subscribe::Deadline` (see
+        // `DeclaresDeadline`), not a fact the alphabet sets on its own, so it is
+        // `None` only where `Deadline` itself is `NoDeadline` — a schedule fact
+        // written by an incarnation that declared a deadline, fired at one that
+        // does not. There is no arm to deliver it to, and no retry that would
+        // make one appear, so it is recorded as the unreadable payload it is.
+        let read_back = match <<S::Subscribe as SagaSubscribe>::Deadline as DeclaresDeadline<
+            S::Subscribe,
+        >>::READ
+        {
+            Some(read) => read(&payload).map_err(|e| e.to_string()),
+            None => Err(
+                "this saga's alphabet declares no deadline variant, so a firing \
+                 for it has no arm to be delivered to"
+                    .to_owned(),
+            ),
+        };
+        let input = match read_back {
+            Ok(input) => input,
+            Err(error) => {
                 tracing::warn!(
-                    error = %e,
-                    "saga scheduled payload failed to deserialize; dropping timer firing"
+                    error = %error,
+                    timer = name.as_str(),
+                    "saga could not read a deadline firing; dropping it"
                 );
                 if !self
                     .record_dead_letter(
-                        SagaFailure::DecodeFailed {
-                            error: e.to_string(),
-                        },
+                        SagaFailure::DecodeFailed { error },
                         SourceContext::without_upstream(),
                         None,
                     )
@@ -930,7 +918,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
                     // treated as processed; a supervised restart will retry.
                     tracing::error!(
                         saga_id = self.saga_id.as_str(),
-                        "saga DLQ append failed for DecodeFailed (timer); stopping for supervised restart"
+                        "saga DLQ append failed for DecodeFailed (deadline); stopping for supervised restart"
                     );
                     let _ = ctx.stop_self().await;
                 }
@@ -948,10 +936,15 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
             jiff::Timestamp::now(),
             drained_failed,
         );
-        let effect = match self.state.on_scheduled(message, &mut saga_ctx).await {
+        let effect = match self.state.handle(input, &mut saga_ctx).await {
             Ok(effect) => effect,
             Err(e) => {
-                tracing::warn!(error = %e, "saga on_scheduled failed");
+                // The failure kind names the entry the input arrived at, not the
+                // method that ran: a deadline that could not be handled is
+                // `ScheduledFailed` whether or not it shares `handle` with the
+                // observed records, which is what keeps an `EnqueuePolicy`
+                // written against the kind meaning the same thing.
+                tracing::warn!(error = %e, "saga failed to handle a deadline firing");
                 if !self
                     .record_dead_letter(
                         SagaFailure::ScheduledFailed {
@@ -975,7 +968,7 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         };
 
         // Record the fire durably BEFORE running the handler's effect so that
-        // if `on_scheduled` re-schedules under the same `TimerName` the event
+        // if the deadline arm re-sets under the same `TimerName` the event
         // stream order becomes:
         //
         //   … Scheduled → Fired → (new) Scheduled
@@ -990,11 +983,11 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         // Best-effort once: an append failure is tolerated (at-least-once
         // delivery permits a replay re-fire).
         let fired_event = ScheduleEvent::Fired {
-            token: ScheduleToken::new(self.saga_id.clone(), name),
+            token: ScheduleToken::new(self.saga_id.clone(), name.clone()),
             fired_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
         };
-        // A timer firing is not an upstream record, so it consumes nothing.
-        scheduler::append_schedule_marker(
+        // A deadline firing is not an observed record, so it consumes nothing.
+        if scheduler::append_schedule_marker(
             &self.store,
             &self.saga_id,
             &mut self.sequence,
@@ -1003,7 +996,14 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
             None,
             &mut self.consumed,
         )
-        .await;
+        .await
+        {
+            // The view follows the journal: the deadline leaves it when its
+            // `fired` marker is durable, and not when the firing arrived. An
+            // append that did not land leaves the deadline pending, which is
+            // what a replay would also conclude from the stream.
+            deadline::forget_pending(&self.pending_deadlines, &name);
+        }
 
         let mut ictx = self.interpreter_ctx(ctx, None);
         // FireScheduled is not delivered via DirectPoller so there is no

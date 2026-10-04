@@ -64,7 +64,7 @@ message DecodeFailed {
   string error = 1;
 }
 
-// `Saga::on_scheduled` returned `Self::Error`.
+// The deadline arm of `Saga::handle` returned `Self::Error`.
 message ScheduledFailed {
   string error = 1;
 }

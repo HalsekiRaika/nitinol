@@ -30,7 +30,9 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaDefaultStoreExt, SagaEffect, SagaId, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaDefaultStoreExt, SagaEffect, SagaId, SagaSubscribe, Subscription,
+};
 
 // Fixtures
 
@@ -64,6 +66,12 @@ impl Event for ReservationRequested {
 /// reservation process each test in this file spawns.
 const RECORDING_SAGA_ID: &str = "saga-default-store-reservation";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 struct RecordingSaga {
     handled: Arc<Mutex<Vec<String>>>,
     notify: Arc<Notify>,
@@ -71,22 +79,20 @@ struct RecordingSaga {
 
 #[async_trait]
 impl Saga for RecordingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RECORDING_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.handled
             .lock()
             .expect("handled mutex is never poisoned: no holder panics while the guard is alive")
@@ -218,11 +224,11 @@ async fn store_less_spawn_saga_journals_onto_the_system_default_store() {
 
     // When: spawning without naming a journal store
     let _saga_proxy = system
-        .spawn_saga(saga_id.clone(), move || RecordingSaga {
+        .spawn_saga(saga_id.clone(), move |_components| RecordingSaga {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to(Subscription::stream(&upstream_store, &order_id))
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn()
         .await;
 
@@ -261,13 +267,15 @@ async fn system_subscription_polls_the_system_default_store() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy = system
-        .spawn_saga_with_store(SagaId::new(RECORDING_SAGA_ID), journal_store, move || {
-            RecordingSaga {
+        .spawn_saga_with_store(
+            SagaId::new(RECORDING_SAGA_ID),
+            journal_store,
+            move |_components| RecordingSaga {
                 handled: Arc::clone(&handled_for_producer),
                 notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .subscribed_to(system.subscription(&order_id))
+            },
+        )
+        .subscribed_to::<OrderPlaced>(system.subscription(&order_id))
         .spawn()
         .await;
 
@@ -308,13 +316,15 @@ async fn spawn_saga_with_store_overrides_the_default_journal_store() {
 
     // When
     let _saga_proxy = system
-        .spawn_saga_with_store(saga_id.clone(), Arc::clone(&override_store), move || {
-            RecordingSaga {
+        .spawn_saga_with_store(
+            saga_id.clone(),
+            Arc::clone(&override_store),
+            move |_components| RecordingSaga {
                 handled: Arc::clone(&handled_for_producer),
                 notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .subscribed_to(Subscription::stream(&upstream_store, &order_id))
+            },
+        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn()
         .await;
 
@@ -362,11 +372,13 @@ async fn explicit_subscription_store_overrides_the_default_upstream_store() {
 
     // When
     let _saga_proxy = system
-        .spawn_saga(SagaId::new(RECORDING_SAGA_ID), move || RecordingSaga {
-            handled: Arc::clone(&handled_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        .spawn_saga(SagaId::new(RECORDING_SAGA_ID), move |_components| {
+            RecordingSaga {
+                handled: Arc::clone(&handled_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
-        .subscribed_to(Subscription::stream(&override_store, &order_id))
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&override_store, &order_id))
         .spawn()
         .await;
 

@@ -20,13 +20,11 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 // Upstream aggregate fixtures
 
@@ -80,26 +78,29 @@ impl Event for WorkflowEvent {
 /// single upstream aggregate, so every trigger belongs to it.
 const WORKFLOW_SAGA_ID: &str = "identity-workflow-saga";
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Upstream(UpstreamTriggered),
+}
+
 struct WorkflowSaga {
     handled: Arc<Notify>,
 }
 
 #[async_trait]
 impl Saga for WorkflowSaga {
-    type SubscribedEvent = UpstreamTriggered;
+    type Subscribe = Observed;
     type Event = WorkflowEvent;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(WORKFLOW_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         self.handled.notify_one();
@@ -172,16 +173,12 @@ async fn saga_persist_stores_the_declared_event_type_for_every_arm() {
     let handled_for_saga = Arc::clone(&handled);
 
     let _saga_proxy =
-        SagaProps::<WorkflowSaga>::new(saga_id.clone(), Arc::clone(&store), move || WorkflowSaga {
-            handled: Arc::clone(&handled_for_saga),
+        SagaProps::<WorkflowSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
+            WorkflowSaga {
+                handled: Arc::clone(&handled_for_saga),
+            }
         })
-        .with_subscription(
-            Arc::clone(&store),
-            SequenceCursor::Stream {
-                key: upstream_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<UpstreamTriggered>(Subscription::stream(&store, &upstream_id))
         .spawn(system.process_system())
         .await;
 

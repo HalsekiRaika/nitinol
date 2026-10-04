@@ -38,7 +38,7 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaDefaultStoreExt;
 
-use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment};
+use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment, Incremented};
 use eventsource_aggregate_communication::saga::RelaySaga;
 
 fn init_tracing() {
@@ -69,12 +69,20 @@ async fn main() {
         .spawn_aggregate::<Counter>(AggregateId::new("comm-b"))
         .await;
 
+    // The producer is handed the capabilities the framework resolved for this
+    // saga; a relay needs none of them, so it ignores them.  It is called again
+    // on a supervised restart, which is why the target is captured as an
+    // `AggregateProxy` — a reference that outlives the activation it reaches.
+    //
+    // One `subscribed_to` call per source the alphabet declares: A's stream,
+    // read as `Incremented`.  `spawn` exists only once every declared source has
+    // one.
     let target = proxy_b.clone();
     let _saga_proxy = system
-        .spawn_saga(RelaySaga::instance_id(), move || RelaySaga {
+        .spawn_saga(RelaySaga::instance_id(), move |_components| RelaySaga {
             target: target.clone(),
         })
-        .subscribed_to(system.subscription(&id_a))
+        .subscribed_to::<Incremented>(system.subscription(&id_a))
         .spawn()
         .await;
 

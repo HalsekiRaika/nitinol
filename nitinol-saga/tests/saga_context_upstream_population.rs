@@ -11,11 +11,11 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct OrderPlaced {
@@ -43,6 +43,16 @@ impl Event for ReservationRequested {
     type Codec = JsonCodec;
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+// The observed payload is decoded and delivered as the variant it belongs to;
+// what this saga decides does not read it, which `dead_code` cannot tell apart
+// from a field nothing fills.
+#[allow(dead_code)]
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 #[derive(Debug, Clone)]
 struct CapturedUpstream {
     saga_id: SagaId,
@@ -63,20 +73,17 @@ const CAPTURING_SAGA_ID: &str = "saga-ctx-upstream-1";
 
 #[async_trait]
 impl Saga for CapturingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(CAPTURING_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         self.captured
@@ -172,17 +179,13 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move |_components| {
+            CapturingSaga {
+                captured: Arc::clone(&captured_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -218,17 +221,13 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move |_components| {
+            CapturingSaga {
+                captured: Arc::clone(&captured_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -265,17 +264,13 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move |_components| {
+            CapturingSaga {
+                captured: Arc::clone(&captured_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -317,17 +312,13 @@ async fn saga_context_existing_accessors_remain_saga_scoped() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
+        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move |_components| {
+            CapturingSaga {
+                captured: Arc::clone(&captured_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 

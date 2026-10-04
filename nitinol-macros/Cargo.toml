@@ -21,7 +21,9 @@ nitinol-persistence = { path = "../nitinol-persistence" }
 
 [dev-dependencies]
 trybuild = "1"
-nitinol = { path = "..", features = ["eventsource"] }
+# The `saga` feature carries the `SagaSubscribe` trait and the `Deadline`
+# surface the alphabet fixtures name; `eventsource` carries `Event`.
+nitinol = { path = "..", features = ["eventsource", "saga"] }
 # `Event` names the codec that writes it, so every fixture that derives `Event`
 # must also name a `Codec`, whose signature is stated in `Bytes`. The framework
 # ships no codec implementation of its own (it stays serde-free), so the

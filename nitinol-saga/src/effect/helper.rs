@@ -1,9 +1,6 @@
-use std::time::Duration;
-
 use nitinol_eventsource::{Aggregate, AggregateTellTarget, Decider};
 
-use crate::effect::core::{SagaEffect, ScheduleSpec, TellIntent};
-use crate::scheduler::TimerName;
+use crate::effect::core::{SagaEffect, TellIntent};
 
 impl<E> SagaEffect<E> {
     /// Returns the identity element of the Monoid — an effect that does nothing.
@@ -44,8 +41,8 @@ impl<E> SagaEffect<E> {
     ///
     /// Emptiness of `events` alone is not enough to make a branch a no-op — a
     /// `Persist` carrying a tell or a schedule but no user event is exactly what
-    /// [`SagaEffect::tell`] and [`SagaEffect::schedule`] build, and it is always
-    /// interpreted.
+    /// [`SagaEffect::tell`] and [`Deadline::set`](crate::Deadline::set) build,
+    /// and it is always interpreted.
     pub fn persist_all(events: Vec<E>) -> Self {
         Self::Persist {
             events,
@@ -223,59 +220,6 @@ impl<E> SagaEffect<E> {
             tells: vec![intent],
             schedules: Vec::new(),
         }
-    }
-
-    /// Put a pre-built [`ScheduleSpec`] on a `Persist` branch of its own.
-    ///
-    /// Builds the same `Persist { events: [], tells: [], schedules: [spec] }`
-    /// shape [`SagaEffect::schedule`] does, but takes its `payload` bytes
-    /// verbatim instead of serializing a typed message into them.
-    ///
-    /// Attach it to another effect with [`SagaEffect::combine`], which folds an
-    /// adjacent `Persist × Persist` junction into one `Persist`: the schedule's
-    /// `Scheduled` marker then shares the events' atomic batch.  Combining
-    /// several specs concatenates them in left-to-right order.
-    pub fn schedule_spec(spec: ScheduleSpec) -> Self {
-        Self::Persist {
-            events: Vec::new(),
-            tells: Vec::new(),
-            schedules: vec![spec],
-        }
-    }
-
-    /// Schedule a typed message to be delivered to [`crate::Saga::on_scheduled`]
-    /// after `after` has elapsed, keyed by `name`.
-    ///
-    /// Builds a `Persist { events: [], tells: [], schedules: [spec] }` whose
-    /// spec carries the `serde_json`-serialized message as its payload.
-    /// Re-using `name` supersedes the earlier schedule.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `serde_json::to_vec(&message)` fails — this indicates a bug in
-    /// the message type's `Serialize` implementation.
-    pub fn schedule<M>(name: TimerName, after: Duration, message: M) -> Self
-    where
-        M: serde::Serialize,
-    {
-        let payload = serde_json::to_vec(&message).map(bytes::Bytes::from).expect(
-            "SagaEffect::schedule: message serialization failed; \
-             ensure the scheduled message type implements serde::Serialize correctly",
-        );
-        Self::Persist {
-            events: Vec::new(),
-            tells: Vec::new(),
-            schedules: vec![ScheduleSpec {
-                name,
-                after,
-                payload,
-            }],
-        }
-    }
-
-    /// Cancel the pending timer registered under `name` for this saga.
-    pub fn cancel_schedule(name: TimerName) -> Self {
-        Self::CancelSchedule(name)
     }
 
     /// Append `End` after `self` via the Monoid `combine`, preserving order.
@@ -514,5 +458,329 @@ impl<E> SagaEffect<E> {
             }
             leaf => Self::push_merging(out, leaf),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The schedule category of the effect algebra.
+    //!
+    //! `combine`'s treatment of events and tells is observable from outside the
+    //! crate and is pinned there (`tests/effect_construction.rs`,
+    //! `tests/effect_monoid.rs`, `tests/effect_attach_is_variant_agnostic.rs`).
+    //! A [`ScheduleSpec`] is not: the only way to build one is
+    //! [`Deadline::set`](crate::Deadline::set), and a
+    //! [`Deadline`](crate::Deadline) only exists inside the producer the spawn
+    //! builder calls — which is the point, because "arm a timer without writing
+    //! the fact" must not be expressible.  So the schedule-carrying cases of the
+    //! same algebra live here, where a spec can be named.
+
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use nitinol_eventsource::codec::Codec;
+    use nitinol_eventsource::test_helpers::MockAggregateProxy;
+    use nitinol_eventsource::{Decision, Event};
+    use nitinol_persistence::{EventType, Family, TypeName};
+
+    use crate::effect::core::ScheduleSpec;
+    use crate::scheduler::TimerName;
+
+    use super::*;
+
+    fn spec(name: &str, secs: u64) -> ScheduleSpec {
+        ScheduleSpec::new(
+            TimerName::new(name),
+            Duration::from_secs(secs),
+            Bytes::from_static(b"payload"),
+        )
+    }
+
+    /// Borrow the `Persist` branch of an effect, failing loudly otherwise.
+    fn persist_parts<E>(effect: &SagaEffect<E>) -> (&Vec<E>, usize, &Vec<ScheduleSpec>) {
+        match effect {
+            SagaEffect::Persist {
+                events,
+                tells,
+                schedules,
+            } => (events, tells.len(), schedules),
+            _ => panic!("expected a single `Persist` branch"),
+        }
+    }
+
+    // A minimal aggregate, only so a `TellIntent` can be named alongside a
+    // schedule: the three categories sharing one batch is the assertion, and a
+    // tell is one of the three.
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct Acked;
+
+    struct AckedCodec;
+
+    impl Codec<Acked> for AckedCodec {
+        type Error = std::convert::Infallible;
+
+        fn encode(_event: &Acked) -> Result<Bytes, Self::Error> {
+            Ok(Bytes::new())
+        }
+
+        fn decode(_payload: &[u8]) -> Result<Acked, Self::Error> {
+            Ok(Acked)
+        }
+    }
+
+    impl Event for Acked {
+        const EVENT_TYPE: EventType =
+            EventType::new(Family::new("effect_algebra"), TypeName::new("Acked"));
+        type Codec = AckedCodec;
+    }
+
+    #[derive(Default)]
+    struct Target;
+
+    #[derive(Clone)]
+    struct Ack;
+
+    impl Aggregate for Target {
+        type Event = Acked;
+
+        fn apply(&mut self, _event: Acked) {}
+    }
+
+    impl Decider<Ack> for Target {
+        type Output = ();
+        type Rejection = std::convert::Infallible;
+
+        fn decide(&self, _cmd: Ack) -> Decision<Acked, (), Self::Rejection> {
+            Decision::persist(Vec::new()).output(())
+        }
+    }
+
+    fn intent() -> TellIntent {
+        TellIntent::new::<Target, Ack, _>(MockAggregateProxy::<Target>::new(), Ack)
+    }
+
+    /// A schedule attached to the identity yields the schedule branch alone —
+    /// `None` adds nothing and takes nothing away.
+    #[test]
+    fn a_schedule_combined_onto_none_yields_the_schedule_branch_alone() {
+        let s = spec("x", 1);
+
+        let effect = SagaEffect::<u32>::empty().combine(SagaEffect::Persist {
+            events: Vec::new(),
+            tells: Vec::new(),
+            schedules: vec![s.clone()],
+        });
+
+        let (events, tells, schedules) = persist_parts(&effect);
+        assert!(events.is_empty(), "the identity must add no event");
+        assert_eq!(tells, 0, "the identity must add no tell");
+        assert_eq!(
+            schedules,
+            &vec![s],
+            "None is the Monoid identity, so attaching a schedule to it must yield \
+             the schedule branch unchanged"
+        );
+    }
+
+    /// A decision and the deadline it sets fold into ONE `Persist`, which is
+    /// what makes the interpreter write them as a single atomic batch — a timer
+    /// can never be armed against a decision no store holds.
+    #[test]
+    fn a_decision_combined_with_a_schedule_yields_one_persist() {
+        let s = spec("deadline", 60);
+
+        let effect = SagaEffect::persist(13u32).combine(SagaEffect::Persist {
+            events: Vec::new(),
+            tells: Vec::new(),
+            schedules: vec![s.clone()],
+        });
+
+        let (events, tells, schedules) = persist_parts(&effect);
+        assert_eq!(events, &vec![13u32]);
+        assert_eq!(tells, 0);
+        assert_eq!(
+            schedules,
+            &vec![s],
+            "the event and its scheduled marker must share a single `Persist`, and \
+             therefore a single atomic append batch"
+        );
+    }
+
+    /// Two schedules concatenate in the order they were combined: a saga setting
+    /// two deadlines in one decision loses neither, and their order is its own.
+    #[test]
+    fn two_schedules_concatenate_in_left_to_right_order() {
+        let first = spec("a", 30);
+        let second = spec("b", 60);
+
+        let effect = SagaEffect::persist(2u32)
+            .combine(SagaEffect::Persist {
+                events: Vec::new(),
+                tells: Vec::new(),
+                schedules: vec![first.clone()],
+            })
+            .combine(SagaEffect::Persist {
+                events: Vec::new(),
+                tells: Vec::new(),
+                schedules: vec![second.clone()],
+            });
+
+        let (events, _, schedules) = persist_parts(&effect);
+        assert_eq!(events, &vec![2u32]);
+        assert_eq!(
+            schedules,
+            &vec![first, second],
+            "chained schedule attachments must keep both specs in left-to-right order"
+        );
+    }
+
+    /// An event, a tell and a schedule attached through `combine` land on ONE
+    /// `Persist`: all three categories share the single atomic batch.
+    #[test]
+    fn an_event_a_tell_and_a_schedule_land_on_the_same_persist() {
+        let s = spec("reminder", 5);
+
+        let effect = SagaEffect::persist(99u32)
+            .combine(SagaEffect::tell_intent(intent()))
+            .combine(SagaEffect::Persist {
+                events: Vec::new(),
+                tells: Vec::new(),
+                schedules: vec![s.clone()],
+            });
+
+        let (events, tells, schedules) = persist_parts(&effect);
+        assert_eq!(events, &vec![99u32]);
+        assert_eq!(
+            tells, 1,
+            "the tell must not be dropped by the schedule's merge"
+        );
+        assert_eq!(schedules, &vec![s]);
+    }
+
+    /// A pair of `Persist` branches already folded into one still accepts a
+    /// schedule without splitting the batch.
+    #[test]
+    fn a_merged_persist_pair_combined_with_a_schedule_stays_one_persist() {
+        let s = spec("after-merge", 3);
+
+        let merged = SagaEffect::persist(1u32).combine(SagaEffect::persist(2u32));
+        let effect = merged.combine(SagaEffect::Persist {
+            events: Vec::new(),
+            tells: Vec::new(),
+            schedules: vec![s.clone()],
+        });
+
+        let (events, _, schedules) = persist_parts(&effect);
+        assert_eq!(events, &vec![1u32, 2]);
+        assert_eq!(
+            schedules,
+            &vec![s],
+            "folding the pair into a `Sequence` instead would split the scheduled \
+             marker out of the events' append batch"
+        );
+    }
+
+    /// `End` is a hard boundary: a schedule behind it stays its own leaf rather
+    /// than being pulled into the terminated batch.
+    #[test]
+    fn a_schedule_combined_after_end_stays_behind_the_terminator() {
+        let effect = SagaEffect::<u32>::end().combine(SagaEffect::Persist {
+            events: Vec::new(),
+            tells: Vec::new(),
+            schedules: vec![spec("x", 1)],
+        });
+
+        match effect {
+            SagaEffect::Sequence(children) => {
+                assert_eq!(children.len(), 2, "combine must not nest or drop leaves");
+                assert!(matches!(children[0], SagaEffect::End));
+                assert!(matches!(children[1], SagaEffect::Persist { .. }));
+            }
+            _ => panic!("a schedule behind `End` must stay a leaf of its own"),
+        }
+    }
+
+    /// Cancelling a deadline and setting a new one is a legitimate decision, and
+    /// the cancellation is never absorbed into the schedule's branch.
+    #[test]
+    fn a_schedule_combined_after_a_cancellation_stays_its_own_leaf() {
+        let cancel: SagaEffect<u32> = SagaEffect::CancelSchedule(TimerName::new("drop"));
+
+        let effect = cancel.combine(SagaEffect::Persist {
+            events: Vec::new(),
+            tells: Vec::new(),
+            schedules: vec![spec("x", 1)],
+        });
+
+        match effect {
+            SagaEffect::Sequence(children) => {
+                assert_eq!(children.len(), 2);
+                assert!(matches!(children[0], SagaEffect::CancelSchedule(_)));
+                assert!(matches!(children[1], SagaEffect::Persist { .. }));
+            }
+            _ => panic!("a cancellation followed by a new schedule must compose as two leaves"),
+        }
+    }
+
+    /// Attaching a schedule to a `Sequence` appends it to the flat leaf list
+    /// without nesting.
+    #[test]
+    fn a_schedule_combined_onto_a_sequence_appends_flatly() {
+        // `Persist.combine(Persist)` folds into one `Persist`, so the Sequence
+        // premise is built from leaves that never merge.
+        let sequence = SagaEffect::persist(1u32).combine(SagaEffect::end());
+
+        let effect = sequence.combine(SagaEffect::Persist {
+            events: Vec::new(),
+            tells: Vec::new(),
+            schedules: vec![spec("x", 1)],
+        });
+
+        match effect {
+            SagaEffect::Sequence(children) => {
+                assert_eq!(children.len(), 3, "the leaf list must stay flat");
+                assert!(matches!(children[0], SagaEffect::Persist { .. }));
+                assert!(matches!(children[1], SagaEffect::End));
+                assert!(matches!(children[2], SagaEffect::Persist { .. }));
+            }
+            _ => panic!("attaching a schedule to a `Sequence` must append a leaf"),
+        }
+    }
+
+    /// The merge concatenates all three categories at once, each in its own
+    /// left-to-right order: dropping or reordering any of them loses saga
+    /// intent.
+    #[test]
+    fn the_merge_concatenates_events_tells_and_schedules_left_to_right() {
+        let left_spec = spec("left", 1);
+        let right_spec = spec("right", 2);
+
+        let left = SagaEffect::persist_all(vec![1u32, 2])
+            .combine(SagaEffect::tell_intent(intent()))
+            .combine(SagaEffect::Persist {
+                events: Vec::new(),
+                tells: Vec::new(),
+                schedules: vec![left_spec.clone()],
+            });
+        let right = SagaEffect::persist(3u32)
+            .combine(SagaEffect::tell_intent(intent()))
+            .combine(SagaEffect::Persist {
+                events: Vec::new(),
+                tells: Vec::new(),
+                schedules: vec![right_spec.clone()],
+            });
+
+        let merged = left.combine(right);
+
+        let (events, tells, schedules) = persist_parts(&merged);
+        assert_eq!(events, &vec![1u32, 2, 3]);
+        assert_eq!(tells, 2);
+        assert_eq!(
+            schedules,
+            &vec![left_spec, right_spec],
+            "the merge must concatenate events, tells AND schedules — each in \
+             left-to-right order"
+        );
     }
 }

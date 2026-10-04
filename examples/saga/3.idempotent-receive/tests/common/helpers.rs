@@ -21,7 +21,7 @@ use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery,
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDefaultStoreExt, SagaManagerProxy};
 
-use saga_idempotent_receive::order::Order;
+use saga_idempotent_receive::order::{Order, OrderPlaced};
 use saga_idempotent_receive::saga::{ReservationRequested, ReservationSaga};
 use saga_idempotent_receive::stock_item::{Reserve, StockItem, StockReserved};
 
@@ -121,9 +121,8 @@ pub async fn spawn_manager(
     let system_for_factory = system.clone();
 
     system
-        .saga_manager_props(system.subscription(order_id), move || {
-            ReservationSaga::new(system_for_producer.clone())
-        })
+        .saga_manager_props(move |_components| ReservationSaga::new(system_for_producer.clone()))
+        .subscribed_to::<OrderPlaced>(system.subscription(order_id))
         .with_crash_restart_factory(move |payload: &[u8]| {
             ReservationSaga::crash_restart_intent(&system_for_factory, payload)
         })

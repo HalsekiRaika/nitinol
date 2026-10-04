@@ -22,11 +22,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 const INSTANCE_PREFIX: &str = "mgr-single-";
 
@@ -84,6 +86,12 @@ impl Codec<OrderPlaced> for CountingUpstreamCodec {
 
 // Saga under test
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 struct RecordingSaga {
     handled: Arc<Mutex<Vec<String>>>,
     notify: Arc<Notify>,
@@ -91,20 +99,21 @@ struct RecordingSaga {
 
 #[async_trait]
 impl Saga for RecordingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(format!("{INSTANCE_PREFIX}{}", event.order)))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Order(event) => {
+                Some(SagaId::new(format!("{INSTANCE_PREFIX}{}", event.order)))
+            }
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         self.handled
@@ -198,20 +207,14 @@ async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
     let _manager_proxy =
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&saga_store), move || {
+        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&saga_store), move |_components| {
             spawned_for_producer.fetch_add(1, Ordering::SeqCst);
             RecordingSaga {
                 handled: Arc::clone(&handled_for_producer),
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 

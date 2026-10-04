@@ -227,8 +227,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aggregate_props::<A>(id)` on the aggregate side, and — through the new
   `SagaDefaultStoreExt` — `spawn_saga(saga_id, producer)` for a saga's own
   journal, `system.subscription(&key)` for the upstream it polls, and
-  `system.saga_manager_props(subscription, producer)` for both at once on a
-  manager. `EventStore` is stream-keyed (`append(key, ..)`,
+  `system.saga_manager_props(producer)` for a manager's journal, with each
+  observed source bound on the returned builder via
+  `.subscribed_to::<E>(system.subscription(&key))`. `EventStore` is
+  stream-keyed (`append(key, ..)`,
   `LoadQuery::by_stream`), so one instance holds every aggregate's stream and
   every saga's journal side by side under their own keys, which is what makes a
   single default sufficient rather than a registry of named stores.
@@ -267,16 +269,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subscription requirement stays enforced at compile time: `spawn()` exists only
   after `subscribed_to()`.
 
-  `SagaProps` is unchanged and remains the entry point for a saga that needs
-  `with_scheduler`, `with_enqueue_policy`, `with_dead_letter_subscriber`,
-  `with_crash_restart_factory` or `with_decode_failure_route`.
+  `SagaProps` remains the entry point for a saga that needs
+  `with_enqueue_policy`, `with_dead_letter_subscriber` or
+  `with_crash_restart_factory`. A saga's own timer wiring is resolved from its
+  alphabet's `#[subscribe(deadline)]` declaration rather than a builder call,
+  and a record whose upstream bytes fail to decode is reported through
+  `tracing` and skipped rather than routed to a configurable handler.
 
 - (`nitinol-saga`): `SagaManagerProps` / `SagaManagerProxy` — a saga instance
   manager. Previously one `SagaProps` spawn meant one saga bound to one fixed
   `SagaId`, so running a process-manager instance per correlation id required
   pre-spawning every id, and each instance ran its own `DirectPollerProcess`
   over the shared upstream stream — `M` upstream records across `N` instances
-  cost `M × N` decodes. The manager holds a *single* upstream subscription and
+  cost `M × N` decodes. The manager holds one upstream subscription per
+  declared source, shared by every instance of the saga type, and
   interprets `Saga::correlate` at runtime: an id with no resident instance is
   spawned as a child and replays its own stream before the event that caused
   the spawn is delivered; an id already resident is handed the event directly.
@@ -284,35 +290,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has been idle for `after`, and a later event for the same id spawns it again
   with its state restored by replay. Every instance-level setting `SagaProps`
   accepts has a counterpart on the manager, which hands it to each instance it
-  spawns: `with_scheduler`, `with_enqueue_policy`,
-  `with_dead_letter_subscriber`, `with_crash_restart_factory` and
-  `with_decode_failure_route`. Without them a manager whose `Saga::correlate` is
-  constant (the degenerate single-instance case below) would not reproduce what
-  `SagaProps` gives a resident saga: no timer would fire for
-  `SagaEffect::schedule`, the dead letters its instances write would have no
-  subscriber, the configured DLQ filter would be ignored, a tell left in flight
-  across a passivation could not be reconstructed, and a corrupt upstream record
-  no `Saga::correlate` can claim would have no owner to be attributed to.
+  spawns: `with_enqueue_policy`, `with_dead_letter_subscriber` and
+  `with_crash_restart_factory`. A saga's own timer wiring needs no counterpart
+  here: the host resolves the resident timer core from the saga's alphabet, so
+  a manager's instances get their deadlines on exactly the same terms a
+  standalone saga does. Without the counterparts above a manager whose
+  `Saga::correlate` is constant (the degenerate single-instance case below)
+  would not reproduce what `SagaProps` gives a resident saga: the dead letters
+  its instances write would have no subscriber, the configured DLQ filter
+  would be ignored, and a tell left in flight across a passivation could not
+  be reconstructed. A record no `Saga::correlate` claims has its source's
+  shared cursor advanced past it rather than attributed to any instance.
 
   The manager process itself is spawned as persistent: idleness is a
   per-instance signal that `with_instance_passivation` acts on, whereas a
-  system-wide default idle timeout reaching the manager — the sole owner of the
-  subscription and the registry, with nothing left to revive it — would silently
-  stop the whole fan-out during a quiet upstream.
+  system-wide default idle timeout reaching the manager — the sole owner of
+  every source's subscription and the registry, with nothing left to revive
+  it — would silently stop the whole fan-out during a quiet upstream.
 
-  Collapsing `N` subscriptions into one moves the cursor decision to the
-  manager: it withholds the shared cursor when the addressed instance could not
-  settle a record (so the record is redelivered), and advances past a record
-  that correlates to no instance, so one unclaimed record cannot starve every
-  instance behind it. A record addressed to an instance whose stream already
-  carries the durable `Ended` marker is recorded as
+  Collapsing each source's per-instance subscriptions into one moves that
+  source's cursor decision to the manager: it withholds that source's cursor
+  when the addressed instance could not settle a record (so the record is
+  redelivered), and advances past a record that correlates to no instance, so
+  one unclaimed record cannot starve every instance behind it. Each declared
+  source keeps its own cursor, independent of every other source's, exactly as
+  under a standalone saga. A record addressed to an instance whose stream
+  already carries the durable `Ended` marker is recorded as
   `SagaFailure::EndedSagaReceivedMessage` on that instance's own stream and the
   cursor moves on.
 
-  `SagaProps` is unchanged and remains the way to spawn a saga that owns its
-  subscription. A `Saga::correlate` that always answers the same `SagaId`
-  reduces the manager to exactly one instance, which is the migration path from
-  the resident single-saga wiring.
+  `SagaProps` remains the way to spawn a saga that owns its own subscriptions
+  — one per declared source. A `Saga::correlate` that always answers the same
+  `SagaId` reduces the manager to exactly one instance, which is the migration
+  path from the resident single-saga wiring.
 
 - (`nitinol-persistence`): `EventStore::append` states a fifth OCC clause,
   `OCC-5`: once a reader has observed `global_sequence = N`, no event carrying
@@ -375,6 +385,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indistinguishable here.
 
 ### Changed
+
+- **BREAKING** (`nitinol-saga`, `nitinol-macros`): `Saga::SubscribedEvent` and
+  `Saga::ScheduledMessage` / `Saga::on_scheduled` are replaced by one
+  associated type, `Saga::Subscribe: SagaSubscribe`, naming the saga's whole
+  alphabet of inputs — every external event type it observes, plus its own
+  time — instead of splitting them across a single upstream event type and a
+  separate timer entry point. A coordinator observes the reply of whoever it
+  addressed *and* the passing of its own deadline, which a trait naming only
+  one upstream event type could not express.
+
+  A user enum derives the alphabet with `#[derive(SagaSubscribe)]`: one
+  newtype variant per external event type, and at most one
+  `#[subscribe(deadline)]` variant naming the saga's own time as a
+  `DeadlineMessage`. `DeadlineMessage::Codec` self-describes how that message
+  is persisted, replacing the removed `ScheduledMessage: Serialize +
+  DeserializeOwned` bound — a schedule fact is written through the same `Codec`
+  discipline as every other persisted record, not through `serde_json` fixed
+  by the trait. `Saga::correlate` and `Saga::handle` both `match` on
+  `Self::Subscribe`, so a source added to the alphabet without a reaction
+  leaves either `match` non-exhaustive at compile time.
+
+  Each external variant is observed as a source of its own — its own
+  `subscribed_to::<E>(subscription)` binding, its own cursor, its own runtime
+  `DirectPollerProcess` — so one source stalling never stops another from
+  progressing; there is deliberately no total order across sources. Binding
+  is a typestate the derive generates (`SourceBindings` / `BindSource` /
+  `AllSourcesSubscribed`): `spawn` exists only once every declared source has
+  been bound, generalizing the existing single-source enforcement
+  (`SubscriptionSet` / `SubscriptionUnset`) to an arbitrary alphabet. The
+  `#[subscribe(deadline)]` variant is allotted no binding slot — a deadline is
+  addressed to the instance that set it and never travels a subscription.
+
+  `Saga::apply` is downgraded to a default no-op, so a stateless translation
+  saga no longer writes an empty body to satisfy the trait. Its own event
+  stream stays mandatory regardless: the delivery host consumes it and
+  consumed positions are folded from it whether or not anything folds into
+  in-memory state.
+
+  The saga instance's producer changes from `Fn() -> S` to
+  `Fn(SagaComponents<S>) -> S`: capabilities the framework resolves — today,
+  `Deadline<M>` for an alphabet that declares `#[subscribe(deadline)]` —
+  arrive as an argument instead of being captured by a closure built before
+  the resolver that produces them exists. A saga using no capability writes
+  `|_| S::default()`.
+
+  Migration: replace `type SubscribedEvent = E;` with a
+  `#[derive(SagaSubscribe)] enum` naming `E` as a variant and set `type
+  Subscribe = ThatEnum;`. Replace a `type ScheduledMessage` / `on_scheduled`
+  pair with a `#[subscribe(deadline)]` variant naming a `DeadlineMessage`
+  type, and move timer wiring out of spawn builders (`with_scheduler`,
+  removed — see Removed below) into `SagaComponents::deadline::<M>()` inside
+  the producer, read and armed through `Deadline::pending` /
+  `Deadline::set` / `Deadline::cancel`. Drop an `apply` body that did nothing.
+  Update every producer closure to accept `SagaComponents<S>`.
 
 - (`nitinol-saga`): the resident scheduler keeps its deadlines in deadline
   order and waits for the earliest one, instead of turning a hashed timing
@@ -608,24 +672,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the umbrella crate as `nitinol::eventsource::AggregateTellTarget`, so
   any out-of-tree implementor of the trait must update at the next compile.
 
-- **BREAKING** (`nitinol-saga`): `SagaEffect::with_tells` and
-  `SagaEffect::with_schedules` are replaced by `SagaEffect::tell_intent(intent)`
-  and `SagaEffect::schedule_spec(spec)`. The two setters were only defined on
-  the `Persist` branch and panicked on every other receiver, so whether a call
-  was legal depended on the runtime variant the caller happened to hold. Once
+- **BREAKING** (`nitinol-saga`): `SagaEffect::with_tells` is replaced by
+  `SagaEffect::tell_intent(intent)`. The setter was only defined on the
+  `Persist` branch and panicked on every other receiver, so whether a call was
+  legal depended on the runtime variant the caller happened to hold. Once
   `combine` folds an adjacent `Persist × Persist` junction into one `Persist`,
-  attaching a tell or a schedule is composition, and composition is `combine`'s
-  job: the new constructors each build their own single-element `Persist`, so
-  there is no receiver left whose variant could make an attachment illegal and
-  no builder call that panics because of one. They keep the capability the
-  setters carried and the typed `tell` / `schedule` builders cannot express — a
-  `TellIntent::new` intent with no crash-restart payload, and a `ScheduleSpec`
-  whose `payload` bytes are given verbatim rather than serialized from a typed
-  message. Callers rewrite `persist(e).with_tells(vec![a, b])` as
-  `persist(e).combine(SagaEffect::tell_intent(a)).combine(SagaEffect::tell_intent(b))`,
-  and `with_schedules` likewise. Note the semantic change this carries:
-  `with_*` *set* the list, so a second call dropped what the first attached,
-  whereas `combine` concatenates and keeps both.
+  attaching a tell is composition, and composition is `combine`'s job:
+  `tell_intent` builds its own single-element `Persist`, so there is no
+  receiver left whose variant could make an attachment illegal and no builder
+  call that panics because of one. It keeps the capability the setter carried
+  and the typed `tell` builder cannot express — a `TellIntent::new` intent with
+  no crash-restart payload. Callers rewrite `persist(e).with_tells(vec![a, b])`
+  as `persist(e).combine(SagaEffect::tell_intent(a)).combine(SagaEffect::tell_intent(b))`.
+  Note the semantic change this carries: `with_tells` *set* the list, so a
+  second call dropped what the first attached, whereas `combine` concatenates
+  and keeps both.
+
+  `SagaEffect::with_schedules` had no equally-direct successor on `SagaEffect`
+  itself: arming a deadline stopped being something a `handle` body builds by
+  naming a `ScheduleSpec` of its own. `ScheduleSpec::new` is `pub(crate)` — the
+  only way to obtain one is through `Deadline::set`, reached from the
+  `Deadline<M>` component `SagaComponents::deadline` hands out, which already
+  returns the `Persist` branch carrying the schedule. Callers that built a
+  `ScheduleSpec` by hand move the timer's name, delay and message to a
+  `#[subscribe(deadline)]` variant and call `Deadline::set` instead.
 
 - (`nitinol-saga`): the `SagaEffect::persist_all` documentation now states what
   the interpreter does with an empty batch. It claimed an empty vector kept the
@@ -634,9 +704,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same no-op path as `SagaEffect::None`. Behaviour is unchanged; what an empty
   vector still buys is structural — the value stays a `Persist` that `combine`
   can fold tells and schedules into. Emptiness of `events` alone was never the
-  condition, and is now documented as such: a branch carrying a tell or a
-  schedule but no user event is what `SagaEffect::tell` and
-  `SagaEffect::schedule` build, and it is always interpreted.
+  condition, and is now documented as such: a branch carrying a tell but no
+  user event is what `SagaEffect::tell` builds, a branch carrying a schedule
+  but no user event is what `Deadline::set` builds, and either is always
+  interpreted.
 
 - (`nitinol-saga`): a saga whose stream carries the durable `Ended` marker now
   records what is still routed to it instead of always stopping outright. It
@@ -650,20 +721,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance's do.
 
 - **BREAKING** (`nitinol-saga`): correlation moved from the spawn wiring to the
-  `Saga` trait. `SagaProps::with_subscription` no longer takes a
-  `Fn(&SubscribedEvent) -> Option<SagaId>` argument; the new required associated
-  function `Saga::correlate(event: &Self::SubscribedEvent) -> Option<SagaId>`
-  answers it instead. Deriving a business process instance's identity from an
+  `Saga` trait. Subscribing to a source no longer takes a
+  `Fn(&Event) -> Option<SagaId>` argument; the new required associated
+  function `Saga::correlate(input: &Self::Subscribe) -> Option<SagaId>`
+  answers it instead, once for the saga's whole alphabet rather than once per
+  subscribed source. Deriving a business process instance's identity from an
   event is domain knowledge, not wiring, and it was previously duplicated at
-  every spawn site. Implementors add `correlate` to their `impl Saga` — returning
-  the instance's own `SagaId` reproduces the common closure — and drop the fourth
-  argument from every `with_subscription` call. There is deliberately no default
-  implementation: a defaulted `None` would silently discard every upstream event.
-  `SagaProps::with_decode_failure_route` is **kept on the builder**: a decode
-  failure has no typed event to correlate on, so attributing it is routing rather
-  than correlation, and it must stay per-instance so two instances of one saga
-  type on a shared upstream stream can attribute the same corrupt record
-  differently.
+  every spawn site. Implementors add `correlate` to their `impl Saga` —
+  returning the instance's own `SagaId` reproduces the common closure — and
+  drop the correlation closure from every subscription call. There is
+  deliberately no default implementation: a defaulted `None` would silently
+  discard every upstream event.
+
+  `SagaProps::with_decode_failure_route` is **removed**, not kept on the
+  builder: a decode failure has no typed input to correlate on, so there is no
+  instance — resident or routed — it could be attributed to; it is reported
+  through `tracing` and skipped, and its source's cursor advances past it.
 
 - **BREAKING** (`nitinol-saga`): removed the `Saga::State` associated type. It
   was never read by the crate — a saga's state is the implementor itself, which
@@ -685,12 +758,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```rust
   // before
   let scheduler = nitinol_saga::spawn_scheduler(&system).await;
-  // after
-  let scheduler: SchedulerProxy = system.spawn_resident::<SchedulerProcess>().await.into();
   ```
 
-  `SagaProps::with_scheduler` and `SagaManagerProps::with_scheduler` take the
-  same `SchedulerProxy` as before.
+  There is no caller-facing `after` for that snippet: `SagaProps::with_scheduler`
+  and `SagaManagerProps::with_scheduler` are themselves removed, and
+  `SchedulerProxy` is `pub(crate)` rather than exported.
+  `spawn_resident::<SchedulerProcess>()` is now called by the framework alone,
+  at every saga and manager spawn whose alphabet declares a
+  `#[subscribe(deadline)]` variant, so a saga author never names
+  `SchedulerProxy` and never decides whether to wire one in.
 
 - **BREAKING** (`nitinol-persistence`, `nitinol-sqlx`): removed
   `EventRegistry::from_linked` and `EventRegistry::from_entries` from the

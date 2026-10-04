@@ -23,7 +23,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{dead_letter_of, failure_kind, outbox_kind_of, resident_scheduler, schedule_kind_of};
+use common::{dead_letter_of, failure_kind, outbox_kind_of, schedule_kind_of};
 use common::{JsonCodec, OutboxKind, ScheduleKind};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -35,11 +35,15 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
+use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, TimerName};
+use nitinol_saga::{
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
+    SagaSubscribe, Subscription, TimerName,
+};
 
 /// The one instance every `Ping` correlates to.
 const INSTANCE_ID: &str = "end-cancels-timer-instance";
@@ -70,34 +74,76 @@ impl Event for Noted {
     type Codec = JsonCodec;
 }
 
+/// What the deadline carries.  It carries nothing: the timer exists only to be
+/// live at the moment `on_stop` runs, and must never fire.
+#[derive(Clone, Debug, PartialEq)]
+struct Due;
+
+struct DueCodec;
+
+impl Codec<Due> for DueCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_value: &Due) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Due, Self::Error> {
+        Ok(Due)
+    }
+}
+
+impl DeadlineMessage for Due {
+    type Codec = DueCodec;
+}
+
+/// The whole alphabet: one observed source, and the saga's own time.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Ping(Ping),
+    #[subscribe(deadline)]
+    Due(Due),
+}
+
 // Saga under test: schedules a deadline and ends in the same decision, so the
 // timer the manager's resident scheduler holds for this instance is live at
 // the moment `on_stop` runs.
 
-struct EndingSaga;
+struct EndingSaga {
+    deadline: Deadline<Due>,
+}
 
 #[async_trait]
 impl Saga for EndingSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = Noted;
-    // on_scheduled is never exercised here — the live timer must be cancelled
-    // before it ever fires — so the default no-op hook is enough and no
-    // override is declared.
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Ping) -> Option<SagaId> {
-        Some(SagaId::new(INSTANCE_ID))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Ping(_) => Some(SagaId::new(INSTANCE_ID)),
+            // A firing is addressed to the instance that set it and never
+            // travels the subscription path.
+            Observed::Due(_) => None,
+        }
     }
-
-    fn apply(&mut self, _event: Noted) {}
 
     async fn handle(
         &mut self,
-        _event: Ping,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Noted>, Self::Error> {
-        Ok(SagaEffect::schedule(TimerName::new("deadline"), DEADLINE, ()).then_end())
+        match input {
+            Observed::Ping(_) => Ok(self
+                .deadline
+                .set(TimerName::new("deadline"), DEADLINE, Due)
+                .then_end()),
+            // The deadline arm is never exercised here — the live timer must be
+            // cancelled before it ever fires — so reacting with nothing is
+            // enough, and a firing observed at all is what the assertions
+            // below reject.
+            Observed::Due(_) => Ok(SagaEffect::None),
+        }
     }
 }
 
@@ -177,7 +223,6 @@ async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
     // Given
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps).build();
-    let scheduler = resident_scheduler(system.process_system()).await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -186,20 +231,16 @@ async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
     let instances_spawned = Arc::new(AtomicUsize::new(0));
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let _manager_proxy = SagaManagerProps::<EndingSaga>::new(Arc::clone(&saga_store), move || {
-        spawned_for_producer.fetch_add(1, Ordering::SeqCst);
-        EndingSaga
-    })
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        SequenceCursor::Stream {
-            key: UPSTREAM_KEY.to_owned(),
-            after: 0,
-        },
-    )
-    .with_scheduler(scheduler.clone())
-    .spawn(system.process_system())
-    .await;
+    let _manager_proxy =
+        SagaManagerProps::<EndingSaga>::new(Arc::clone(&saga_store), move |components| {
+            spawned_for_producer.fetch_add(1, Ordering::SeqCst);
+            EndingSaga {
+                deadline: components.deadline(),
+            }
+        })
+        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
+        .spawn(system.process_system())
+        .await;
 
     append_ping(&upstream_store, 1).await;
     let events = wait_for_ended_marker(&saga_store, &saga_id, Duration::from_secs(5)).await;
