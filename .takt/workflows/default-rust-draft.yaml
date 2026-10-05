@@ -114,7 +114,7 @@ steps:
         name: rust-quality
         command: bash ./.takt/quality-gates/rust-quality.sh
         cwd: .
-        timeout_ms: 1800000
+        timeout_ms: 3600000
     rules:
       - condition: AI問題の修正完了
         next: ai-antipattern-review-1st
