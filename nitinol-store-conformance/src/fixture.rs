@@ -11,7 +11,8 @@ use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEv
 /// The clauses judge numbering and visibility, never routing, so one type for
 /// everything is enough — and it keeps a store that filters by event type from
 /// changing what any clause reads back.
-const FACT: EventType = EventType::new(Family::new("occ.conformance"), TypeName::new("Fact"));
+pub(crate) const FACT: EventType =
+    EventType::new(Family::new("occ.conformance"), TypeName::new("Fact"));
 
 /// One event to append, carrying `payload` so a clause can tell which write it
 /// is reading back.

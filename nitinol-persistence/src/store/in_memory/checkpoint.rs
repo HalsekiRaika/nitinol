@@ -4,11 +4,13 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use crate::error::CheckpointError;
-use crate::id::ProjectionId;
-use crate::store::checkpoint_store::CheckpointStore;
+use crate::store::checkpoint_store::{CheckpointScope, CheckpointStore};
 
+/// The rendered key is the whole of what a scope hands a store, so it is what
+/// this one keys its map by: two consumers of different kinds are kept apart
+/// here by exactly what keeps them apart in a backend's table.
 pub struct InMemoryCheckpointStore {
-    state: Mutex<HashMap<ProjectionId, u64>>,
+    state: Mutex<HashMap<String, u64>>,
 }
 
 impl Default for InMemoryCheckpointStore {
@@ -23,17 +25,17 @@ impl Default for InMemoryCheckpointStore {
 impl CheckpointStore for InMemoryCheckpointStore {
     type Tx = ();
 
-    async fn load(&self, projection_id: &ProjectionId) -> Result<Option<u64>, CheckpointError> {
+    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
         let state = self
             .state
             .lock()
             .expect("in-memory checkpoint state lock was poisoned by a panicking holder");
-        Ok(state.get(projection_id).copied())
+        Ok(state.get(scope.checkpoint_key()).copied())
     }
 
     async fn save(
         &self,
-        projection_id: &ProjectionId,
+        scope: &dyn CheckpointScope,
         sequence: u64,
         _tx: Option<&mut Self::Tx>,
     ) -> Result<(), CheckpointError> {
@@ -41,7 +43,7 @@ impl CheckpointStore for InMemoryCheckpointStore {
             .state
             .lock()
             .expect("in-memory checkpoint state lock was poisoned by a panicking holder");
-        state.insert(projection_id.clone(), sequence);
+        state.insert(scope.checkpoint_key().to_owned(), sequence);
         Ok(())
     }
 }

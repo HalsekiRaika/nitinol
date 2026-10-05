@@ -5,7 +5,7 @@ use bytes::Bytes;
 use jiff::Timestamp;
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType, LoadQuery};
+use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType, LoadQuery, MaterializedPath};
 
 use crate::fixture;
 use crate::under_test::StoreUnderTest;
@@ -28,6 +28,8 @@ pub async fn verify_deterministic<S: StoreUnderTest>(store: &S) {
     an_append_becomes_visible_as_one_commit_unit(store).await;
     a_load_serves_events_in_ascending_global_sequence_order(store).await;
     a_refusal_leaves_every_observable_part_of_the_store_as_it_was(store).await;
+    a_prefix_and_a_position_select_the_events_satisfying_both(store).await;
+    a_prefix_no_stored_event_is_within_selects_nothing(store).await;
 }
 
 /// OCC-1. A `(stream, sequence)` pair the stream already holds is refused, and
@@ -318,6 +320,113 @@ async fn a_refusal_leaves_every_observable_part_of_the_store_as_it_was<S: StoreU
     );
 }
 
+/// LOAD-1. An event-type prefix and a global position are a conjunction: what
+/// a load serves is within the prefix **and** at or above the position.
+///
+/// A store treating the two as an alternative is caught from this side: the
+/// event below the position is within the prefix, so an alternative would serve
+/// it.
+async fn a_prefix_and_a_position_select_the_events_satisfying_both<S: StoreUnderTest>(store: &S) {
+    const CLAUSE: &str = "LOAD-1";
+    const FIRST: &str = "occ.conformance.conjunction.first";
+    const SECOND: &str = "occ.conformance.conjunction.second";
+
+    let backend = store.bring_up().await;
+    // Two streams, so neither condition can be answered by the stream key
+    // instead, and the position has events on both sides of it.
+    let below = highest(
+        committed(
+            CLAUSE,
+            &backend,
+            FIRST,
+            vec![fixture::fact(1, b"below-first")],
+        )
+        .await,
+    );
+    committed(
+        CLAUSE,
+        &backend,
+        SECOND,
+        vec![fixture::fact(1, b"below-second")],
+    )
+    .await;
+    let floor = highest(committed(CLAUSE, &backend, FIRST, vec![fixture::fact(2, b"at")]).await);
+    let above =
+        highest(committed(CLAUSE, &backend, SECOND, vec![fixture::fact(2, b"above")]).await);
+
+    // The declaration's own path, then a family above it: a prefix is matched
+    // on path boundaries, and the position condition holds under either.
+    for prefix in [fixture::FACT.to_path(), path("occ.conformance")] {
+        let served = fixture::observe(
+            &backend,
+            LoadQuery {
+                event_type_prefix: Some(prefix.clone()),
+                from_global_sequence: Some(floor),
+                ..LoadQuery::default()
+            },
+        )
+        .await;
+
+        let positions: Vec<u64> = served.iter().map(|event| event.global_sequence).collect();
+        assert_eq!(
+            positions,
+            vec![floor, above],
+            "{CLAUSE} is broken: a load naming the prefix {prefix} and the position {floor} \
+             served the positions {positions:?}. What is served is the events within the prefix \
+             at or above the position, in ascending global order: the event at {below} is within \
+             the prefix and below the position, so it is left out, and the position names the \
+             first event admitted rather than the first excluded"
+        );
+    }
+}
+
+/// LOAD-1. A prefix no stored event is within serves nothing, whatever the
+/// position asked from.
+///
+/// The other side of the conjunction: every stored event is at or above the
+/// position, so a store treating the conditions as an alternative serves them
+/// all.
+async fn a_prefix_no_stored_event_is_within_selects_nothing<S: StoreUnderTest>(store: &S) {
+    const CLAUSE: &str = "LOAD-1";
+    const STREAM: &str = "occ.conformance.disjoint";
+
+    let backend = store.bring_up().await;
+    let stored = committed(
+        CLAUSE,
+        &backend,
+        STREAM,
+        vec![
+            fixture::fact(1, b"one"),
+            fixture::fact(2, b"two"),
+            fixture::fact(3, b"three"),
+        ],
+    )
+    .await;
+
+    // A sibling of the stored declaration, so the two paths share every
+    // character of their family and part nowhere but at the last name.
+    let absent = path("occ.conformance.Absent");
+    for floor in stored {
+        let served = fixture::observe(
+            &backend,
+            LoadQuery {
+                event_type_prefix: Some(absent.clone()),
+                from_global_sequence: Some(floor),
+                ..LoadQuery::default()
+            },
+        )
+        .await;
+
+        assert!(
+            served.is_empty(),
+            "{CLAUSE} is broken: no stored event is within the prefix {absent}, so no position \
+             can admit one — and asked from {floor} the store served {} event(s). The two \
+             conditions are a conjunction, not an alternative",
+            served.len()
+        );
+    }
+}
+
 // Staging and judging a clause
 
 /// Every observable field of everything the store holds, in the order a load
@@ -389,6 +498,16 @@ fn conflicted(clause: &str, what: &str, outcome: Result<AppendOutcome, AppendErr
             taken.assigned_sequences
         ),
     }
+}
+
+/// A prefix a clause names.
+///
+/// A literal with no empty segment always parses, so a failure here is the
+/// suite failing to run rather than a contract being broken, and it names no
+/// clause.
+fn path(text: &str) -> MaterializedPath {
+    text.parse()
+        .expect("a dotted literal with no empty segment is a materialized path")
 }
 
 /// Where an append left the numbering off.

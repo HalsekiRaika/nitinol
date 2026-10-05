@@ -293,7 +293,7 @@ mod tests {
 
     use async_trait::async_trait;
     use nitinol_persistence::error::CheckpointError;
-    use nitinol_persistence::store::InMemoryCheckpointStore;
+    use nitinol_persistence::store::{CheckpointScope, InMemoryCheckpointStore};
     use nitinol_persistence::ProjectionId;
 
     /// The checkpoint every case starts from.  Deliberately non-zero and
@@ -333,13 +333,13 @@ mod tests {
     impl CheckpointStore for TestCheckpointStore {
         type Tx = ();
 
-        async fn load(&self, projection_id: &ProjectionId) -> Result<Option<u64>, CheckpointError> {
-            self.inner.load(projection_id).await
+        async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
+            self.inner.load(scope).await
         }
 
         async fn save(
             &self,
-            projection_id: &ProjectionId,
+            scope: &dyn CheckpointScope,
             sequence: u64,
             tx: Option<&mut Self::Tx>,
         ) -> Result<(), CheckpointError> {
@@ -347,7 +347,7 @@ mod tests {
             if self.fail_save {
                 return Err(CheckpointError::Backend(failure()));
             }
-            self.inner.save(projection_id, sequence, tx).await
+            self.inner.save(scope, sequence, tx).await
         }
     }
 

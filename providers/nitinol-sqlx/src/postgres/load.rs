@@ -45,14 +45,29 @@ pub(super) fn load<'a>(
     //
     // An event type prefix matches on segment boundaries: a stored path is
     // under the prefix when it is the prefix itself, or when the prefix is
-    // followed by a separator. Comparing the leading characters rather than
-    // matching a pattern is what keeps `_` and `%` — both legal in a family —
+    // followed by a separator. Comparing the column rather than matching a
+    // pattern against it is what keeps `_` and `%` — both legal in a family —
     // from behaving as wildcards.
     //
+    // The descendants are asked for as the half-open range `[$4 || '.',
+    // $4 || '/')` rather than by taking the leading characters of the column.
+    // The two select the same rows: `.` and `/` are adjacent bytes, so a path
+    // lies in that range exactly when `$4` is followed by a separator. What
+    // differs is that a range over the column reaches an index while a function
+    // of the column cannot, and an index is the difference between reading the
+    // rows of one declaration and reading every row above the position to
+    // throw most of them away.
+    //
+    // `COLLATE "C"` is what makes that equality hold, and it is not optional:
+    // the adjacency of `.` and `/` is a fact about bytes, and under a locale
+    // collation the same range leaves out paths that are under the prefix. It
+    // names the same collation the index on this column is built with, so the
+    // two have to be changed together or the index stops being reachable.
+    //
     // A stored path is a family and a type name with nothing after it, so the
-    // second clause reaches a declaration only from a family above it. The
-    // first is what a query for one declaration lands on: it has no descendant
-    // of its own for the second clause to gather.
+    // range reaches a declaration only from a family above it. The equality is
+    // what a query for one declaration lands on: it has no descendant of its
+    // own for the range to gather.
     let rows = sqlx::query_as::<_, StoredEvent>(
         r#"
         SELECT persistence_id, sequence_number, global_sequence, event_type, payload, occurred_at
@@ -60,8 +75,9 @@ pub(super) fn load<'a>(
          WHERE ($1::text   IS NULL OR persistence_id  =  $1)
            AND ($2::bigint IS NULL OR global_sequence >= $2)
            AND ($3::bigint IS NULL OR sequence_number >= $3)
-           AND ($4::text   IS NULL OR event_type = $4
-                                   OR left(event_type, length($4) + 1) = $4 || '.')
+           AND ($4::text   IS NULL OR event_type COLLATE "C" = $4
+                                   OR (event_type COLLATE "C" >= $4 || '.'
+                                   AND event_type COLLATE "C" <  $4 || '/'))
          ORDER BY global_sequence
          LIMIT $5::bigint
         "#,

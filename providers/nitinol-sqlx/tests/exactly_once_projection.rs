@@ -61,7 +61,7 @@ use linkme::distributed_slice;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{Event, ProjectionContext, Projector, ProjectorProps, TxProvider};
 use nitinol_persistence::error::CheckpointError;
-use nitinol_persistence::store::{CheckpointStore, EventStore};
+use nitinol_persistence::store::{CheckpointScope, CheckpointStore, EventStore};
 use nitinol_persistence::{
     AggregateId, EventRegistryEntry, EventType, Family, ProjectionId, TypeName, EVENT_REGISTRY,
 };
@@ -236,17 +236,17 @@ struct ObservedCheckpoints {
 impl CheckpointStore for ObservedCheckpoints {
     type Tx = PgTransaction<'static>;
 
-    async fn load(&self, projection_id: &ProjectionId) -> Result<Option<u64>, CheckpointError> {
-        self.inner.load(projection_id).await
+    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
+        self.inner.load(scope).await
     }
 
     async fn save(
         &self,
-        projection_id: &ProjectionId,
+        scope: &dyn CheckpointScope,
         sequence: u64,
         tx: Option<&mut Self::Tx>,
     ) -> Result<(), CheckpointError> {
-        let outcome = self.inner.save(projection_id, sequence, tx).await;
+        let outcome = self.inner.save(scope, sequence, tx).await;
         if let Err(CheckpointError::Backend(ref cause)) = outcome {
             if cause.downcast_ref::<CheckpointConflict>().is_some() {
                 self.conflicts.fetch_add(1, Ordering::SeqCst);

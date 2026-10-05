@@ -150,5 +150,39 @@ pub trait EventStore: Send + Sync {
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError>;
 
+    /// Serves the stored events a [`LoadQuery`] selects.
+    ///
+    /// # LOAD-1: a query's conditions are a conjunction
+    ///
+    /// Every condition a `LoadQuery` names applies to every event served: what
+    /// comes back satisfies all of them, in ascending `global_sequence` order,
+    /// and nothing else does. A condition left absent selects nothing out.
+    ///
+    /// In particular `event_type_prefix` and `from_global_sequence` named
+    /// together serve the events within that prefix **and** at or above that
+    /// position. Neither one widens the other: an event within the prefix below
+    /// the position is left out, and so is an event above the position outside
+    /// the prefix.
+    ///
+    /// `from_global_sequence` includes the position it names, so a consumer
+    /// asks for what it has not seen by naming the position after the one it
+    /// finished with.
+    ///
+    /// This is the reading every checkpoint-following consumer of one event
+    /// type rests on, and both halves matter to it. An event of another type
+    /// coming back would be handed to a consumer that cannot read it; an event
+    /// at or below the position would be handed over a second time. Ascending
+    /// order is what lets such a consumer take the last event it finished with
+    /// as its progress.
+    ///
+    /// A prefix matches on path boundaries: a stored path is within the prefix
+    /// when it is the prefix itself, or when the prefix is followed by a
+    /// separator. A canonical path — a family and a type name, with nothing
+    /// after it — has no descendant of its own, so naming one selects that
+    /// declaration's events alone.
+    ///
+    /// Fixed by `nitinol-store-conformance` for any backend, and by
+    /// `nitinol-persistence/tests/event_store_load_query_conjunction.rs`
+    /// against the reference implementation.
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError>;
 }

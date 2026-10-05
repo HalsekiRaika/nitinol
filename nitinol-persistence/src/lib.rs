@@ -6,7 +6,8 @@
 //! |---|---|
 //! | [`store::EventStore`] | Append and load domain events |
 //! | [`store::SnapshotStore`] | Save and load aggregate snapshots |
-//! | [`store::CheckpointStore`] | Track the delivery progress of a projector |
+//! | [`store::CheckpointStore`] | Track the progress of an event consumer |
+//! | [`store::CheckpointScope`] | The key a consumer's progress is filed under |
 //! | [`store::DeliveryMode`] | Delivery guarantee: `AtMostOnce` / `AtLeastOnce` / `ExactlyOnce` |
 //!
 //! An in-memory reference implementation is provided under [`store`] for

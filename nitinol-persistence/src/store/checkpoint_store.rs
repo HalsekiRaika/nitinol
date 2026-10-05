@@ -70,15 +70,64 @@ pub enum DeliveryMode {
     ExactlyOnce,
 }
 
+/// What a consumer of events is called where its progress is kept.
+///
+/// A [`CheckpointStore`] holds the positions of more than one kind of consumer
+/// — a projection, a partition of a delivery host — and each kind names itself
+/// with its own type. This trait is the whole of what a store is told: the key
+/// the position is filed under.
+///
+/// # Keys that cannot meet
+///
+/// Two kinds of consumer sharing one table must not be able to render one key,
+/// or one would read the other's position as its own. The rendering is
+/// therefore a property of the implementing type rather than of a convention
+/// the caller follows:
+///
+/// - [`ProjectionId`] renders **verbatim**, so a row written before any other
+///   kind of consumer existed is still found under the text its identifier
+///   carries.
+/// - A framework-owned consumer renders inside the
+///   [reserved namespace](crate::reserved), which every user-facing identifier
+///   constructor refuses. A [`ProjectionId`] that could collide with one cannot
+///   be constructed at all.
+///
+/// Sharing the table is what is left once the keys cannot collide: the store
+/// keeps one kind of row, and what distinguishes the consumers is the key.
+pub trait CheckpointScope: Send + Sync {
+    /// The key this consumer's position is filed under.
+    fn checkpoint_key(&self) -> &str;
+}
+
+/// A projection is named by its identifier, with nothing added to it.
+///
+/// Decorating the key — a prefix naming the kind, say — would move every row a
+/// projection had already written.
+impl CheckpointScope for ProjectionId {
+    fn checkpoint_key(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// The persisted progress cache every event consumer shares.
+///
+/// What a checkpoint holds is where a consumer had got to, and nothing more.
+/// The business record is the events themselves — the aggregates' and the
+/// sagas' — so a checkpoint can be rebuilt by reading from the beginning, and
+/// losing one costs redelivery rather than a fact.
+///
+/// The key is a [`CheckpointScope`] rather than any one consumer's identifier,
+/// so one store serves every kind of consumer without either kind knowing the
+/// other exists.
 #[async_trait]
 pub trait CheckpointStore: Send + Sync {
     type Tx: Send;
 
-    async fn load(&self, projection_id: &ProjectionId) -> Result<Option<u64>, CheckpointError>;
+    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError>;
 
     async fn save(
         &self,
-        projection_id: &ProjectionId,
+        scope: &dyn CheckpointScope,
         sequence: u64,
         tx: Option<&mut Self::Tx>,
     ) -> Result<(), CheckpointError>;
