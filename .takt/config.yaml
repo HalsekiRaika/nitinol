@@ -67,6 +67,19 @@ provider_routing:
             - Bash
             - WebSearch
             - WebFetch
+    route-claude-fable-read:
+      provider: claude
+      model: fable
+      provider_options:
+        claude:
+          effort: high
+          allowed_tools:
+            - Read
+            - Glob
+            - Grep
+            - Bash
+            - WebSearch
+            - WebFetch
     route-claude-opus-high-edit:
       provider: claude
       model: opus
