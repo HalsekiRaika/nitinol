@@ -17,17 +17,31 @@ nitinol = { version = "0.4", features = ["postgres"] }
 ```
 
 ```rust,ignore
-use std::sync::Arc;
-
-use nitinol::persistence::store::EventStore;
+use nitinol::eventsource::system::EventSourceSystem;
+use nitinol::runtime::ProcessSystem;
 use nitinol::sqlx::sqlx::postgres::PgPoolOptions;
-use nitinol::sqlx::PostgresEventStore;
+use nitinol::sqlx::{postgres_persistence, PostgresEventStore};
 
 let pool = PgPoolOptions::new().connect(&std::env::var("DATABASE_URL")?).await?;
 PostgresEventStore::migrate(&pool).await?;
 
-let store: Arc<dyn EventStore> = Arc::new(PostgresEventStore::new(pool)?);
+// One provider: the journal and both checkpoint slots over this database.
+let persistence = postgres_persistence(pool)?;
+
+let system = EventSourceSystem::builder(ProcessSystem::new().await)
+    .with_persistence(persistence.clone())
+    .build();
 ```
+
+The provider is what every wiring point resolves its store from, so a
+deployment names the database once. There is no snapshot store in this crate,
+so the slot stays unprovided and wiring that needs one is refused while it is
+compiled rather than at the first save; a deployment that wants snapshots names
+a store for that slot itself, with `with_snapshot_store`.
+
+One supplier is not one transaction: the clauses on
+`nitinol::persistence::provider::PersistenceProvider` state what a provider does
+and does not promise across its slots.
 
 Four things the store expects of its caller.
 
@@ -126,19 +140,22 @@ impl TxProvider for PoolTransactions {
 }
 ```
 
-Hand it to the projector alongside the checkpoint store, and write the read
-model through the transaction `project` is given:
+Hand it to the projector, whose journal and checkpoint store both come from the
+provider, and write the read model through the transaction `project` is given:
 
 ```rust,ignore
-let checkpoints = Arc::new(PostgresCheckpointStore::new(pool.clone()));
-
-ProjectorProps::new(ProjectionId::new("orders.totals"), store, checkpoints, OrderTotals::new)
+system
+    .projector_props(ProjectionId::new("orders.totals"), OrderTotals::new)
     .with_tx_provider(PoolTransactions { pool: pool.clone() })
     .with_event::<OrderPlaced>()
     .catchup_from_global()
-    .spawn(&system)
+    .spawn(system.process_system())
     .await;
 ```
+
+A projector wired without a system is the same two slots named from the same
+provider — `ProjectorProps::new(ProjectionId::new("orders.totals"),
+&persistence, OrderTotals::new)`.
 
 ```rust,ignore
 async fn project(

@@ -34,6 +34,7 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
@@ -213,15 +214,17 @@ async fn append_upstream(store: &Arc<dyn EventStore>, agg_id: &AggregateId, seq:
 #[tokio::test]
 async fn saga_stops_after_end_even_when_terminal_append_fails() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    // The target aggregate's journal is the one the system's provider supplies;
+    // the saga keeps its own failing store below.
+    let target_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&target_store)))
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("term-fail-agg");
 
-    let target_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let target_proxy = system
-        .spawn_aggregate::<TargetAgg>(agg_id.clone(), Arc::clone(&target_store))
-        .await;
+    let target_proxy = system.spawn_aggregate::<TargetAgg>(agg_id.clone()).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(TwoSuccessStore::new());
     let saga_id = SagaId::new(TELL_THEN_END_SAGA_ID);

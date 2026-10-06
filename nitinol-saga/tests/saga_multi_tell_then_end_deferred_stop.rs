@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
+use nitinol_persistence::provider::{InMemoryPersistence, Persistence};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -181,7 +182,7 @@ async fn wait_for_event_count(
 
 #[allow(clippy::type_complexity)]
 async fn spawn_two_tells_then_end_saga(
-    system: &EventSourceSystem,
+    system: &EventSourceSystem<InMemoryPersistence>,
     saga_label: &str,
 ) -> (
     Arc<dyn EventStore>,
@@ -194,10 +195,7 @@ async fn spawn_two_tells_then_end_saga(
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new(format!("{saga_label}-agg"));
 
-    let target_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let target_proxy = system
-        .spawn_aggregate::<TargetAgg>(agg_id.clone(), Arc::clone(&target_store))
-        .await;
+    let target_proxy = system.spawn_aggregate::<TargetAgg>(agg_id.clone()).await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(TWO_TELLS_THEN_END_SAGA_ID);
@@ -231,7 +229,9 @@ async fn spawn_two_tells_then_end_saga(
 #[tokio::test]
 async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let (saga_store, saga_id, upstream_store, agg_id, _handle_count, _saga_proxy) =
         spawn_two_tells_then_end_saga(&system, "multi-tell-gapfree").await;
@@ -298,7 +298,9 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
 #[tokio::test]
 async fn multi_tell_then_end_stops_saga_after_last_executor_settles() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let (saga_store, saga_id, upstream_store, agg_id, handle_count, _saga_proxy) =
         spawn_two_tells_then_end_saga(&system, "multi-tell-stops").await;

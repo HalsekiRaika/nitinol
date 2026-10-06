@@ -29,6 +29,7 @@ use nitinol_eventsource::{
     ExecError, Query, TellError,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
@@ -392,7 +393,7 @@ async fn genesis_conflict_keeps_the_reference_on_its_activation() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(Persistence::new(Arc::clone(&store)))
         .build();
     let id = AggregateId::new("conflict-genesis-reference");
 

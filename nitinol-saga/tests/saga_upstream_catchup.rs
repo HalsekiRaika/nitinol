@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -210,7 +211,9 @@ async fn wait_for_count(captured: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>
 #[tokio::test]
 async fn saga_catches_up_on_preexisting_upstream_events() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-catchup-order");
 
@@ -253,7 +256,9 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
 #[tokio::test]
 async fn saga_catchup_declines_events_that_correlate_elsewhere() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-route-order");
 
@@ -299,7 +304,9 @@ async fn saga_catchup_declines_events_that_correlate_elsewhere() {
 #[tokio::test]
 async fn saga_catchup_resumes_from_cursor_after_value() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-resume-order");
 
@@ -342,7 +349,9 @@ async fn saga_catchup_resumes_from_cursor_after_value() {
 #[tokio::test]
 async fn saga_receives_live_events_after_catchup_via_durable_stream() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-live-order");
 
@@ -383,7 +392,9 @@ async fn saga_receives_live_events_after_catchup_via_durable_stream() {
 #[tokio::test]
 async fn saga_catchup_ignores_events_of_other_types() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-mixed-order");
 
@@ -434,7 +445,9 @@ async fn saga_catchup_ignores_events_of_other_types() {
 #[tokio::test]
 async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let agg_a = AggregateId::new("saga-upstream-global-a");

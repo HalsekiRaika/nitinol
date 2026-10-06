@@ -7,6 +7,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -186,18 +187,17 @@ async fn projector_single_event_type_project_called_during_catchup() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("proj-single"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || TrackingProjector {
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy = ProjectorProps::new(ProjectionId::new("proj-single"), &persistence, move || {
+        TrackingProjector {
             count: Arc::clone(&count_c),
             label_count: Arc::new(AtomicUsize::new(0)),
             notify: Arc::clone(&notify_c),
             last_projection_id: Arc::new(Mutex::new(None)),
             last_sequence: Arc::new(AtomicUsize::new(0)),
-        },
-    )
+        }
+    })
     .with_event::<Counted>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -227,18 +227,17 @@ async fn projector_context_provides_correct_projection_id() {
     let notify_c = Arc::clone(&notify);
     let last_pid_c = Arc::clone(&last_pid);
 
-    let _proxy = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || TrackingProjector {
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+        TrackingProjector {
             count: Arc::clone(&count_c),
             label_count: Arc::new(AtomicUsize::new(0)),
             notify: Arc::clone(&notify_c),
             last_projection_id: Arc::clone(&last_pid_c),
             last_sequence: Arc::new(AtomicUsize::new(0)),
-        },
-    )
+        }
+    })
     .with_event::<Counted>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -275,18 +274,17 @@ async fn projector_context_provides_current_sequence() {
     let notify_c = Arc::clone(&notify);
     let last_seq_c = Arc::clone(&last_seq);
 
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("proj-ctx-seq"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || TrackingProjector {
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy = ProjectorProps::new(ProjectionId::new("proj-ctx-seq"), &persistence, move || {
+        TrackingProjector {
             count: Arc::clone(&count_c),
             label_count: Arc::new(AtomicUsize::new(0)),
             notify: Arc::clone(&notify_c),
             last_projection_id: Arc::new(Mutex::new(None)),
             last_sequence: Arc::clone(&last_seq_c),
-        },
-    )
+        }
+    })
     .with_event::<Counted>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
@@ -317,18 +315,17 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
     let lc_c = Arc::clone(&label_count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("proj-multi"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || TrackingProjector {
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy = ProjectorProps::new(ProjectionId::new("proj-multi"), &persistence, move || {
+        TrackingProjector {
             count: Arc::clone(&count_c),
             label_count: Arc::clone(&lc_c),
             notify: Arc::clone(&notify_c),
             last_projection_id: Arc::new(Mutex::new(None)),
             last_sequence: Arc::new(AtomicUsize::new(0)),
-        },
-    )
+        }
+    })
     .with_event::<Counted>()
     .with_event::<Labeled>()
     .catchup_from_aggregate(agg_id)
@@ -363,18 +360,15 @@ async fn projector_live_event_is_projected_after_catchup() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(
-        projection_id,
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || TrackingProjector {
-            count: Arc::clone(&count_c),
-            label_count: Arc::new(AtomicUsize::new(0)),
-            notify: Arc::clone(&notify_c),
-            last_projection_id: Arc::new(Mutex::new(None)),
-            last_sequence: Arc::new(AtomicUsize::new(0)),
-        },
-    )
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy = ProjectorProps::new(projection_id, &persistence, move || TrackingProjector {
+        count: Arc::clone(&count_c),
+        label_count: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::clone(&notify_c),
+        last_projection_id: Arc::new(Mutex::new(None)),
+        last_sequence: Arc::new(AtomicUsize::new(0)),
+    })
     .with_event::<Counted>()
     .catchup_from_aggregate(agg_id.clone())
     .spawn(&system)
@@ -429,10 +423,11 @@ async fn projector_dispatches_on_the_declaration_a_row_carries_and_not_its_desce
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
     let _proxy = ProjectorProps::new(
         ProjectionId::new("proj-identity-dispatch"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
+        &persistence,
         move || TrackingProjector {
             count: Arc::clone(&count_c),
             label_count: Arc::new(AtomicUsize::new(0)),

@@ -35,6 +35,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -238,7 +239,9 @@ async fn wait_for_seen(
 #[tokio::test]
 async fn a_manager_decodes_each_source_once_and_routes_both_to_the_same_instances() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     // Each source reads a stream key of its own, which is the ordinary shape:
     // two aggregates a coordinator watches.

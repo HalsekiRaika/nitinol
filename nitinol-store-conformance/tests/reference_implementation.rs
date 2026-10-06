@@ -16,6 +16,11 @@
 //!   Given InMemoryCheckpointStore
 //!   When the kit's CKP verification is run
 //!   Then every clause holds
+//!
+//! Scenario: the reference persistence provider conforms
+//!   Given the in-memory persistence provider
+//!   When the kit's PRV verification is run
+//!   Then every clause holds
 //! ```
 //!
 //! The in-memory stores are the implementations the clauses on
@@ -41,10 +46,13 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{ReferenceCheckpointStore, ReferenceSnapshotStore, ReferenceStore, TokioExecutor};
+use common::{
+    ReferenceCheckpointStore, ReferenceProvider, ReferenceSnapshotStore, ReferenceStore,
+    TokioExecutor,
+};
 
 use nitinol_store_conformance::{
-    checkpoint, snapshot, verify, verify_deterministic, verify_under_concurrency,
+    checkpoint, provider, snapshot, verify, verify_deterministic, verify_under_concurrency,
 };
 
 /// Every clause — the deterministic ones and the concurrent one — must hold for
@@ -108,4 +116,54 @@ async fn the_deterministic_checkpoint_clauses_run_without_an_executor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_checkpoint_concurrency_clause_runs_on_its_own() {
     checkpoint::verify_under_concurrency(&ReferenceCheckpointStore, &TokioExecutor).await;
+}
+
+/// Every `PRV` clause must hold for the reference provider, slot by slot and
+/// then for the provider whole.
+///
+/// The whole-provider entry is the one a backend supplying every slot runs, and
+/// the reference provider is the only implementation in the repository that
+/// does: the Postgres provider supplies no snapshot store, so its own
+/// conformance test runs the slot entries it has and none it has not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_in_memory_provider_conforms_to_every_provider_clause() {
+    provider::verify(&ReferenceProvider, &TokioExecutor).await;
+}
+
+/// The event-store slot on its own, which is the entry a provider that supplies
+/// only a journal runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_event_store_slot_runs_on_its_own() {
+    provider::verify_event_store(&ReferenceProvider, &TokioExecutor).await;
+}
+
+/// The snapshot slot on its own, and with no executor — the snapshot contract
+/// has no clause that needs writers and a reader at once, and a provider's
+/// slot entry inherits that shape rather than asking for a runtime it has
+/// nothing to spawn on.
+#[tokio::test]
+async fn the_snapshot_slot_runs_on_its_own_and_asks_for_no_executor() {
+    provider::verify_snapshot_store(&ReferenceProvider).await;
+}
+
+/// The projection-checkpoint slot on its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_projection_checkpoint_slot_runs_on_its_own() {
+    provider::verify_projection_checkpoints(&ReferenceProvider, &TokioExecutor).await;
+}
+
+/// The delivery-checkpoint slot on its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_delivery_checkpoint_slot_runs_on_its_own() {
+    provider::verify_delivery_checkpoints(&ReferenceProvider, &TokioExecutor).await;
+}
+
+/// The independence of the two checkpoint slots on its own.
+///
+/// It runs against a provider whose slots were configured with **one** store,
+/// which is the case the clause has to hold in: what keeps the two consumers
+/// apart there is the key each renders, not a store each.
+#[tokio::test]
+async fn the_checkpoint_slots_are_independent_even_when_configured_with_one_store() {
+    provider::verify_checkpoint_independence(&ReferenceProvider).await;
 }

@@ -52,6 +52,7 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -257,7 +258,9 @@ impl Saga for HandleFailSaga {
 #[tokio::test]
 async fn handle_error_enqueues_a_handle_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-handle-upstream", 1, "boom").await;
@@ -380,7 +383,9 @@ impl Saga for ScheduleThenFailSaga {
 #[tokio::test]
 async fn a_failing_deadline_arm_enqueues_a_scheduled_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-sched-upstream", 1, "tick").await;
@@ -521,7 +526,9 @@ async fn tell_failing_every_attempt_enqueues_a_tell_failed_dead_letter_after_ret
     use nitinol_saga::SagaFailure;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-tell-upstream", 1, "order").await;
@@ -689,7 +696,9 @@ async fn message_to_ended_saga_enqueues_an_ended_saga_received_message_dead_lett
     use nitinol_saga::SagaFailure;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     // Pre-load BOTH events.  The DirectPoller (via `poll_direct_once`) reads the
     // entire batch in one `store.load()` call and delivers event-1 then event-2
@@ -856,7 +865,9 @@ impl Saga for PersistFailSaga {
 #[tokio::test]
 async fn persist_retry_recovers_domain_event_without_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(
@@ -917,7 +928,9 @@ async fn persist_retry_recovers_domain_event_without_dead_letter() {
 #[tokio::test]
 async fn persist_failure_enqueues_a_persist_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-persist-upstream", 1, "persist-test").await;
@@ -1063,7 +1076,9 @@ impl Saga for DecodeFailSaga {
 #[tokio::test]
 async fn decode_failure_in_scheduled_payload_enqueues_a_decode_failed_dead_letter() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "dlq-decode-upstream", 1, "decode-test").await;

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -164,7 +165,9 @@ async fn wait_for_count(
 #[tokio::test]
 async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-upstream-order");
 
@@ -204,7 +207,9 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
 #[tokio::test]
 async fn saga_context_exposes_upstream_sequence_from_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-upstream-seq-order");
 
@@ -249,7 +254,9 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
     let started = jiff::Timestamp::now();
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-now-order");
 
@@ -297,7 +304,9 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
 #[tokio::test]
 async fn saga_context_existing_accessors_remain_saga_scoped() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-saga-scope-order");
 

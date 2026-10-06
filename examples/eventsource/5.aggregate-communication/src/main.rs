@@ -27,16 +27,15 @@
 //! Run with:
 //!   cargo run -p eventsource-aggregate-communication
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaDefaultStoreExt;
+use nitinol_saga::SagaSystemExt;
 
 use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment, Incremented};
 use eventsource_aggregate_communication::saga::RelaySaga;
@@ -57,10 +56,10 @@ async fn main() {
     let ps = ProcessSystem::new().await;
 
     // `EventStore` is stream-keyed, so both counters and the saga's own journal
-    // are tenants of this one store, each under its own key.
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // are tenants of the one journal the provider supplies, each under its own
+    // key.
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(store)
+        .with_persistence(Persistence::in_memory())
         .build();
 
     let id_a = AggregateId::new("comm-a");

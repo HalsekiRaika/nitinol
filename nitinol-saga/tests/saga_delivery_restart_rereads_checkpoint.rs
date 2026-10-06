@@ -22,8 +22,8 @@
 #[path = "common/delivery.rs"]
 mod delivery;
 use delivery::{
-    delivery_id, in_memory_system, partition_count, scope_of, wait_until_loads, DeliverySaga,
-    LoadFault, RecordingCheckpointStore, RecordingEventStore,
+    delivery_id, delivery_persistence, in_memory_system, partition_count, scope_of,
+    wait_until_loads, DeliverySaga, LoadFault, RecordingCheckpointStore, RecordingEventStore,
 };
 
 use std::sync::Arc;
@@ -52,8 +52,7 @@ async fn a_restarted_partition_resumes_from_the_position_now_recorded() {
     recording.fault_on(FAILING_CALL, LoadFault::Panic);
 
     let _host = SagaDeliveryProps::<DeliverySaga, RecordingCheckpointStore>::new(
-        Arc::clone(&journal),
-        Arc::clone(&checkpoints),
+        &delivery_persistence(&journal, &checkpoints),
     )
     .with_delivery_id(delivery_id())
     .with_partitions(partition_count(1))

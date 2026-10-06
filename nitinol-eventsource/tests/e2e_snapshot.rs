@@ -16,6 +16,7 @@ use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Query,
     SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, EventType, Family, PersistedSnapshot, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -192,8 +193,9 @@ async fn e2e_snapshot_at_latest_sequence_restores_state() {
     // Given: shared system and persistors
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let snapshot_ref =
-        SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
+    let persistence = Persistence::new(Arc::clone(&store))
+        .with_snapshot_store(Arc::new(InMemorySnapshotStore::default()));
+    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("e2e-snap-latest");
 
     // Write 3 events via process 1
@@ -243,8 +245,9 @@ async fn e2e_snapshot_plus_delta_events_combine_correctly() {
     // Given: shared system and persistors
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let snapshot_ref =
-        SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
+    let persistence = Persistence::new(Arc::clone(&store))
+        .with_snapshot_store(Arc::new(InMemorySnapshotStore::default()));
+    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("e2e-snap-delta");
 
     // Write 8 events

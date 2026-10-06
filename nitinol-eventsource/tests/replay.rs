@@ -15,6 +15,7 @@ use nitinol_eventsource::{
     SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{
     EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore,
 };
@@ -269,8 +270,9 @@ async fn replay_with_snapshot_only_restores_snapshot_state() {
     // Given: a SnapshotPersistor with a pre-saved snapshot (value=5, sequence=5)
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let snapshot_ref =
-        SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
+    let persistence = Persistence::new(Arc::clone(&store))
+        .with_snapshot_store(Arc::new(InMemorySnapshotStore::default()));
+    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("replay-snap-only");
 
     // Manually save a snapshot via SnapshotPersistorRef (big-endian u64 encoding)
@@ -301,8 +303,9 @@ async fn replay_applies_delta_events_after_snapshot() {
     // Given: shared persistors
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let snapshot_ref =
-        SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
+    let persistence = Persistence::new(Arc::clone(&store))
+        .with_snapshot_store(Arc::new(InMemorySnapshotStore::default()));
+    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("replay-snap-delta");
 
     // Write 5 events through a snapshotable process
@@ -350,8 +353,9 @@ async fn replay_snapshot_at_latest_sequence_no_delta_events() {
     // Given: pre-write 3 events through a process, then save a snapshot at seq=3
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let snapshot_ref =
-        SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
+    let persistence = Persistence::new(Arc::clone(&store))
+        .with_snapshot_store(Arc::new(InMemorySnapshotStore::default()));
+    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("replay-snap-latest");
 
     {

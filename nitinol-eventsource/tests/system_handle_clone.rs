@@ -2,7 +2,7 @@
 //!
 //! Cloning an `EventSourceSystem` produces another name for the same instance:
 //! every clone resolves through the same aggregate registry and carries the same
-//! default [`EventStore`].  That is what lets callers drop the outer
+//! persistence provider.  That is what lets callers drop the outer
 //! `Arc<EventSourceSystem<..>>` they used to need in order to hand the system to
 //! more than one task.
 //!
@@ -24,10 +24,9 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::system::{
-    EventSourceSystem, EventSourceSystemBuilder, StoreSet, StoreUnset,
-};
+use nitinol_eventsource::system::{EventSourceSystem, EventSourceSystemBuilder, PersistenceUnset};
 use nitinol_eventsource::{codec::Codec, Aggregate, Decider, Decision, Event, Query};
+use nitinol_persistence::provider::{InMemoryPersistence, Persistence, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -105,11 +104,11 @@ async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<
 }
 
 /// A system on a fresh in-memory store, plus the store to read it back from.
-async fn counter_system() -> (EventSourceSystem<StoreSet>, Arc<dyn EventStore>) {
+async fn counter_system() -> (EventSourceSystem<Persistence>, Arc<dyn EventStore>) {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(Persistence::new(Arc::clone(&store)))
         .build();
     (system, store)
 }
@@ -118,21 +117,23 @@ async fn counter_system() -> (EventSourceSystem<StoreSet>, Arc<dyn EventStore>) 
 
 fn assert_clone<T: Clone>() {}
 
-/// The system type is the shared handle, in both store states.
+/// The system type is the shared handle, whether or not a provider was supplied.
 ///
-/// It carries no codec type at all — each event names its own — so the store
-/// state is the only axis this has to be stated across.
+/// It carries no codec type at all — each event names its own — so the provider
+/// is the only axis this has to be stated across.  Sharing does not depend on
+/// the provider type being `Clone` itself: `InMemoryPersistence` is the assembly
+/// a deployment names, and the handle is clonable either way.
 #[allow(dead_code)]
-fn _event_source_system_is_clone_in_both_store_states() {
-    assert_clone::<EventSourceSystem<StoreUnset>>();
-    assert_clone::<EventSourceSystem<StoreSet>>();
+fn _event_source_system_is_clone_in_both_provider_states() {
+    assert_clone::<EventSourceSystem<PersistenceUnset>>();
+    assert_clone::<EventSourceSystem<InMemoryPersistence>>();
 }
 
 /// `builder(ps)` is the name of the entry point that returns a builder.
 #[allow(dead_code)]
 async fn _builder_is_the_entry_point() {
     let ps = ProcessSystem::new().await;
-    let _: EventSourceSystemBuilder<StoreUnset> = EventSourceSystem::builder(ps);
+    let _: EventSourceSystemBuilder<PersistenceUnset> = EventSourceSystem::builder(ps);
 }
 
 // Sharing across clones
@@ -187,20 +188,20 @@ async fn clone_and_original_resolve_through_one_aggregate_registry() {
     );
 }
 
-/// Clones carry the default store the system was built with.
+/// Clones carry the provider the system was built with.
 ///
-/// Read back through the *clone's* accessor rather than the store the test kept:
-/// a clone that dropped the default would either fail to build props at all or
+/// Read back through the *clone's* provider rather than the store the test kept:
+/// a clone that dropped the provider would either fail to build props at all or
 /// serve them from an empty store, and reading through the original would hide
 /// both.
 #[tokio::test]
-async fn clone_and_original_share_the_default_event_store() {
+async fn clone_and_original_share_the_providers_event_store() {
     // Given: a system and a clone of it
     let (system, _store) = counter_system().await;
     let handle = system.clone();
     let id = AggregateId::new("clone-shared-store");
 
-    // When: an event is persisted through the original's default store
+    // When: an event is persisted through the original's provider
     system
         .spawn_aggregate::<Counter>(id.clone())
         .await
@@ -208,11 +209,11 @@ async fn clone_and_original_share_the_default_event_store() {
         .await
         .expect("the dispatch must persist");
 
-    // Then: the clone's default store is the one that received it
+    // Then: the clone's provider answers with the store that received it
     assert_eq!(
-        stored_sequences(handle.event_store(), &id).await,
+        stored_sequences(&handle.persistence().event_store(), &id).await,
         vec![1],
-        "the clone must carry the default store the original was built with, \
-         not an empty one of its own"
+        "the clone must carry the provider the original was built with, \
+         not an empty store of its own"
     );
 }

@@ -17,7 +17,7 @@
 #[path = "common/delivery.rs"]
 mod delivery;
 use delivery::{
-    delivery_id, in_memory_system, partition_count, spawn_host, DeliverySaga,
+    delivery_id, delivery_persistence, in_memory_system, partition_count, spawn_host, DeliverySaga,
     RecordingCheckpointStore, RecordingEventStore, TEST_POLL_INTERVAL,
 };
 
@@ -46,8 +46,7 @@ async fn the_configured_interval_is_the_interval_between_queries() {
 
     // When
     let _host = SagaDeliveryProps::<DeliverySaga, RecordingCheckpointStore>::new(
-        Arc::clone(&journal),
-        Arc::clone(&checkpoints),
+        &delivery_persistence(&journal, &checkpoints),
     )
     .with_delivery_id(delivery_id())
     .with_partitions(partition_count(1))

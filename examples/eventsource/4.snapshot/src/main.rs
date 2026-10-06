@@ -19,7 +19,7 @@ use bytes::Bytes;
 use tracing::info;
 
 use nitinol_eventsource::{AggregateProps, SnapshotPersistor};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
+use nitinol_persistence::provider::{Persistence, PersistenceProvider};
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::ProcessSystem;
 
@@ -39,9 +39,14 @@ async fn main() {
     init_tracing();
 
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let snapshot_ref =
-        SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
+
+    // One supplier for both stores this example touches. The lifecycle below is
+    // pinned to one aggregate and started from props directly rather than from
+    // an `EventSourceSystem`, so the persistor is spawned from the provider
+    // here — it still reaches the slot the provider was configured with.
+    let persistence = Persistence::in_memory();
+    let store = persistence.event_store();
+    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("snap-counter");
 
     // Process 1: write 5 events

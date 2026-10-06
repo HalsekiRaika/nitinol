@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event, SystemEvent};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -214,7 +215,9 @@ fn snapshot(applied: &Arc<Mutex<Vec<Note>>>) -> Vec<Note> {
 #[tokio::test]
 async fn replay_never_hands_a_disposition_marker_to_the_domain_codec() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(NOTE_SAGA_ID);
@@ -281,7 +284,9 @@ async fn replay_never_hands_a_disposition_marker_to_the_domain_codec() {
 #[tokio::test]
 async fn a_disposition_marker_neither_ends_the_saga_nor_desynchronises_its_sequence() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(NOTE_SAGA_ID);

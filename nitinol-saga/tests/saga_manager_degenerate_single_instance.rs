@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, Query,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -237,20 +238,16 @@ async fn wait_until_outbox_acked(
 #[tokio::test]
 async fn single_constant_correlation_reproduces_the_resident_saga() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&journal)))
+        .build();
 
-    let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("mgr-degenerate-order");
-    let order_proxy = system
-        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&order_store))
-        .await;
+    let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
-    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory_proxy = system
-        .spawn_aggregate::<Inventory>(
-            AggregateId::new("mgr-degenerate-inventory"),
-            inventory_store,
-        )
+        .spawn_aggregate::<Inventory>(AggregateId::new("mgr-degenerate-inventory"))
         .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -267,7 +264,7 @@ async fn single_constant_correlation_reproduces_the_resident_saga() {
                 captured: Arc::clone(&captured_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&journal, &order_id))
         .spawn(system.process_system())
         .await;
 

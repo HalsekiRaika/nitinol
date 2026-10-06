@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use nitinol_persistence::error::SnapshotError;
+use nitinol_persistence::provider::SnapshotStoreProvider;
 use nitinol_persistence::store::SnapshotStore;
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::process::ProcessProxy;
@@ -55,14 +56,45 @@ impl Receive<LoadLatestSnapshot> for SnapshotPersistor {
 }
 
 impl SnapshotPersistor {
-    /// Spawn a `SnapshotPersistor` on the given system and return a typed reference.
+    /// Spawn a `SnapshotPersistor` on the given system, over the snapshot store
+    /// `persistence` supplies, and return a typed reference.
     ///
     /// - Supervision: `Resume` — the process stays alive after handler errors.
     /// - Idle timeout: `Persistent` — never stopped due to inactivity.
-    pub async fn spawn(
+    ///
+    /// This is the low-level entry point, for a lifecycle pinned to one
+    /// aggregate and started without an
+    /// [`EventSourceSystem`](crate::system::EventSourceSystem). A deployment
+    /// that has a system takes
+    /// [`snapshot_persistor`](crate::system::EventSourceSystem::snapshot_persistor)
+    /// from it instead, which starts one process and distributes it; both
+    /// resolve the provider's snapshot slot, so neither reaches a store of its
+    /// own.
+    ///
+    /// # Typestate
+    ///
+    /// A provider that supplies no snapshot store is refused here rather than
+    /// at the first save:
+    ///
+    /// ```compile_fail
+    /// # use std::sync::Arc;
+    /// # use nitinol_eventsource::SnapshotPersistor;
+    /// # use nitinol_persistence::provider::Persistence;
+    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    /// // no `with_snapshot_store` — this provider has no snapshot slot
+    /// let persistence = Persistence::new(store);
+    /// SnapshotPersistor::spawn(&ps, &persistence).await;
+    /// # }
+    /// ```
+    pub async fn spawn<Pv: SnapshotStoreProvider>(
         system: &ProcessSystem,
-        store: Arc<dyn SnapshotStore>,
+        persistence: &Pv,
     ) -> SnapshotPersistorProxy {
+        let store = persistence.snapshot_store();
         let props = Props::new(move || SnapshotPersistor {
             store: Arc::clone(&store),
         })

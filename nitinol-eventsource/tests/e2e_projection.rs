@@ -9,8 +9,9 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
-    ProjectionContext, Projector, ProjectorProps,
+    ProjectionContext, Projector,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{
     CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
@@ -123,14 +124,17 @@ async fn wait_for_checkpoint(
 #[tokio::test]
 async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(
+            Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+                .with_projection_checkpoints(Arc::clone(&checkpoint_store)),
+        )
+        .build();
     let id = AggregateId::new("e2e-proj-catchup-agg");
 
-    let agg_proxy = system
-        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .await;
+    let agg_proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
     agg_proxy.ask(Increment).await.expect("ask must succeed");
 
     let count = Arc::new(AtomicUsize::new(0));
@@ -138,19 +142,17 @@ async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proj_proxy = ProjectorProps::new(
-        ProjectionId::new("e2e-proj-catchup"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || CountingProjector {
-            count: Arc::clone(&count_c),
-            notify: Arc::clone(&notify_c),
-        },
-    )
-    .with_event::<Incremented>()
-    .catchup_from_aggregate(id)
-    .spawn(system.process_system())
-    .await;
+    let _proj_proxy = system
+        .projector_props(ProjectionId::new("e2e-proj-catchup"), move || {
+            CountingProjector {
+                count: Arc::clone(&count_c),
+                notify: Arc::clone(&notify_c),
+            }
+        })
+        .with_event::<Incremented>()
+        .catchup_from_aggregate(id)
+        .spawn(system.process_system())
+        .await;
 
     wait_for_count(&count, &notify, 1).await;
     assert_eq!(
@@ -163,9 +165,14 @@ async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
 #[tokio::test]
 async fn e2e_live_projection_sees_published_event_envelope() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(
+            Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+                .with_projection_checkpoints(Arc::clone(&checkpoint_store)),
+        )
+        .build();
     let agg_id = AggregateId::new("e2e-proj-live-agg");
 
     let count = Arc::new(AtomicUsize::new(0));
@@ -173,23 +180,19 @@ async fn e2e_live_projection_sees_published_event_envelope() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proj_proxy = ProjectorProps::new(
-        ProjectionId::new("e2e-proj-live"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || CountingProjector {
-            count: Arc::clone(&count_c),
-            notify: Arc::clone(&notify_c),
-        },
-    )
-    .with_event::<Incremented>()
-    .catchup_from_aggregate(agg_id.clone())
-    .spawn(system.process_system())
-    .await;
-
-    let agg_proxy = system
-        .spawn_aggregate::<Counter>(agg_id, Arc::clone(&event_store) as Arc<dyn EventStore>)
+    let _proj_proxy = system
+        .projector_props(ProjectionId::new("e2e-proj-live"), move || {
+            CountingProjector {
+                count: Arc::clone(&count_c),
+                notify: Arc::clone(&notify_c),
+            }
+        })
+        .with_event::<Incremented>()
+        .catchup_from_aggregate(agg_id.clone())
+        .spawn(system.process_system())
         .await;
+
+    let agg_proxy = system.spawn_aggregate::<Counter>(agg_id).await;
     agg_proxy.ask(Increment).await.expect("ask must succeed");
 
     wait_for_count(&count, &notify, 1).await;
@@ -203,15 +206,18 @@ async fn e2e_live_projection_sees_published_event_envelope() {
 #[tokio::test]
 async fn e2e_at_most_once_delivery_advances_checkpoint_before_project() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(
+            Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+                .with_projection_checkpoints(Arc::clone(&checkpoint_store)),
+        )
+        .build();
     let id = AggregateId::new("e2e-proj-amo-agg");
     let projection_id = ProjectionId::new("e2e-proj-amo");
 
-    let agg_proxy = system
-        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .await;
+    let agg_proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
     agg_proxy.ask(Increment).await.expect("ask 1");
     agg_proxy.ask(Increment).await.expect("ask 2");
 
@@ -220,20 +226,16 @@ async fn e2e_at_most_once_delivery_advances_checkpoint_before_project() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proj_proxy = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || CountingProjector {
+    let _proj_proxy = system
+        .projector_props(projection_id.clone(), move || CountingProjector {
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
-    .with_event::<Incremented>()
-    .delivery_mode(DeliveryMode::AtMostOnce)
-    .catchup_from_aggregate(id)
-    .spawn(system.process_system())
-    .await;
+        })
+        .with_event::<Incremented>()
+        .delivery_mode(DeliveryMode::AtMostOnce)
+        .catchup_from_aggregate(id)
+        .spawn(system.process_system())
+        .await;
 
     wait_for_count(&count, &notify, 2).await;
     assert_eq!(

@@ -157,7 +157,7 @@ impl<A: Aggregate> WithCodecProbe for AggregateProps<A> {
     }
 }
 
-impl WithCodecProbe for EventSourceSystemBuilder<StoreUnset> {
+impl WithCodecProbe for EventSourceSystemBuilder<PersistenceUnset> {
     fn with_codec(&self) -> &'static str {
         PROBE_OWNER
     }

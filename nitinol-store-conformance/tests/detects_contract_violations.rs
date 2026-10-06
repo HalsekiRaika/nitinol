@@ -21,6 +21,16 @@
 //!   Given a store answering an unsaved scope with a position of zero
 //!   When the kit's deterministic checkpoint verification is run
 //!   Then it fails, naming CKP-1
+//!
+//! Scenario: a provider that hands out a store of its own per call
+//!   Given a provider answering every event-store request with a new store
+//!   When the kit's provider verification is run
+//!   Then it fails, naming PRV-1
+//!
+//! Scenario: a provider whose checkpoint slots cannot be told apart
+//!   Given a provider over a store with one position for every key
+//!   When the kit's slot-independence verification is run
+//!   Then it fails, naming PRV-4
 //! ```
 //!
 //! A suite that only ever passes says nothing about what it measures, and OCC-5
@@ -44,12 +54,12 @@
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    CheckpointFault, Fault, FaultyCheckpointStore, FaultySnapshotStore, FaultyStore, SnapshotFault,
-    TokioExecutor,
+    CheckpointFault, Fault, FaultyCheckpointStore, FaultyProvider, FaultySnapshotStore,
+    FaultyStore, ProviderWithCollidingCheckpointSlots, SnapshotFault, TokioExecutor,
 };
 
 use nitinol_store_conformance::{
-    checkpoint, snapshot, verify_deterministic, verify_under_concurrency,
+    checkpoint, provider, snapshot, verify_deterministic, verify_under_concurrency,
 };
 
 /// A `global_sequence` handed out before the commit it belongs to becomes
@@ -176,4 +186,23 @@ async fn refusing_a_reserved_namespace_key_is_reported_as_a_ckp_5_violation() {
         CheckpointFault::RefuseAKeyInsideTheReservedNamespace,
     ))
     .await;
+}
+
+/// A provider that builds a store per request splits the world in two with no
+/// error raised anywhere: both handles work, and a record written through one
+/// is simply not there through the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[should_panic(expected = "PRV-1")]
+async fn a_store_of_its_own_per_call_is_reported_as_a_prv_1_violation() {
+    provider::verify_event_store(&FaultyProvider, &TokioExecutor).await;
+}
+
+/// Configuring both checkpoint slots with one store is allowed, so the clause
+/// cannot be about the store being shared. What it is about is the two
+/// consumers being told apart inside it — and a store with one position for
+/// every key tells them apart nowhere.
+#[tokio::test]
+#[should_panic(expected = "PRV-4")]
+async fn checkpoint_slots_that_cannot_be_told_apart_are_reported_as_a_prv_4_violation() {
+    provider::verify_checkpoint_independence(&ProviderWithCollidingCheckpointSlots).await;
 }

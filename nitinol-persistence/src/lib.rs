@@ -9,25 +9,31 @@
 //! | [`store::CheckpointStore`] | Track the progress of an event consumer |
 //! | [`store::CheckpointScope`] | The key a consumer's progress is filed under |
 //! | [`store::DeliveryMode`] | Delivery guarantee: `AtMostOnce` / `AtLeastOnce` / `ExactlyOnce` |
+//! | [`provider::PersistenceProvider`] | Hand out the stores above, one supplier per deployment |
 //!
 //! An in-memory reference implementation is provided under [`store`] for
-//! use in tests and examples.  It is **not** intended for production use.
+//! use in tests and examples, and [`provider::Persistence::in_memory`]
+//! assembles a provider over it.  Neither is intended for production use.
 //!
 //! # Third-party backends
 //!
 //! Production backends (Postgres, SQLite, DynamoDB, etc.) are intentionally
 //! out of scope for this crate.  Implement [`store::EventStore`],
 //! [`store::SnapshotStore`], and [`store::CheckpointStore`] against your
-//! preferred storage engine and wire them through
-//! `nitinol_eventsource::system::ProcessSystem`.
+//! preferred storage engine, then assemble a [`provider::Persistence`] naming
+//! your handles — that is what every wiring point in the framework resolves its
+//! stores from.
 //!
-//! All three traits carry behavioural contracts a backend has to reproduce,
-//! stated as labelled clauses on the trait itself:
+//! All three store traits carry behavioural contracts a backend has to
+//! reproduce, stated as labelled clauses on the trait itself:
 //! [`store::EventStore`] carries `OCC-1` … `OCC-5` and `LOAD-1`,
 //! [`store::SnapshotStore`] carries `SNAP-1` … `SNAP-4`, and
 //! [`store::CheckpointStore`] carries `CKP-1` … `CKP-6`.  One OCC clause is
 //! broken silently by the most obvious way to number events in a relational
 //! store, and one `CKP` clause by the most obvious way to read a missing row.
+//! [`provider::PersistenceProvider`] carries `PRV-1` … `PRV-5` for the supplier
+//! above them — what distribution, identity and slot independence mean, and
+//! what a single supplier is explicitly not.
 //! `nitinol-store-conformance` is those contracts as a suite to run against
 //! your implementation.
 //!
@@ -69,6 +75,7 @@
 //! than derived carries no symbol at all.
 
 pub mod error;
+pub mod provider;
 pub mod reserved;
 pub mod store;
 

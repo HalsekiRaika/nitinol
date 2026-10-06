@@ -17,10 +17,11 @@ use std::time::Duration;
 use futures_util::TryStreamExt;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::{Persistence, PersistenceProvider};
+use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaDefaultStoreExt;
+use nitinol_saga::SagaSystemExt;
 
 use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment, Incremented};
 use eventsource_aggregate_communication::saga::RelaySaga;
@@ -49,10 +50,11 @@ async fn stored_len(store: &Arc<dyn EventStore>, id: &AggregateId) -> usize {
 async fn a_fact_of_one_aggregate_reaches_another_as_a_command() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(Persistence::in_memory())
         .build();
+    // What the last clause reads is the journal the system's spawns resolve.
+    let store = system.persistence().event_store();
 
     let id_a = AggregateId::new("relay-test-a");
     let id_b = AggregateId::new("relay-test-b");

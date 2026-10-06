@@ -15,7 +15,7 @@
 //! | Effect ADT | [`SagaEffect`] |
 //! | Identifier | [`SagaId`] |
 //! | Spawn builder | [`SagaProps`] |
-//! | System-bound spawn builder | [`SagaSpawn`] (from [`SagaSystemExt::spawn_saga`] / [`SagaDefaultStoreExt::spawn_saga`]) |
+//! | System-bound spawn builder | [`SagaSpawn`] (from [`SagaSystemExt::spawn_saga`]) |
 //! | Upstream subscription value | [`Subscription`] |
 //! | Handle | [`SagaProxy`] |
 //! | Instance-manager spawn builder | [`SagaManagerProps`] |
@@ -60,23 +60,25 @@
 //! - Symmetric spawn: [`SagaSystemExt`] extends
 //!   [`nitinol_eventsource::system::EventSourceSystem`] with
 //!   [`spawn_saga`](SagaSystemExt::spawn_saga), the counterpart of
-//!   `EventSourceSystem::spawn_aggregate` — the `ProcessSystem` comes from the
-//!   system, store plus start position arrive as one [`Subscription`], and the
-//!   formats are settled already by the event types themselves.  [`SagaProps`]
-//!   stays the entry point for the settings that builder does not take.
-//! - Default store: a system built with
-//!   [`with_event_store`](nitinol_eventsource::system::EventSourceSystemBuilder::with_event_store)
-//!   carries the store as well, and [`SagaDefaultStoreExt`] is the store-less
-//!   spawn surface it unlocks — [`spawn_saga`](SagaDefaultStoreExt::spawn_saga)
-//!   for a standalone saga's journal,
-//!   [`subscription`](SagaDefaultStoreExt::subscription) for the upstream it
-//!   polls, and [`saga_manager_props`](SagaDefaultStoreExt::saga_manager_props)
-//!   for both at once on a manager.  `EventStore` is stream-keyed, so that one
+//!   `EventSourceSystem::spawn_aggregate` — the `ProcessSystem` and the journal
+//!   both come from the system, and the formats are settled already by the
+//!   event types themselves.  [`SagaProps`] stays the entry point for the
+//!   settings that builder does not take.
+//! - One supplier: a system is built with a
+//!   [`PersistenceProvider`](nitinol_persistence::provider::PersistenceProvider),
+//!   and [`SagaSystemExt`] resolves the journal from it —
+//!   [`spawn_saga`](SagaSystemExt::spawn_saga) for a standalone saga's own
+//!   stream, [`subscription`](SagaSystemExt::subscription) for the upstream it
+//!   polls, and [`saga_manager_props`](SagaSystemExt::saga_manager_props) for
+//!   both at once on a manager.  `EventStore` is stream-keyed, so that one
 //!   store holds the upstream stream and every instance's own stream side by
-//!   side.  Each direction keeps its override —
-//!   [`spawn_saga_with_store`](SagaDefaultStoreExt::spawn_saga_with_store),
-//!   [`Subscription::stream`], [`SagaManagerProps::new`] — which takes
-//!   precedence over the default.
+//!   side.  Reaching a *different* destination is written down rather than
+//!   defaulted: [`Subscription::stream`] names a source's store, and
+//!   [`SagaProps::new`] / [`SagaManagerProps::new`] name a journal.
+//! - Where delivery progress is kept: [`SagaDeliveryExt`] resolves the journal
+//!   and the delivery-checkpoint slot from the same provider, and exists only
+//!   where that provider supplies the slot — so a deployment with no store for
+//!   a host's progress is told while the wiring is compiled.
 //! - Instance management: [`SagaManagerProps`] spawns one manager that holds
 //!   one upstream subscription per declared source, shared by every instance
 //!   of a saga type, so an upstream record is decoded once no matter how far
@@ -347,7 +349,7 @@ pub use self::subscribe::{
     SourceBindings, SubscriptionSet, SubscriptionUnset,
 };
 pub use self::subscription::Subscription;
-pub use self::system_ext::{SagaDefaultStoreExt, SagaSpawn, SagaSystemExt};
+pub use self::system_ext::{SagaDeliveryExt, SagaSpawn, SagaSystemExt};
 
 /// `#[derive(SagaSubscribe)]`, co-located with the [`SagaSubscribe`] trait so a
 /// single `use nitinol::saga::SagaSubscribe;` brings both into scope (trait in

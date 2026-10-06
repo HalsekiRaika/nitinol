@@ -18,18 +18,16 @@
 //!
 //! The counterpart is that a saga needing nothing must not pay for the change.
 //! `|_| TrivialSaga::default()` is the whole producer below — the components are
-//! offered and ignored, at all four entry points.
+//! offered and ignored, at every entry point.
 //!
 //! ## API contract assumed by this file
 //!
-//! All four entry points take `producer: impl Fn(SagaComponents<S>) -> S`:
+//! Every entry point takes `producer: impl Fn(SagaComponents<S>) -> S`:
 //!
-//! 1. `SagaSystemExt::spawn_saga(saga_id, store, producer)`
-//! 2. `SagaDefaultStoreExt::spawn_saga(saga_id, producer)` and
-//!    `spawn_saga_with_store(saga_id, store, producer)`
-//! 3. `SagaProps::new(saga_id, store, producer)`
-//! 4. `SagaManagerProps::new(store, producer)` and
-//!    `SagaDefaultStoreExt::saga_manager_props(producer)`
+//! 1. `SagaSystemExt::spawn_saga(saga_id, producer)`
+//! 2. `SagaProps::new(saga_id, store, producer)`
+//! 3. `SagaManagerProps::new(store, producer)` and
+//!    `SagaSystemExt::saga_manager_props(producer)`
 //!
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_producer_takes_components`.
@@ -48,12 +46,12 @@ use serde::{Deserialize, Serialize};
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaDefaultStoreExt, SagaEffect, SagaId, SagaManagerProps, SagaProps,
-    SagaSystemExt, Subscription,
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaProps, SagaSystemExt, Subscription,
 };
 
 // Domain
@@ -126,8 +124,6 @@ impl Saga for TrivialSaga {
 /// Each entry point gets its own upstream stream key, which is also the saga id
 /// `correlate` names, so the observations below cannot be confused.
 const THROUGH_SYSTEM_EXT: &str = "producer-system-ext";
-const THROUGH_DEFAULT_STORE: &str = "producer-default-store";
-const THROUGH_DEFAULT_STORE_WITH_STORE: &str = "producer-default-store-with-store";
 const THROUGH_PROPS: &str = "producer-props";
 const THROUGH_MANAGER_PROPS: &str = "producer-manager-props";
 const THROUGH_SYSTEM_MANAGER_PROPS: &str = "producer-system-manager-props";
@@ -191,51 +187,27 @@ async fn wait_for_all(expected: &[&str]) -> Vec<String> {
 #[tokio::test]
 async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
     let ps = ProcessSystem::new().await;
-    let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-
-    // Entry point 1 — `SagaSystemExt` on a system with no default store.
-    let store_unset_system = EventSourceSystem::builder(ps.clone()).build();
     let own_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    append_ping(&upstream_store, THROUGH_SYSTEM_EXT).await;
-    let _through_system_ext = store_unset_system
-        .spawn_saga(
-            SagaId::new(THROUGH_SYSTEM_EXT),
-            Arc::clone(&own_store),
-            |_components| TrivialSaga::default(),
-        )
-        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, THROUGH_SYSTEM_EXT))
-        .spawn()
-        .await;
 
-    // Entry points 2 — `SagaDefaultStoreExt`, both the store-less form and the
-    // override.
-    let store_set_system = EventSourceSystem::builder(ps.clone())
-        .with_event_store(Arc::clone(&default_store))
+    // Entry point 1 — `SagaSystemExt` on a system, journalling onto the store
+    // the provider supplies.
+    let provider_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps.clone())
+        .with_persistence(Persistence::new(Arc::clone(&provider_store)))
         .build();
-    append_ping(&default_store, THROUGH_DEFAULT_STORE).await;
-    append_ping(&default_store, THROUGH_DEFAULT_STORE_WITH_STORE).await;
-    append_ping(&default_store, THROUGH_SYSTEM_MANAGER_PROPS).await;
+    append_ping(&provider_store, THROUGH_SYSTEM_EXT).await;
+    append_ping(&provider_store, THROUGH_SYSTEM_MANAGER_PROPS).await;
 
-    let _through_default_store = store_set_system
-        .spawn_saga(SagaId::new(THROUGH_DEFAULT_STORE), |_components| {
+    let _through_system_ext = system
+        .spawn_saga(SagaId::new(THROUGH_SYSTEM_EXT), |_components| {
             TrivialSaga::default()
         })
-        .subscribed_to::<Ping>(store_set_system.subscription(THROUGH_DEFAULT_STORE))
+        .subscribed_to::<Ping>(system.subscription(THROUGH_SYSTEM_EXT))
         .spawn()
         .await;
 
-    let _through_default_store_with_store = store_set_system
-        .spawn_saga_with_store(
-            SagaId::new(THROUGH_DEFAULT_STORE_WITH_STORE),
-            Arc::clone(&own_store),
-            |_components| TrivialSaga::default(),
-        )
-        .subscribed_to::<Ping>(store_set_system.subscription(THROUGH_DEFAULT_STORE_WITH_STORE))
-        .spawn()
-        .await;
-
-    // Entry point 3 — `SagaProps` directly.
+    // Entry point 2 — `SagaProps` directly.
     append_ping(&upstream_store, THROUGH_PROPS).await;
     let _through_props = SagaProps::<TrivialSaga>::new(
         SagaId::new(THROUGH_PROPS),
@@ -246,7 +218,7 @@ async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
     .spawn(&ps)
     .await;
 
-    // Entry points 4 — `SagaManagerProps`, built directly and from the system.
+    // Entry points 3 — `SagaManagerProps`, built directly and from the system.
     append_ping(&upstream_store, THROUGH_MANAGER_PROPS).await;
     let _through_manager_props =
         SagaManagerProps::<TrivialSaga>::new(Arc::clone(&own_store), |_components| {
@@ -256,15 +228,13 @@ async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
         .spawn(&ps)
         .await;
 
-    let _through_system_manager_props = store_set_system
+    let _through_system_manager_props = system
         .saga_manager_props(|_components| TrivialSaga::default())
-        .subscribed_to::<Ping>(store_set_system.subscription(THROUGH_SYSTEM_MANAGER_PROPS))
+        .subscribed_to::<Ping>(system.subscription(THROUGH_SYSTEM_MANAGER_PROPS))
         .spawn(&ps)
         .await;
 
     let expected = [
-        THROUGH_DEFAULT_STORE,
-        THROUGH_DEFAULT_STORE_WITH_STORE,
         THROUGH_MANAGER_PROPS,
         THROUGH_PROPS,
         THROUGH_SYSTEM_EXT,

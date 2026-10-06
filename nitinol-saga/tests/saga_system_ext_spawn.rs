@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -188,13 +189,14 @@ async fn wait_for_persisted(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Ve
 #[tokio::test]
 async fn spawn_saga_uses_the_codecs_its_events_name() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&journal)))
+        .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-system-ext-order");
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_store_for_assert = Arc::clone(&saga_store);
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
 
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -203,11 +205,9 @@ async fn spawn_saga_uses_the_codecs_its_events_name() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy = system
-        .spawn_saga(saga_id.clone(), saga_store, move |_components| {
-            RecordingSaga {
-                handled: Arc::clone(&handled_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
+        .spawn_saga(saga_id.clone(), move |_components| RecordingSaga {
+            handled: Arc::clone(&handled_for_producer),
+            notify: Arc::clone(&notify_for_producer),
         })
         .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
         .spawn()
@@ -225,7 +225,7 @@ async fn spawn_saga_uses_the_codecs_its_events_name() {
     );
 
     assert_eq!(
-        wait_for_persisted(&saga_store_for_assert, &saga_id).await,
+        wait_for_persisted(&journal, &saga_id).await,
         vec!["SKU-EXT".to_owned()],
         "the codec `ReservationRequested` names must encode exactly one event onto the saga stream"
     );
@@ -234,28 +234,27 @@ async fn spawn_saga_uses_the_codecs_its_events_name() {
 #[tokio::test]
 async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-system-ext-catchup-order");
     append_order_placed(&order_store, &order_id, 1, "BEFORE-1").await;
     append_order_placed(&order_store, &order_id, 2, "BEFORE-2").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
     let handled_for_producer = Arc::clone(&handled);
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy = system
-        .spawn_saga(
-            SagaId::new(RECORDING_SAGA_ID),
-            saga_store,
-            move |_components| RecordingSaga {
+        .spawn_saga(SagaId::new(RECORDING_SAGA_ID), move |_components| {
+            RecordingSaga {
                 handled: Arc::clone(&handled_for_producer),
                 notify: Arc::clone(&notify_for_producer),
-            },
-        )
+            }
+        })
         .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
         .spawn()
         .await;
@@ -271,28 +270,27 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
 #[tokio::test]
 async fn stream_subscription_after_override_skips_records_up_to_that_position() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-system-ext-resume-order");
     append_order_placed(&order_store, &order_id, 1, "SKIPPED").await;
     append_order_placed(&order_store, &order_id, 2, "DELIVERED").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
     let handled_for_producer = Arc::clone(&handled);
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy = system
-        .spawn_saga(
-            SagaId::new(RECORDING_SAGA_ID),
-            saga_store,
-            move |_components| RecordingSaga {
+        .spawn_saga(SagaId::new(RECORDING_SAGA_ID), move |_components| {
+            RecordingSaga {
                 handled: Arc::clone(&handled_for_producer),
                 notify: Arc::clone(&notify_for_producer),
-            },
-        )
+            }
+        })
         .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id).with_after(1))
         .spawn()
         .await;

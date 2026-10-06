@@ -23,6 +23,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{Event, ProjectionContext, Projector, ProjectorProps};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -261,10 +262,11 @@ async fn each_subscribed_event_is_decoded_by_the_codec_it_names() {
     let recorded = Recorded::default();
     let produced = recorded.clone();
 
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
     let _proxy = ProjectorProps::new(
         ProjectionId::new("named-projection"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
+        &persistence,
         move || produced.clone(),
     )
     .with_event::<Counted>()

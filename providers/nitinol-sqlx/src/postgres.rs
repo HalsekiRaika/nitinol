@@ -5,9 +5,14 @@ mod load;
 mod numbering;
 mod timestamp;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use nitinol_persistence::__private::linked_event_registry;
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::{
+    DeliveryCheckpointsProvided, Persistence, ProjectionCheckpointsProvided, Unprovided,
+};
 use nitinol_persistence::store::{EventStore, EventStream};
 use nitinol_persistence::{
     AppendOutcome, AppendingEvent, EventRegistry, EventRegistryError, LoadQuery,
@@ -76,4 +81,41 @@ impl EventStore for PostgresEventStore {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         load::load(&self.pool, self.event_types, query)
     }
+}
+
+/// The provider this backend assembles: the journal and both checkpoint slots,
+/// and no snapshot store.
+///
+/// There is no Postgres [`SnapshotStore`] in this crate, so the snapshot slot is
+/// left unprovided rather than filled from somewhere else — wiring that needs
+/// snapshots is refused while it is compiled. A deployment that wants them
+/// names a store for that slot itself, which is what mixing backends has to
+/// look like.
+///
+/// [`SnapshotStore`]: nitinol_persistence::store::SnapshotStore
+pub type PostgresPersistence = Persistence<
+    Unprovided,
+    ProjectionCheckpointsProvided<PostgresCheckpointStore>,
+    DeliveryCheckpointsProvided<PostgresCheckpointStore>,
+>;
+
+/// Assemble a provider over `pool`.
+///
+/// Both checkpoint slots are configured with **one** store over one table,
+/// which is this backend's deployment: what keeps a projection's position apart
+/// from a delivery host's progress there is the key each consumer renders, not
+/// a table each. The slots are still independent — neither answers for what the
+/// other filed — which is the contract the provider conformance suite runs.
+///
+/// The journal and the checkpoints share the pool because they share the
+/// database, and one migration step creates both tables. Sharing a pool is an
+/// implementation of identity rather than the contract: what makes two handles
+/// one world is that they reach the same rows.
+///
+/// Fails where two event declarations in this binary claim one canonical path,
+/// which is what [`PostgresEventStore::new`] reports — the one failure that
+/// belongs at assembly rather than at the row it would have restored wrongly.
+pub fn postgres_persistence(pool: PgPool) -> Result<PostgresPersistence, EventRegistryError> {
+    let journal: Arc<dyn EventStore> = Arc::new(PostgresEventStore::new(pool.clone())?);
+    Ok(Persistence::new(journal).with_checkpoints(Arc::new(PostgresCheckpointStore::new(pool))))
 }

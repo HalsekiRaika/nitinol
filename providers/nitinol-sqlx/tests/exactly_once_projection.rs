@@ -61,6 +61,7 @@ use linkme::distributed_slice;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{Event, ProjectionContext, Projector, ProjectorProps, TxProvider};
 use nitinol_persistence::error::CheckpointError;
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{CheckpointScope, CheckpointStore, EventStore};
 use nitinol_persistence::{
     AggregateId, EventRegistryEntry, EventType, Family, ProjectionId, TypeName, EVENT_REGISTRY,
@@ -403,20 +404,17 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
 
     let never_fail = Arc::new(AtomicBool::new(false));
     let first_attempts = Arc::new(AtomicUsize::new(0));
-    let first = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&events),
-        observed(pool.clone(), &Arc::new(AtomicUsize::new(0))),
-        {
-            let fail = Arc::clone(&never_fail);
-            let attempts = Arc::clone(&first_attempts);
-            move || CountingProjector {
-                fail: Arc::clone(&fail),
-                attempts: Arc::clone(&attempts),
-                rendezvous: None,
-            }
-        },
-    )
+    let persistence = Persistence::new(Arc::clone(&events))
+        .with_projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))));
+    let first = ProjectorProps::new(projection_id.clone(), &persistence, {
+        let fail = Arc::clone(&never_fail);
+        let attempts = Arc::clone(&first_attempts);
+        move || CountingProjector {
+            fail: Arc::clone(&fail),
+            attempts: Arc::clone(&attempts),
+            rendezvous: None,
+        }
+    })
     .with_tx_provider(PoolTransactions { pool: pool.clone() })
     .with_event::<Incremented>()
     .catchup_from_aggregate(stream.clone())
@@ -437,20 +435,17 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     // When: a second projector takes the same projection over, and is handed
     // the event the first one already applied along with one it has not seen.
     let second_attempts = Arc::new(AtomicUsize::new(0));
-    let second = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&events),
-        observed(pool.clone(), &Arc::new(AtomicUsize::new(0))),
-        {
-            let fail = Arc::clone(&never_fail);
-            let attempts = Arc::clone(&second_attempts);
-            move || CountingProjector {
-                fail: Arc::clone(&fail),
-                attempts: Arc::clone(&attempts),
-                rendezvous: None,
-            }
-        },
-    )
+    let persistence = Persistence::new(Arc::clone(&events))
+        .with_projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))));
+    let second = ProjectorProps::new(projection_id.clone(), &persistence, {
+        let fail = Arc::clone(&never_fail);
+        let attempts = Arc::clone(&second_attempts);
+        move || CountingProjector {
+            fail: Arc::clone(&fail),
+            attempts: Arc::clone(&attempts),
+            rendezvous: None,
+        }
+    })
     .with_tx_provider(PoolTransactions { pool: pool.clone() })
     .with_event::<Incremented>()
     .catchup_from_aggregate(stream.clone())
@@ -513,20 +508,17 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_checkpoint_where_the
 
     let fail = Arc::new(AtomicBool::new(true));
     let attempts = Arc::new(AtomicUsize::new(0));
-    let projector = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&events),
-        observed(pool.clone(), &Arc::new(AtomicUsize::new(0))),
-        {
-            let fail = Arc::clone(&fail);
-            let attempts = Arc::clone(&attempts);
-            move || CountingProjector {
-                fail: Arc::clone(&fail),
-                attempts: Arc::clone(&attempts),
-                rendezvous: None,
-            }
-        },
-    )
+    let persistence = Persistence::new(Arc::clone(&events))
+        .with_projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))));
+    let projector = ProjectorProps::new(projection_id.clone(), &persistence, {
+        let fail = Arc::clone(&fail);
+        let attempts = Arc::clone(&attempts);
+        move || CountingProjector {
+            fail: Arc::clone(&fail),
+            attempts: Arc::clone(&attempts),
+            rendezvous: None,
+        }
+    })
     .with_tx_provider(PoolTransactions { pool: pool.clone() })
     .with_event::<Incremented>()
     .catchup_from_aggregate(stream.clone())
@@ -605,20 +597,17 @@ async fn a_refused_checkpoint_save_rolls_the_read_model_update_back() {
     let conflicts = Arc::new(AtomicUsize::new(0));
     let attempts = Arc::new(AtomicUsize::new(0));
     let never_fail = Arc::new(AtomicBool::new(false));
-    let projector = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&events),
-        observed(pool.clone(), &conflicts),
-        {
-            let fail = Arc::clone(&never_fail);
-            let attempts = Arc::clone(&attempts);
-            move || CountingProjector {
-                fail: Arc::clone(&fail),
-                attempts: Arc::clone(&attempts),
-                rendezvous: None,
-            }
-        },
-    )
+    let persistence = Persistence::new(Arc::clone(&events))
+        .with_projection_checkpoints(observed(pool.clone(), &conflicts));
+    let projector = ProjectorProps::new(projection_id.clone(), &persistence, {
+        let fail = Arc::clone(&never_fail);
+        let attempts = Arc::clone(&attempts);
+        move || CountingProjector {
+            fail: Arc::clone(&fail),
+            attempts: Arc::clone(&attempts),
+            rendezvous: None,
+        }
+    })
     .with_tx_provider(PoolTransactions { pool: pool.clone() })
     .with_event::<Incremented>()
     .catchup_from_aggregate(stream.clone())
@@ -705,20 +694,17 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
     let other_conflicts = Arc::new(AtomicUsize::new(0));
 
     let one_system = ProcessSystem::new().await;
-    let one = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&one_events),
-        observed(one_pool.clone(), &one_conflicts),
-        {
-            let fail = Arc::clone(&never_fail);
-            let rendezvous = Arc::clone(&rendezvous);
-            move || CountingProjector {
-                fail: Arc::clone(&fail),
-                attempts: Arc::new(AtomicUsize::new(0)),
-                rendezvous: Some(Arc::clone(&rendezvous)),
-            }
-        },
-    )
+    let persistence = Persistence::new(Arc::clone(&one_events))
+        .with_projection_checkpoints(observed(one_pool.clone(), &one_conflicts));
+    let one = ProjectorProps::new(projection_id.clone(), &persistence, {
+        let fail = Arc::clone(&never_fail);
+        let rendezvous = Arc::clone(&rendezvous);
+        move || CountingProjector {
+            fail: Arc::clone(&fail),
+            attempts: Arc::new(AtomicUsize::new(0)),
+            rendezvous: Some(Arc::clone(&rendezvous)),
+        }
+    })
     .with_tx_provider(PoolTransactions {
         pool: one_pool.clone(),
     })
@@ -728,20 +714,17 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
     .await;
 
     let other_system = ProcessSystem::new().await;
-    let other = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&other_events),
-        observed(other_pool.clone(), &other_conflicts),
-        {
-            let fail = Arc::clone(&never_fail);
-            let rendezvous = Arc::clone(&rendezvous);
-            move || CountingProjector {
-                fail: Arc::clone(&fail),
-                attempts: Arc::new(AtomicUsize::new(0)),
-                rendezvous: Some(Arc::clone(&rendezvous)),
-            }
-        },
-    )
+    let persistence = Persistence::new(Arc::clone(&other_events))
+        .with_projection_checkpoints(observed(other_pool.clone(), &other_conflicts));
+    let other = ProjectorProps::new(projection_id.clone(), &persistence, {
+        let fail = Arc::clone(&never_fail);
+        let rendezvous = Arc::clone(&rendezvous);
+        move || CountingProjector {
+            fail: Arc::clone(&fail),
+            attempts: Arc::new(AtomicUsize::new(0)),
+            rendezvous: Some(Arc::clone(&rendezvous)),
+        }
+    })
     .with_tx_provider(PoolTransactions {
         pool: other_pool.clone(),
     })
@@ -834,20 +817,17 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     let other_conflicts = Arc::new(AtomicUsize::new(0));
 
     let one_system = ProcessSystem::new().await;
-    let one = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&one_events),
-        observed(one_pool.clone(), &one_conflicts),
-        {
-            let fail = Arc::clone(&never_fail);
-            let rendezvous = Arc::clone(&rendezvous);
-            move || CountingProjector {
-                fail: Arc::clone(&fail),
-                attempts: Arc::new(AtomicUsize::new(0)),
-                rendezvous: Some(Arc::clone(&rendezvous)),
-            }
-        },
-    )
+    let persistence = Persistence::new(Arc::clone(&one_events))
+        .with_projection_checkpoints(observed(one_pool.clone(), &one_conflicts));
+    let one = ProjectorProps::new(projection_id.clone(), &persistence, {
+        let fail = Arc::clone(&never_fail);
+        let rendezvous = Arc::clone(&rendezvous);
+        move || CountingProjector {
+            fail: Arc::clone(&fail),
+            attempts: Arc::new(AtomicUsize::new(0)),
+            rendezvous: Some(Arc::clone(&rendezvous)),
+        }
+    })
     .with_tx_provider(PoolTransactions {
         pool: one_pool.clone(),
     })
@@ -857,20 +837,17 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     .await;
 
     let other_system = ProcessSystem::new().await;
-    let other = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&other_events),
-        observed(other_pool.clone(), &other_conflicts),
-        {
-            let fail = Arc::clone(&never_fail);
-            let rendezvous = Arc::clone(&rendezvous);
-            move || CountingProjector {
-                fail: Arc::clone(&fail),
-                attempts: Arc::new(AtomicUsize::new(0)),
-                rendezvous: Some(Arc::clone(&rendezvous)),
-            }
-        },
-    )
+    let persistence = Persistence::new(Arc::clone(&other_events))
+        .with_projection_checkpoints(observed(other_pool.clone(), &other_conflicts));
+    let other = ProjectorProps::new(projection_id.clone(), &persistence, {
+        let fail = Arc::clone(&never_fail);
+        let rendezvous = Arc::clone(&rendezvous);
+        move || CountingProjector {
+            fail: Arc::clone(&fail),
+            attempts: Arc::new(AtomicUsize::new(0)),
+            rendezvous: Some(Arc::clone(&rendezvous)),
+        }
+    })
     .with_tx_provider(PoolTransactions {
         pool: other_pool.clone(),
     })

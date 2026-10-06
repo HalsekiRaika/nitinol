@@ -23,6 +23,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event, SystemEvent};
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -312,7 +313,9 @@ fn count_ended_saga_dead_letters(events: &[LoadedEvent]) -> usize {
 #[tokio::test]
 async fn instance_handler_error_holds_the_shared_cursor() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-hold-orders");
@@ -356,7 +359,9 @@ async fn instance_handler_error_holds_the_shared_cursor() {
 #[tokio::test]
 async fn uncorrelated_event_advances_the_cursor() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-selective-orders");
@@ -400,7 +405,9 @@ async fn uncorrelated_event_advances_the_cursor() {
 #[tokio::test]
 async fn ended_instance_does_not_stall_the_shared_subscription() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-fanout-orders");

@@ -1,13 +1,12 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaDefaultStoreExt;
+use nitinol_saga::SagaSystemExt;
 
 use saga_basic_saga::inventory::{GetReservedCount, Inventory};
 use saga_basic_saga::order::{Order, OrderPlaced, PlaceOrder};
@@ -28,13 +27,12 @@ async fn main() {
 
     let ps = ProcessSystem::new().await;
 
-    // One store for the whole example.  `EventStore` is stream-keyed, so the
+    // One supplier for the whole example.  `EventStore` is stream-keyed, so the
     // order's stream, the inventory's stream and the saga's own journal are
-    // tenants of this one instance, each under its own key — which is what lets
-    // the system hand it to every spawn below.
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // tenants of the one journal it supplies, each under its own key — which is
+    // what lets every spawn below resolve the same store.
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(store)
+        .with_persistence(Persistence::in_memory())
         .build();
 
     let order_id = AggregateId::new("example-order");

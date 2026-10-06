@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{AggregateProxy, Event};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, TellIntent};
 
@@ -13,7 +14,11 @@ use crate::payroll_run::PayrollRunApproved;
 use crate::payslip::{IssuePayslip, Payslip};
 
 /// The system every payslip in this example lives on.
-type PayrollSystem = EventSourceSystem<StoreSet>;
+///
+/// The provider supplies the journal and nothing else: this example wires no
+/// projector, no delivery host and no snapshots, so it names no store for those
+/// slots and the wiring that would need them does not compile against it.
+pub type PayrollSystem = EventSourceSystem<Persistence>;
 
 /// A reference to the payslip that owns the stream `key`.
 ///

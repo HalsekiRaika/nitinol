@@ -38,6 +38,7 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
@@ -359,7 +360,9 @@ async fn append_order_placed(
 #[tokio::test]
 async fn all_empty_persist_writes_only_the_consumed_position() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("empty-persist-order");
@@ -445,15 +448,19 @@ async fn all_empty_persist_writes_only_the_consumed_position() {
 #[tokio::test]
 async fn persist_with_no_events_but_a_tell_is_not_a_noop() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    // The inventory aggregate's journal is the one the system's provider
+    // supplies; the saga keeps its own recording store below.
+    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(inventory_store))
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("tell-only-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-TELL").await;
 
-    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory = system
-        .spawn_aggregate::<Inventory>(AggregateId::new("tell-only-inventory"), inventory_store)
+        .spawn_aggregate::<Inventory>(AggregateId::new("tell-only-inventory"))
         .await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));

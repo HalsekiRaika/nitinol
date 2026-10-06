@@ -13,16 +13,17 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDefaultStoreExt, SagaManagerProxy};
+use nitinol_saga::{SagaManagerProxy, SagaSystemExt};
 
 use saga_idempotent_receive::order::{Order, OrderPlaced};
-use saga_idempotent_receive::saga::{ReservationRequested, ReservationSaga};
+use saga_idempotent_receive::saga::{ReservationRequested, ReservationSaga, ReservationSystem};
 use saga_idempotent_receive::stock_item::{Reserve, StockItem, StockReserved};
 
 /// The stock item every order in these tests reserves against.
@@ -64,10 +65,10 @@ pub fn single_store() -> Arc<dyn EventStore> {
 ///
 /// The direct-dispatch test drives the receiving aggregate itself, so it needs
 /// the aggregates without the process manager that would also address them.
-pub async fn spawn_system(store: Arc<dyn EventStore>) -> EventSourceSystem<StoreSet> {
+pub async fn spawn_system(store: Arc<dyn EventStore>) -> ReservationSystem {
     let ps = ProcessSystem::new().await;
     EventSourceSystem::builder(ps)
-        .with_event_store(store)
+        .with_persistence(Persistence::new(store))
         .build()
 }
 
@@ -77,7 +78,7 @@ pub async fn spawn_system(store: Arc<dyn EventStore>) -> EventSourceSystem<Store
 /// aggregates and the manager run on; dropping the last handle early would take
 /// the incarnation down.
 pub struct ReservationWorld {
-    pub system: EventSourceSystem<StoreSet>,
+    pub system: ReservationSystem,
     pub order: AggregateProxy<Order>,
     pub manager: SagaManagerProxy<ReservationSaga>,
 }
@@ -114,7 +115,7 @@ pub async fn spawn_world(order_id: &AggregateId, store: Arc<dyn EventStore>) -> 
 /// dispatch whose settlement never landed.  That is the at-least-once delivery
 /// this pattern has to absorb.
 pub async fn spawn_manager(
-    system: &EventSourceSystem<StoreSet>,
+    system: &ReservationSystem,
     order_id: &AggregateId,
 ) -> SagaManagerProxy<ReservationSaga> {
     let system_for_producer = system.clone();
@@ -298,7 +299,7 @@ impl EventStore for UnsettledDispatchStore {
 // Aggregate observation
 
 /// A reference to the stock item that owns the stream `key`.
-pub fn stock_ref(system: &EventSourceSystem<StoreSet>, key: &str) -> AggregateProxy<StockItem> {
+pub fn stock_ref(system: &ReservationSystem, key: &str) -> AggregateProxy<StockItem> {
     system.aggregate_proxy::<StockItem>(AggregateId::new(key))
 }
 
@@ -314,11 +315,7 @@ pub fn stock_ref(system: &EventSourceSystem<StoreSet>, key: &str) -> AggregatePr
 /// The command sent is a repeat of `reservation`, which the pattern answers with
 /// an acceptance that appends nothing: draining the mailbox this way adds no
 /// record for the assertions that follow to see.
-pub async fn drain_stock_item(
-    system: &EventSourceSystem<StoreSet>,
-    stock_key: &str,
-    reservation: &str,
-) {
+pub async fn drain_stock_item(system: &ReservationSystem, stock_key: &str, reservation: &str) {
     stock_ref(system, stock_key)
         .ask(Reserve {
             reservation: reservation.to_owned(),

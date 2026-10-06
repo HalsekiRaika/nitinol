@@ -16,10 +16,11 @@ use futures_util::TryStreamExt;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaDefaultStoreExt;
+use nitinol_saga::SagaSystemExt;
 
 use saga_idempotent_receive::order::{Order, OrderPlaced, PlaceOrder};
 use saga_idempotent_receive::saga::ReservationSaga;
@@ -40,14 +41,14 @@ const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
 async fn main() {
     let ps = ProcessSystem::new().await;
 
-    // One store for the whole example.  `EventStore` is stream-keyed, so the
+    // One supplier for the whole example.  `EventStore` is stream-keyed, so the
     // order's stream, the stock item's stream and the saga's journal are tenants
     // of this one instance; the manager's subscription below is what narrows it
     // back down to the order's stream.  The handle is kept here as well, because
     // the streams are what this demonstration verifies itself against.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(Persistence::new(Arc::clone(&store)))
         .build();
 
     let order_id = AggregateId::new("order-cobalt-42");

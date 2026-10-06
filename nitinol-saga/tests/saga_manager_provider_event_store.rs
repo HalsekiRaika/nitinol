@@ -1,18 +1,18 @@
-//! The saga manager entry point on a system that already holds a default
-//! [`EventStore`].
+//! The saga manager entry point on a system, and which store it resolves.
 //!
 //! `system.saga_manager_props(producer)` returns a manager builder with
 //! everything the system already knows filled in: the store each instance
-//! journals onto.  The two formats are settled by the event types themselves —
-//! each names its codec — so only the subscription handed to `subscribed_to`
-//! stays in the caller's hands, which makes it also the manager's override
-//! point — `Subscription::stream(&store, &key)` names an upstream store
-//! explicitly where `system.subscription(&key)` takes the default.
+//! journals onto, which is the journal the system's provider supplies.  The two
+//! formats are settled by the event types themselves — each names its codec —
+//! so only the subscription handed to `subscribed_to` stays in the caller's
+//! hands, which makes it where another upstream is named:
+//! `Subscription::stream(&store, &key)` names one explicitly where
+//! `system.subscription(&key)` resolves the provider's.
 //!
-//! The store is stream-keyed, so one default store holds the upstream stream
-//! and every correlated instance's own stream side by side; that is what the
-//! first test observes, on the id `Saga::correlate` derived rather than on a
-//! fixed one.
+//! The store is stream-keyed, so the one journal a provider supplies holds the
+//! upstream stream and every correlated instance's own stream side by side;
+//! that is what the first test observes, on the id `Saga::correlate` derived
+//! rather than on a fixed one.
 
 #[path = "common/helpers.rs"]
 mod common;
@@ -28,13 +28,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaDefaultStoreExt, SagaEffect, SagaId, SagaSubscribe, Subscription,
+    Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSystemExt, Subscription,
 };
 
 // Fixtures
@@ -205,18 +206,18 @@ async fn wait_for_instance_persisted(store: &Arc<dyn EventStore>, saga_id: &Saga
     }
 }
 
-// Default store: both directions of the manager
+// The provider's journal: both directions of the manager
 
 /// `system.saga_manager_props(producer).subscribed_to(system.subscription(&key))`
-/// must resolve both stores from the system default: the upstream it polls and
-/// the journal each correlated instance writes to.
+/// must resolve both stores from the system's provider: the upstream it polls
+/// and the journal each correlated instance writes to.
 #[tokio::test]
-async fn store_less_manager_props_uses_the_system_default_store_for_upstream_and_journal() {
-    // Given: one default store, holding the upstream stream
+async fn manager_props_uses_the_providers_event_store_for_upstream_and_journal() {
+    // Given: one provider, whose journal holds the upstream stream
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(Arc::clone(&default_store))
+        .with_persistence(Persistence::new(Arc::clone(&default_store)))
         .build();
 
     let upstream_key = AggregateId::new("mgr-default-store-orders");
@@ -243,38 +244,39 @@ async fn store_less_manager_props_uses_the_system_default_store_for_upstream_and
     assert_eq!(
         handled_orders(&handled),
         vec!["A".to_owned()],
-        "a store-less manager subscription must deliver records written to the default store"
+        "a manager subscription taken from the system must deliver records \
+         written to the store its provider supplies"
     );
     // ... and the instance journalled back onto it, under the correlated id
     assert_eq!(
         wait_for_instance_persisted(&default_store, &SagaId::new(format!("{INSTANCE_PREFIX}A")))
             .await,
         vec!["A".to_owned()],
-        "each instance the manager spawns must journal onto the default store, \
-         keyed by the id Saga::correlate named"
+        "each instance the manager spawns must journal onto the store the \
+         provider supplies, keyed by the id Saga::correlate named"
     );
 }
 
-// Override beats default: the manager's upstream
+// An upstream store named explicitly: the provider's store is not polled
 
-/// An upstream store named through `Subscription::stream` must win over the
-/// system default, even when the default holds a record under the very same
-/// stream key.
+/// An upstream store named through `Subscription::stream` must be the only one
+/// the manager polls, even when the store the provider supplies holds a record
+/// under the very same stream key.
 #[tokio::test]
-async fn explicit_subscription_store_overrides_the_default_upstream_for_the_manager() {
+async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls() {
     // Given: the same stream key exists in both stores, holding different records
     let ps = ProcessSystem::new().await;
-    let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let provider_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let named_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(Arc::clone(&default_store))
+        .with_persistence(Persistence::new(Arc::clone(&provider_store)))
         .build();
 
     let upstream_key = AggregateId::new("mgr-override-store-orders");
     // Seeded before the spawn so a subscription that wrongly resolved to the
-    // default would deliver it on the manager's very first poll.
-    append_order_placed(&default_store, &upstream_key, 1, "FROM-DEFAULT").await;
-    append_order_placed(&override_store, &upstream_key, 1, "FROM-OVERRIDE-1").await;
+    // provider's store would deliver it on the manager's very first poll.
+    append_order_placed(&provider_store, &upstream_key, 1, "FROM-THE-PROVIDER").await;
+    append_order_placed(&named_store, &upstream_key, 1, "FROM-THE-NAMED-STORE-1").await;
 
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -287,31 +289,34 @@ async fn explicit_subscription_store_overrides_the_default_upstream_for_the_mana
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&override_store, &upstream_key))
+        .subscribed_to::<OrderPlaced>(Subscription::stream(&named_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 
     wait_for_handled(&handled, &notify, 1).await;
-    // A second record on the overriding store acts as the barrier: once it has
-    // been handled the manager has completed a further poll cycle with the
-    // default store's decoy already visible, so "not delivered yet" and "never
+    // A second record on the named store acts as the barrier: once it has been
+    // handled the manager has completed a further poll cycle with the
+    // provider's decoy already visible, so "not delivered yet" and "never
     // delivered" are no longer the same observation.
-    append_order_placed(&override_store, &upstream_key, 2, "FROM-OVERRIDE-2").await;
+    append_order_placed(&named_store, &upstream_key, 2, "FROM-THE-NAMED-STORE-2").await;
     wait_for_handled(&handled, &notify, 2).await;
 
     // Then
     assert_eq!(
         handled_orders(&handled),
-        vec!["FROM-OVERRIDE-1".to_owned(), "FROM-OVERRIDE-2".to_owned()],
-        "only the explicitly subscribed store may be polled; the default store's \
+        vec![
+            "FROM-THE-NAMED-STORE-1".to_owned(),
+            "FROM-THE-NAMED-STORE-2".to_owned()
+        ],
+        "only the explicitly subscribed store may be polled; the provider's \
          record under the same stream key must never reach an instance"
     );
 }
 
 // Compile-fail coverage
 //
-// Calling the store-less `saga_manager_props` / `subscription` on a system that
-// was never given a default store must be a COMPILE ERROR (the typestate
-// guard).  An integration test cannot express that, so it is verified via
-// rustdoc compile_fail doctests on the store-less saga entry points.
-// See: nitinol-saga/src/system_ext.rs
+// Building a system with no provider at all, and wiring a delivery host from a
+// provider with no delivery-checkpoint slot, must both be COMPILE ERRORS. An
+// integration test cannot express a call that must not compile, so both are
+// verified via rustdoc compile_fail doctests on the entry points.
+// See: nitinol-saga/src/system_ext.rs, nitinol-eventsource/src/system.rs

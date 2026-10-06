@@ -21,11 +21,17 @@
 //! | `EventStore` (`OCC-1` … `OCC-5`, `LOAD-1`) | [`verify`], [`verify_deterministic`], [`verify_under_concurrency`] |
 //! | `SnapshotStore` (`SNAP-1` … `SNAP-4`) | [`snapshot::verify`] |
 //! | `CheckpointStore` (`CKP-1` … `CKP-6`) | [`checkpoint::verify`], [`checkpoint::verify_deterministic`], [`checkpoint::verify_under_concurrency`] |
+//! | `PersistenceProvider` (`PRV-1` … `PRV-5`) | [`provider::verify`] and one entry point per slot |
 //!
-//! The three are independent: a backend implementing one of the traits runs
-//! that contract's entry points and owes the others nothing.  Two clauses of
-//! the checkpoint contract are deliberately not fixed here — the trait's
-//! documentation says which, and why, next to each.
+//! The store contracts are independent: a backend implementing one of the
+//! traits runs that contract's entry points and owes the others nothing.  Two
+//! clauses of the checkpoint contract are deliberately not fixed here — the
+//! trait's documentation says which, and why, next to each.
+//!
+//! The [`provider`] module is the layer above them: it judges the supplier that
+//! hands those stores out, slot by slot, and puts each slot's store through the
+//! contract it owes.  An assembly supplying only some slots runs the entry
+//! points for the ones it has.
 //!
 //! # What a green run is not
 //!
@@ -117,6 +123,7 @@
 //! on stays yours to choose, and [`Executor`] is how the suite borrows it.
 
 pub mod checkpoint;
+pub mod provider;
 pub mod snapshot;
 
 mod concurrency;

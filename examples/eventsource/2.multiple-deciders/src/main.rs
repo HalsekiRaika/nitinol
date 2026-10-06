@@ -7,12 +7,10 @@
 //! Run with:
 //!   cargo run -p eventsource-multiple-deciders
 
-use std::sync::Arc;
-
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
@@ -32,9 +30,8 @@ async fn main() {
     init_tracing();
 
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(store)
+        .with_persistence(Persistence::in_memory())
         .build();
 
     let proxy = system

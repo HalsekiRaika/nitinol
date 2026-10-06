@@ -25,9 +25,8 @@
 #[path = "common/delivery.rs"]
 mod delivery;
 use delivery::{
-    append_decided, in_memory_system, scope_of, spawn_host, wait_until_loads,
-    AppendRefusingEventStore, DeliverySaga, Ledger, RecordingCheckpointStore, RecordingEventStore,
-    TEST_DELIVERY_ID, TEST_POLL_INTERVAL,
+    append_decided, scope_of, spawn_host, wait_until_loads, AppendRefusingEventStore, DeliverySaga,
+    Ledger, RecordingCheckpointStore, RecordingEventStore, TEST_DELIVERY_ID, TEST_POLL_INTERVAL,
 };
 
 use std::collections::BTreeMap;
@@ -35,8 +34,11 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
+use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaId;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -181,14 +183,18 @@ async fn a_held_delivery_is_retried_with_a_growing_pause_and_is_diagnosable() {
     let capture = Capture::installed();
 
     // Given: a receiver that accepts commands and cannot record them.
-    let (system, _aggregates) = in_memory_system().await;
+    //
+    // A receiving aggregate's stream is in the journal the system's provider
+    // supplies, and there is no per-spawn store to override it with, so the
+    // provider is assembled over the refusing store itself.
+    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(
+            Arc::new(AppendRefusingEventStore) as Arc<dyn EventStore>
+        ))
+        .build();
     let target = AggregateId::new("ledger-transient");
-    let _unwritable = system
-        .spawn_aggregate_with_store::<Ledger>(
-            target.clone(),
-            Arc::new(AppendRefusingEventStore) as Arc<dyn EventStore>,
-        )
-        .await;
+    let _unwritable = system.spawn_aggregate::<Ledger>(target.clone()).await;
 
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();

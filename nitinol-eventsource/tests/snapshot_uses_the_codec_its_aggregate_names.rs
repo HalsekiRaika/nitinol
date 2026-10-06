@@ -30,6 +30,7 @@ use nitinol_eventsource::{
     Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Query, SnapshotPersistor,
     SnapshotPersistorProxy, Snapshotable,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, EventType, Family, PersistedSnapshot, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -201,8 +202,9 @@ fn a_caller_reaches_the_snapshot_format_through_the_aggregates_codec() {
 async fn an_activation_restores_through_the_codec_the_aggregate_names() {
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let snapshot_ref =
-        SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
+    let persistence = Persistence::new(Arc::clone(&store))
+        .with_snapshot_store(Arc::new(InMemorySnapshotStore::default()));
+    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("named-snapshot-restore");
 
     {
@@ -247,8 +249,9 @@ async fn an_activation_restores_through_the_codec_the_aggregate_names() {
 async fn a_restore_and_a_delta_replay_use_their_own_codecs() {
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let snapshot_ref =
-        SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
+    let persistence = Persistence::new(Arc::clone(&store))
+        .with_snapshot_store(Arc::new(InMemorySnapshotStore::default()));
+    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("named-snapshot-delta");
 
     {

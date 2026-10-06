@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{codec::Codec, Aggregate, AggregateProxy, Decider, Decision, Event};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -106,7 +107,7 @@ async fn synchronously_built_reference_addresses_the_same_aggregate() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(Persistence::new(Arc::clone(&store)))
         .build();
     let id = AggregateId::new("sync-entry-shared");
 

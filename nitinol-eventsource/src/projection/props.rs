@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use nitinol_contract::Event;
+use nitinol_persistence::provider::ProjectionCheckpointProvider;
 use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore};
 use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::process::ProcessProxy;
@@ -35,16 +36,40 @@ where
     P: Send + Sync + 'static,
     Cs: CheckpointStore + Send + Sync + 'static,
 {
-    pub fn new(
+    /// Wiring for the projection `projection_id`, over the two slots
+    /// `persistence` supplies.
+    ///
+    /// Both are resolved from the provider: the journal the projection follows,
+    /// and the projection-checkpoint slot its position is recorded in. A
+    /// provider supplying no projection checkpoints is refused here rather than
+    /// at the first save:
+    ///
+    /// ```compile_fail
+    /// # use std::sync::Arc;
+    /// # use nitinol_eventsource::ProjectorProps;
+    /// # use nitinol_persistence::ProjectionId;
+    /// # use nitinol_persistence::provider::Persistence;
+    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+    /// # struct ReadModel;
+    /// # fn wiring() {
+    /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    /// // no `with_projection_checkpoints` — this provider has no projection slot
+    /// let persistence = Persistence::new(store);
+    /// ProjectorProps::new(ProjectionId::new("read-model"), &persistence, || ReadModel);
+    /// # }
+    /// ```
+    pub fn new<Pv>(
         projection_id: ProjectionId,
-        store: Arc<dyn EventStore>,
-        checkpoint_store: Arc<Cs>,
+        persistence: &Pv,
         producer: impl Fn() -> P + Send + Sync + 'static,
-    ) -> Self {
+    ) -> Self
+    where
+        Pv: ProjectionCheckpointProvider<ProjectionCheckpoints = Cs>,
+    {
         Self {
             projection_id,
-            store,
-            checkpoint_store,
+            store: persistence.event_store(),
+            checkpoint_store: persistence.projection_checkpoints(),
             delivery_mode: DeliveryMode::AtLeastOnce,
             catchup_origin: OriginUnset,
             tx_provider: None,
@@ -193,19 +218,17 @@ where
     /// Calling `spawn` without any `with_event` call (builder is in [`EventUnset`] state):
     ///
     /// ```compile_fail
-    /// # use std::sync::Arc;
     /// # use nitinol_eventsource::ProjectorProps;
     /// # use nitinol_persistence::ProjectionId;
-    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryCheckpointStore};
+    /// # use nitinol_persistence::provider::Persistence;
     /// # use nitinol_runtime::ProcessSystem;
     /// # struct MyProj;
     /// # impl MyProj { fn new() -> Self { MyProj } }
     /// # async fn bad() {
     /// let system = ProcessSystem::new().await;
-    /// let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    /// let cs = Arc::new(InMemoryCheckpointStore::default());
+    /// let persistence = Persistence::in_memory();
     /// // compile error: spawn() requires EventSet — call with_event() first
-    /// ProjectorProps::new(ProjectionId::new("p"), store, cs, MyProj::new)
+    /// ProjectorProps::new(ProjectionId::new("p"), &persistence, MyProj::new)
     ///     .spawn(&system)
     ///     .await;
     /// # }
@@ -215,12 +238,11 @@ where
     /// [`OriginUnset`] state):
     ///
     /// ```compile_fail
-    /// # use std::sync::Arc;
     /// # use async_trait::async_trait;
     /// # use nitinol_eventsource::{Event, Projector, ProjectorProps, ProjectionContext};
     /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_persistence::{EventType, Family, ProjectionId, TypeName};
-    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryCheckpointStore};
+    /// # use nitinol_persistence::provider::Persistence;
     /// # use nitinol_runtime::ProcessSystem;
     /// # use bytes::Bytes;
     /// # #[derive(Clone, PartialEq, Debug)] struct MyEv;
@@ -243,10 +265,9 @@ where
     /// # }
     /// # async fn bad() {
     /// let system = ProcessSystem::new().await;
-    /// let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    /// let cs = Arc::new(InMemoryCheckpointStore::default());
+    /// let persistence = Persistence::in_memory();
     /// // compile error: spawn() requires OriginSet — call catchup_from_aggregate() or catchup_from_global() first
-    /// ProjectorProps::new(ProjectionId::new("p"), store, cs, MyProj::new)
+    /// ProjectorProps::new(ProjectionId::new("p"), &persistence, MyProj::new)
     ///     .with_event::<MyEv>()
     ///     .spawn(&system)
     ///     .await;

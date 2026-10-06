@@ -38,6 +38,7 @@ use tokio::sync::{Notify, Semaphore};
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -273,7 +274,9 @@ async fn parent_stop_cascades_to_in_flight_outbox_executor_child() {
     const MAX_ATTEMPTS: usize = 3; // RetryPolicy::default(): 1 initial + 2 retries.
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("cascade-order");

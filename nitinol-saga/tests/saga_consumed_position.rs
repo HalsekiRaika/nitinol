@@ -69,6 +69,7 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -1011,15 +1012,16 @@ async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() 
 #[tokio::test]
 async fn the_position_is_the_last_row_so_no_tell_id_moves() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let source = AggregateId::new("tell-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory = system
-        .spawn_aggregate::<Inventory>(AggregateId::new("tell-inventory"), inventory_store)
+        .spawn_aggregate::<Inventory>(AggregateId::new("tell-inventory"))
         .await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));

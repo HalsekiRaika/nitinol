@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{AggregateProxy, Event};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, TellIntent};
 
@@ -13,7 +14,11 @@ use crate::order::OrderPlaced;
 use crate::stock_item::{Reserve, StockItem};
 
 /// The system every aggregate in this example lives on.
-type ReservationSystem = EventSourceSystem<StoreSet>;
+///
+/// The provider supplies the journal and nothing else: this example wires no
+/// projector, no delivery host and no snapshots, so it names no store for those
+/// slots and the wiring that would need them does not compile against it.
+pub type ReservationSystem = EventSourceSystem<Persistence>;
 
 /// A reference to the stock item that owns the stream `key`.
 ///

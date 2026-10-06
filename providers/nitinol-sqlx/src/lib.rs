@@ -116,7 +116,8 @@ mod postgres;
 
 #[cfg(feature = "postgres")]
 pub use self::postgres::{
-    CheckpointConflict, PostgresCheckpointStore, PostgresEventStore, UnknownEventType,
+    postgres_persistence, CheckpointConflict, PostgresCheckpointStore, PostgresEventStore,
+    PostgresPersistence, UnknownEventType,
 };
 
 /// The `sqlx` this crate links, so a caller builds the pool it is handed

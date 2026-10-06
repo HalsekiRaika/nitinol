@@ -14,17 +14,18 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, EventStream};
 use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDefaultStoreExt, SagaManagerProxy};
+use nitinol_saga::{SagaManagerProxy, SagaSystemExt};
 
 use saga_fanout_pattern::payroll_run::{PayrollRun, PayrollRunApproved};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
-use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
+use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted, PayrollSystem};
 
 /// Fan-out width the example is built around: one approval covers 32 employees.
 /// Every assertion that counts payslip streams is anchored to it, so an
@@ -72,7 +73,7 @@ pub fn payslip_keys(payroll_run: &str, employees: &[String]) -> Vec<String> {
 /// aggregates and the manager run on; dropping the last handle early would take
 /// the incarnation down.
 pub struct FanOutWorld {
-    pub system: EventSourceSystem<StoreSet>,
+    pub system: PayrollSystem,
     pub payroll_run: AggregateProxy<PayrollRun>,
     pub manager: SagaManagerProxy<FanOutSaga>,
 }
@@ -89,11 +90,12 @@ pub struct FanOutWorld {
 /// The store is a parameter because the redelivery and crash/replay tests hand
 /// the same durable state to two successive incarnations, wrapping the first
 /// one's in [`InterruptedFanOutStore`] — which is what makes an interrupted
-/// fan-out reproducible.
+/// fan-out reproducible.  It is named as the journal of the provider the system
+/// is built on, which is the one place a store is named here.
 pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> FanOutWorld {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(store)
+        .with_persistence(Persistence::new(store))
         .build();
 
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
@@ -121,7 +123,7 @@ pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> Fa
 /// the run's own stream while the payslip streams and the saga's journal share
 /// the same store.
 pub async fn spawn_manager(
-    system: &EventSourceSystem<StoreSet>,
+    system: &PayrollSystem,
     run_id: &AggregateId,
 ) -> SagaManagerProxy<FanOutSaga> {
     let system_for_producer = system.clone();
@@ -256,7 +258,7 @@ pub fn decisions(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
 /// command has been handled — both dispatches resolve to the one activation.
 /// Draining the mailbox this way is what stops "no duplicate was written" from
 /// passing merely because the redelivered command had not been processed yet.
-pub async fn drain_payslips(system: &EventSourceSystem<StoreSet>, keys: &[String]) -> Vec<bool> {
+pub async fn drain_payslips(system: &PayrollSystem, keys: &[String]) -> Vec<bool> {
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
         let proxy: AggregateProxy<Payslip> =

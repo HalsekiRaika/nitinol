@@ -18,6 +18,7 @@ use futures_util::TryStreamExt;
 use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event, Query,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -102,12 +103,12 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 async fn e2e_ask_persists_the_fact_its_decision_stated() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .build();
     let id = AggregateId::new("e2e-agg-ask");
-    let proxy = system
-        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
-        .await;
+    let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
 
     // When
     proxy.ask(Increment).await.expect("ask must succeed");
@@ -153,20 +154,20 @@ async fn e2e_ask_persists_the_fact_its_decision_stated() {
 async fn e2e_persisted_state_is_visible_through_a_later_reference() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(store))
+        .build();
     let id = AggregateId::new("e2e-agg-restart");
 
     // Reference 1: write one event via ask()
     {
-        let proxy1 = system
-            .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
-            .await;
+        let proxy1 = system.spawn_aggregate::<Counter>(id.clone()).await;
         proxy1.ask(Increment).await.expect("ask must succeed");
     }
 
     // When: resolve the same AggregateId again
-    let proxy2 = system.spawn_aggregate::<Counter>(id, store).await;
+    let proxy2 = system.spawn_aggregate::<Counter>(id).await;
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: the later reference sees the persisted increment
@@ -186,12 +187,12 @@ async fn e2e_persisted_state_is_visible_through_a_later_reference() {
 async fn e2e_multiple_asks_advance_sequence_monotonically() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .build();
     let id = AggregateId::new("e2e-agg-multi");
-    let proxy = system
-        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
-        .await;
+    let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
 
     // When: three sequential increments
     proxy.ask(Increment).await.expect("ask 1");

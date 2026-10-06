@@ -30,6 +30,7 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
@@ -595,18 +596,16 @@ async fn wait_for_recorded_events(
 #[tokio::test]
 async fn persist_combined_with_tell_is_written_in_one_append_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("combine-single-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
-    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory = system
-        .spawn_aggregate::<Inventory>(
-            AggregateId::new("combine-single-inventory"),
-            Arc::clone(&inventory_store),
-        )
+        .spawn_aggregate::<Inventory>(AggregateId::new("combine-single-inventory"))
         .await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
@@ -699,18 +698,16 @@ async fn persist_combined_with_tell_is_written_in_one_append_batch() {
 #[tokio::test]
 async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("sequence-single-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-SEQ").await;
 
-    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory = system
-        .spawn_aggregate::<Inventory>(
-            AggregateId::new("sequence-single-inventory"),
-            Arc::clone(&inventory_store),
-        )
+        .spawn_aggregate::<Inventory>(AggregateId::new("sequence-single-inventory"))
         .await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
@@ -803,18 +800,16 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
 #[tokio::test]
 async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("sequence-empty-nested-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-SEQ-EMPTY").await;
 
-    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory = system
-        .spawn_aggregate::<Inventory>(
-            AggregateId::new("sequence-empty-nested-inventory"),
-            Arc::clone(&inventory_store),
-        )
+        .spawn_aggregate::<Inventory>(AggregateId::new("sequence-empty-nested-inventory"))
         .await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
@@ -908,18 +903,16 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
 #[tokio::test]
 async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("sequence-none-leaf-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-SEQ-NONE").await;
 
-    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let inventory = system
-        .spawn_aggregate::<Inventory>(
-            AggregateId::new("sequence-none-leaf-inventory"),
-            Arc::clone(&inventory_store),
-        )
+        .spawn_aggregate::<Inventory>(AggregateId::new("sequence-none-leaf-inventory"))
         .await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
@@ -1009,19 +1002,19 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
 #[tokio::test]
 async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("combine-order-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-2").await;
 
-    let first_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let second_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let first = system
-        .spawn_aggregate::<Inventory>(AggregateId::new("combine-order-inv-a"), first_store)
+        .spawn_aggregate::<Inventory>(AggregateId::new("combine-order-inv-a"))
         .await;
     let second = system
-        .spawn_aggregate::<Inventory>(AggregateId::new("combine-order-inv-b"), second_store)
+        .spawn_aggregate::<Inventory>(AggregateId::new("combine-order-inv-b"))
         .await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
@@ -1105,7 +1098,9 @@ async fn combined_tells_keep_left_to_right_order_inside_the_single_batch() {
 #[tokio::test]
 async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("combine-schedule-order");

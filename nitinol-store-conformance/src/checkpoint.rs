@@ -31,7 +31,7 @@
 
 mod concurrency;
 mod deterministic;
-mod fixture;
+pub(crate) mod fixture;
 
 use std::sync::Arc;
 

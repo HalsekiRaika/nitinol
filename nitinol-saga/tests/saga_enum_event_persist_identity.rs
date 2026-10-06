@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -160,12 +161,14 @@ fn domain_rows(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
 #[tokio::test]
 async fn saga_persist_stores_the_declared_event_type_for_every_arm() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .build();
 
     let upstream_id = AggregateId::new("identity-upstream-agg");
     let upstream_proxy = system
-        .spawn_aggregate::<UpstreamAggregate>(upstream_id.clone(), Arc::clone(&store))
+        .spawn_aggregate::<UpstreamAggregate>(upstream_id.clone())
         .await;
 
     let saga_id = SagaId::new(WORKFLOW_SAGA_ID);

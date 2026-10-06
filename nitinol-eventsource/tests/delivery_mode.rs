@@ -28,6 +28,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{
     CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
@@ -174,16 +175,15 @@ async fn at_most_once_checkpoint_advanced_even_when_project_fails() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with AtMostOnce
-    let _proxy = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || ConditionallyFailingProjector {
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+        ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtMostOnce)
     .catchup_from_aggregate(agg_id)
@@ -230,16 +230,15 @@ async fn at_most_once_checkpoint_advanced_on_success() {
     let notify_c = Arc::clone(&notify);
 
     // When
-    let _proxy = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || ConditionallyFailingProjector {
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+        ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtMostOnce)
     .catchup_from_aggregate(agg_id)
@@ -277,16 +276,15 @@ async fn at_least_once_checkpoint_not_saved_when_project_fails() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with AtLeastOnce (default)
-    let _proxy = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || ConditionallyFailingProjector {
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+        ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
@@ -335,16 +333,15 @@ async fn at_least_once_checkpoint_saved_after_successful_project() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with AtLeastOnce (default)
-    let _proxy = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || ConditionallyFailingProjector {
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+        ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
@@ -391,16 +388,15 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
         let checkpoint_store_c = Arc::clone(&checkpoint_store);
         let agg_id_c = agg_id.clone();
 
-        ProjectorProps::new(
-            projection_id_c,
-            event_store_c,
-            checkpoint_store_c,
-            move || ConditionallyFailingProjector {
+        let persistence =
+            Persistence::new(event_store_c).with_projection_checkpoints(checkpoint_store_c);
+        ProjectorProps::new(projection_id_c, &persistence, move || {
+            ConditionallyFailingProjector {
                 should_fail: Arc::clone(&sf_c),
                 count: Arc::clone(&count_c),
                 notify: Arc::clone(&notify_c),
-            },
-        )
+            }
+        })
         .with_event::<Evt>()
         .delivery_mode(DeliveryMode::AtLeastOnce)
         .catchup_from_aggregate(agg_id_c)
@@ -456,16 +452,15 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     let notify2 = Arc::clone(&notify);
     let sf2 = Arc::clone(&should_fail);
 
-    let _proxy2 = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || ConditionallyFailingProjector {
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy2 = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+        ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf2),
             count: Arc::clone(&count2),
             notify: Arc::clone(&notify2),
-        },
-    )
+        }
+    })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
     .catchup_from_aggregate(agg_id)
@@ -506,16 +501,15 @@ async fn exactly_once_framework_does_not_save_checkpoint() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with ExactlyOnce (framework skips checkpoint saving)
-    let _proxy = ProjectorProps::new(
-        projection_id.clone(),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || ConditionallyFailingProjector {
+    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+        ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::ExactlyOnce)
     .catchup_from_aggregate(agg_id)

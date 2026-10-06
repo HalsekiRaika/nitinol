@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -150,14 +151,14 @@ async fn wait_for_decisions(
 #[tokio::test]
 async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .build();
+
     let order_id = AggregateId::new("direct-order");
-    let order_proxy = system
-        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&store))
-        .await;
+    let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<SagaId>>> = Arc::new(Mutex::new(Vec::new()));
@@ -232,14 +233,14 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
 #[tokio::test]
 async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .build();
+
     let order_id = AggregateId::new("drop-proxy-order");
-    let order_proxy = system
-        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&store))
-        .await;
+    let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<SagaId>>> = Arc::new(Mutex::new(Vec::new()));
@@ -294,13 +295,13 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
 #[tokio::test]
 async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .build();
 
     let order_id = AggregateId::new("replay-order");
-    let order_proxy = system
-        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&store))
-        .await;
+    let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<SagaId>>> = Arc::new(Mutex::new(Vec::new()));

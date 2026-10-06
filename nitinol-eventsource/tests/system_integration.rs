@@ -1,7 +1,7 @@
 // Integration tests for EventSourceSystem.
 //
 // Tests verify:
-// - Builder pattern: EventSourceSystem::builder(ps).build()
+// - Builder pattern: EventSourceSystem::builder(ps).with_persistence(..).build()
 // - spawn_aggregate creates a working AggregateProxy
 // - A second spawn_aggregate with the same id addresses the aggregate the first
 //   call resolved, rather than a second activation of it
@@ -27,6 +27,7 @@ use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
     ProjectionContext, Projector, ProjectorProps, Query, Snapshotable,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{
     EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore,
 };
@@ -194,15 +195,17 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 
 // Test: EventSourceSystem builder creates a system
 
-/// EventSourceSystem::builder(ps).build() compiles and produces an
-/// EventSourceSystem that exposes process_system().
+/// EventSourceSystem::builder(ps).with_persistence(..).build() compiles and
+/// produces an EventSourceSystem that exposes process_system().
 #[tokio::test]
 async fn event_source_system_builder_produces_system() {
     // Given
     let ps = ProcessSystem::new().await;
 
     // When
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::new(InMemoryEventStore::default())))
+        .build();
 
     // Then: process_system() is accessible (type-level proof)
     let _ = system.process_system();
@@ -216,14 +219,14 @@ async fn event_source_system_builder_produces_system() {
 async fn spawn_aggregate_creates_working_aggregate_proxy() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .build();
     let id = AggregateId::new("sys-spawn-basic");
 
     // When
-    let proxy = system
-        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
-        .await;
+    let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
 
     proxy.ask(Increment).await.expect("ask must succeed");
 
@@ -254,19 +257,17 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
 async fn spawn_aggregate_second_call_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .build();
     let id = AggregateId::new("sys-replay-state");
 
-    let proxy1 = system
-        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
-        .await;
+    let proxy1 = system.spawn_aggregate::<Counter>(id.clone()).await;
     proxy1.ask(Increment).await.expect("ask must succeed");
 
     // When: resolve the same id again, then dispatch through both references
-    let proxy2 = system
-        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
-        .await;
+    let proxy2 = system.spawn_aggregate::<Counter>(id.clone()).await;
     proxy2
         .ask(Increment)
         .await
@@ -305,10 +306,11 @@ async fn spawn_aggregate_second_call_addresses_the_same_aggregate() {
 async fn spawn_aggregate_sequential_increments_accumulate_state() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::new(InMemoryEventStore::default())))
+        .build();
     let proxy = system
-        .spawn_aggregate::<Counter>(AggregateId::new("sys-seq"), store)
+        .spawn_aggregate::<Counter>(AggregateId::new("sys-seq"))
         .await;
 
     // When
@@ -331,10 +333,14 @@ async fn spawn_aggregate_sequential_increments_accumulate_state() {
 async fn projector_props_decode_through_the_codec_each_event_names() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
-
     let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let persistence = Persistence::new(Arc::clone(&event_store))
+        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(persistence.clone())
+        .build();
+
     let agg_id = AggregateId::new("sys-proj-agg");
 
     // Pre-append one event so catch-up has something to project
@@ -359,15 +365,12 @@ async fn projector_props_decode_through_the_codec_each_event_names() {
     let notify_c = Arc::clone(&notify);
 
     // When: wire a projector for the event type, naming no codec
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("sys-proj"),
-        Arc::clone(&event_store),
-        Arc::clone(&checkpoint_store),
-        move || CountingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("sys-proj"), &persistence, move || {
+        CountingProjector {
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_event::<Incremented>()
     .catchup_from_aggregate(agg_id)
     .spawn(system.process_system())
@@ -392,11 +395,13 @@ async fn projector_props_decode_through_the_codec_each_event_names() {
 async fn snapshot_roundtrip_via_event_source_system() {
     // Given
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let persistence = Persistence::new(Arc::new(InMemoryEventStore::default()))
+        .with_snapshot_store(Arc::new(InMemorySnapshotStore::default()));
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(persistence.clone())
+        .build();
 
-    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let snapshot_store = Arc::new(InMemorySnapshotStore::default());
-    let snapshot_ref = SnapshotPersistor::spawn(system.process_system(), snapshot_store).await;
+    let snapshot_ref = SnapshotPersistor::spawn(system.process_system(), &persistence).await;
     let id = AggregateId::new("sys-snap-restore");
 
     // Manually save a JSON-encoded snapshot (value=7 at sequence=7)
@@ -416,7 +421,7 @@ async fn snapshot_roundtrip_via_event_source_system() {
     // When: spawn a process that restores from the snapshot through the codec
     // the aggregate names
     let proxy = system
-        .aggregate_props::<CounterWithSnapshot>(id, event_store)
+        .aggregate_props::<CounterWithSnapshot>(id)
         .with_snapshot_persistor(snapshot_ref)
         .spawn(system.process_system())
         .await;

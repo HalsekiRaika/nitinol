@@ -24,8 +24,8 @@
 #[path = "common/delivery.rs"]
 mod delivery;
 use delivery::{
-    append_decided, in_memory_system, partition_count, wait_until_stored, Decided, DeliverySaga,
-    RecordingCheckpointStore, TEST_POLL_INTERVAL,
+    append_decided, delivery_persistence, in_memory_system, partition_count, wait_until_stored,
+    Decided, DeliverySaga, RecordingCheckpointStore, TEST_POLL_INTERVAL,
 };
 
 use std::sync::Arc;
@@ -49,8 +49,7 @@ async fn the_wired_identifier_is_the_one_progress_is_filed_under() {
 
     // When
     let host = SagaDeliveryProps::<DeliverySaga, RecordingCheckpointStore>::new(
-        Arc::clone(&journal),
-        Arc::clone(&checkpoints),
+        &delivery_persistence(&journal, &checkpoints),
     )
     .with_delivery_id(named.clone())
     .with_partitions(partition_count(1))
@@ -96,8 +95,7 @@ async fn an_unwired_identifier_is_derived_from_the_declared_event_type() {
 
     // When
     let host = SagaDeliveryProps::<DeliverySaga, RecordingCheckpointStore>::new(
-        Arc::clone(&journal),
-        Arc::clone(&checkpoints),
+        &delivery_persistence(&journal, &checkpoints),
     )
     .with_partitions(partition_count(1))
     .with_poll_interval(TEST_POLL_INTERVAL)

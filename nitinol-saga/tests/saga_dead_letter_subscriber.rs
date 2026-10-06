@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event, SystemEvent};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
@@ -218,7 +219,9 @@ async fn append_ping(store: &Arc<dyn EventStore>, stream_key: &str, sequence: u6
 #[tokio::test]
 async fn dead_letter_subscriber_receives_the_enqueued_event() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     // Spawn the subscriber process and obtain its ProcessProxy<DlqCollector>.
     let received = Arc::new(AtomicUsize::new(0));
@@ -272,7 +275,9 @@ async fn dead_letter_subscriber_receives_the_enqueued_event() {
 #[tokio::test]
 async fn dead_letter_subscriber_catchup_delivers_pre_existing_dead_letters() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let saga_id = SagaId::new(FAIL_SAGA_ID);
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -355,7 +360,9 @@ async fn dead_letter_subscriber_catchup_delivers_pre_existing_dead_letters() {
 #[tokio::test]
 async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let saga_id = SagaId::new(FAIL_SAGA_ID);
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -484,7 +491,9 @@ async fn dead_letter_subscriber_catchup_survives_saga_respawn() {
 #[tokio::test]
 async fn same_subscriber_registered_for_two_sagas_receives_both_dead_letters() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     // --- Pre-populate saga A stream ---
     let saga_id_a = SagaId::new(MULTI_SAGA_A_ID);
@@ -612,7 +621,9 @@ async fn dlq_poller_is_stopped_when_saga_stops_while_subscriber_stays_alive() {
     use nitinol_runtime::ident::ProcessName;
 
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let saga_id = SagaId::new(FAIL_SAGA_ID);
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

@@ -13,6 +13,11 @@
 //! clause its fault names, so the clauses can be shown to catch a backend that
 //! breaks the contract instead of merely passing against one that keeps it.
 //!
+//! [`ReferenceProvider`] is the same wiring one level up: a whole persistence
+//! provider rather than a single store, brought up for the `PRV` clauses.
+//! [`FaultyProvider`] and [`ProviderWithCollidingCheckpointSlots`] are its
+//! self-check, each breaking exactly the one provider clause it names.
+//!
 //! The doubles live in this crate rather than in the kit's `src/` for two
 //! reasons: they are not part of what the kit publishes, and a store defined
 //! outside the kit's own crate is the direct evidence that a provider's store
@@ -30,6 +35,10 @@ use async_trait::async_trait;
 use futures_core::future::BoxFuture;
 use futures_util::stream;
 use nitinol_persistence::error::{AppendError, CheckpointError, LoadError, SnapshotError};
+use nitinol_persistence::provider::{
+    DeliveryCheckpointsProvided, InMemoryPersistence, Persistence, PersistenceProvider,
+    ProjectionCheckpointsProvided, Unprovided,
+};
 use nitinol_persistence::store::{
     CheckpointScope, CheckpointStore, EventStore, EventStream, InMemoryCheckpointStore,
     InMemoryEventStore, InMemorySnapshotStore, SnapshotStore,
@@ -39,6 +48,7 @@ use nitinol_persistence::{
     LoadedEvent, PersistedSnapshot,
 };
 use nitinol_store_conformance::checkpoint::CheckpointStoreUnderTest;
+use nitinol_store_conformance::provider::ProviderUnderTest;
 use nitinol_store_conformance::snapshot::SnapshotStoreUnderTest;
 use nitinol_store_conformance::{Executor, StoreUnderTest};
 
@@ -623,5 +633,79 @@ impl CheckpointStoreUnderTest for FaultyCheckpointStore {
     fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
         let fault = self.fault;
         Box::pin(async move { Arc::new(SkewedCheckpointStore::injecting(fault)) })
+    }
+}
+
+/// The reference provider the `PRV` clauses are written against.
+///
+/// `Persistence::in_memory()` is the assembly the framework ships: an in-memory
+/// store for every slot, with the two checkpoint slots configured with one
+/// store — the shape a single-table backend is deployed in, and the harder half
+/// of the independence clause.
+pub struct ReferenceProvider;
+
+impl ProviderUnderTest for ReferenceProvider {
+    type Provider = InMemoryPersistence;
+
+    fn bring_up(&self) -> BoxFuture<'_, Self::Provider> {
+        Box::pin(async { Persistence::in_memory() })
+    }
+}
+
+/// A provider that answers every `event_store` call with a store of its own.
+///
+/// PRV-1: the handles a caller takes would then name a world each, so an append
+/// made through one is invisible through the other and nothing reports it. That
+/// is why the clause reads a record back through a second handle rather than
+/// comparing the handles themselves — a provider handing out two handles onto
+/// one store and one handing out two stores are indistinguishable until
+/// something is written.
+pub struct AStoreOfItsOwnPerCall;
+
+impl PersistenceProvider for AStoreOfItsOwnPerCall {
+    fn event_store(&self) -> Arc<dyn EventStore> {
+        Arc::new(InMemoryEventStore::default())
+    }
+}
+
+/// A provider under test whose event-store slot splits the world.
+pub struct FaultyProvider;
+
+impl ProviderUnderTest for FaultyProvider {
+    type Provider = AStoreOfItsOwnPerCall;
+
+    fn bring_up(&self) -> BoxFuture<'_, Self::Provider> {
+        Box::pin(async { AStoreOfItsOwnPerCall })
+    }
+}
+
+/// What [`ProviderWithCollidingCheckpointSlots`] brings up: both checkpoint
+/// slots configured with a store that keeps one position for every key.
+pub type CollidingCheckpoints = Persistence<
+    Unprovided,
+    ProjectionCheckpointsProvided<SkewedCheckpointStore>,
+    DeliveryCheckpointsProvided<SkewedCheckpointStore>,
+>;
+
+/// A provider whose two checkpoint slots reach a store with one slot for every
+/// scope.
+///
+/// PRV-4: configuring both slots with one store is allowed, and what makes it
+/// allowed is that each consumer files under a key of its own. A store that
+/// forgot the key it was given has a delivery host resume from a projection's
+/// position, so the slots of a provider assembled over one are not independent
+/// however they were configured.
+pub struct ProviderWithCollidingCheckpointSlots;
+
+impl ProviderUnderTest for ProviderWithCollidingCheckpointSlots {
+    type Provider = CollidingCheckpoints;
+
+    fn bring_up(&self) -> BoxFuture<'_, Self::Provider> {
+        Box::pin(async {
+            let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+            Persistence::new(events).with_checkpoints(Arc::new(SkewedCheckpointStore::injecting(
+                CheckpointFault::OneSlotForEveryScope,
+            )))
+        })
     }
 }

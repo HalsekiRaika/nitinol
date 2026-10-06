@@ -22,9 +22,10 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{Aggregate, AggregateProxy, Decider, Decision, Event, Query};
 use nitinol_persistence::error::{AppendError, CheckpointError, LoadError};
+use nitinol_persistence::provider::{DeliveryCheckpointsProvided, Persistence, Unprovided};
 use nitinol_persistence::store::{
     CheckpointScope, CheckpointStore, EventStore, EventStream, InMemoryEventStore,
 };
@@ -422,18 +423,43 @@ pub fn partition_count(n: usize) -> NonZeroUsize {
     NonZeroUsize::new(n).expect("a fixture partition count is not zero")
 }
 
+/// The provider a delivery host is wired from here: `journal` as the store the
+/// saga's decisions are on, `checkpoints` as the slot the host records in, and
+/// no other slot named.
+///
+/// A host needs exactly those two, so a provider with nothing else on it is
+/// what the fixtures assemble — the projection and snapshot slots are left
+/// unprovided rather than filled with stores no clause here reads.
+pub type DeliveryPersistence =
+    Persistence<Unprovided, Unprovided, DeliveryCheckpointsProvided<RecordingCheckpointStore>>;
+
+/// The system the delivery fixtures spawn onto: its provider supplies the
+/// journal the receiving aggregates are tenants of.
+///
+/// That journal is a different one from the saga's, which is what keeps the
+/// rows a host reads apart from the rows its deliveries write — the fixtures
+/// assert on both.
+pub type DeliverySystem = EventSourceSystem<Persistence>;
+
+pub fn delivery_persistence(
+    journal: &Arc<dyn EventStore>,
+    checkpoints: &Arc<RecordingCheckpointStore>,
+) -> DeliveryPersistence {
+    Persistence::new(Arc::clone(journal)).with_delivery_checkpoints(Arc::clone(checkpoints))
+}
+
 /// Start a delivery host for `S` over `journal`, recording progress in
 /// `checkpoints`, with `partitions` partitions.
 pub async fn spawn_host<S: Saga>(
-    system: &EventSourceSystem<StoreSet>,
+    system: &DeliverySystem,
     journal: &Arc<dyn EventStore>,
     checkpoints: &Arc<RecordingCheckpointStore>,
     partitions: usize,
 ) -> SagaDeliveryProxy<S> {
-    SagaDeliveryProps::<S, RecordingCheckpointStore>::new(
-        Arc::clone(journal),
-        Arc::clone(checkpoints),
-    )
+    SagaDeliveryProps::<S, RecordingCheckpointStore>::new(&delivery_persistence(
+        journal,
+        checkpoints,
+    ))
     .with_delivery_id(delivery_id())
     .with_partitions(partition_count(partitions))
     .with_poll_interval(TEST_POLL_INTERVAL)
@@ -441,12 +467,13 @@ pub async fn spawn_host<S: Saga>(
     .await
 }
 
-/// A system with an in-memory default store, and that store.
-pub async fn in_memory_system() -> (EventSourceSystem<StoreSet>, Arc<dyn EventStore>) {
+/// A system over a provider whose journal is a fresh in-memory store, and that
+/// store.
+pub async fn in_memory_system() -> (DeliverySystem, Arc<dyn EventStore>) {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(Persistence::new(Arc::clone(&store)))
         .build();
     (system, store)
 }

@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -209,7 +210,11 @@ async fn wait_for_ended_marker(store: &Arc<dyn EventStore>, saga_id: &SagaId) ->
 #[tokio::test]
 async fn draining_saga_ignores_upstream_event_before_tell_settles() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    // The tell target's journal is the one the system's provider supplies.
+    let target_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&target_store)))
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("drain-guard-agg");
@@ -220,12 +225,8 @@ async fn draining_saga_ignores_upstream_event_before_tell_settles() {
     append_upstream_drain_event(&upstream_store, &agg_id, 1, "evt-1").await;
     append_upstream_drain_event(&upstream_store, &agg_id, 2, "evt-2").await;
 
-    let target_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let target_proxy = system
-        .spawn_aggregate::<DrainTargetAgg>(
-            AggregateId::new("drain-guard-target"),
-            Arc::clone(&target_store),
-        )
+        .spawn_aggregate::<DrainTargetAgg>(AggregateId::new("drain-guard-target"))
         .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

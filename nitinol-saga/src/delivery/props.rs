@@ -5,8 +5,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
+use nitinol_persistence::provider::{DeliveryCheckpointProvider, PersistenceProvider};
 use nitinol_persistence::store::{CheckpointStore, EventStore};
 use nitinol_runtime::process::SupervisionStrategy;
 use nitinol_runtime::{IdleTimeout, Props};
@@ -81,16 +82,27 @@ where
     S: Saga,
     Cs: CheckpointStore + 'static,
 {
-    /// Begin wiring a host that reads `journal` and records its progress in
-    /// `checkpoints`.
+    /// Begin wiring a host over the two slots `persistence` supplies.
     ///
-    /// `journal` is the store the saga's own decisions were persisted to, which
-    /// is the host's whole input. `checkpoints` may be the same store a
-    /// projection records to: the keys cannot collide, so the table is shared.
-    pub fn new(journal: Arc<dyn EventStore>, checkpoints: Arc<Cs>) -> Self {
+    /// The journal is the store the saga's own decisions were persisted to,
+    /// which is the host's whole input, and the delivery-checkpoint slot is
+    /// where its progress is recorded. A provider may have configured that slot
+    /// with the same store a projection records to: the keys cannot collide, so
+    /// the table is shared — and replacing the store the projection slot is
+    /// configured with still leaves this one alone.
+    ///
+    /// A provider supplying no delivery slot is refused here rather than when
+    /// the host first tries to record where it got to; the typestate doctest on
+    /// [`SagaDeliveryExt::saga_delivery_props`](crate::SagaDeliveryExt::saga_delivery_props)
+    /// fixes that, and a deployment with a system reaches this wiring through
+    /// it.
+    pub fn new<Pv>(persistence: &Pv) -> Self
+    where
+        Pv: DeliveryCheckpointProvider<DeliveryCheckpoints = Cs>,
+    {
         Self {
-            journal,
-            checkpoints,
+            journal: persistence.event_store(),
+            checkpoints: persistence.delivery_checkpoints(),
             delivery_id: None,
             partitions: DEFAULT_PARTITIONS,
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -138,7 +150,17 @@ where
     /// they deliver through `system`: a target is reached by the same reference
     /// any other caller would resolve it with, so a receiving aggregate needs
     /// nothing of the host's on it.
-    pub async fn spawn(self, system: &EventSourceSystem<StoreSet>) -> SagaDeliveryProxy<S> {
+    ///
+    /// `system` is any system, whatever slots its provider supplies — a host is
+    /// wired from the provider that holds its journal and its progress, and
+    /// delivers through whichever system the receiving aggregates resolve on.
+    /// The handle the partitions keep has the provider's type erased, so the
+    /// mapping a saga author wrote names one system type and the partitions
+    /// stay one type whatever a deployment assembled.
+    pub async fn spawn<Pv: PersistenceProvider>(
+        self,
+        system: &EventSourceSystem<Pv>,
+    ) -> SagaDeliveryProxy<S> {
         let delivery_id = self.delivery_id.unwrap_or_else(|| {
             // The key is persisted, so what it is derived from has to be
             // something the type itself fixes. The declared event type is: one
@@ -152,7 +174,7 @@ where
             let delivery_id = delivery_id.clone();
             let journal = Arc::clone(&self.journal);
             let checkpoints = Arc::clone(&self.checkpoints);
-            let system_for_partition = system.clone();
+            let system_for_partition = system.erase_persistence();
             let partitions = self.partitions;
             let poll_interval = self.poll_interval;
 

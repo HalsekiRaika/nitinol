@@ -19,6 +19,7 @@ use nitinol_eventsource::{
     SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{
     EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore,
 };
@@ -295,8 +296,9 @@ async fn e2e_replay_with_snapshot_restores_state() {
     // Given: shared persistors
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let snapshot_ref =
-        SnapshotPersistor::spawn(&system, Arc::new(InMemorySnapshotStore::default())).await;
+    let persistence = Persistence::new(Arc::clone(&store))
+        .with_snapshot_store(Arc::new(InMemorySnapshotStore::default()));
+    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("e2e-replay-snap");
 
     // Write 5 events through process 1

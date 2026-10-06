@@ -62,6 +62,7 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -368,7 +369,9 @@ impl Saga for HandleFailSaga {
 async fn a_dead_letter_is_reported_with_its_event_type_arm_and_stream() {
     let capture = Capture::installed();
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "tracing-handle-upstream", 1, "boom").await;
@@ -493,7 +496,9 @@ impl Saga for TellFailSaga {
 async fn each_marker_of_a_failing_tell_is_reported_with_its_own_arm() {
     let capture = Capture::installed();
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "tracing-tell-upstream", 1, "order").await;
@@ -612,7 +617,9 @@ impl Saga for ScheduleSaga {
 async fn a_registered_and_a_fired_timer_are_reported_with_distinct_arms() {
     let capture = Capture::installed();
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "tracing-schedule-upstream", 1, "tick").await;
@@ -687,7 +694,9 @@ impl Saga for PositionSaga {
 async fn the_position_a_batch_consumed_is_reported_with_its_own_arm() {
     let capture = Capture::installed();
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, POSITION_UPSTREAM_KEY, 1, "note").await;
@@ -773,7 +782,9 @@ impl Saga for DomainOnlySaga {
 async fn a_user_event_is_not_reported_as_a_framework_record() {
     let capture = Capture::installed();
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     append_ping(&upstream_store, "tracing-domain-upstream", 1, "note").await;

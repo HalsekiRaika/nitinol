@@ -11,10 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaDefaultStoreExt;
+use nitinol_saga::SagaSystemExt;
 
 use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun, PayrollRunApproved};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
@@ -33,13 +34,13 @@ fn employee_ids() -> Vec<String> {
 async fn main() {
     let ps = ProcessSystem::new().await;
 
-    // One store for the whole example.  `EventStore` is stream-keyed, so the
+    // One supplier for the whole example.  `EventStore` is stream-keyed, so the
     // payroll run's stream, the 32 payslip streams and the saga's journal are
-    // tenants of this one instance; the manager's subscription below is what
-    // narrows it back down to the run's stream.
+    // tenants of the one journal it supplies; the manager's subscription below
+    // is what narrows it back down to the run's stream.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_event_store(store)
+        .with_persistence(Persistence::new(store))
         .build();
 
     let run_id = AggregateId::new("payroll-run-april");

@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -179,15 +180,18 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 #[tokio::test]
 async fn persist_with_tell_then_end_writes_terminal_marker_before_stop() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    // The target aggregate's journal is the one the system's provider supplies.
+    let target_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::new(Arc::clone(&target_store)))
+        .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let agg_id = AggregateId::new("persist-tell-end-agg");
 
     // Spawn the target aggregate — the saga will tell it via TriggerCmd.
-    let target_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let target_proxy = system
-        .spawn_aggregate::<TargetAggregate>(agg_id.clone(), Arc::clone(&target_store))
+        .spawn_aggregate::<TargetAggregate>(agg_id.clone())
         .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

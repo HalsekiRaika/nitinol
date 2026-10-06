@@ -34,6 +34,7 @@ use tokio::sync::Mutex;
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::error::SendError;
@@ -296,7 +297,9 @@ async fn publish_order_placed(upstream_store: &Arc<dyn EventStore>, order_id: &s
 #[tokio::test]
 async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -386,7 +389,9 @@ async fn replay_tell_failed_is_surfaced_in_next_handle_via_context() {
 #[tokio::test]
 async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -476,7 +481,9 @@ async fn synthetic_replay_tell_failed_is_surfaced_in_next_handle_via_context() {
 #[tokio::test]
 async fn runtime_tell_failed_is_not_repeated_to_the_next_handle_via_context() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

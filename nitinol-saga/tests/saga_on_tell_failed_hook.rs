@@ -50,6 +50,7 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -655,7 +656,9 @@ struct Observations {
 /// later upstream delivery.
 async fn run_tell_failure_scenario(saga_key: &str, terminate_after_tell: bool) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -749,7 +752,9 @@ fn assert_reported_while_draining(events: &[LoadedEvent]) {
 /// shows the tell has settled.
 async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -799,7 +804,9 @@ async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
 /// replay, never through an outcome report.
 async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -862,7 +869,9 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
 /// the deadline its hook registered has fired.
 async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -905,7 +914,9 @@ async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
 /// stream once the rejected hook has been accounted for (or the wait expires).
 async fn run_rejecting_hook_scenario(saga_key: &str) -> Vec<LoadedEvent> {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps).build();
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(Persistence::in_memory())
+        .build();
 
     let upstream_key = format!("{saga_key}-upstream");
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
