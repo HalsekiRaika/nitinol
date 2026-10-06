@@ -6,9 +6,31 @@ use async_trait::async_trait;
 use crate::error::CheckpointError;
 use crate::store::checkpoint_store::{CheckpointScope, CheckpointStore};
 
+/// In-memory reference implementation of [`CheckpointStore`].
+///
+/// This type is the reference implementation of the checkpoint contract every
+/// backend must reproduce: never started is not the same as at zero, a saved
+/// position is what a load answers with, a move forward is taken however far it
+/// reaches, and the rendered key is the whole of what a store is told.  The
+/// clauses, their labels and their exact wording live on [`CheckpointStore`].
+///
 /// The rendered key is the whole of what a scope hands a store, so it is what
 /// this one keys its map by: two consumers of different kinds are kept apart
 /// here by exactly what keeps them apart in a backend's table.
+///
+/// A save is taken whatever position it carries.  That is this type's answer to
+/// the one thing the contract leaves to a backend — a save that would not carry
+/// a checkpoint forward — rather than something a third party may rely on; the
+/// Postgres provider refuses such a save instead.  `Tx` is `()` because there
+/// is no transaction to join here.
+///
+/// The contract is fixed by two executable records, neither of which is this
+/// implementation's incidental behaviour: the tests in
+/// `nitinol-persistence/tests/checkpoint_store.rs`, which run against this
+/// type, and `nitinol-store-conformance`, the suite a third-party backend is
+/// put through — this type among them.
+///
+/// Intended for tests and examples; not for production use.
 pub struct InMemoryCheckpointStore {
     state: Mutex<HashMap<String, u64>>,
 }

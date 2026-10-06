@@ -21,11 +21,21 @@
 //! preferred storage engine and wire them through
 //! `nitinol_eventsource::system::ProcessSystem`.
 //!
-//! [`store::EventStore`] carries an optimistic-concurrency-control contract
-//! (`OCC-1` … `OCC-5`) that a backend has to reproduce, and one of its clauses
-//! is broken silently by the most obvious way to number events in a relational
-//! store.  `nitinol-store-conformance` is that contract as a suite to run
-//! against your implementation.
+//! All three traits carry behavioural contracts a backend has to reproduce,
+//! stated as labelled clauses on the trait itself:
+//! [`store::EventStore`] carries `OCC-1` … `OCC-5` and `LOAD-1`,
+//! [`store::SnapshotStore`] carries `SNAP-1` … `SNAP-4`, and
+//! [`store::CheckpointStore`] carries `CKP-1` … `CKP-6`.  One OCC clause is
+//! broken silently by the most obvious way to number events in a relational
+//! store, and one `CKP` clause by the most obvious way to read a missing row.
+//! `nitinol-store-conformance` is those contracts as a suite to run against
+//! your implementation.
+//!
+//! What the clauses fix is each store on its own.  A contract that holds only
+//! for a store *together with* the machinery driving it — that a projection's
+//! result and the checkpoint covering it settle in one transaction — is fixed
+//! against a provider and a projector at once instead; each trait's
+//! documentation names where.
 //!
 //! # Reserved namespace
 //!

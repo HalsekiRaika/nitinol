@@ -11,6 +11,16 @@
 //!   Given a store that hides the last event of a batch from the first load
 //!   When the kit's deterministic verification is run
 //!   Then it fails, naming OCC-3
+//!
+//! Scenario: a snapshot store that answers with a state no save ever wrote
+//!   Given a store answering with the latest sequence and the first payload
+//!   When the kit's snapshot verification is run
+//!   Then it fails, naming SNAP-3
+//!
+//! Scenario: a checkpoint store that cannot tell "never started" from "at zero"
+//!   Given a store answering an unsaved scope with a position of zero
+//!   When the kit's deterministic checkpoint verification is run
+//!   Then it fails, naming CKP-1
 //! ```
 //!
 //! A suite that only ever passes says nothing about what it measures, and OCC-5
@@ -24,14 +34,23 @@
 //! also why a probabilistic stress run is not on its own evidence that the kit
 //! would have caught anything.
 //!
-//! `expected` matches the OCC label the kit puts at the front of its message,
-//! which is what tells a broken clause from a panic for any other reason.
+//! The snapshot and checkpoint faults below are constructed in the same sense:
+//! each store answers the same way however a run is scheduled, so the clause
+//! that catches it does so every time.
+//!
+//! `expected` matches the label the kit puts at the front of its message, which
+//! is what tells a broken clause from a panic for any other reason.
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{Fault, FaultyStore, TokioExecutor};
+use common::{
+    CheckpointFault, Fault, FaultyCheckpointStore, FaultySnapshotStore, FaultyStore, SnapshotFault,
+    TokioExecutor,
+};
 
-use nitinol_store_conformance::{verify_deterministic, verify_under_concurrency};
+use nitinol_store_conformance::{
+    checkpoint, snapshot, verify_deterministic, verify_under_concurrency,
+};
 
 /// A `global_sequence` handed out before the commit it belongs to becomes
 /// visible below a checkpoint the reader has already passed, so the event is
@@ -56,6 +75,105 @@ async fn delayed_visibility_is_reported_as_an_occ_5_violation() {
 async fn a_partially_visible_batch_is_reported_as_an_occ_3_violation() {
     verify_deterministic(&FaultyStore::injecting(
         Fault::WithholdLastEventOfMultiEventBatch,
+    ))
+    .await;
+}
+
+/// An aggregate that has never been snapshotted is a condition, not a failure:
+/// it is what every aggregate activating for the first time looks like. A store
+/// that raised an error there would stop an activation the contract has carrying
+/// on from its default state.
+#[tokio::test]
+#[should_panic(expected = "SNAP-1")]
+async fn failing_the_load_of_an_unsaved_aggregate_is_reported_as_a_snap_1_violation() {
+    snapshot::verify(&FaultySnapshotStore::injecting(
+        SnapshotFault::FailTheUnsavedAggregate,
+    ))
+    .await;
+}
+
+/// A store that answers with the first snapshot an aggregate ever saved has the
+/// aggregate restore an old state and replay from the position that state was
+/// taken at, with no error raised anywhere.
+#[tokio::test]
+#[should_panic(expected = "SNAP-3")]
+async fn answering_with_a_superseded_snapshot_is_reported_as_a_snap_3_violation() {
+    snapshot::verify(&FaultySnapshotStore::injecting(
+        SnapshotFault::TheFirstSaveWins,
+    ))
+    .await;
+}
+
+/// The worse half of the same clause, and the reason it is about the pair rather
+/// than about the sequence: a store answering with the latest sequence and an
+/// earlier payload hands back a state no save ever wrote, and the aggregate then
+/// replays from beyond the events that payload is missing. A clause that checked
+/// the sequence alone would pass this store.
+#[tokio::test]
+#[should_panic(expected = "SNAP-3")]
+async fn answering_with_a_sequence_and_a_payload_from_different_saves_is_reported_as_a_snap_3_violation(
+) {
+    snapshot::verify(&FaultySnapshotStore::injecting(
+        SnapshotFault::TheLatestSequenceWithTheFirstPayload,
+    ))
+    .await;
+}
+
+/// A store with one slot for every aggregate has an aggregate restore another
+/// aggregate's state.
+#[tokio::test]
+#[should_panic(expected = "SNAP-4")]
+async fn one_slot_for_every_aggregate_is_reported_as_a_snap_4_violation() {
+    snapshot::verify(&FaultySnapshotStore::injecting(
+        SnapshotFault::OneSlotForEveryAggregate,
+    ))
+    .await;
+}
+
+/// A position of zero for a scope nothing has saved for cannot be told from a
+/// consumer that really did stop at zero, which is the distinction a consumer
+/// deciding where to resume from rests on.
+#[tokio::test]
+#[should_panic(expected = "CKP-1")]
+async fn reading_an_unsaved_scope_as_zero_is_reported_as_a_ckp_1_violation() {
+    checkpoint::verify_deterministic(&FaultyCheckpointStore::injecting(
+        CheckpointFault::ReadTheUnsavedScopeAsZero,
+    ))
+    .await;
+}
+
+/// A consumer following a store-wide order passes records it has no handler for,
+/// so the position it saves skips numbers. A store that took only the next one
+/// would refuse every save such a consumer makes.
+#[tokio::test]
+#[should_panic(expected = "CKP-3")]
+async fn refusing_a_position_that_skips_numbers_is_reported_as_a_ckp_3_violation() {
+    checkpoint::verify_deterministic(&FaultyCheckpointStore::injecting(
+        CheckpointFault::TakeOnlyTheSequenceAfterTheStoredOne,
+    ))
+    .await;
+}
+
+/// A store with one slot for every scope has each consumer resume from wherever
+/// another one had got to.
+#[tokio::test]
+#[should_panic(expected = "CKP-5")]
+async fn one_slot_for_every_scope_is_reported_as_a_ckp_5_violation() {
+    checkpoint::verify_deterministic(&FaultyCheckpointStore::injecting(
+        CheckpointFault::OneSlotForEveryScope,
+    ))
+    .await;
+}
+
+/// The rendered key is the whole of what a store is told, and a framework-owned
+/// consumer renders inside the reserved namespace deliberately — that is what
+/// keeps its key from meeting a projection's. A store that read the namespace as
+/// something to validate would keep those consumers from recording anything.
+#[tokio::test]
+#[should_panic(expected = "CKP-5")]
+async fn refusing_a_reserved_namespace_key_is_reported_as_a_ckp_5_violation() {
+    checkpoint::verify_deterministic(&FaultyCheckpointStore::injecting(
+        CheckpointFault::RefuseAKeyInsideTheReservedNamespace,
     ))
     .await;
 }

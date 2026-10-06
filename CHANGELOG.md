@@ -46,6 +46,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type. Delivery is at-least-once with no mode to choose, and the host runs
   beside the existing tell path rather than replacing it.
 
+- (`nitinol-persistence`): `SnapshotStore` and `CheckpointStore` now state
+  behavioural clauses of their own, labelled the way `EventStore`'s OCC clauses
+  are and stable in the same sense. `SNAP-1` … `SNAP-4`: an aggregate nothing
+  was saved for is a condition rather than a failure, one save reads back whole
+  — the position and the state it was taken at, together, never a pair no save
+  wrote — the save that came last is what a load answers with, and one
+  aggregate's snapshot is never another's. `CKP-1` … `CKP-6`: never started is
+  not the same as at zero, a saved position is what a load answers with, a move
+  forward is taken however far it reaches, a save that is not a move forward is
+  the backend's to answer, the rendered key is the whole of what a store is
+  told — reserved-namespace keys included — and a save handed a transaction
+  belongs to it.
+
+  Each clause names what fixes it, and the two that no suite can fix say so
+  with the reason: `CKP-4` because the contract leaves two answers open and
+  `CheckpointError` has no variant that would tell them apart, `CKP-6` because
+  a kit can make no backend's transaction. Both are fixed by the tests of a
+  backend that has one.
+
+  What the clauses fix is each store alone. Settling a projection's result and
+  the checkpoint covering it in one transaction is a contract of a store *and*
+  the projector driving it, and the trait documentation says so and names where
+  that is fixed instead.
+
+- (`nitinol-store-conformance`): the snapshot and checkpoint clauses as suites,
+  beside the OCC one. `snapshot::verify` has one entry point and no concurrency
+  half, because the framework's only consumer of a snapshot store serialises
+  every call through one process; `checkpoint::verify_deterministic`,
+  `checkpoint::verify_under_concurrency` and `checkpoint::verify` keep the same
+  division the OCC suite does, the concurrent half putting several writers
+  under keys of their own at once — which is how a partitioned delivery host
+  reaches a store, and the one path that puts a provider's connection pool
+  under more than one writer. A provider implements
+  `snapshot::SnapshotStoreUnderTest` or `checkpoint::CheckpointStoreUnderTest`
+  and keeps the existing conventions: a `bring_up` that hands back a store
+  holding nothing, and the caller's own runtime borrowed through `Executor`.
+  The crate still depends on no async runtime. The in-memory reference stores
+  and the Postgres `CheckpointStore` are run through them.
+
 - (`nitinol-persistence`): `EventStore::load` now states `LOAD-1` — a query's
   conditions are a conjunction, so an event-type prefix and a global position
   named together serve what satisfies both, in ascending global order, and the

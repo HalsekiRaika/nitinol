@@ -32,7 +32,8 @@ use futures_core::future::BoxFuture;
 use linkme::distributed_slice;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{EventRegistryEntry, EventType, Family, TypeName, EVENT_REGISTRY};
-use nitinol_sqlx::PostgresEventStore;
+use nitinol_sqlx::{PostgresCheckpointStore, PostgresEventStore};
+use nitinol_store_conformance::checkpoint::CheckpointStoreUnderTest;
 use nitinol_store_conformance::{Executor, StoreUnderTest};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, Executor as _, PgPool};
@@ -251,6 +252,23 @@ async fn pool_on(url: &str, schema: &str, connections: u32) -> PgPool {
 impl StoreUnderTest for PostgresBackend {
     fn bring_up(&self) -> BoxFuture<'_, Arc<dyn EventStore>> {
         Box::pin(async move { self.bring_up_store().await })
+    }
+}
+
+impl CheckpointStoreUnderTest for PostgresBackend {
+    /// The concrete store rather than a `dyn` handle: this provider's
+    /// `CheckpointStore::Tx` is a `sqlx` transaction, and that association is
+    /// what the suite hands back to a caller.
+    type Store = PostgresCheckpointStore;
+
+    /// A schema of its own, migrated, over a pool of its own: the checkpoint
+    /// table is keyed by the rendered scope alone, so two clauses sharing one
+    /// schema would have each reading the other's rows.
+    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
+        Box::pin(async move {
+            let schema = self.migrated_schema().await;
+            Arc::new(PostgresCheckpointStore::new(schema.pool()))
+        })
     }
 }
 
