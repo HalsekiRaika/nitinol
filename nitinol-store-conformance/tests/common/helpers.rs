@@ -1,31 +1,45 @@
 //! What a caller brings to the kit: a store to put under test, and a runtime to
 //! run the concurrent clauses on.
 //!
-//! [`ReferenceStore`] and [`TokioExecutor`] are the whole of the wiring a
-//! provider writes. [`FaultyStore`] is the kit's own self-check: it brings up a
-//! store whose numbering order and visibility order come apart on purpose, so
-//! the clauses can be shown to catch a backend that breaks the contract instead
-//! of merely passing against one that keeps it.
+//! One of these per store contract the kit states. [`ReferenceStore`],
+//! [`ReferenceSnapshotStore`] and [`ReferenceCheckpointStore`] bring up the
+//! in-memory implementation the `OCC`, `SNAP` and `CKP` clauses are
+//! respectively written against, and [`TokioExecutor`] is the runtime the
+//! concurrent clauses are lent. Together they are the whole of the wiring a
+//! provider writes.
+//!
+//! [`FaultyStore`], [`FaultySnapshotStore`] and [`FaultyCheckpointStore`] are
+//! the kit's own self-check: each brings up a store that breaks exactly the one
+//! clause its fault names, so the clauses can be shown to catch a backend that
+//! breaks the contract instead of merely passing against one that keeps it.
 //!
 //! The doubles live in this crate rather than in the kit's `src/` for two
 //! reasons: they are not part of what the kit publishes, and a store defined
-//! outside the kit's own crate is the direct evidence that a provider's
-//! `EventStore` can be handed to the public API.
+//! outside the kit's own crate is the direct evidence that a provider's store
+//! can be handed to the public API.
 //!
 //! Each test binary compiles this module in full but uses only the subset it
 //! needs, so per-binary dead code is expected.
 
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use futures_core::future::BoxFuture;
 use futures_util::stream;
-use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
-use nitinol_persistence::{AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
+use nitinol_persistence::error::{AppendError, CheckpointError, LoadError, SnapshotError};
+use nitinol_persistence::store::{
+    CheckpointScope, CheckpointStore, EventStore, EventStream, InMemoryCheckpointStore,
+    InMemoryEventStore, InMemorySnapshotStore, SnapshotStore,
+};
+use nitinol_persistence::{
+    is_within_reserved_namespace, AggregateId, AppendOutcome, AppendingEvent, LoadQuery,
+    LoadedEvent, PersistedSnapshot,
+};
+use nitinol_store_conformance::checkpoint::CheckpointStoreUnderTest;
+use nitinol_store_conformance::snapshot::SnapshotStoreUnderTest;
 use nitinol_store_conformance::{Executor, StoreUnderTest};
 
 /// The reference implementation the OCC clauses are written against.
@@ -319,4 +333,295 @@ fn matches_query(event: &LoadedEvent, query: &LoadQuery) -> bool {
         }
     }
     true
+}
+
+/// The reference implementation the `SNAP` clauses are written against.
+pub struct ReferenceSnapshotStore;
+
+impl SnapshotStoreUnderTest for ReferenceSnapshotStore {
+    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn SnapshotStore>> {
+        Box::pin(async { Arc::new(InMemorySnapshotStore::default()) as Arc<dyn SnapshotStore> })
+    }
+}
+
+/// The way a [`SkewedSnapshotStore`] departs from what a snapshot store owes.
+///
+/// Each one is a mistake a backend could make while every byte it stored looks
+/// right, and each is the mistake one `SNAP` clause exists to refuse.
+#[derive(Debug, Clone, Copy)]
+pub enum SnapshotFault {
+    /// An aggregate the store holds no snapshot for fails its load instead of
+    /// being answered that there is none.
+    ///
+    /// SNAP-1: an aggregate activating for the first time would then be unable
+    /// to tell "nothing was ever saved for me" from "the store is broken", and
+    /// the contract has it carry on from its default state.
+    FailTheUnsavedAggregate,
+    /// The first snapshot an aggregate ever saved is the one every later load
+    /// answers with.
+    ///
+    /// SNAP-3: an aggregate would restore an old state and then replay from the
+    /// position that state was taken at, which is the one reading that produces
+    /// no error anywhere.
+    TheFirstSaveWins,
+    /// The sequence comes from the latest save and the payload from the first,
+    /// so what is answered is a pair no single save ever wrote.
+    ///
+    /// SNAP-3: the worst of the two, because the sequence looks current. An
+    /// aggregate would restore the old payload and then replay from beyond the
+    /// events that payload is missing, losing them for good.
+    TheLatestSequenceWithTheFirstPayload,
+    /// One slot for every aggregate: what was saved for one is read back for
+    /// all of them.
+    ///
+    /// SNAP-4: an aggregate would restore another aggregate's state — a store
+    /// whose lookup forgot which aggregate it was asked about.
+    OneSlotForEveryAggregate,
+}
+
+/// A snapshot store that keeps the contract except for the clause its fault
+/// names.
+///
+/// It keeps the saves it was handed rather than an answer it has already chosen,
+/// so each fault is a way of reading that log back and there is one copy of
+/// what happened.
+pub struct SkewedSnapshotStore {
+    fault: SnapshotFault,
+    saves: Mutex<Vec<PersistedSnapshot>>,
+}
+
+impl SkewedSnapshotStore {
+    fn injecting(fault: SnapshotFault) -> Self {
+        Self {
+            fault,
+            saves: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Vec<PersistedSnapshot>> {
+        self.saves
+            .lock()
+            .expect("the skewed snapshot store's state lock was poisoned by a panicking holder")
+    }
+}
+
+#[async_trait]
+impl SnapshotStore for SkewedSnapshotStore {
+    async fn save(&self, snapshot: PersistedSnapshot) -> Result<(), SnapshotError> {
+        self.lock().push(snapshot);
+        Ok(())
+    }
+
+    async fn load_latest(
+        &self,
+        aggregate_id: &AggregateId,
+    ) -> Result<Option<PersistedSnapshot>, SnapshotError> {
+        let saves = self.lock();
+        let of_this_aggregate: Vec<&PersistedSnapshot> = saves
+            .iter()
+            .filter(|saved| &saved.aggregate_id == aggregate_id)
+            .collect();
+        let first = of_this_aggregate.first().copied();
+        let latest = of_this_aggregate.last().copied();
+
+        match self.fault {
+            SnapshotFault::FailTheUnsavedAggregate => match latest {
+                Some(found) => Ok(Some(found.clone())),
+                None => Err(SnapshotError::Backend(
+                    "this store reports an aggregate it holds no snapshot for as a failure".into(),
+                )),
+            },
+            SnapshotFault::TheFirstSaveWins => Ok(first.cloned()),
+            SnapshotFault::TheLatestSequenceWithTheFirstPayload => {
+                Ok(latest.zip(first).map(|(latest, first)| PersistedSnapshot {
+                    payload: first.payload.clone(),
+                    ..latest.clone()
+                }))
+            }
+            SnapshotFault::OneSlotForEveryAggregate => Ok(saves.last().cloned()),
+        }
+    }
+}
+
+/// A snapshot store under test that brings up a backend breaking exactly the one
+/// clause `fault` names.
+pub struct FaultySnapshotStore {
+    fault: SnapshotFault,
+}
+
+impl FaultySnapshotStore {
+    pub fn injecting(fault: SnapshotFault) -> Self {
+        Self { fault }
+    }
+}
+
+impl SnapshotStoreUnderTest for FaultySnapshotStore {
+    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn SnapshotStore>> {
+        let fault = self.fault;
+        Box::pin(async move {
+            Arc::new(SkewedSnapshotStore::injecting(fault)) as Arc<dyn SnapshotStore>
+        })
+    }
+}
+
+/// The reference implementation the `CKP` clauses are written against.
+///
+/// The associated store type is the concrete one rather than a `dyn` handle:
+/// `CheckpointStore::Tx` is an associated type, and a transaction is the one
+/// thing a checkpoint store's own backend decides.
+pub struct ReferenceCheckpointStore;
+
+impl CheckpointStoreUnderTest for ReferenceCheckpointStore {
+    type Store = InMemoryCheckpointStore;
+
+    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
+        Box::pin(async { Arc::new(InMemoryCheckpointStore::default()) })
+    }
+}
+
+/// The way a [`SkewedCheckpointStore`] departs from what a checkpoint store
+/// owes.
+#[derive(Debug, Clone, Copy)]
+pub enum CheckpointFault {
+    /// A scope nothing has saved for reads as a position of zero rather than as
+    /// no position at all.
+    ///
+    /// CKP-1: the one answer that cannot be told from a consumer that really
+    /// did stop at zero, which is why the clause asks for `None`.
+    ReadTheUnsavedScopeAsZero,
+    /// Only the sequence immediately after the stored one is taken; a save that
+    /// skips numbers is refused.
+    ///
+    /// CKP-3: a consumer following a store-wide order moves over records it has
+    /// no handler for, so the position it saves is not the one before it plus
+    /// one. A store that required the next number would refuse every one of
+    /// them.
+    TakeOnlyTheSequenceAfterTheStoredOne,
+    /// One slot for every scope: a position saved under one key is read back
+    /// under every other.
+    ///
+    /// CKP-5: each consumer would resume from wherever another one had got to —
+    /// a lookup that forgot the key it was given.
+    OneSlotForEveryScope,
+    /// A key inside the framework's reserved namespace is refused rather than
+    /// stored like any other.
+    ///
+    /// CKP-5: the rendered key is the whole of what a store is told, and a
+    /// framework-owned consumer renders inside that namespace on purpose. A
+    /// store that read the namespace as something to validate would keep the
+    /// framework's own consumers from recording anything.
+    RefuseAKeyInsideTheReservedNamespace,
+}
+
+/// Where a store with one slot for everything keeps the only position it has.
+const THE_ONLY_ROW: &str = "the one row this store has";
+
+/// A checkpoint store that keeps the contract except for the clause its fault
+/// names.
+pub struct SkewedCheckpointStore {
+    fault: CheckpointFault,
+    positions: Mutex<HashMap<String, u64>>,
+}
+
+impl SkewedCheckpointStore {
+    fn injecting(fault: CheckpointFault) -> Self {
+        Self {
+            fault,
+            positions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, u64>> {
+        self.positions
+            .lock()
+            .expect("the skewed checkpoint store's state lock was poisoned by a panicking holder")
+    }
+
+    /// The key this store files a position under.
+    ///
+    /// Everything but the one-slot fault files the key the scope rendered, which
+    /// is the whole of what the contract says a store is told.
+    fn key_of(&self, scope: &dyn CheckpointScope) -> String {
+        match self.fault {
+            CheckpointFault::OneSlotForEveryScope => THE_ONLY_ROW.to_owned(),
+            _ => scope.checkpoint_key().to_owned(),
+        }
+    }
+}
+
+#[async_trait]
+impl CheckpointStore for SkewedCheckpointStore {
+    type Tx = ();
+
+    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
+        let key = self.key_of(scope);
+        let saved = self.lock().get(&key).copied();
+
+        match self.fault {
+            CheckpointFault::ReadTheUnsavedScopeAsZero => Ok(Some(saved.unwrap_or(0))),
+            _ => Ok(saved),
+        }
+    }
+
+    async fn save(
+        &self,
+        scope: &dyn CheckpointScope,
+        sequence: u64,
+        _tx: Option<&mut Self::Tx>,
+    ) -> Result<(), CheckpointError> {
+        if matches!(
+            self.fault,
+            CheckpointFault::RefuseAKeyInsideTheReservedNamespace
+        ) && is_within_reserved_namespace(scope.checkpoint_key())
+        {
+            return Err(CheckpointError::Backend(
+                "this store refuses a checkpoint key inside the framework's reserved namespace"
+                    .into(),
+            ));
+        }
+
+        let key = self.key_of(scope);
+        let mut positions = self.lock();
+
+        if matches!(
+            self.fault,
+            CheckpointFault::TakeOnlyTheSequenceAfterTheStoredOne
+        ) {
+            if let Some(held) = positions.get(&key).copied() {
+                if sequence != held + 1 {
+                    return Err(CheckpointError::Backend(
+                        format!(
+                            "this store takes only the sequence after {held}, and was handed \
+                             {sequence}"
+                        )
+                        .into(),
+                    ));
+                }
+            }
+        }
+
+        positions.insert(key, sequence);
+        Ok(())
+    }
+}
+
+/// A checkpoint store under test that brings up a backend breaking exactly the
+/// one clause `fault` names.
+pub struct FaultyCheckpointStore {
+    fault: CheckpointFault,
+}
+
+impl FaultyCheckpointStore {
+    pub fn injecting(fault: CheckpointFault) -> Self {
+        Self { fault }
+    }
+}
+
+impl CheckpointStoreUnderTest for FaultyCheckpointStore {
+    type Store = SkewedCheckpointStore;
+
+    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
+        let fault = self.fault;
+        Box::pin(async move { Arc::new(SkewedCheckpointStore::injecting(fault)) })
+    }
 }

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Executable conformance suite for the OCC contract any nitinol EventStore owes"
+description = "Executable conformance suites for the contracts any nitinol EventStore, SnapshotStore and CheckpointStore owes"
 
 # The point of this crate is what it may *not* depend on: an async runtime.  A
 # kit that reached for one would be out of reach of every provider built on
@@ -18,8 +18,8 @@ futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 jiff = "0.2"
 
-# `async-trait` is a dev-dependency because the kit itself implements no
-# `EventStore`: only the fault-injecting double under `tests/` does.
+# `async-trait` is a dev-dependency because the kit itself implements none of
+# the store traits: only the fault-injecting doubles under `tests/` do.
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 async-trait = "0.1"

@@ -3,8 +3,9 @@
 A Postgres `EventStore` and `CheckpointStore` for `nitinol`, built on `sqlx`.
 
 The crate carries its own schema as `sqlx` migrations and puts itself through
-`nitinol-store-conformance`, the executable form of the `EventStore` OCC
-contract.
+`nitinol-store-conformance`, the executable form of the store contracts — the
+`EventStore` OCC clauses and the `CheckpointStore` clauses, each against a
+schema of its own.
 
 ## Using it
 
