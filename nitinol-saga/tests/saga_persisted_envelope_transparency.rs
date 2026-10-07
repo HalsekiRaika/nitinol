@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
-use nitinol_persistence::provider::Persistence;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -122,7 +122,11 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
 
     let upstream_id = AggregateId::new("envelope-encode-upstream");
@@ -210,7 +214,7 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
 async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 

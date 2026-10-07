@@ -21,7 +21,7 @@
 //! | `EventStore` (`OCC-1` … `OCC-5`, `LOAD-1`) | [`verify`], [`verify_deterministic`], [`verify_under_concurrency`] |
 //! | `SnapshotStore` (`SNAP-1` … `SNAP-4`) | [`snapshot::verify`] |
 //! | `CheckpointStore` (`CKP-1` … `CKP-6`) | [`checkpoint::verify`], [`checkpoint::verify_deterministic`], [`checkpoint::verify_under_concurrency`] |
-//! | `PersistenceProvider` (`PRV-1` … `PRV-5`) | [`provider::verify`] and one entry point per slot |
+//! | `Store` (`PRV-1` … `PRV-5`) | [`provider::verify`] and one entry point per slot |
 //!
 //! The store contracts are independent: a backend implementing one of the
 //! traits runs that contract's entry points and owes the others nothing.  Two

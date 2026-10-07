@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
@@ -42,14 +42,23 @@ impl Default for EventStoreState {
 /// third-party backend is put through — this type among them.
 ///
 /// Intended for tests and examples; not for production use.
+///
+/// # A handle, not a region
+///
+/// Cloning this names the same records: the handle is what is copied, and the
+/// data region behind it is shared. [`Default`] is the other half — it
+/// constructs a destination, so two stores built that way hold nothing of each
+/// other's. That is `PRV-1` as a store owes it, and it is what lets a
+/// deployment hand this store to two wiring points without an `Arc` around it.
+#[derive(Clone)]
 pub struct InMemoryEventStore {
-    state: Mutex<EventStoreState>,
+    state: Arc<Mutex<EventStoreState>>,
 }
 
 impl Default for InMemoryEventStore {
     fn default() -> Self {
         Self {
-            state: Mutex::new(EventStoreState::default()),
+            state: Arc::new(Mutex::new(EventStoreState::default())),
         }
     }
 }

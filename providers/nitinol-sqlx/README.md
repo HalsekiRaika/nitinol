@@ -20,28 +20,43 @@ nitinol = { version = "0.4", features = ["postgres"] }
 use nitinol::eventsource::system::EventSourceSystem;
 use nitinol::runtime::ProcessSystem;
 use nitinol::sqlx::sqlx::postgres::PgPoolOptions;
-use nitinol::sqlx::{postgres_persistence, PostgresEventStore};
+use nitinol::persistence::provider::PersistenceProvider;
+use nitinol::sqlx::{PostgresEventStore, PostgresStore};
 
 let pool = PgPoolOptions::new().connect(&std::env::var("DATABASE_URL")?).await?;
 PostgresEventStore::migrate(&pool).await?;
 
-// One provider: the journal and both checkpoint slots over this database.
-let persistence = postgres_persistence(pool)?;
+// One store: the journal and both checkpoint slots over this database.
+let persistence = PersistenceProvider::new(PostgresStore::new(pool)?);
 
 let system = EventSourceSystem::builder(ProcessSystem::new().await)
     .with_persistence(persistence.clone())
     .build();
 ```
 
-The provider is what every wiring point resolves its store from, so a
+The supplier is what every wiring point resolves its store from, so a
 deployment names the database once. There is no snapshot store in this crate,
-so the slot stays unprovided and wiring that needs one is refused while it is
-compiled rather than at the first save; a deployment that wants snapshots names
-a store for that slot itself, with `with_snapshot_store`.
+so `PostgresStore` does not implement that slot: wiring that needs one is
+refused while it is compiled rather than at the first save. A deployment that
+wants snapshots names each handle itself instead, which is what mixing backends
+has to look like:
+
+```rust,ignore
+use nitinol::persistence::provider::CustomStore;
+use nitinol::sqlx::{PostgresCheckpointStore, PostgresEventStore};
+
+let persistence = PersistenceProvider::new(
+    CustomStore::builder()
+        .eventstore(PostgresEventStore::new(pool.clone())?)
+        .checkpoints(PostgresCheckpointStore::new(pool.clone()))
+        .snapshot(snapshots_from_somewhere_else)
+        .build(),
+);
+```
 
 One supplier is not one transaction: the clauses on
-`nitinol::persistence::provider::PersistenceProvider` state what a provider does
-and does not promise across its slots.
+`nitinol::persistence::provider::Store` state what a supplier does and does not
+promise across its slots.
 
 Four things the store expects of its caller.
 
@@ -141,7 +156,7 @@ impl TxProvider for PoolTransactions {
 ```
 
 Hand it to the projector, whose journal and checkpoint store both come from the
-provider, and write the read model through the transaction `project` is given:
+supplier, and write the read model through the transaction `project` is given:
 
 ```rust,ignore
 system
@@ -149,13 +164,15 @@ system
     .with_tx_provider(PoolTransactions { pool: pool.clone() })
     .with_event::<OrderPlaced>()
     .catchup_from_global()
-    .spawn(system.process_system())
+    .spawn()
     .await;
 ```
 
-A projector wired without a system is the same two slots named from the same
-provider — `ProjectorProps::new(ProjectionId::new("orders.totals"),
-&persistence, OrderTotals::new)`.
+Props taken from a system carry the system they came from, so the spawn above
+needs nothing re-injected. A projector wired without a system is the same two
+slots named from the same supplier, started on a process system named at the
+spawn — `ProjectorProps::new(ProjectionId::new("orders.totals"), &persistence,
+OrderTotals::new) … .spawn(&ps)`.
 
 ```rust,ignore
 async fn project(

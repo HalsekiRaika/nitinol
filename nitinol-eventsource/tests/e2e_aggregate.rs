@@ -18,7 +18,7 @@ use futures_util::TryStreamExt;
 use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event, Query,
 };
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -105,7 +105,11 @@ async fn e2e_ask_persists_the_fact_its_decision_stated() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
     let id = AggregateId::new("e2e-agg-ask");
     let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
@@ -156,7 +160,9 @@ async fn e2e_persisted_state_is_visible_through_a_later_reference() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(store))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder().eventstore(store).build(),
+        ))
         .build();
     let id = AggregateId::new("e2e-agg-restart");
 
@@ -189,7 +195,11 @@ async fn e2e_multiple_asks_advance_sequence_monotonically() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
     let id = AggregateId::new("e2e-agg-multi");
     let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;

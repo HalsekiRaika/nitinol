@@ -69,8 +69,8 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::Persistence;
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -1013,7 +1013,7 @@ async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() 
 async fn the_position_is_the_last_row_so_no_tell_id_moves() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

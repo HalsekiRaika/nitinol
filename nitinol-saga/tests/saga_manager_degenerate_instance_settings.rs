@@ -33,8 +33,8 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
 use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
-use nitinol_persistence::provider::Persistence;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::{ProcessSystem, Props};
@@ -259,7 +259,7 @@ async fn load_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<Loade
 async fn manager_with_dead_letter_subscriber_delivers_the_instances_dead_letter() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let received = Arc::new(Mutex::new(Vec::<DeadLetterEvent>::new()));
@@ -334,7 +334,7 @@ async fn manager_with_dead_letter_subscriber_delivers_the_instances_dead_letter(
 async fn manager_with_enqueue_policy_suppresses_the_instances_dead_letter() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -432,7 +432,7 @@ impl Saga for InertSaga {
 async fn manager_with_crash_restart_factory_redispatches_the_instances_pending_tell() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let mock = MockAggregateProxy::<Inventory>::new();
@@ -522,7 +522,7 @@ async fn manager_with_crash_restart_factory_redispatches_the_instances_pending_t
 async fn manager_dead_letter_subscriber_receives_an_ended_instances_dead_letter() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let received = Arc::new(Mutex::new(Vec::<DeadLetterEvent>::new()));

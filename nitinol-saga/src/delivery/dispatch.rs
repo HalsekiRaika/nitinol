@@ -1,13 +1,10 @@
 //! One consequence of a decision, and what came back from carrying it out.
 
-use std::sync::Arc;
-
 use futures_core::future::BoxFuture;
 
 use nitinol_eventsource::error::Retryability;
-use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::system::SystemHandle;
 use nitinol_eventsource::{Aggregate, Decider};
-use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::AggregateId;
 
 /// Why a delivery did not land, classified once.
@@ -25,18 +22,8 @@ pub(crate) struct DeliveryFailure {
     pub(crate) detail: String,
 }
 
-/// The system a delivery is carried out on, with the provider's type erased.
-///
-/// A mapping is written before a deployment's provider is known — and
-/// [`Saga::dispatch`](crate::Saga::dispatch) takes no type parameter to carry
-/// one — so the closure below has to name one system type for every provider.
-/// Erasing to `Arc<dyn PersistenceProvider>` is that type, and
-/// [`EventSourceSystem::erase_persistence`] is how a host gets a handle onto
-/// the system it was spawned on in that shape.
-pub(crate) type ErasedSystem = EventSourceSystem<Arc<dyn PersistenceProvider>>;
-
 type Dispatch =
-    Box<dyn FnOnce(ErasedSystem) -> BoxFuture<'static, Result<(), DeliveryFailure>> + Send>;
+    Box<dyn FnOnce(SystemHandle) -> BoxFuture<'static, Result<(), DeliveryFailure>> + Send>;
 
 /// One command, addressed to one aggregate.
 ///
@@ -69,7 +56,7 @@ impl SagaDelivery {
         let addressed = target.clone();
         Self {
             target,
-            dispatch: Box::new(move |system: ErasedSystem| {
+            dispatch: Box::new(move |system: SystemHandle| {
                 Box::pin(async move {
                     // Asking rather than telling is what makes a refusal
                     // something the host can see: a dispatch with no answer
@@ -93,7 +80,7 @@ impl SagaDelivery {
     }
 
     /// Issue the command and wait for the receiver's answer.
-    pub(crate) async fn deliver(self, system: ErasedSystem) -> Result<(), DeliveryFailure> {
+    pub(crate) async fn deliver(self, system: SystemHandle) -> Result<(), DeliveryFailure> {
         (self.dispatch)(system).await
     }
 }

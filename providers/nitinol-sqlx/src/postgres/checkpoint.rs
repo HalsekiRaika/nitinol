@@ -53,6 +53,11 @@ pub struct CheckpointConflict {
 /// The table is part of this crate's schema, so
 /// [`PostgresEventStore::migrate`](super::PostgresEventStore::migrate) is what
 /// creates it.
+///
+/// Cloning copies the pool handle, which reaches the same table in the same
+/// database: a clone is the same data region, which is what `PRV-1` asks of a
+/// store distributed by being cloned.
+#[derive(Clone)]
 pub struct PostgresCheckpointStore {
     pool: PgPool,
 }

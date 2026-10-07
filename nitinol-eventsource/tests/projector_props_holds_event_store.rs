@@ -23,7 +23,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -88,7 +88,12 @@ fn _assert_sig_projector_props_new_accepts_arc_dyn_event_store(
 ) {
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
-    let persistence = Persistence::new(store).with_projection_checkpoints(cs);
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(store)
+            .projection_checkpoints(cs)
+            .build(),
+    );
     let _ = ProjectorProps::new(pid, &persistence, move || CountingProjector {
         count: Arc::clone(&count),
         notify: Arc::clone(&notify),
@@ -130,8 +135,12 @@ async fn projector_catches_up_via_direct_arc_dyn_event_store() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn projector over the same Arc<dyn EventStore> (no EventPersistor)
-    let persistence = Persistence::new(Arc::clone(&store))
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&store))
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(
         ProjectionId::new("direct-store-projector"),
         &persistence,

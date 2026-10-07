@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -31,14 +31,21 @@ use crate::store::checkpoint_store::{CheckpointScope, CheckpointStore};
 /// put through — this type among them.
 ///
 /// Intended for tests and examples; not for production use.
+///
+/// # A handle, not a region
+///
+/// Cloning this names the same positions, and [`Default`] constructs a
+/// destination of its own — which is what naming one handle into both
+/// checkpoint slots of a store means, and what naming two apart means.
+#[derive(Clone)]
 pub struct InMemoryCheckpointStore {
-    state: Mutex<HashMap<String, u64>>,
+    state: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl Default for InMemoryCheckpointStore {
     fn default() -> Self {
         Self {
-            state: Mutex::new(HashMap::new()),
+            state: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

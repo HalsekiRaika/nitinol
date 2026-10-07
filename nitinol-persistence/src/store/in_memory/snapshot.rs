@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -28,14 +28,20 @@ use crate::store::snapshot_store::SnapshotStore;
 /// through — this type among them.
 ///
 /// Intended for tests and examples; not for production use.
+///
+/// # A handle, not a region
+///
+/// Cloning this names the same saves, and [`Default`] constructs a destination
+/// of its own.
+#[derive(Clone)]
 pub struct InMemorySnapshotStore {
-    state: Mutex<HashMap<AggregateId, PersistedSnapshot>>,
+    state: Arc<Mutex<HashMap<AggregateId, PersistedSnapshot>>>,
 }
 
 impl Default for InMemorySnapshotStore {
     fn default() -> Self {
         Self {
-            state: Mutex::new(HashMap::new()),
+            state: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

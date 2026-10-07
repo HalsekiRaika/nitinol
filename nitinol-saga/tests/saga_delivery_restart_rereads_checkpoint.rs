@@ -51,7 +51,7 @@ async fn a_restarted_partition_resumes_from_the_position_now_recorded() {
     let checkpoints = RecordingCheckpointStore::new();
     recording.fault_on(FAILING_CALL, LoadFault::Panic);
 
-    let _host = SagaDeliveryProps::<DeliverySaga, RecordingCheckpointStore>::new(
+    let _host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingCheckpointStore>>::new(
         &delivery_persistence(&journal, &checkpoints),
     )
     .with_delivery_id(delivery_id())

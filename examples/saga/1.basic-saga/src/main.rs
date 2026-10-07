@@ -3,7 +3,8 @@ use std::time::Duration;
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaSystemExt;
@@ -32,7 +33,7 @@ async fn main() {
     // tenants of the one journal it supplies, each under its own key — which is
     // what lets every spawn below resolve the same store.
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let order_id = AggregateId::new("example-order");

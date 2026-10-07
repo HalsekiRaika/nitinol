@@ -111,3 +111,18 @@ pub trait SnapshotStore: Send + Sync {
         aggregate_id: &AggregateId,
     ) -> Result<Option<PersistedSnapshot>, SnapshotError>;
 }
+
+/// A snapshot store reached through an `Arc` is that store.
+#[async_trait]
+impl<T: SnapshotStore + ?Sized> SnapshotStore for std::sync::Arc<T> {
+    async fn save(&self, snapshot: PersistedSnapshot) -> Result<(), SnapshotError> {
+        T::save(self, snapshot).await
+    }
+
+    async fn load_latest(
+        &self,
+        aggregate_id: &AggregateId,
+    ) -> Result<Option<PersistedSnapshot>, SnapshotError> {
+        T::load_latest(self, aggregate_id).await
+    }
+}

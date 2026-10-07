@@ -27,7 +27,7 @@ use nitinol_eventsource::{
     Query, SnapshotPersistor, Snapshotable,
 };
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -194,7 +194,11 @@ async fn concurrent_resolve_produces_a_single_writer() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
     let id = AggregateId::new("resolve-single-flight");
     let barrier = Arc::new(Barrier::new(CONCURRENT_RESOLVERS));
@@ -260,7 +264,11 @@ async fn second_spawn_aggregate_addresses_the_same_aggregate() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
     let id = AggregateId::new("resolve-second-spawn");
 
@@ -301,7 +309,11 @@ async fn aggregate_props_spawn_addresses_the_same_aggregate() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
     let id = AggregateId::new("resolve-props-path");
 
@@ -309,10 +321,7 @@ async fn aggregate_props_spawn_addresses_the_same_aggregate() {
     spawned.ask(Increment).await.expect("first dispatch");
 
     // When
-    let from_props = system
-        .aggregate_props::<Counter>(id.clone())
-        .spawn(system.process_system())
-        .await;
+    let from_props = system.aggregate_props::<Counter>(id.clone()).spawn().await;
     from_props
         .ask(Increment)
         .await
@@ -339,10 +348,12 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(
-            Persistence::new(Arc::clone(&store))
-                .with_snapshot_store(Arc::new(InMemorySnapshotStore::default())),
-        )
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .snapshot(Arc::new(InMemorySnapshotStore::default()))
+                .build(),
+        ))
         .build();
     let snapshot_ref =
         SnapshotPersistor::spawn(system.process_system(), system.persistence()).await;
@@ -351,7 +362,7 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
     let first = system
         .aggregate_props::<SnapshottingCounter>(id.clone())
         .with_snapshot_persistor(snapshot_ref.clone())
-        .spawn(system.process_system())
+        .spawn()
         .await;
     first.ask(Increment).await.expect("first dispatch");
 
@@ -359,7 +370,7 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
     let second = system
         .aggregate_props::<SnapshottingCounter>(id.clone())
         .with_snapshot_persistor(snapshot_ref)
-        .spawn(system.process_system())
+        .spawn()
         .await;
     second
         .ask(Increment)
@@ -395,7 +406,11 @@ async fn reference_survives_the_death_of_its_activation() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
     let id = AggregateId::new("resolve-self-heal");
 

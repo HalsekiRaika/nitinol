@@ -7,7 +7,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
     CheckpointStore, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
@@ -97,8 +97,12 @@ async fn catchup_all_events_processed_from_empty_checkpoint() {
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("cu-all-agg");
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
 
     for seq in 1..=3 {
         append_evt(&event_store, &agg_id, seq).await;
@@ -143,8 +147,12 @@ async fn catchup_skips_events_before_checkpoint() {
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("cu-skip-agg");
     let projection_id = ProjectionId::new("cu-skip");
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
 
     for seq in 1..=3 {
         append_evt(&event_store, &agg_id, seq).await;
@@ -194,7 +202,12 @@ async fn catchup_empty_store_project_never_called() {
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
 
-    let persistence = Persistence::new(event_store).with_projection_checkpoints(checkpoint_store);
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(event_store)
+            .projection_checkpoints(checkpoint_store)
+            .build(),
+    );
 
     let count = Arc::new(AtomicUsize::new(0));
 
@@ -227,8 +240,12 @@ async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_a = AggregateId::new("cu-multi-a");
     let agg_b = AggregateId::new("cu-multi-b");
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
 
     append_evt(&event_store, &agg_a, 1).await;
     append_evt(&event_store, &agg_b, 1).await;
@@ -269,8 +286,12 @@ async fn catchup_then_live_append_is_projected_via_durable_stream() {
     let event_store = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("cu-then-live-agg");
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
 
     for seq in 1..=2 {
         append_evt(&event_store, &agg_id, seq).await;

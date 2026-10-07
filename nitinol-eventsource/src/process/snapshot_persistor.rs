@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use nitinol_persistence::error::SnapshotError;
-use nitinol_persistence::provider::SnapshotStoreProvider;
+use nitinol_persistence::provider::{PersistenceProvider, SnapshotSlot};
 use nitinol_persistence::store::SnapshotStore;
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
+use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::{IdleTimeout, ProcessSystem, Props, SupervisionStrategy};
@@ -57,7 +58,7 @@ impl Receive<LoadLatestSnapshot> for SnapshotPersistor {
 
 impl SnapshotPersistor {
     /// Spawn a `SnapshotPersistor` on the given system, over the snapshot store
-    /// `persistence` supplies, and return a typed reference.
+    /// `persistence` distributes, and return a typed reference.
     ///
     /// - Supervision: `Resume` — the process stays alive after handler errors.
     /// - Idle timeout: `Persistent` — never stopped due to inactivity.
@@ -68,31 +69,30 @@ impl SnapshotPersistor {
     /// that has a system takes
     /// [`snapshot_persistor`](crate::system::EventSourceSystem::snapshot_persistor)
     /// from it instead, which starts one process and distributes it; both
-    /// resolve the provider's snapshot slot, so neither reaches a store of its
+    /// resolve the supplier's snapshot slot, so neither reaches a store of its
     /// own.
     ///
     /// # Typestate
     ///
-    /// A provider that supplies no snapshot store is refused here rather than
-    /// at the first save:
+    /// A store that holds no snapshot store is refused here rather than at the
+    /// first save:
     ///
     /// ```compile_fail
-    /// # use std::sync::Arc;
     /// # use nitinol_eventsource::SnapshotPersistor;
-    /// # use nitinol_persistence::provider::Persistence;
-    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+    /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+    /// # use nitinol_persistence::store::InMemoryEventStore;
     /// # use nitinol_runtime::ProcessSystem;
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    /// // no `with_snapshot_store` — this provider has no snapshot slot
-    /// let persistence = Persistence::new(store);
+    /// // no `snapshot` — this store has no snapshot slot
+    /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
+    /// let persistence = PersistenceProvider::new(store);
     /// SnapshotPersistor::spawn(&ps, &persistence).await;
     /// # }
     /// ```
-    pub async fn spawn<Pv: SnapshotStoreProvider>(
+    pub async fn spawn<St: SnapshotSlot>(
         system: &ProcessSystem,
-        persistence: &Pv,
+        persistence: &PersistenceProvider<St>,
     ) -> SnapshotPersistorProxy {
         let store = persistence.snapshot_store();
         let props = Props::new(move || SnapshotPersistor {
@@ -119,6 +119,17 @@ impl From<ProcessProxy<SnapshotPersistor>> for SnapshotPersistorProxy {
 pub struct SnapshotPersistorProxy(ProcessProxy<SnapshotPersistor>);
 
 impl SnapshotPersistorProxy {
+    /// The process this handle addresses.
+    ///
+    /// What it is for is telling one persistor from two: the snapshot contract
+    /// is written for a single consumer serialising its calls, and a system
+    /// handing back a second process over one store would be two consumers —
+    /// which a round trip through the store cannot see, because both would
+    /// pass it.
+    pub fn pid(&self) -> Pid {
+        self.0.pid()
+    }
+
     /// Save a snapshot via the `SnapshotPersistor` process.
     pub async fn save(&self, snapshot: PersistedSnapshot) -> Result<(), SnapshotError> {
         self.0

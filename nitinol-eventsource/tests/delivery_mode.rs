@@ -28,7 +28,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
     CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
@@ -175,8 +175,12 @@ async fn at_most_once_checkpoint_advanced_even_when_project_fails() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with AtMostOnce
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
@@ -230,8 +234,12 @@ async fn at_most_once_checkpoint_advanced_on_success() {
     let notify_c = Arc::clone(&notify);
 
     // When
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
@@ -276,8 +284,12 @@ async fn at_least_once_checkpoint_not_saved_when_project_fails() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with AtLeastOnce (default)
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
@@ -333,8 +345,12 @@ async fn at_least_once_checkpoint_saved_after_successful_project() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with AtLeastOnce (default)
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
@@ -388,8 +404,12 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
         let checkpoint_store_c = Arc::clone(&checkpoint_store);
         let agg_id_c = agg_id.clone();
 
-        let persistence =
-            Persistence::new(event_store_c).with_projection_checkpoints(checkpoint_store_c);
+        let persistence = PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store_c)
+                .projection_checkpoints(checkpoint_store_c)
+                .build(),
+        );
         ProjectorProps::new(projection_id_c, &persistence, move || {
             ConditionallyFailingProjector {
                 should_fail: Arc::clone(&sf_c),
@@ -452,8 +472,12 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     let notify2 = Arc::clone(&notify);
     let sf2 = Arc::clone(&should_fail);
 
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy2 = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf2),
@@ -501,8 +525,12 @@ async fn exactly_once_framework_does_not_save_checkpoint() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with ExactlyOnce (framework skips checkpoint saving)
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),

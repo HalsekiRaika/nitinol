@@ -13,56 +13,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on, so an operator names each logical destination once instead of handing the
   same store to every wiring point by hand.
 
-  `provider::PersistenceProvider` is the journal every event-sourced deployment
-  owes, and `SnapshotStoreProvider`, `ProjectionCheckpointProvider` and
-  `DeliveryCheckpointProvider` are the slots beyond it. A provider with no
-  store for a slot does not implement that slot's trait, so the wiring needing
-  it does not compile — a store nobody configured cannot be relied on, and
-  cannot be filled quietly from somewhere else either. `provider::Persistence`
-  is the assembly most deployments want: the journal to `new`, then one `with_*`
-  per further slot, each existing only while that slot is `Unprovided`, so the
-  store a slot answers with is settled in one place. `with_checkpoints` names
-  one store for both checkpoint slots, which is the single-table deployment.
-  `Persistence::in_memory` is every slot over the in-memory reference stores.
+  Three responsibilities, kept apart. `provider::Store` is the storage itself,
+  as one cloneable handle: it owes the journal, and `provider::SnapshotSlot`,
+  `provider::ProjectionCheckpointSlot` and
+  `provider::DeliveryCheckpointSlot` are the slots beyond it. A store with no
+  resource for a slot does not implement that slot's trait, so the wiring
+  needing it does not compile — a store nobody configured cannot be relied on,
+  and cannot be filled quietly from somewhere else either.
+  `provider::CustomStore` is the assembly a mixture is written down in:
+  `CustomStore::builder()`, then `eventstore` for the journal and one of
+  `snapshot` / `projection_checkpoints` / `delivery_checkpoints` /
+  `checkpoints` per further slot, each existing only while that slot is
+  `Unprovided`, and `build` existing only once a journal has been named.
+  `checkpoints` names one handle for both checkpoint slots, which is the
+  single-table deployment. `store::InMemoryStore` is every slot over the
+  in-memory reference stores, and `provider::PersistenceProvider::new(store)`
+  is what distributes whichever of them the store holds to the framework's
+  wiring.
 
-  The clauses a provider reproduces are labelled the way the store contracts
-  are and stable in the same sense. `PRV-1`: distribution is idempotent — for
-  every slot supplied, taking a handle twice reaches one set of records.
-  `PRV-2`: identity is of the data region rather than of the connection, so
-  sharing a pool is neither necessary nor sufficient and the pool half is the
-  assembling implementor's obligation rather than a suite's to judge. `PRV-3`:
-  a mixture of backends is assembled explicitly or not at all. `PRV-4`: a
-  projection's position and a delivery host's progress are two slots,
-  independently configured, initialised and recovered — configuring both with
-  one store is allowed, and what keeps them apart there is the key each
-  consumer renders. `PRV-5`: **a provider is not a transaction** — one supplier
-  is not one atomic unit, and there is no transaction spanning the journal, the
+  The handles themselves are now `Clone`, and cloning one names the same data
+  region: `store::InMemoryEventStore`, `store::InMemorySnapshotStore` and
+  `store::InMemoryCheckpointStore` share their state, while `Default` still
+  constructs a destination of its own. A store that is not a cloneable value of
+  its own is named through an `Arc`, which the three store traits now implement
+  for `Arc<T>` — the `Tx` of a checkpoint store included, so a projector's
+  transaction stays visible through it.
+
+  The clauses a store reproduces are labelled the way the other store contracts
+  are and stable in the same sense. `PRV-1`: distribution and duplication are
+  idempotent — for every slot held, handles taken twice from one store, from a
+  clone of the store handle, and from a supplier over either, reach one set of
+  records. `PRV-2`: identity is of the data region rather than of the
+  connection, so sharing a pool is neither necessary nor sufficient and the
+  pool half is the implementor's obligation rather than a suite's to judge.
+  `PRV-3`: a mixture of backends is assembled explicitly or not at all.
+  `PRV-4`: a projection's position and a delivery host's progress are two
+  slots, independently configured, initialised and recovered — naming both with
+  one handle is allowed, and what keeps them apart there is the key each
+  consumer renders. `PRV-5`: **a supplier is not a transaction** — one store is
+  not one atomic unit, and there is no transaction spanning the journal, the
   snapshots and the checkpoints, nor spanning the two checkpoint slots. The
   atomic units stay the ones stated elsewhere (`OCC-3`, and `CKP-6` driven by a
   projector's transaction provider), and `PRV-5` is stated because the name
   invites the opposite reading. It is the one clause no test fixes, and says so
   with the reason.
 
-- (`nitinol-store-conformance`): `provider::verify` puts a whole provider
-  through its clauses, beside the per-store suites. A provider implements
-  `provider::ProviderUnderTest` — a `bring_up` handing back a provider holding
-  nothing, as the other suites take a store — and the per-slot entry points
-  (`verify_event_store`, `verify_snapshot_store`,
+- (`nitinol-store-conformance`): `provider::verify` puts a whole store through
+  its clauses, beside the per-store suites. A backend implements
+  `provider::ProviderUnderTest` — a `bring_up` handing back a `Store` holding
+  nothing, as the other suites take a single store — and the per-slot entry
+  points (`verify_event_store`, `verify_snapshot_store`,
   `verify_projection_checkpoints`, `verify_delivery_checkpoints`) each observe
-  `PRV-1` for that slot and then delegate to the store contract behind it, so a
-  backend supplying one slot runs that slot's entry point and owes the others
-  nothing. `verify_checkpoint_independence` is `PRV-4`, read as "each slot
-  keeps the answer filed under its own key" — which is what a single-table
+  `PRV-1` for that slot across a repeated take *and* across a clone of the
+  store handle, then delegate to the store contract behind it — so a backend
+  holding one slot runs that slot's entry point and owes the others nothing.
+  The clone path is read rather than left to the `Clone` bound, because a
+  `Clone` that constructs fresh state satisfies the bound and still splits the
+  deployment in two. `verify_checkpoint_independence` is `PRV-4`, read as "each
+  slot keeps the answer filed under its own key" — which is what a single-table
   deployment satisfies. The crate still depends on no async runtime.
 
-- (`nitinol-sqlx`): `postgres_persistence(pool)` assembles the provider this
-  backend supplies — the journal and both checkpoint slots over one database,
-  the two checkpoint slots configured with one store over one table. The
-  snapshot slot is left unprovided, because this crate has no Postgres
-  `SnapshotStore`: wiring that needs snapshots is refused while it is compiled,
-  rather than filled from a different backend behind the operator's back.
-  `PostgresPersistence` names the resulting type, and the provider conformance
-  entry points are run against it where a database can be reached.
+- (`nitinol-sqlx`): `PostgresStore::new(pool)` assembles this backend as one
+  `Store` — the journal and both checkpoint slots over one database, the two
+  checkpoint slots answering with one store over one table. `PostgresEventStore`
+  and `PostgresCheckpointStore` are `Clone`, copying the pool handle, so a clone
+  reaches the same rows. The snapshot slot is left unimplemented, because this
+  crate has no Postgres `SnapshotStore`: wiring that needs snapshots is refused
+  while it is compiled, rather than filled from a different backend behind the
+  operator's back. The supplier conformance entry points are run against it
+  where a database can be reached.
 
 - (`nitinol-saga`): a delivery host carries what a saga decided to the
   aggregates it addressed, as a partitioned pull consumer of the saga's own
@@ -400,9 +419,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   producer)` — so existing wiring compiles unchanged.
 
   Superseded before release: the store a system holds now comes from a
-  persistence provider, so `with_persistence` replaces `with_event_store` and
+  persistence supplier, so `with_persistence` replaces `with_event_store` and
   the per-spawn overrides are gone. See the Changed and Removed entries for the
-  provider.
+  supplier.
 
 - (`nitinol-saga`): `SagaSystemExt` / `Subscription` — spawning a saga from an
   `EventSourceSystem`, symmetrically to `EventSourceSystem::spawn_aggregate`.
@@ -541,41 +560,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **BREAKING** (`nitinol-eventsource`, `nitinol-saga`): every wiring point
-  resolves its stores from a provider instead of being handed each store at the
+  resolves its stores from a supplier instead of being handed each store at the
   call.
 
-  `EventSourceSystem::builder(ps).with_persistence(provider).build()` is how a
-  system is built, and `build` exists only once a provider has been supplied,
-  so there is no system whose stores nobody named. The provider is the system's
-  type parameter, which is what decides the entry points it has:
+  `EventSourceSystem::builder(ps).with_persistence(PersistenceProvider::new(store)).build()`
+  is how a system is built, and `build` exists only once a supplier has been
+  supplied, so there is no system whose stores nobody named. The store is the
+  system's type parameter, which is what decides the entry points it has:
   `spawn_aggregate(id)` / `aggregate_props(id)` / `aggregate_proxy(id)` need
   only the journal, `snapshot_persistor()` needs the snapshot slot, and
   `projector_props(projection_id, producer)` needs the projection-checkpoint
-  slot. A slot the provider does not supply is a compile error at the wiring
-  that needs it rather than a failure at the first save.
+  slot. A slot the store does not hold is a compile error at the wiring that
+  needs it rather than a failure at the first save.
   `system.snapshot_persistor()` hands out **one** persistor process per system,
   shared across clones, because the snapshot contract is written for a single
-  consumer serialising its calls.
+  consumer serialising its calls; `SnapshotPersistorProxy::pid` is how two
+  handles are told to be that one process.
 
   `SnapshotPersistor::spawn(&ps, &persistence)`,
   `ProjectorProps::new(projection_id, &persistence, producer)` and
-  `SagaDeliveryProps::new(&persistence)` take the provider rather than the
+  `SagaDeliveryProps::new(&persistence)` take the supplier rather than the
   stores, each resolving the slots it needs — a projector the journal together
   with the projection slot, a delivery host the journal together with the
   delivery slot — so the two halves of a wiring cannot come from two worlds.
-  `SagaSystemExt` is now one trait over any provider, with
+  `SagaSystemExt` is now one trait over any store, with
   `spawn_saga(saga_id, producer)`, `subscription(key)` and
-  `saga_manager_props(producer)` journalling onto the provider's store, and
+  `saga_manager_props(producer)` journalling onto the supplier's store, and
   `SagaDeliveryExt::saga_delivery_props::<S>()` is the delivery host's entry
-  point, separate because the delivery slot is one a provider need not supply.
-  `SagaDeliveryProps::spawn` takes a system over any provider, reaching it
-  through the erased handle `EventSourceSystem::erase_persistence` returns.
+  point, separate because the delivery slot is one a store need not hold.
+
+  Props taken from a system now carry where they start, so
+  `.spawn().await` completes the wiring: `aggregate_props`, `projector_props`,
+  `spawn_saga`, `saga_manager_props` and `saga_delivery_props` all hand back
+  props in a `Hosted` state whose `spawn` takes no argument. Props built
+  directly are `Unhosted` and keep the argument they always took —
+  `AggregateProps::new(..).spawn(&ps)`, `SagaProps::new(..).spawn(&ps)`,
+  `SagaManagerProps::new(..).spawn(&ps)`,
+  `ProjectorProps::new(..).spawn(&ps)` and
+  `SagaDeliveryProps::new(..).spawn(&system)` — which replaces the call that
+  took a `ProcessSystem` and ignored it. `system::SystemHandle` is the system
+  with the store's type erased, and `EventSourceSystem::erase_store` is how a
+  caller gets one; only the journal survives the erasure, so a slot nobody
+  supplied stays unreachable through it.
+
+  `SagaComponents::system` hands a saga the system hosting it — the same
+  process system, the same aggregate registry and the same supplier — so a
+  producer that needs a reference to tell resolves it there rather than from a
+  clone of the system captured outside the spawn. It answers `Some` for every
+  incarnation a system's own entry point started and `None` for one built from
+  props on a store, which is the path that has no system to name.
 
   The low-level entry points that name a store are unchanged and are how a
   second destination is reached: `AggregateProps::new`, `SagaProps::new`,
   `SagaManagerProps::new`, `Subscription::stream` / `Subscription::global` and
   `DeadLetterQueue::new`. Reaching two destinations is therefore something an
-  operator writes down — a second provider, assembled and named as such —
+  operator writes down — a second supplier, assembled and named as such —
   rather than a per-spawn argument at one call among many.
 
 - **BREAKING** (`nitinol-persistence`): `CheckpointStore::load` and
@@ -959,15 +998,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spawn_saga_with_store`, and the store-taking form of
   `SagaSystemExt::spawn_saga`.
 
-  The replacement is `with_persistence` on the builder and the provider-resolved
+  The replacement is `with_persistence` on the builder and the supplier-resolved
   entry points beside it, so a stream cannot be half-moved: a per-spawn
   override only took effect on the first resolve of an identity, which left two
   activations writing to two worlds with nothing reporting it. Placing one
   aggregate's or one saga's stream in a different destination is now a second
-  provider, named as such, with `AggregateProps::new` or `SagaProps::new` built
-  on the store it supplies. A system's own store is reached through
+  supplier, named as such, with `AggregateProps::new` or `SagaProps::new` built
+  on the store it distributes. A system's own store is reached through
   `system.persistence().event_store()` where a raw handle is what a caller
   needs.
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-eventsource`, `nitinol-saga`,
+  `nitinol-sqlx`): removed the supplier that was a trait over assembled `Arc`s,
+  now that the store itself carries its identity: the `PersistenceProvider`
+  trait and its `SnapshotStoreProvider` / `ProjectionCheckpointProvider` /
+  `DeliveryCheckpointProvider` sub-traits, the `Persistence` assembly with
+  `with_snapshot_store` / `with_projection_checkpoints` /
+  `with_delivery_checkpoints` / `with_checkpoints`, the
+  `SnapshotStoreProvided` / `ProjectionCheckpointsProvided` /
+  `DeliveryCheckpointsProvided` slot markers, `InMemoryPersistence` with
+  `Persistence::in_memory`, `EventSourceSystem::erase_persistence`, and
+  `nitinol-sqlx`'s `postgres_persistence` with `PostgresPersistence`.
+
+  The replacement is the `Store` / `CustomStore` / `PersistenceProvider` trio
+  in the Added entry: `PersistenceProvider::new(InMemoryStore::default())` for
+  the in-memory reference stores,
+  `PersistenceProvider::new(PostgresStore::new(pool)?)` for Postgres, and
+  `PersistenceProvider::new(CustomStore::builder().eventstore(e)…build())`
+  where handles are named one by one. `erase_store` replaces
+  `erase_persistence`, and `Unprovided` keeps its name and its meaning.
+
+  Wrapping each store in an `Arc` inside the supplier made identity the
+  caller's to establish: nothing stopped a store from being constructed twice
+  and nothing said which of the two a wiring point had. A store that is
+  `Clone`, with `PRV-1` read across that clone, is where the obligation
+  belongs.
 
 - **BREAKING** (`nitinol-saga`): removed `spawn_scheduler`. The resident
   scheduler is started by type, through `ProcessSystem::spawn_resident`, and

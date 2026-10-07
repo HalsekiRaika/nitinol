@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
+use nitinol_eventsource::system::SystemHandle;
 use nitinol_persistence::store::EventStore;
 use nitinol_runtime::process::{ProcessContext, ProcessProxy};
 use nitinol_runtime::Props;
@@ -143,6 +144,14 @@ pub(crate) struct SagaInstanceSpec<S: Saga> {
     /// capability is bound to the incarnation that holds it: the pending-deadline
     /// view a `Deadline` reads belongs to the process that writes it.
     pub(crate) producer: SagaProducer<S>,
+    /// The system this instance is hosted by, where it was wired from one.
+    ///
+    /// Handed to every incarnation through
+    /// [`SagaComponents::system`](crate::SagaComponents::system), so a saga
+    /// reaches its host's resources without one being captured outside the
+    /// spawn. It is a handle: holding it keeps the host's process system and
+    /// registry alive, and neither holds a saga instance back.
+    pub(crate) host: Option<SystemHandle>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
     /// One subscription per declared source.  Empty on an instance a manager
     /// fronts, which observes through the manager's subscriptions instead.
@@ -178,7 +187,10 @@ impl<S: Saga> SagaInstanceSpec<S> {
             // answer, and only the process can put one there.
             let pending_deadlines = crate::components::PendingDeadlineCell::default();
             SagaProcess::<S> {
-                state: (self.producer)(SagaComponents::new(Arc::clone(&pending_deadlines))),
+                state: (self.producer)(SagaComponents::new(
+                    Arc::clone(&pending_deadlines),
+                    self.host.clone(),
+                )),
                 saga_id: self.saga_id.clone(),
                 store: Arc::clone(&self.store),
                 sequence: 0,

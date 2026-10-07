@@ -1,24 +1,34 @@
-//! The provider contract, run against the Postgres backend assembled as one.
+//! The supplier contract, run against the Postgres backend assembled as one
+//! store.
 //!
 //! ```gherkin
-//! Scenario: the Postgres provider keeps every clause of the slots it supplies
+//! Scenario: the Postgres store keeps every clause of the slots it supplies
 //!   Given a Postgres this run has reached
-//!   And a provider assembled from one pool over one schema
+//!   And a store assembled from one pool over one schema
 //!   When the conformance suite's PRV verification is run for each supplied slot
 //!   Then every clause holds
 //!
+//! Scenario: the store handle's clone reaches the same rows
+//!   Given a store assembled over one pool and one schema
+//!   When a record is written through one handle and read through its clone
+//!   Then the two are observed as one region
+//!
 //! Scenario: the two checkpoint slots are told apart inside one table
-//!   Given a provider whose checkpoint slots are one Postgres table
+//!   Given a store whose checkpoint slots are one Postgres table
 //!   When the slot-independence verification is run
 //!   Then neither slot answers for what the other holds
 //! ```
 //!
-//! This provider supplies the journal and both checkpoint slots and **no
-//! snapshot store**, so it runs the slot entry points it has and owes the
-//! snapshot one nothing — the same division the store contracts already keep,
-//! where a backend implementing one trait runs that contract and no other. The
-//! whole-provider entry point is therefore not run here; the in-memory
-//! reference provider is what exercises it.
+//! This store supplies the journal and both checkpoint slots and **no snapshot
+//! store**, so it runs the slot entry points it has and owes the snapshot one
+//! nothing — the same division the store contracts already keep, where a
+//! backend implementing one trait runs that contract and no other. The
+//! whole-supplier entry point is therefore not run here; the in-memory
+//! reference store is what exercises it.
+//!
+//! The clone clause is not a separate test: each slot entry point reads across
+//! a clone of the store handle as well as across a repeated take, so the
+//! Postgres handle's own `Clone` is judged wherever a slot is.
 //!
 //! What the independence clause is about here is worth naming: both checkpoint
 //! slots are assembled over **one** store on **one** table, which is this
@@ -36,31 +46,32 @@ mod harness;
 
 use futures_core::future::BoxFuture;
 use harness::{PostgresBackend, TokioExecutor};
-use nitinol_sqlx::{postgres_persistence, PostgresPersistence};
+use nitinol_sqlx::PostgresStore;
 use nitinol_store_conformance::provider::{self, ProviderUnderTest};
 
-/// A provider holding nothing: a schema of its own, migrated, with the journal
-/// and the checkpoint table assembled over one pool onto it.
+/// A store holding nothing: a schema of its own, migrated, with the journal and
+/// the checkpoint table assembled over one pool onto it.
 ///
 /// Every clause asks for its own, so a clause reading another's leftovers
-/// cannot happen — and because the two checkpoint slots of one provider are the
+/// cannot happen — and because the two checkpoint slots of one store are the
 /// same table, a shared schema would have each clause reading the positions the
 /// one before it left.
 impl ProviderUnderTest for PostgresBackend {
-    type Provider = PostgresPersistence;
+    type Store = PostgresStore;
 
-    fn bring_up(&self) -> BoxFuture<'_, Self::Provider> {
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
         Box::pin(async move {
             let schema = self.migrated_schema().await;
-            postgres_persistence(schema.pool())
+            PostgresStore::new(schema.pool())
                 .expect("the event types this test binary linked claim distinct canonical paths")
         })
     }
 }
 
-/// The event-store slot: taken twice from one provider, it is one journal.
+/// The journal slot: taken twice from one store, and across its clone, it is
+/// one journal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_postgres_providers_event_store_slot_conforms() {
+async fn the_postgres_stores_event_store_slot_conforms() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };
@@ -70,7 +81,7 @@ async fn the_postgres_providers_event_store_slot_conforms() {
 
 /// The projection-checkpoint slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_postgres_providers_projection_checkpoint_slot_conforms() {
+async fn the_postgres_stores_projection_checkpoint_slot_conforms() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };
@@ -80,7 +91,7 @@ async fn the_postgres_providers_projection_checkpoint_slot_conforms() {
 
 /// The delivery-checkpoint slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_postgres_providers_delivery_checkpoint_slot_conforms() {
+async fn the_postgres_stores_delivery_checkpoint_slot_conforms() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };
@@ -90,7 +101,7 @@ async fn the_postgres_providers_delivery_checkpoint_slot_conforms() {
 
 /// The two checkpoint slots, told apart inside the one table they share.
 #[tokio::test]
-async fn the_postgres_providers_checkpoint_slots_are_independent() {
+async fn the_postgres_stores_checkpoint_slots_are_independent() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };

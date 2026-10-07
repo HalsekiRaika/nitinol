@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
-use nitinol_persistence::provider::{InMemoryPersistence, Persistence};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -190,7 +190,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 
 #[allow(clippy::type_complexity)]
 async fn spawn_recording_saga(
-    system: &EventSourceSystem<InMemoryPersistence>,
+    system: &EventSourceSystem<InMemoryStore>,
     saga_store: &Arc<dyn EventStore>,
     upstream_store: &Arc<dyn EventStore>,
     upstream_key: &str,
@@ -219,7 +219,7 @@ async fn spawn_recording_saga(
 async fn non_terminated_saga_handles_routed_event() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -258,7 +258,7 @@ async fn non_terminated_saga_handles_routed_event() {
 async fn terminated_saga_skips_subscription_and_never_handles() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -302,7 +302,7 @@ async fn terminated_saga_skips_subscription_and_never_handles() {
 async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

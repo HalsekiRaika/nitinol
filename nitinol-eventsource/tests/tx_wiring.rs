@@ -21,7 +21,7 @@ use nitinol_eventsource::{
     codec::Codec, Event, ProjectionContext, Projector, ProjectorProps, TxProvider,
 };
 use nitinol_persistence::error::CheckpointError;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
     CheckpointScope, CheckpointStore, EventStore, InMemoryEventStore,
 };
@@ -283,8 +283,12 @@ async fn tx_provider_supplies_tx_to_projection_context() {
     let (tp, _tp_state) = MockTxProvider::new();
 
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
-    let persistence = Persistence::new(Arc::clone(&store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&mock_cs));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&mock_cs))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(
         ProjectionId::new("tx-ctx-test-proj"),
         &persistence,
@@ -329,8 +333,12 @@ async fn exactly_once_with_tx_provider_saves_checkpoint_in_same_tx() {
     let (tp, _tp_state) = MockTxProvider::new();
 
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
-    let persistence = Persistence::new(Arc::clone(&store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&mock_cs));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&mock_cs))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(
         ProjectionId::new("tx-ckpt-test-proj"),
         &persistence,
@@ -375,8 +383,12 @@ async fn tx_provider_commit_called_after_successful_project() {
     let (tp, tp_state) = MockTxProvider::new();
 
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
-    let persistence = Persistence::new(Arc::clone(&store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&mock_cs));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&mock_cs))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(
         ProjectionId::new("tx-commit-test-proj"),
         &persistence,
@@ -429,8 +441,12 @@ async fn tx_provider_rollback_called_when_project_fails() {
     let (tp, tp_state) = MockTxProvider::new();
 
     // When: spawn projector that always fails (ExactlyOnce forced by with_tx_provider)
-    let persistence = Persistence::new(Arc::clone(&store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&mock_cs));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&mock_cs))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(
         ProjectionId::new("tx-rollback-test-proj"),
         &persistence,
@@ -519,8 +535,12 @@ async fn without_tx_provider_ctx_tx_returns_none() {
     }
 
     // When: spawn without TxProvider (default Tx = ())
-    let persistence =
-        Persistence::new(Arc::clone(&store) as Arc<dyn EventStore>).with_projection_checkpoints(cs);
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&store) as Arc<dyn EventStore>)
+            .projection_checkpoints(cs)
+            .build(),
+    );
     let _proxy = ProjectorProps::new(
         ProjectionId::new("tx-none-test-proj"),
         &persistence,

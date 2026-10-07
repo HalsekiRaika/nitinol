@@ -38,7 +38,7 @@ use nitinol_eventsource::{
     codec::Codec, Event, ProjectionContext, Projector, ProjectorProps, TxProvider,
 };
 use nitinol_persistence::error::CheckpointError;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
     CheckpointScope, CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore,
     InMemoryEventStore,
@@ -470,8 +470,12 @@ async fn at_least_once_failing_event_blocks_the_next_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingProjector {
             recorder: Arc::clone(&recorder_c),
@@ -523,8 +527,12 @@ async fn at_least_once_next_event_waits_for_the_retry_to_succeed() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingProjector {
             recorder: Arc::clone(&recorder_c),
@@ -586,8 +594,12 @@ async fn at_least_once_failed_event_survives_a_restart() {
     let first_run = {
         let recorder_c = Arc::clone(&recorder);
         let failures_c = Arc::clone(&failures);
-        let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+        let persistence = PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+                .projection_checkpoints(Arc::clone(&checkpoint_store))
+                .build(),
+        );
         ProjectorProps::new(projection_id.clone(), &persistence, move || {
             RecordingProjector {
                 recorder: Arc::clone(&recorder_c),
@@ -632,8 +644,12 @@ async fn at_least_once_failed_event_survives_a_restart() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _second_run = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingProjector {
             recorder: Arc::clone(&recorder_c),
@@ -680,8 +696,12 @@ async fn exactly_once_tx_project_failure_blocks_the_next_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingTxProjector {
             recorder: Arc::clone(&recorder_c),
@@ -747,8 +767,12 @@ async fn exactly_once_tx_begin_failure_blocks_the_next_event() {
     let (provider, counters) = CountingTxProvider::new(2, 0);
 
     let recorder_c = Arc::clone(&recorder);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingTxProjector {
             recorder: Arc::clone(&recorder_c),
@@ -802,8 +826,12 @@ async fn exactly_once_tx_checkpoint_save_failure_blocks_the_next_event() {
     let (provider, counters) = CountingTxProvider::new(0, 0);
 
     let recorder_c = Arc::clone(&recorder);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingTxProjector {
             recorder: Arc::clone(&recorder_c),
@@ -857,8 +885,12 @@ async fn exactly_once_tx_commit_failure_blocks_the_next_event() {
     let (provider, counters) = CountingTxProvider::new(0, PERMANENT);
 
     let recorder_c = Arc::clone(&recorder);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingTxProjector {
             recorder: Arc::clone(&recorder_c),
@@ -917,8 +949,12 @@ async fn at_most_once_failing_event_does_not_block_the_next_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingProjector {
             recorder: Arc::clone(&recorder_c),
@@ -967,8 +1003,12 @@ async fn exactly_once_without_tx_project_failure_blocks_the_next_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingProjector {
             recorder: Arc::clone(&recorder_c),
@@ -1020,8 +1060,12 @@ async fn projector_keeps_retrying_a_permanently_failing_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingProjector {
             recorder: Arc::clone(&recorder_c),
@@ -1067,8 +1111,12 @@ async fn unregistered_event_type_does_not_block_the_next_event() {
     let recorder = Recorder::new();
 
     let recorder_c = Arc::clone(&recorder);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingProjector {
             recorder: Arc::clone(&recorder_c),
@@ -1115,8 +1163,12 @@ async fn already_processed_event_is_accepted_without_projecting() {
     let recorder = Recorder::new();
 
     let recorder_c = Arc::clone(&recorder);
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
     let proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         RecordingProjector {
             recorder: Arc::clone(&recorder_c),

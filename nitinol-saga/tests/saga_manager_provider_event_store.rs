@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -217,7 +217,11 @@ async fn manager_props_uses_the_providers_event_store_for_upstream_and_journal()
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&default_store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&default_store))
+                .build(),
+        ))
         .build();
 
     let upstream_key = AggregateId::new("mgr-default-store-orders");
@@ -234,7 +238,7 @@ async fn manager_props_uses_the_providers_event_store_for_upstream_and_journal()
             notify: Arc::clone(&notify_for_producer),
         })
         .subscribed_to::<OrderPlaced>(system.subscription(&upstream_key))
-        .spawn(system.process_system())
+        .spawn()
         .await;
 
     append_order_placed(&default_store, &upstream_key, 1, "A").await;
@@ -269,7 +273,11 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls()
     let provider_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let named_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&provider_store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&provider_store))
+                .build(),
+        ))
         .build();
 
     let upstream_key = AggregateId::new("mgr-override-store-orders");
@@ -290,7 +298,7 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls()
             notify: Arc::clone(&notify_for_producer),
         })
         .subscribed_to::<OrderPlaced>(Subscription::stream(&named_store, &upstream_key))
-        .spawn(system.process_system())
+        .spawn()
         .await;
 
     wait_for_handled(&handled, &notify, 1).await;

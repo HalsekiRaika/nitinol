@@ -48,7 +48,7 @@ async fn the_wired_identifier_is_the_one_progress_is_filed_under() {
     let named = SagaDeliveryId::new("orders-delivery");
 
     // When
-    let host = SagaDeliveryProps::<DeliverySaga, RecordingCheckpointStore>::new(
+    let host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingCheckpointStore>>::new(
         &delivery_persistence(&journal, &checkpoints),
     )
     .with_delivery_id(named.clone())
@@ -94,7 +94,7 @@ async fn an_unwired_identifier_is_derived_from_the_declared_event_type() {
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let host = SagaDeliveryProps::<DeliverySaga, RecordingCheckpointStore>::new(
+    let host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingCheckpointStore>>::new(
         &delivery_persistence(&journal, &checkpoints),
     )
     .with_partitions(partition_count(1))

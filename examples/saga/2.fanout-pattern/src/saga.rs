@@ -3,9 +3,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::system::SystemHandle;
 use nitinol_eventsource::{AggregateProxy, Event};
-use nitinol_persistence::provider::Persistence;
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, TellIntent};
 
@@ -13,12 +12,14 @@ use crate::codec::JsonCodec;
 use crate::payroll_run::PayrollRunApproved;
 use crate::payslip::{IssuePayslip, Payslip};
 
-/// The system every payslip in this example lives on.
+/// The hosting system, as the saga is handed it.
 ///
-/// The provider supplies the journal and nothing else: this example wires no
-/// projector, no delivery host and no snapshots, so it names no store for those
-/// slots and the wiring that would need them does not compile against it.
-pub type PayrollSystem = EventSourceSystem<Persistence>;
+/// A saga's producer is given the system it was spawned from rather than a
+/// clone prepared outside the spawn, and what it is given has the store's type
+/// erased — one type for every deployment, since a saga type is written before
+/// anyone assembles a store. The journal survives the erasure, which is all an
+/// aggregate reference needs.
+pub type PayrollSystem = SystemHandle;
 
 /// A reference to the payslip that owns the stream `key`.
 ///

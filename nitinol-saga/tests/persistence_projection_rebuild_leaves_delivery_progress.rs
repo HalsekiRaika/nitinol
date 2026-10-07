@@ -1,14 +1,14 @@
 //! Rebuilding a projection does not reach the delivery progress beside it.
 //!
 //! ```gherkin
-//!   Scenario: a projection rebuilt over a provider that shares one checkpoint store
-//!     Given a provider whose two checkpoint slots were configured with one store
+//!   Scenario: a projection rebuilt over a store that shares one checkpoint handle
+//!     Given a store whose two checkpoint slots were named with one handle
 //!     And a projection position and a delivery position recorded in it
-//!     When the projection slot is replaced with a store of its own and the
+//!     When the projection slot is named with a handle of its own and the
 //!         projector is started again
 //!     Then the projector applies every record from the beginning
 //!     And the delivery position is where it was
-//!     And a host restarted over the rebuilt provider delivers nothing again
+//!     And a host restarted over the rebuilt store delivers nothing again
 //! ```
 //!
 //! Sharing one store between the two slots is the harder half of the contract
@@ -17,12 +17,12 @@
 //! be here.
 //!
 //! What "rebuilt" means is the slot, not a store operation. There is no delete
-//! on a checkpoint store and none is added: a projection is rebuilt by
-//! configuring the provider's projection slot with a store that holds nothing,
-//! which is what has the projector resume from no position and apply everything
-//! again. The delivery slot is configured with the store it already had, so the
-//! two halves of the change are visible side by side — one slot replaced, the
-//! other left alone.
+//! on a checkpoint store and none is added: a projection is rebuilt by naming
+//! the store's projection slot with a handle that holds nothing, which is what
+//! has the projector resume from no position and apply everything again. The
+//! delivery slot is named with the handle it already had, so the two halves of
+//! the change are visible side by side — one slot replaced, the other left
+//! alone.
 //!
 //! The counter is read per incarnation rather than cumulatively: each
 //! incarnation builds its own projector with a counter of its own, so "applied
@@ -46,7 +46,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{ProjectionContext, Projector};
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::ProcessSystem;
@@ -112,8 +112,8 @@ const DECISIONS: usize = 2;
 
 #[tokio::test]
 async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_was() {
-    // Given: one event store, and one checkpoint store configured into both
-    // checkpoint slots of the provider.
+    // Given: one event store, and one checkpoint handle named into both
+    // checkpoint slots of the store.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let shared_checkpoints = RecordingCheckpointStore::new();
     let projection = ProjectionId::new("projection-rebuild-read-model");
@@ -124,9 +124,12 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
     let last_decision = append_decided(&store, &saga_id, 2, target.as_str(), "op-2").await;
 
     let first_system = EventSourceSystem::builder(ProcessSystem::new().await)
-        .with_persistence(
-            Persistence::new(Arc::clone(&store)).with_checkpoints(Arc::clone(&shared_checkpoints)),
-        )
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .checkpoints(Arc::clone(&shared_checkpoints))
+                .build(),
+        ))
         .build();
 
     let first_applied = Arc::new(AtomicUsize::new(0));
@@ -140,7 +143,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         })
         .with_event::<Decided>()
         .catchup_from_global()
-        .spawn(first_system.process_system())
+        .spawn()
         .await;
 
     let _first_host = first_system
@@ -148,11 +151,11 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
         .with_poll_interval(TEST_POLL_INTERVAL)
-        .spawn(&first_system)
+        .spawn()
         .await;
 
-    // And: both consumers have recorded where they got to, in the one store
-    // both slots were configured with.
+    // And: both consumers have recorded where they got to, in the one handle
+    // both slots were named with.
     wait_until_applied(
         &first_applied,
         &first_notify,
@@ -186,16 +189,18 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         vec!["op-1".to_owned(), "op-2".to_owned()],
     );
 
-    // When: the projection slot is configured with a store holding nothing and
-    // the delivery slot keeps the one it had, and both consumers are started
-    // again over the same event store.
+    // When: the projection slot is named with a handle holding nothing and the
+    // delivery slot keeps the one it had, and both consumers are started again
+    // over the same event store.
     let rebuilt_checkpoints = RecordingCheckpointStore::new();
     let rebuilt_system = EventSourceSystem::builder(ProcessSystem::new().await)
-        .with_persistence(
-            Persistence::new(Arc::clone(&store))
-                .with_projection_checkpoints(Arc::clone(&rebuilt_checkpoints))
-                .with_delivery_checkpoints(Arc::clone(&shared_checkpoints)),
-        )
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .projection_checkpoints(Arc::clone(&rebuilt_checkpoints))
+                .delivery_checkpoints(Arc::clone(&shared_checkpoints))
+                .build(),
+        ))
         .build();
 
     let rebuilt_applied = Arc::new(AtomicUsize::new(0));
@@ -209,7 +214,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         })
         .with_event::<Decided>()
         .catchup_from_global()
-        .spawn(rebuilt_system.process_system())
+        .spawn()
         .await;
 
     let _rebuilt_host = rebuilt_system
@@ -217,7 +222,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
         .with_poll_interval(TEST_POLL_INTERVAL)
-        .spawn(&rebuilt_system)
+        .spawn()
         .await;
 
     // Then: the rebuilt projection really is a rebuild — it resumed from no
@@ -231,15 +236,15 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         )
         .await,
         DECISIONS,
-        "a projection slot configured with a store holding nothing has the \
+        "a projection slot named with a handle holding nothing has the \
          projector resume from no position, which is what a rebuild is"
     );
     assert!(
         rebuilt_checkpoints
             .stored(&projection)
             .is_some_and(|held| held >= last_decision),
-        "and the rebuilt projection records into the slot it was configured \
-         with, which holds {:?}",
+        "and the rebuilt projection records into the slot it was named with, \
+         which holds {:?}",
         rebuilt_checkpoints.stored(&projection)
     );
 
@@ -250,7 +255,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         Some(last_decision),
         "rebuilding the projection slot does not reach the delivery slot: the \
          delivery position has to be the one recorded before the rebuild, even \
-         though both slots were configured with one store"
+         though both slots were named with one handle"
     );
 
     // And: nothing was delivered a second time, which is what an unchanged
@@ -264,7 +269,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         stream_rows(&store, target.as_str()).await.len(),
         DECISIONS,
         "and {DECISIONS} rows stand behind them: a host restarted over the \
-         rebuilt provider resumes above the delivery position the rebuild left \
+         rebuilt store resumes above the delivery position the rebuild left \
          alone"
     );
 }

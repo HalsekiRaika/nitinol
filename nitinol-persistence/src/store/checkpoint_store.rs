@@ -278,3 +278,24 @@ pub trait CheckpointStore: Send + Sync {
         tx: Option<&mut Self::Tx>,
     ) -> Result<(), CheckpointError>;
 }
+
+/// A checkpoint store reached through an `Arc` is that store, transaction type
+/// included: erasing it would take away what a projector settling its update
+/// and its position together needs to see.
+#[async_trait]
+impl<T: CheckpointStore + ?Sized> CheckpointStore for std::sync::Arc<T> {
+    type Tx = T::Tx;
+
+    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
+        T::load(self, scope).await
+    }
+
+    async fn save(
+        &self,
+        scope: &dyn CheckpointScope,
+        sequence: u64,
+        tx: Option<&mut Self::Tx>,
+    ) -> Result<(), CheckpointError> {
+        T::save(self, scope, sequence, tx).await
+    }
+}

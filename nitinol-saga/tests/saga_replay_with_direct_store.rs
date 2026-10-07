@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -154,7 +154,11 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
 
     let order_id = AggregateId::new("direct-order");
@@ -236,7 +240,11 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
 
     let order_id = AggregateId::new("drop-proxy-order");
@@ -297,7 +305,11 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
 
     let order_id = AggregateId::new("replay-order");

@@ -17,8 +17,8 @@ use std::time::Duration;
 use futures_util::TryStreamExt;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::provider::{Persistence, PersistenceProvider};
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, InMemoryStore};
 use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaSystemExt;
@@ -51,7 +51,7 @@ async fn a_fact_of_one_aggregate_reaches_another_as_a_command() {
     // Given
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
     // What the last clause reads is the journal the system's spawns resolve.
     let store = system.persistence().event_store();

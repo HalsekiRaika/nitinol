@@ -20,7 +20,8 @@ use std::time::Duration;
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::{AggregateId, ProjectionId};
 use nitinol_runtime::ProcessSystem;
 
@@ -44,7 +45,7 @@ async fn main() {
 
     // The one supplier the journal and the projection checkpoints come from.
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let agg_id = AggregateId::new("proj-counter");
@@ -76,7 +77,7 @@ async fn main() {
         // read is not — `Incremented` names the codec that wrote it.
         .with_event::<Incremented>()
         .catchup_from_aggregate(agg_id)
-        .spawn(system.process_system())
+        .spawn()
         .await;
 
     // Wait for both catch-up events to be projected

@@ -19,7 +19,8 @@ use bytes::Bytes;
 use tracing::info;
 
 use nitinol_eventsource::{AggregateProps, SnapshotPersistor};
-use nitinol_persistence::provider::{Persistence, PersistenceProvider};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::ProcessSystem;
 
@@ -44,7 +45,7 @@ async fn main() {
     // pinned to one aggregate and started from props directly rather than from
     // an `EventSourceSystem`, so the persistor is spawned from the provider
     // here — it still reaches the slot the provider was configured with.
-    let persistence = Persistence::in_memory();
+    let persistence = PersistenceProvider::new(InMemoryStore::default());
     let store = persistence.event_store();
     let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("snap-counter");

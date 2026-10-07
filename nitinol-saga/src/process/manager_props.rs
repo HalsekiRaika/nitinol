@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use nitinol_eventsource::system::{Hosted, SystemHandle, Unhosted};
 use nitinol_eventsource::Event;
 use nitinol_persistence::store::EventStore;
 use nitinol_runtime::process::{Process, ProcessProxy, Receive, SupervisionStrategy};
@@ -53,7 +54,7 @@ use crate::subscription::Subscription;
 ///
 /// That is the migration path: the resident saga is the degenerate case of the
 /// manager, not a separate mechanism.
-pub struct SagaManagerProps<S: Saga, B = SourceBindings<S>> {
+pub struct SagaManagerProps<S: Saga, B = SourceBindings<S>, H = Unhosted> {
     store: Arc<dyn EventStore>,
     producer: SagaProducer<S>,
     bindings: B,
@@ -61,9 +62,10 @@ pub struct SagaManagerProps<S: Saga, B = SourceBindings<S>> {
     enqueue_policy: Option<Arc<dyn EnqueuePolicy>>,
     dead_letter_subscriber: Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>,
     crash_restart_factory: Option<CrashRestartFactory>,
+    host: H,
 }
 
-impl<S: Saga> SagaManagerProps<S, SourceBindings<S>> {
+impl<S: Saga> SagaManagerProps<S, SourceBindings<S>, Unhosted> {
     /// Begin a manager spawn, with every declared source still unbound.
     ///
     /// `store` is the EventStore every instance persists its own events to;
@@ -84,11 +86,29 @@ impl<S: Saga> SagaManagerProps<S, SourceBindings<S>> {
             enqueue_policy: None,
             dead_letter_subscriber: None,
             crash_restart_factory: None,
+            host: Unhosted,
         }
     }
 }
 
-impl<S: Saga, B> SagaManagerProps<S, B> {
+impl<S: Saga, B> SagaManagerProps<S, B, Unhosted> {
+    /// Carry `host` as where these props start, and as what the instances they
+    /// spawn are handed through [`SagaComponents::system`].
+    pub(crate) fn hosted(self, host: SystemHandle) -> SagaManagerProps<S, B, Hosted> {
+        SagaManagerProps {
+            store: self.store,
+            producer: self.producer,
+            bindings: self.bindings,
+            instance_idle_timeout: self.instance_idle_timeout,
+            enqueue_policy: self.enqueue_policy,
+            dead_letter_subscriber: self.dead_letter_subscriber,
+            crash_restart_factory: self.crash_restart_factory,
+            host: Hosted::new(host),
+        }
+    }
+}
+
+impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     /// Observe the declared source `E` through `subscription`, for the whole
     /// fan-out.
     ///
@@ -99,7 +119,7 @@ impl<S: Saga, B> SagaManagerProps<S, B> {
     pub fn subscribed_to<E>(
         self,
         subscription: Subscription,
-    ) -> SagaManagerProps<S, <B as BindSource<E>>::Bound>
+    ) -> SagaManagerProps<S, <B as BindSource<E>>::Bound, H>
     where
         E: Event,
         B: BindSource<E>,
@@ -116,6 +136,7 @@ impl<S: Saga, B> SagaManagerProps<S, B> {
             enqueue_policy: self.enqueue_policy,
             dead_letter_subscriber: self.dead_letter_subscriber,
             crash_restart_factory: self.crash_restart_factory,
+            host: self.host,
         }
     }
 
@@ -191,21 +212,20 @@ impl<S: Saga, B> SagaManagerProps<S, B> {
     }
 }
 
-impl<S: Saga, B> SagaManagerProps<S, B>
+impl<S: Saga, B, H> SagaManagerProps<S, B, H>
 where
     B: AllSourcesSubscribed<S::Subscribe>,
 {
-    /// Spawn the manager process.
+    /// Start the manager on `system`, handing `host` to every instance it
+    /// spawns.
     ///
-    /// Every declared source's poller and every saga instance are runtime
-    /// **children** of the manager, so stopping the manager cascade-stops the
-    /// whole fan-out.
-    ///
-    /// A saga whose alphabet declares a deadline also has the system's one
-    /// resident timer core resolved here, and every instance the manager spawns
-    /// is handed it — so the degenerate single-instance manager reproduces a
-    /// standalone saga's deadlines with no extra wiring.
-    pub async fn spawn(self, system: &ProcessSystem) -> SagaManagerProxy<S> {
+    /// The sole place a configured props becomes a running manager, so both
+    /// spawn entry points start the same fan-out.
+    async fn start_on(
+        self,
+        system: &ProcessSystem,
+        host: Option<SystemHandle>,
+    ) -> SagaManagerProxy<S> {
         let store = self.store;
         // The proxy hands out dead letter queues over the very store the
         // manager writes to, so it keeps its own handle to it.
@@ -228,6 +248,7 @@ where
         let props = Props::new(move || SagaManagerProcess::<S> {
             store: Arc::clone(&store),
             producer: Arc::clone(&producer),
+            host: host.clone(),
             enqueue_policy: Arc::clone(&enqueue_policy),
             upstream: upstream.clone(),
             instance_idle_timeout,
@@ -248,5 +269,45 @@ where
         .with_idle_timeout(IdleTimeout::Persistent);
 
         SagaManagerProxy::new(system.spawn(props).await, store_for_proxy)
+    }
+}
+
+impl<S: Saga, B> SagaManagerProps<S, B, Unhosted>
+where
+    B: AllSourcesSubscribed<S::Subscribe>,
+{
+    /// Spawn the manager process on `system`.
+    ///
+    /// Every declared source's poller and every saga instance are runtime
+    /// **children** of the manager, so stopping the manager cascade-stops the
+    /// whole fan-out.
+    ///
+    /// A saga whose alphabet declares a deadline also has the system's one
+    /// resident timer core resolved here, and every instance the manager spawns
+    /// is handed it — so the degenerate single-instance manager reproduces a
+    /// standalone saga's deadlines with no extra wiring.
+    ///
+    /// These props were built on a store rather than taken from an
+    /// `EventSourceSystem`, so there is no host to hand over:
+    /// [`SagaComponents::system`](crate::SagaComponents::system) answers
+    /// `None` for every instance this manager spawns.
+    pub async fn spawn(self, system: &ProcessSystem) -> SagaManagerProxy<S> {
+        self.start_on(system, None).await
+    }
+}
+
+impl<S: Saga, B> SagaManagerProps<S, B, Hosted>
+where
+    B: AllSourcesSubscribed<S::Subscribe>,
+{
+    /// Spawn the manager process on the system these props came from.
+    ///
+    /// Nothing is named here, and every instance the manager spawns is handed
+    /// that system through
+    /// [`SagaComponents::system`](crate::SagaComponents::system).
+    pub async fn spawn(self) -> SagaManagerProxy<S> {
+        let host = self.host.system().clone();
+        let ps = host.process_system().clone();
+        self.start_on(&ps, Some(host)).await
     }
 }

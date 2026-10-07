@@ -13,10 +13,12 @@
 //! clause its fault names, so the clauses can be shown to catch a backend that
 //! breaks the contract instead of merely passing against one that keeps it.
 //!
-//! [`ReferenceProvider`] is the same wiring one level up: a whole persistence
-//! provider rather than a single store, brought up for the `PRV` clauses.
-//! [`FaultyProvider`] and [`ProviderWithCollidingCheckpointSlots`] are its
-//! self-check, each breaking exactly the one provider clause it names.
+//! [`ReferenceProvider`] is the same wiring one level up: a whole store, from
+//! which a supplier is assembled, rather than a single slot — brought up for
+//! the `PRV` clauses. [`FaultyProvider`],
+//! [`ProviderWithCloneThatSplitsTheWorld`] and
+//! [`ProviderWithCollidingCheckpointSlots`] are its self-check, each breaking
+//! exactly the one clause it names.
 //!
 //! The doubles live in this crate rather than in the kit's `src/` for two
 //! reasons: they are not part of what the kit publishes, and a store defined
@@ -35,13 +37,10 @@ use async_trait::async_trait;
 use futures_core::future::BoxFuture;
 use futures_util::stream;
 use nitinol_persistence::error::{AppendError, CheckpointError, LoadError, SnapshotError};
-use nitinol_persistence::provider::{
-    DeliveryCheckpointsProvided, InMemoryPersistence, Persistence, PersistenceProvider,
-    ProjectionCheckpointsProvided, Unprovided,
-};
+use nitinol_persistence::provider::{CustomStore, Store, Unprovided};
 use nitinol_persistence::store::{
     CheckpointScope, CheckpointStore, EventStore, EventStream, InMemoryCheckpointStore,
-    InMemoryEventStore, InMemorySnapshotStore, SnapshotStore,
+    InMemoryEventStore, InMemorySnapshotStore, InMemoryStore, SnapshotStore,
 };
 use nitinol_persistence::{
     is_within_reserved_namespace, AggregateId, AppendOutcome, AppendingEvent, LoadQuery,
@@ -636,76 +635,122 @@ impl CheckpointStoreUnderTest for FaultyCheckpointStore {
     }
 }
 
-/// The reference provider the `PRV` clauses are written against.
+/// The reference store the `PRV` clauses are written against.
 ///
-/// `Persistence::in_memory()` is the assembly the framework ships: an in-memory
-/// store for every slot, with the two checkpoint slots configured with one
-/// store — the shape a single-table backend is deployed in, and the harder half
-/// of the independence clause.
+/// [`InMemoryStore`] is the assembly the framework ships: an in-memory store
+/// for every slot, with a handle of its own for each checkpoint slot. The
+/// single-table shape — both slots named with one handle — is what
+/// [`ProviderWithCollidingCheckpointSlots`] is assembled in, so the
+/// independence clause is read against both.
 pub struct ReferenceProvider;
 
 impl ProviderUnderTest for ReferenceProvider {
-    type Provider = InMemoryPersistence;
+    type Store = InMemoryStore;
 
-    fn bring_up(&self) -> BoxFuture<'_, Self::Provider> {
-        Box::pin(async { Persistence::in_memory() })
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
+        Box::pin(async { InMemoryStore::default() })
     }
 }
 
-/// A provider that answers every `event_store` call with a store of its own.
+/// A store that answers every `events` call with a store of its own.
 ///
 /// PRV-1: the handles a caller takes would then name a world each, so an append
 /// made through one is invisible through the other and nothing reports it. That
 /// is why the clause reads a record back through a second handle rather than
-/// comparing the handles themselves — a provider handing out two handles onto
-/// one store and one handing out two stores are indistinguishable until
-/// something is written.
+/// comparing the handles themselves — a store handing out two handles onto one
+/// region and one handing out two regions are indistinguishable until something
+/// is written.
+#[derive(Clone, Default)]
 pub struct AStoreOfItsOwnPerCall;
 
-impl PersistenceProvider for AStoreOfItsOwnPerCall {
-    fn event_store(&self) -> Arc<dyn EventStore> {
-        Arc::new(InMemoryEventStore::default())
+impl Store for AStoreOfItsOwnPerCall {
+    type Events = InMemoryEventStore;
+
+    fn events(&self) -> Self::Events {
+        InMemoryEventStore::default()
     }
 }
 
-/// A provider under test whose event-store slot splits the world.
+/// A store under test whose journal slot splits the world.
 pub struct FaultyProvider;
 
 impl ProviderUnderTest for FaultyProvider {
-    type Provider = AStoreOfItsOwnPerCall;
+    type Store = AStoreOfItsOwnPerCall;
 
-    fn bring_up(&self) -> BoxFuture<'_, Self::Provider> {
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
         Box::pin(async { AStoreOfItsOwnPerCall })
     }
 }
 
+/// A store whose handle answers consistently and whose *clone* names a region
+/// of its own.
+///
+/// PRV-1 across clones: a store handed to two wiring points by cloning the
+/// handle is the ordinary way a deployment distributes it, so a `Clone` that
+/// built fresh state splits the deployment in two with nothing reported. Every
+/// clause that takes a slot twice from one handle passes this store, which is
+/// why the clause reads across a clone as well.
+#[derive(Default)]
+pub struct AStoreWhoseCloneSplitsTheWorld {
+    events: InMemoryEventStore,
+}
+
+/// The fault: what should copy the handle constructs a new region instead.
+impl Clone for AStoreWhoseCloneSplitsTheWorld {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl Store for AStoreWhoseCloneSplitsTheWorld {
+    type Events = InMemoryEventStore;
+
+    fn events(&self) -> Self::Events {
+        self.events.clone()
+    }
+}
+
+/// A store under test whose clone splits the world.
+pub struct ProviderWithCloneThatSplitsTheWorld;
+
+impl ProviderUnderTest for ProviderWithCloneThatSplitsTheWorld {
+    type Store = AStoreWhoseCloneSplitsTheWorld;
+
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
+        Box::pin(async { AStoreWhoseCloneSplitsTheWorld::default() })
+    }
+}
+
 /// What [`ProviderWithCollidingCheckpointSlots`] brings up: both checkpoint
-/// slots configured with a store that keeps one position for every key.
-pub type CollidingCheckpoints = Persistence<
+/// slots named with a store that keeps one position for every key.
+pub type CollidingCheckpoints = CustomStore<
+    InMemoryEventStore,
     Unprovided,
-    ProjectionCheckpointsProvided<SkewedCheckpointStore>,
-    DeliveryCheckpointsProvided<SkewedCheckpointStore>,
+    Arc<SkewedCheckpointStore>,
+    Arc<SkewedCheckpointStore>,
 >;
 
-/// A provider whose two checkpoint slots reach a store with one slot for every
+/// A store whose two checkpoint slots reach a store with one slot for every
 /// scope.
 ///
-/// PRV-4: configuring both slots with one store is allowed, and what makes it
+/// PRV-4: naming both slots with one handle is allowed, and what makes it
 /// allowed is that each consumer files under a key of its own. A store that
 /// forgot the key it was given has a delivery host resume from a projection's
-/// position, so the slots of a provider assembled over one are not independent
-/// however they were configured.
+/// position, so the slots of an assembly over one are not independent however
+/// they were named.
 pub struct ProviderWithCollidingCheckpointSlots;
 
 impl ProviderUnderTest for ProviderWithCollidingCheckpointSlots {
-    type Provider = CollidingCheckpoints;
+    type Store = CollidingCheckpoints;
 
-    fn bring_up(&self) -> BoxFuture<'_, Self::Provider> {
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
         Box::pin(async {
-            let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-            Persistence::new(events).with_checkpoints(Arc::new(SkewedCheckpointStore::injecting(
-                CheckpointFault::OneSlotForEveryScope,
-            )))
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .checkpoints(Arc::new(SkewedCheckpointStore::injecting(
+                    CheckpointFault::OneSlotForEveryScope,
+                )))
+                .build()
         })
     }
 }

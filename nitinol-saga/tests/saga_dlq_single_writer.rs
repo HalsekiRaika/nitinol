@@ -36,8 +36,8 @@ use tokio::sync::Notify;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{Event, SystemEvent};
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::Persistence;
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -190,7 +190,7 @@ struct Harness {
 async fn spawn_harness(saga_store: Arc<dyn EventStore>, upstream_name: &str) -> Harness {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

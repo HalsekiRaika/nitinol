@@ -3,7 +3,7 @@
 //! Demonstrates the minimal setup needed to run an event-sourced aggregate:
 //!
 //! 1. Create a `ProcessSystem`
-//! 2. Assemble a `Persistence` provider over the in-memory stores
+//! 2. Assemble a `PersistenceProvider` over the in-memory stores
 //! 3. Build an `EventSourceSystem` on that provider
 //! 4. Spawn a `Counter` aggregate and call `ask`, `tell`, `exec`
 //!
@@ -13,7 +13,8 @@
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
@@ -39,7 +40,7 @@ async fn main() {
     let ps = ProcessSystem::new().await;
 
     // 2. Assemble the provider every store comes from.
-    let persistence = Persistence::in_memory();
+    let persistence = PersistenceProvider::new(InMemoryStore::default());
 
     // 3. Build the event-source system on it.  Every aggregate spawned below
     //    persists onto the journal that provider supplies — there is no

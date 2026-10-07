@@ -38,8 +38,8 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::Persistence;
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
@@ -361,7 +361,7 @@ async fn append_order_placed(
 async fn all_empty_persist_writes_only_the_consumed_position() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -452,7 +452,9 @@ async fn persist_with_no_events_but_a_tell_is_not_a_noop() {
     // supplies; the saga keeps its own recording store below.
     let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(inventory_store))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder().eventstore(inventory_store).build(),
+        ))
         .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

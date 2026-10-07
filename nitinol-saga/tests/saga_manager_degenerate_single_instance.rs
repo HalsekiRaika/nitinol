@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, Query,
 };
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -240,7 +240,11 @@ async fn single_constant_correlation_reproduces_the_resident_saga() {
     let ps = ProcessSystem::new().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&journal)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&journal))
+                .build(),
+        ))
         .build();
 
     let order_id = AggregateId::new("mgr-degenerate-order");

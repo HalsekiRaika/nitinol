@@ -2,6 +2,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use nitinol_eventsource::system::{Hosted, SystemHandle, Unhosted};
 use nitinol_eventsource::Event;
 use nitinol_persistence::store::EventStore;
 use nitinol_runtime::ProcessSystem;
@@ -44,7 +45,7 @@ use nitinol_runtime::process::{Process, ProcessProxy, Receive};
 /// There is no scheduler stage either.  Whether this saga has its own time is
 /// settled by whether its alphabet declares a deadline, so the host resolves the
 /// resident timer core from the declaration — see [`SagaComponents::deadline`].
-pub struct SagaProps<S: Saga, B = SourceBindings<S>> {
+pub struct SagaProps<S: Saga, B = SourceBindings<S>, H = Unhosted> {
     saga_id: SagaId,
     store: Arc<dyn EventStore>,
     producer: SagaProducer<S>,
@@ -52,11 +53,12 @@ pub struct SagaProps<S: Saga, B = SourceBindings<S>> {
     crash_restart_factory: Option<CrashRestartFactory>,
     enqueue_policy: Option<Arc<dyn EnqueuePolicy>>,
     dead_letter_subscriber: Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>,
+    host: H,
     #[cfg(test)]
     initial_tell_states: HashMap<u64, TellState>,
 }
 
-impl<S: Saga> SagaProps<S, SourceBindings<S>> {
+impl<S: Saga> SagaProps<S, SourceBindings<S>, Unhosted> {
     /// Begin a saga spawn, with every declared source still unbound.
     ///
     /// `producer` builds the saga instance from the capabilities the framework
@@ -77,13 +79,33 @@ impl<S: Saga> SagaProps<S, SourceBindings<S>> {
             crash_restart_factory: None,
             enqueue_policy: None,
             dead_letter_subscriber: None,
+            host: Unhosted,
             #[cfg(test)]
             initial_tell_states: HashMap::new(),
         }
     }
 }
 
-impl<S: Saga, B> SagaProps<S, B> {
+impl<S: Saga, B> SagaProps<S, B, Unhosted> {
+    /// Carry `host` as where these props start, and as what their incarnations
+    /// are handed through [`SagaComponents::system`].
+    pub(crate) fn hosted(self, host: SystemHandle) -> SagaProps<S, B, Hosted> {
+        SagaProps {
+            saga_id: self.saga_id,
+            store: self.store,
+            producer: self.producer,
+            bindings: self.bindings,
+            crash_restart_factory: self.crash_restart_factory,
+            enqueue_policy: self.enqueue_policy,
+            dead_letter_subscriber: self.dead_letter_subscriber,
+            host: Hosted::new(host),
+            #[cfg(test)]
+            initial_tell_states: self.initial_tell_states,
+        }
+    }
+}
+
+impl<S: Saga, B, H> SagaProps<S, B, H> {
     /// Observe the declared source `E` through `subscription`.
     ///
     /// At spawn time each bound source starts a runtime child
@@ -106,7 +128,7 @@ impl<S: Saga, B> SagaProps<S, B> {
     pub fn subscribed_to<E>(
         self,
         subscription: Subscription,
-    ) -> SagaProps<S, <B as BindSource<E>>::Bound>
+    ) -> SagaProps<S, <B as BindSource<E>>::Bound, H>
     where
         E: Event,
         B: BindSource<E>,
@@ -123,6 +145,7 @@ impl<S: Saga, B> SagaProps<S, B> {
             crash_restart_factory: self.crash_restart_factory,
             enqueue_policy: self.enqueue_policy,
             dead_letter_subscriber: self.dead_letter_subscriber,
+            host: self.host,
             #[cfg(test)]
             initial_tell_states: self.initial_tell_states,
         }
@@ -176,26 +199,25 @@ impl<S: Saga, B> SagaProps<S, B> {
     }
 }
 
-impl<S: Saga, B> SagaProps<S, B>
+impl<S: Saga, B, H> SagaProps<S, B, H>
 where
     B: AllSourcesSubscribed<S::Subscribe>,
 {
-    /// Spawn the saga process.
+    /// The resolved ingredients of this saga's instance, on `system`.
     ///
-    /// Each declared source is wired as a direct poller child process of its own
-    /// — no shared [`nitinol_eventsource::DurableStream`] fan-out channel is
-    /// created.  Their lifetimes are bound to the saga process; when the saga
-    /// stops the runtime cascade-stops every poller.
-    ///
-    /// A saga whose alphabet declares a deadline also has the system's one
-    /// resident timer core resolved for it here, which is the whole of its
-    /// scheduler wiring.
-    pub async fn spawn(self, system: &ProcessSystem) -> SagaProxy<S> {
+    /// The sole place a configured props becomes a spec, so both spawn entry
+    /// points start the same instance.
+    async fn into_spec(
+        self,
+        system: &ProcessSystem,
+        host: Option<SystemHandle>,
+    ) -> SagaInstanceSpec<S> {
         let scheduler = scheduler::resolve_for::<S>(system).await;
-        let spec = SagaInstanceSpec::<S> {
+        SagaInstanceSpec::<S> {
             saga_id: self.saga_id,
             store: self.store,
             producer: self.producer,
+            host,
             enqueue_policy: self
                 .enqueue_policy
                 .unwrap_or_else(dead_letter::default_enqueue_policy),
@@ -214,8 +236,47 @@ where
             dlq_child_spawn: self.dead_letter_subscriber,
             #[cfg(test)]
             initial_tell_states: self.initial_tell_states,
-        };
+        }
+    }
+}
 
+impl<S: Saga, B> SagaProps<S, B, Unhosted>
+where
+    B: AllSourcesSubscribed<S::Subscribe>,
+{
+    /// Spawn the saga process on `system`.
+    ///
+    /// Each declared source is wired as a direct poller child process of its own
+    /// — no shared [`nitinol_eventsource::DurableStream`] fan-out channel is
+    /// created.  Their lifetimes are bound to the saga process; when the saga
+    /// stops the runtime cascade-stops every poller.
+    ///
+    /// A saga whose alphabet declares a deadline also has the system's one
+    /// resident timer core resolved for it here, which is the whole of its
+    /// scheduler wiring.
+    ///
+    /// These props were built on a store rather than taken from an
+    /// `EventSourceSystem`, so there is no host to hand over:
+    /// [`SagaComponents::system`](crate::SagaComponents::system) answers
+    /// `None` for every incarnation this starts.
+    pub async fn spawn(self, system: &ProcessSystem) -> SagaProxy<S> {
+        let spec = self.into_spec(system, None).await;
         system.spawn(spec.into_props()).await.into()
+    }
+}
+
+impl<S: Saga, B> SagaProps<S, B, Hosted>
+where
+    B: AllSourcesSubscribed<S::Subscribe>,
+{
+    /// Spawn the saga process on the system these props came from.
+    ///
+    /// Nothing is named here, and every incarnation is handed that system
+    /// through [`SagaComponents::system`](crate::SagaComponents::system).
+    pub async fn spawn(self) -> SagaProxy<S> {
+        let host = self.host.system().clone();
+        let ps = host.process_system().clone();
+        let spec = self.into_spec(&ps, Some(host)).await;
+        ps.spawn(spec.into_props()).await.into()
     }
 }

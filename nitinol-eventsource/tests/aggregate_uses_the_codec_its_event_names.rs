@@ -28,7 +28,7 @@ use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Query,
 };
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -290,7 +290,11 @@ async fn two_event_types_on_one_system_each_use_their_own_codec() {
 
     // No `with_codec` step: the builder binds a store and nothing else.
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
 
     let counter_id = AggregateId::new("named-codec-counter");

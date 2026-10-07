@@ -22,13 +22,18 @@
 //!   When the kit's deterministic checkpoint verification is run
 //!   Then it fails, naming CKP-1
 //!
-//! Scenario: a provider that hands out a store of its own per call
-//!   Given a provider answering every event-store request with a new store
-//!   When the kit's provider verification is run
+//! Scenario: a store that hands out a journal of its own per call
+//!   Given a store answering every journal request with a new store
+//!   When the kit's supplier verification is run
 //!   Then it fails, naming PRV-1
 //!
-//! Scenario: a provider whose checkpoint slots cannot be told apart
-//!   Given a provider over a store with one position for every key
+//! Scenario: a store whose clone names a region of its own
+//!   Given a store whose handle is consistent and whose clone is not
+//!   When the kit's supplier verification is run
+//!   Then it fails, naming PRV-1
+//!
+//! Scenario: a store whose checkpoint slots cannot be told apart
+//!   Given a store with one position for every key in both slots
 //!   When the kit's slot-independence verification is run
 //!   Then it fails, naming PRV-4
 //! ```
@@ -55,7 +60,8 @@
 mod common;
 use common::{
     CheckpointFault, Fault, FaultyCheckpointStore, FaultyProvider, FaultySnapshotStore,
-    FaultyStore, ProviderWithCollidingCheckpointSlots, SnapshotFault, TokioExecutor,
+    FaultyStore, ProviderWithCloneThatSplitsTheWorld, ProviderWithCollidingCheckpointSlots,
+    SnapshotFault, TokioExecutor,
 };
 
 use nitinol_store_conformance::{
@@ -188,7 +194,7 @@ async fn refusing_a_reserved_namespace_key_is_reported_as_a_ckp_5_violation() {
     .await;
 }
 
-/// A provider that builds a store per request splits the world in two with no
+/// A store that builds a journal per request splits the world in two with no
 /// error raised anywhere: both handles work, and a record written through one
 /// is simply not there through the other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -197,7 +203,18 @@ async fn a_store_of_its_own_per_call_is_reported_as_a_prv_1_violation() {
     provider::verify_event_store(&FaultyProvider, &TokioExecutor).await;
 }
 
-/// Configuring both checkpoint slots with one store is allowed, so the clause
+/// A store whose handle is consistent and whose clone is not passes every
+/// clause that takes a slot twice from one handle, and still splits a
+/// deployment in two: handing the store to a second wiring point is cloning it.
+/// Adding `Clone` to the bound cannot say this; only a record written through
+/// one handle and read through the clone can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[should_panic(expected = "PRV-1")]
+async fn a_clone_that_names_a_region_of_its_own_is_reported_as_a_prv_1_violation() {
+    provider::verify_event_store(&ProviderWithCloneThatSplitsTheWorld, &TokioExecutor).await;
+}
+
+/// Naming both checkpoint slots with one handle is allowed, so the clause
 /// cannot be about the store being shared. What it is about is the two
 /// consumers being told apart inside it — and a store with one position for
 /// every key tells them apart nowhere.

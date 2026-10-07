@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
 };
-use nitinol_persistence::provider::{InMemoryPersistence, Persistence};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -182,7 +182,7 @@ async fn wait_for_event_count(
 
 #[allow(clippy::type_complexity)]
 async fn spawn_two_tells_then_end_saga(
-    system: &EventSourceSystem<InMemoryPersistence>,
+    system: &EventSourceSystem<InMemoryStore>,
     saga_label: &str,
 ) -> (
     Arc<dyn EventStore>,
@@ -230,7 +230,7 @@ async fn spawn_two_tells_then_end_saga(
 async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let (saga_store, saga_id, upstream_store, agg_id, _handle_count, _saga_proxy) =
@@ -299,7 +299,7 @@ async fn multi_tell_then_end_settles_all_terminals_at_gapfree_sequences() {
 async fn multi_tell_then_end_stops_saga_after_last_executor_settles() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let (saga_store, saga_id, upstream_store, agg_id, handle_count, _saga_proxy) =

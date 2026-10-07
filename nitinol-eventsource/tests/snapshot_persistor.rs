@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::ProcessSystem;
@@ -21,8 +21,12 @@ use nitinol_runtime::ProcessSystem;
 /// Spawns a fresh ProcessSystem with an InMemorySnapshotStore-backed SnapshotPersistor.
 async fn setup() -> (ProcessSystem, SnapshotPersistorProxy) {
     let system = ProcessSystem::new().await;
-    let persistence = Persistence::new(Arc::new(InMemoryEventStore::default()))
-        .with_snapshot_store(Arc::new(InMemorySnapshotStore::default()));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::new(InMemoryEventStore::default()))
+            .snapshot(Arc::new(InMemorySnapshotStore::default()))
+            .build(),
+    );
     let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     (system, snapshot_ref)
 }

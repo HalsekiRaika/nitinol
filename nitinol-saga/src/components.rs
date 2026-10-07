@@ -25,6 +25,8 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
+use nitinol_eventsource::system::SystemHandle;
+
 use crate::saga::Saga;
 use crate::scheduler::TimerName;
 use crate::subscribe::{HasDeadline, SagaSubscribe};
@@ -55,6 +57,7 @@ pub(crate) type PendingDeadlineCell = Arc<RwLock<HashMap<TimerName, jiff::Timest
 /// ever resolved to arm it.
 pub struct SagaComponents<S: Saga> {
     pending_deadlines: PendingDeadlineCell,
+    host: Option<SystemHandle>,
     _saga: PhantomData<fn() -> S>,
 }
 
@@ -64,11 +67,32 @@ impl<S: Saga> SagaComponents<S> {
     /// Called once per incarnation, so the cell the process writes and the one
     /// the saga's [`Deadline`] reads are the same cell — and a restarted
     /// incarnation starts from an empty one, which replay then fills.
-    pub(crate) fn new(pending_deadlines: PendingDeadlineCell) -> Self {
+    pub(crate) fn new(pending_deadlines: PendingDeadlineCell, host: Option<SystemHandle>) -> Self {
         Self {
             pending_deadlines,
+            host,
             _saga: PhantomData,
         }
+    }
+
+    /// The system hosting this saga, where one is.
+    ///
+    /// `Some` for an incarnation the hosting machinery built from a system:
+    /// [`SagaSystemExt::spawn_saga`](crate::SagaSystemExt::spawn_saga),
+    /// [`SagaSystemExt::saga_manager_props`](crate::SagaSystemExt::saga_manager_props),
+    /// and every instance a manager wired that way spawns. The handle reaches
+    /// the host's process system, its aggregate registry and the journal its
+    /// supplier distributes — so a saga that has to tell an aggregate resolves
+    /// the reference from here rather than from a clone of the system captured
+    /// outside the spawn.
+    ///
+    /// `None` for an incarnation built from props the caller assembled on a
+    /// store — [`SagaProps::new`](crate::SagaProps::new) and
+    /// [`SagaManagerProps::new`](crate::SagaManagerProps::new). That path needs
+    /// no system to run on, so there is no system to answer with, and saying so
+    /// is what keeps the answer truthful.
+    pub fn system(&self) -> Option<&SystemHandle> {
+        self.host.as_ref()
     }
 
     /// Ask for this saga's own time.

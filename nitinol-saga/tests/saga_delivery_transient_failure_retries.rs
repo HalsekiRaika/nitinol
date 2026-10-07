@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
@@ -189,8 +189,10 @@ async fn a_held_delivery_is_retried_with_a_growing_pause_and_is_diagnosable() {
     // provider is assembled over the refusing store itself.
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(
-            Arc::new(AppendRefusingEventStore) as Arc<dyn EventStore>
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::new(AppendRefusingEventStore) as Arc<dyn EventStore>)
+                .build(),
         ))
         .build();
     let target = AggregateId::new("ledger-transient");

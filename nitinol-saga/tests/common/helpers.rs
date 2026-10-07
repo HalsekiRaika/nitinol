@@ -12,7 +12,7 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{Aggregate, Decider, Decision, Event, SystemEvent};
 use nitinol_persistence::__private::reserved_family;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -86,7 +86,9 @@ pub async fn make_tell_effect<E>() -> SagaEffect<E> {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(store))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder().eventstore(store).build(),
+        ))
         .build();
     let proxy = system
         .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-target"))
@@ -101,7 +103,9 @@ pub async fn make_tell_intent() -> TellIntent {
     let ps = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(store))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder().eventstore(store).build(),
+        ))
         .build();
     let proxy = system
         .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-intent-target"))

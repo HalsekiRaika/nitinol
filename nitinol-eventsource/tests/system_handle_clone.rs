@@ -2,15 +2,28 @@
 //!
 //! Cloning an `EventSourceSystem` produces another name for the same instance:
 //! every clone resolves through the same aggregate registry and carries the same
-//! persistence provider.  That is what lets callers drop the outer
+//! persistence supplier.  That is what lets callers drop the outer
 //! `Arc<EventSourceSystem<..>>` they used to need in order to hand the system to
 //! more than one task.
 //!
-//! What makes a second registry observable is the store's OCC rule, exactly as
-//! in `aggregate_resolve.rs`: two activations of one stream each carry their own
-//! sequence counter, so the one that fell behind has its append rejected.  A
-//! test that ends with every dispatch accepted and a gap-free sequence has
-//! therefore seen exactly one writer, whichever clone reached it.
+//! ```gherkin
+//!   Scenario: a clone writes where the store the system was built on reads
+//!     Given a system built on a store the caller still holds
+//!     When an aggregate is resolved and told to decide through a clone
+//!     Then the handle the caller holds is where its events landed
+//! ```
+//!
+//! What makes a second registry observable is the store's optimistic
+//! concurrency rule, exactly as in `aggregate_resolve.rs`: two activations of
+//! one stream each carry their own sequence counter, so the one that fell behind
+//! has its append rejected.  A test that ends with every dispatch accepted and a
+//! gap-free sequence has therefore seen exactly one writer, whichever clone
+//! reached it.
+//!
+//! What makes a second data region observable is the store handle this file
+//! constructed. A clone reading through its own supplier would pass that clause
+//! against a copy of the store as readily as against the store itself, so the
+//! last clause reads the handle the caller kept instead.
 //!
 //! Single-flight across clones under concurrency is pinned by
 //! `aggregate_resolve.rs::concurrent_resolve_produces_a_single_writer`, which
@@ -18,16 +31,14 @@
 //! statement of the same sharing, plus the type-level part that has no runtime
 //! observation at all.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::system::{EventSourceSystem, EventSourceSystemBuilder, PersistenceUnset};
 use nitinol_eventsource::{codec::Codec, Aggregate, Decider, Decision, Event, Query};
-use nitinol_persistence::provider::{InMemoryPersistence, Persistence, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::{PersistenceProvider, Store};
+use nitinol_persistence::store::{EventStore, InMemoryStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -92,7 +103,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 }
 
 /// Stream sequences stored under `id`, in ascending order.
-async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<u64> {
+async fn stored_sequences(store: &dyn EventStore, id: &AggregateId) -> Vec<u64> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await
@@ -103,12 +114,13 @@ async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<
     loaded.iter().map(|event| event.sequence).collect()
 }
 
-/// A system on a fresh in-memory store, plus the store to read it back from.
-async fn counter_system() -> (EventSourceSystem<Persistence>, Arc<dyn EventStore>) {
+/// A system on a fresh in-memory store, plus the store handle to read it back
+/// from.
+async fn counter_system() -> (EventSourceSystem<InMemoryStore>, InMemoryStore) {
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(store.clone()))
         .build();
     (system, store)
 }
@@ -117,16 +129,14 @@ async fn counter_system() -> (EventSourceSystem<Persistence>, Arc<dyn EventStore
 
 fn assert_clone<T: Clone>() {}
 
-/// The system type is the shared handle, whether or not a provider was supplied.
+/// The system type is the shared handle, whether or not a store was supplied.
 ///
-/// It carries no codec type at all — each event names its own — so the provider
-/// is the only axis this has to be stated across.  Sharing does not depend on
-/// the provider type being `Clone` itself: `InMemoryPersistence` is the assembly
-/// a deployment names, and the handle is clonable either way.
+/// It carries no codec type at all — each event names its own — so the store is
+/// the only axis this has to be stated across.
 #[allow(dead_code)]
-fn _event_source_system_is_clone_in_both_provider_states() {
+fn _event_source_system_is_clone_in_both_supplier_states() {
     assert_clone::<EventSourceSystem<PersistenceUnset>>();
-    assert_clone::<EventSourceSystem<InMemoryPersistence>>();
+    assert_clone::<EventSourceSystem<InMemoryStore>>();
 }
 
 /// `builder(ps)` is the name of the entry point that returns a builder.
@@ -145,7 +155,7 @@ async fn _builder_is_the_entry_point() {
 /// registry of its own, it would have activated a second `Counter`, replayed the
 /// one stored event, and taken sequence 2 — leaving the original's activation
 /// still holding sequence 1 as its next append, so this last dispatch would come
-/// back as an OCC rejection instead of succeeding.
+/// back as a rejection instead of succeeding.
 #[tokio::test]
 async fn clone_and_original_resolve_through_one_aggregate_registry() {
     // Given: a system and a clone of it
@@ -173,7 +183,7 @@ async fn clone_and_original_resolve_through_one_aggregate_registry() {
 
     // Then: one writer numbered every append, without a gap or a collision
     assert_eq!(
-        stored_sequences(&store, &id).await,
+        stored_sequences(&store.events(), &id).await,
         vec![1, 2, 3],
         "both clones must feed one writer; a per-clone registry would put two \
          activations on this stream"
@@ -188,20 +198,20 @@ async fn clone_and_original_resolve_through_one_aggregate_registry() {
     );
 }
 
-/// Clones carry the provider the system was built with.
+/// Clones carry the supplier the system was built with.
 ///
-/// Read back through the *clone's* provider rather than the store the test kept:
-/// a clone that dropped the provider would either fail to build props at all or
-/// serve them from an empty store, and reading through the original would hide
-/// both.
+/// Read back through the *clone's* supplier rather than the store this clause
+/// kept: a clone that dropped the supplier would either fail to build props at
+/// all or serve them from an empty store, and reading through the original would
+/// hide both.
 #[tokio::test]
-async fn clone_and_original_share_the_providers_event_store() {
+async fn clone_and_original_share_the_suppliers_event_store() {
     // Given: a system and a clone of it
     let (system, _store) = counter_system().await;
     let handle = system.clone();
     let id = AggregateId::new("clone-shared-store");
 
-    // When: an event is persisted through the original's provider
+    // When: an event is persisted through the original's supplier
     system
         .spawn_aggregate::<Counter>(id.clone())
         .await
@@ -209,11 +219,41 @@ async fn clone_and_original_share_the_providers_event_store() {
         .await
         .expect("the dispatch must persist");
 
-    // Then: the clone's provider answers with the store that received it
+    // Then: the clone's supplier answers with the store that received it
     assert_eq!(
-        stored_sequences(&handle.persistence().event_store(), &id).await,
+        stored_sequences(&*handle.persistence().event_store(), &id).await,
         vec![1],
-        "the clone must carry the provider the original was built with, \
+        "the clone must carry the supplier the original was built with, \
          not an empty store of its own"
+    );
+}
+
+/// A clone writes into the data region the store handle the caller holds names.
+///
+/// This is the half the clause above cannot see. A clone that copied the store
+/// into a region of its own would still read its own writes back through its own
+/// supplier, so the handle this clause constructed is what settles whether the
+/// region was shared or duplicated.
+#[tokio::test]
+async fn a_clone_writes_where_the_store_the_system_was_built_on_reads() {
+    // Given: a system built on a store this clause keeps hold of, and a clone
+    let (system, store) = counter_system().await;
+    let handle = system.clone();
+    let id = AggregateId::new("clone-store-handle-identity");
+
+    // When: the dispatch goes through the clone
+    handle
+        .spawn_aggregate::<Counter>(id.clone())
+        .await
+        .ask(Increment)
+        .await
+        .expect("the clone's dispatch must persist");
+
+    // Then: the handle the caller holds is where it landed
+    assert_eq!(
+        stored_sequences(&store.events(), &id).await,
+        vec![1],
+        "a system's clone distributes the store the system was built on, so a \
+         caller holding that store reads what the clone wrote"
     );
 }

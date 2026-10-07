@@ -186,3 +186,24 @@ pub trait EventStore: Send + Sync {
     /// against the reference implementation.
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError>;
 }
+
+/// A journal reached through an `Arc` is that journal.
+///
+/// What this is for is naming a store that is not a cloneable value of its own
+/// — a trait object, or a backend handle a deployment shares — as a slot of an
+/// assembly: the `Arc` is the cloneable handle, and the clauses above are
+/// whatever the store behind it keeps.
+#[async_trait]
+impl<T: EventStore + ?Sized> EventStore for std::sync::Arc<T> {
+    async fn append(
+        &self,
+        key: &str,
+        events: Vec<AppendingEvent>,
+    ) -> Result<AppendOutcome, AppendError> {
+        T::append(self, key, events).await
+    }
+
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        T::load(self, query).await
+    }
+}

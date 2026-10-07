@@ -50,8 +50,8 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::Persistence;
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -657,7 +657,7 @@ struct Observations {
 async fn run_tell_failure_scenario(saga_key: &str, terminate_after_tell: bool) -> Observations {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_key = format!("{saga_key}-upstream");
@@ -753,7 +753,7 @@ fn assert_reported_while_draining(events: &[LoadedEvent]) {
 async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_key = format!("{saga_key}-upstream");
@@ -805,7 +805,7 @@ async fn run_undurable_failure_scenario(saga_key: &str) -> Observations {
 async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_key = format!("{saga_key}-upstream");
@@ -870,7 +870,7 @@ async fn run_replay_failure_scenario(saga_key: &str) -> Observations {
 async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_key = format!("{saga_key}-upstream");
@@ -915,7 +915,7 @@ async fn run_timer_after_failure_scenario(saga_key: &str) -> Observations {
 async fn run_rejecting_hook_scenario(saga_key: &str) -> Vec<LoadedEvent> {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_key = format!("{saga_key}-upstream");

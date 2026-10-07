@@ -41,8 +41,8 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::provider::{InMemoryPersistence, Persistence};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -217,7 +217,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 /// from the beginning.  No routing argument is passed — correlation lives on
 /// `CorrelationSaga`.
 async fn spawn_correlation_saga(
-    system: &EventSourceSystem<InMemoryPersistence>,
+    system: &EventSourceSystem<InMemoryStore>,
     upstream_store: &Arc<dyn EventStore>,
     agg_id: &AggregateId,
     saga_store: Arc<dyn EventStore>,
@@ -251,7 +251,7 @@ async fn spawn_correlation_saga(
 async fn only_events_correlating_to_this_saga_reach_handle() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -294,7 +294,7 @@ async fn only_events_correlating_to_this_saga_reach_handle() {
 async fn correlation_mismatch_is_silent_and_writes_no_dead_letter() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

@@ -9,20 +9,23 @@
 //! | [`store::CheckpointStore`] | Track the progress of an event consumer |
 //! | [`store::CheckpointScope`] | The key a consumer's progress is filed under |
 //! | [`store::DeliveryMode`] | Delivery guarantee: `AtMostOnce` / `AtLeastOnce` / `ExactlyOnce` |
-//! | [`provider::PersistenceProvider`] | Hand out the stores above, one supplier per deployment |
+//! | [`provider::Store`] | Hold the stores above, as one cloneable handle per deployment |
+//! | [`provider::CustomStore`] | Assemble a store by naming one handle per slot |
+//! | [`provider::PersistenceProvider`] | Distribute what a store holds to the framework's wiring |
 //!
 //! An in-memory reference implementation is provided under [`store`] for
-//! use in tests and examples, and [`provider::Persistence::in_memory`]
-//! assembles a provider over it.  Neither is intended for production use.
+//! use in tests and examples, and [`store::InMemoryStore`] is a whole store
+//! over it.  Neither is intended for production use.
 //!
 //! # Third-party backends
 //!
 //! Production backends (Postgres, SQLite, DynamoDB, etc.) are intentionally
 //! out of scope for this crate.  Implement [`store::EventStore`],
 //! [`store::SnapshotStore`], and [`store::CheckpointStore`] against your
-//! preferred storage engine, then assemble a [`provider::Persistence`] naming
-//! your handles — that is what every wiring point in the framework resolves its
-//! stores from.
+//! preferred storage engine, then either implement [`provider::Store`] over
+//! them or name your handles in a [`provider::CustomStore`] — and hand the
+//! result to [`provider::PersistenceProvider::new`], which is what every
+//! wiring point in the framework resolves its stores from.
 //!
 //! All three store traits carry behavioural contracts a backend has to
 //! reproduce, stated as labelled clauses on the trait itself:
@@ -31,16 +34,16 @@
 //! [`store::CheckpointStore`] carries `CKP-1` … `CKP-6`.  One OCC clause is
 //! broken silently by the most obvious way to number events in a relational
 //! store, and one `CKP` clause by the most obvious way to read a missing row.
-//! [`provider::PersistenceProvider`] carries `PRV-1` … `PRV-5` for the supplier
-//! above them — what distribution, identity and slot independence mean, and
-//! what a single supplier is explicitly not.
+//! [`provider::Store`] carries `PRV-1` … `PRV-5` for the layer above them —
+//! what distribution, identity and slot independence mean, and what a single
+//! supplier is explicitly not.
 //! `nitinol-store-conformance` is those contracts as a suite to run against
 //! your implementation.
 //!
 //! What the clauses fix is each store on its own.  A contract that holds only
 //! for a store *together with* the machinery driving it — that a projection's
 //! result and the checkpoint covering it settle in one transaction — is fixed
-//! against a provider and a projector at once instead; each trait's
+//! against a supplier and a projector at once instead; each trait's
 //! documentation names where.
 //!
 //! # Reserved namespace

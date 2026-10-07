@@ -42,8 +42,8 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::SystemEvent;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
-use nitinol_persistence::provider::Persistence;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -152,7 +152,7 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
 
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -214,7 +214,7 @@ async fn acked_tell_requested_does_not_get_synthetic_failed_on_replay() {
 async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -312,7 +312,7 @@ async fn unresolvable_tell_requested_yields_synthetic_tell_failed_on_replay() {
 async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -389,7 +389,7 @@ async fn unresolvable_tell_requested_with_target_enqueues_dead_letter_on_replay(
 async fn unresolvable_tell_requested_without_target_skips_dead_letter_on_replay() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

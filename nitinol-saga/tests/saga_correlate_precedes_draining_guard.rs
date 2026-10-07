@@ -49,8 +49,8 @@ use nitinol_eventsource::{
     system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event,
     SystemEvent, TellError,
 };
-use nitinol_persistence::provider::Persistence;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -264,7 +264,7 @@ async fn wait_for_ended_saga_dead_letter(
 async fn draining_saga_dead_letters_only_events_it_correlates_to() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     // Pre-load all three events: the direct poller reads the batch in one

@@ -76,9 +76,14 @@
 //!   defaulted: [`Subscription::stream`] names a source's store, and
 //!   [`SagaProps::new`] / [`SagaManagerProps::new`] name a journal.
 //! - Where delivery progress is kept: [`SagaDeliveryExt`] resolves the journal
-//!   and the delivery-checkpoint slot from the same provider, and exists only
-//!   where that provider supplies the slot — so a deployment with no store for
-//!   a host's progress is told while the wiring is compiled.
+//!   and the delivery-checkpoint slot from the same supplier, and exists only
+//!   where that supplier's store holds the slot — so a deployment with no
+//!   store for a host's progress is told while the wiring is compiled.
+//! - Reaching the host from inside: a saga spawned through [`SagaSystemExt`]
+//!   is handed the hosting system by
+//!   [`SagaComponents::system`](crate::SagaComponents::system), so a producer
+//!   that needs a reference to tell resolves it there rather than from a clone
+//!   of the system captured outside the spawn.
 //! - Instance management: [`SagaManagerProps`] spawns one manager that holds
 //!   one upstream subscription per declared source, shared by every instance
 //!   of a saga type, so an upstream record is decoded once no matter how far

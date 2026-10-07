@@ -7,7 +7,7 @@ use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, ProjectionContext,
     Projector, ProjectorProps,
 };
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, ProjectionId, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -108,7 +108,12 @@ async fn projector_props_correct_chain_compiles_and_spawns() {
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
-    let persistence = Persistence::new(store).with_projection_checkpoints(checkpoint_store);
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(store)
+            .projection_checkpoints(checkpoint_store)
+            .build(),
+    );
 
     // When: full required chain
     let _proxy = ProjectorProps::new(
@@ -140,7 +145,12 @@ async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
-    let persistence = Persistence::new(store).with_projection_checkpoints(checkpoint_store);
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(store)
+            .projection_checkpoints(checkpoint_store)
+            .build(),
+    );
 
     // When: two with_event() calls followed by catchup → spawn
     let _proxy = ProjectorProps::new(
@@ -166,7 +176,12 @@ async fn projector_props_catchup_from_aggregate_enables_spawn() {
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
-    let persistence = Persistence::new(store).with_projection_checkpoints(checkpoint_store);
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(store)
+            .projection_checkpoints(checkpoint_store)
+            .build(),
+    );
 
     let agg_id = AggregateId::new("typestate-agg-origin");
 

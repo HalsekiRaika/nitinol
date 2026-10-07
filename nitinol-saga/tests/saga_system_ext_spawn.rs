@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
-use nitinol_persistence::provider::Persistence;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -191,7 +191,11 @@ async fn spawn_saga_uses_the_codecs_its_events_name() {
     let ps = ProcessSystem::new().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&journal)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&journal))
+                .build(),
+        ))
         .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -235,7 +239,7 @@ async fn spawn_saga_uses_the_codecs_its_events_name() {
 async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -271,7 +275,7 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
 async fn stream_subscription_after_override_skips_records_up_to_that_position() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::in_memory())
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());

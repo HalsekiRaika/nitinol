@@ -61,7 +61,7 @@ use linkme::distributed_slice;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{Event, ProjectionContext, Projector, ProjectorProps, TxProvider};
 use nitinol_persistence::error::CheckpointError;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{CheckpointScope, CheckpointStore, EventStore};
 use nitinol_persistence::{
     AggregateId, EventRegistryEntry, EventType, Family, ProjectionId, TypeName, EVENT_REGISTRY,
@@ -404,8 +404,12 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
 
     let never_fail = Arc::new(AtomicBool::new(false));
     let first_attempts = Arc::new(AtomicUsize::new(0));
-    let persistence = Persistence::new(Arc::clone(&events))
-        .with_projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&events))
+            .projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
+            .build(),
+    );
     let first = ProjectorProps::new(projection_id.clone(), &persistence, {
         let fail = Arc::clone(&never_fail);
         let attempts = Arc::clone(&first_attempts);
@@ -435,8 +439,12 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     // When: a second projector takes the same projection over, and is handed
     // the event the first one already applied along with one it has not seen.
     let second_attempts = Arc::new(AtomicUsize::new(0));
-    let persistence = Persistence::new(Arc::clone(&events))
-        .with_projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&events))
+            .projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
+            .build(),
+    );
     let second = ProjectorProps::new(projection_id.clone(), &persistence, {
         let fail = Arc::clone(&never_fail);
         let attempts = Arc::clone(&second_attempts);
@@ -508,8 +516,12 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_checkpoint_where_the
 
     let fail = Arc::new(AtomicBool::new(true));
     let attempts = Arc::new(AtomicUsize::new(0));
-    let persistence = Persistence::new(Arc::clone(&events))
-        .with_projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&events))
+            .projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
+            .build(),
+    );
     let projector = ProjectorProps::new(projection_id.clone(), &persistence, {
         let fail = Arc::clone(&fail);
         let attempts = Arc::clone(&attempts);
@@ -597,8 +609,12 @@ async fn a_refused_checkpoint_save_rolls_the_read_model_update_back() {
     let conflicts = Arc::new(AtomicUsize::new(0));
     let attempts = Arc::new(AtomicUsize::new(0));
     let never_fail = Arc::new(AtomicBool::new(false));
-    let persistence = Persistence::new(Arc::clone(&events))
-        .with_projection_checkpoints(observed(pool.clone(), &conflicts));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&events))
+            .projection_checkpoints(observed(pool.clone(), &conflicts))
+            .build(),
+    );
     let projector = ProjectorProps::new(projection_id.clone(), &persistence, {
         let fail = Arc::clone(&never_fail);
         let attempts = Arc::clone(&attempts);
@@ -694,8 +710,12 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
     let other_conflicts = Arc::new(AtomicUsize::new(0));
 
     let one_system = ProcessSystem::new().await;
-    let persistence = Persistence::new(Arc::clone(&one_events))
-        .with_projection_checkpoints(observed(one_pool.clone(), &one_conflicts));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&one_events))
+            .projection_checkpoints(observed(one_pool.clone(), &one_conflicts))
+            .build(),
+    );
     let one = ProjectorProps::new(projection_id.clone(), &persistence, {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);
@@ -714,8 +734,12 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
     .await;
 
     let other_system = ProcessSystem::new().await;
-    let persistence = Persistence::new(Arc::clone(&other_events))
-        .with_projection_checkpoints(observed(other_pool.clone(), &other_conflicts));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&other_events))
+            .projection_checkpoints(observed(other_pool.clone(), &other_conflicts))
+            .build(),
+    );
     let other = ProjectorProps::new(projection_id.clone(), &persistence, {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);
@@ -817,8 +841,12 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     let other_conflicts = Arc::new(AtomicUsize::new(0));
 
     let one_system = ProcessSystem::new().await;
-    let persistence = Persistence::new(Arc::clone(&one_events))
-        .with_projection_checkpoints(observed(one_pool.clone(), &one_conflicts));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&one_events))
+            .projection_checkpoints(observed(one_pool.clone(), &one_conflicts))
+            .build(),
+    );
     let one = ProjectorProps::new(projection_id.clone(), &persistence, {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);
@@ -837,8 +865,12 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     .await;
 
     let other_system = ProcessSystem::new().await;
-    let persistence = Persistence::new(Arc::clone(&other_events))
-        .with_projection_checkpoints(observed(other_pool.clone(), &other_conflicts));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&other_events))
+            .projection_checkpoints(observed(other_pool.clone(), &other_conflicts))
+            .build(),
+    );
     let other = ProjectorProps::new(projection_id.clone(), &persistence, {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);

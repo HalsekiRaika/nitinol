@@ -12,13 +12,11 @@
 //! [`EventSourceSystem::persistence`] — already exist.
 
 use std::borrow::Borrow;
-use std::sync::Arc;
 
-use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::system::{EventSourceSystem, Hosted};
 use nitinol_eventsource::Event;
-use nitinol_persistence::provider::{DeliveryCheckpointProvider, PersistenceProvider};
-use nitinol_persistence::store::{CheckpointStore, EventStore};
-use nitinol_runtime::ProcessSystem;
+use nitinol_persistence::provider::{DeliveryCheckpointSlot, Store};
+use nitinol_persistence::store::CheckpointStore;
 
 use crate::components::SagaComponents;
 use crate::delivery::SagaDeliveryProps;
@@ -69,7 +67,8 @@ pub trait SagaSystemExt {
     /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::system::EventSourceSystem;
     /// # use nitinol_eventsource::Event;
-    /// # use nitinol_persistence::provider::Persistence;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt, Subscription};
@@ -109,7 +108,7 @@ pub trait SagaSystemExt {
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// # let system = EventSourceSystem::builder(ps)
-    /// #     .with_persistence(Persistence::in_memory())
+    /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
     /// #     .build();
     /// # let order_id = AggregateId::new("order");
     /// let saga_proxy = system
@@ -123,7 +122,7 @@ pub trait SagaSystemExt {
         &self,
         saga_id: SagaId,
         producer: impl Fn(SagaComponents<S>) -> S + Send + Sync + 'static,
-    ) -> SagaSpawn<'_, S>;
+    ) -> SagaSpawn<S>;
 
     /// Subscribe to the stream `key` in the store the provider supplies, from
     /// its beginning.
@@ -149,23 +148,21 @@ pub trait SagaSystemExt {
     fn saga_manager_props<S>(
         &self,
         producer: impl Fn(SagaComponents<S>) -> S + Send + Sync + 'static,
-    ) -> SagaManagerProps<S>
+    ) -> SagaManagerProps<S, SourceBindings<S>, Hosted>
     where
         S: Saga;
 }
 
-impl<P: PersistenceProvider> SagaSystemExt for EventSourceSystem<P> {
+impl<St: Store> SagaSystemExt for EventSourceSystem<St> {
     fn spawn_saga<S: Saga>(
         &self,
         saga_id: SagaId,
         producer: impl Fn(SagaComponents<S>) -> S + Send + Sync + 'static,
-    ) -> SagaSpawn<'_, S> {
-        SagaSpawn::new(
-            self.process_system(),
-            saga_id,
-            self.persistence().event_store(),
-            producer,
-        )
+    ) -> SagaSpawn<S> {
+        SagaSpawn {
+            props: SagaProps::new(saga_id, self.persistence().event_store(), producer)
+                .hosted(self.erase_store()),
+        }
     }
 
     fn subscription<K>(&self, key: &K) -> Subscription
@@ -178,11 +175,12 @@ impl<P: PersistenceProvider> SagaSystemExt for EventSourceSystem<P> {
     fn saga_manager_props<S>(
         &self,
         producer: impl Fn(SagaComponents<S>) -> S + Send + Sync + 'static,
-    ) -> SagaManagerProps<S>
+    ) -> SagaManagerProps<S, SourceBindings<S>, Hosted>
     where
         S: Saga,
     {
         SagaManagerProps::<S>::new(self.persistence().event_store(), producer)
+            .hosted(self.erase_store())
     }
 }
 
@@ -210,14 +208,13 @@ pub trait SagaDeliveryExt {
     /// first tries to record where it got to:
     ///
     /// ```compile_fail
-    /// # use std::sync::Arc;
     /// # use async_trait::async_trait;
     /// # use bytes::Bytes;
     /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::system::EventSourceSystem;
     /// # use nitinol_eventsource::Event;
-    /// # use nitinol_persistence::provider::Persistence;
-    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+    /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+    /// # use nitinol_persistence::store::InMemoryEventStore;
     /// # use nitinol_persistence::{EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaDeliveryExt, SagaEffect, SagaId};
@@ -256,22 +253,26 @@ pub trait SagaDeliveryExt {
     /// # }
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    /// // no `with_delivery_checkpoints` — this provider has no delivery slot
+    /// // no `delivery_checkpoints` — this store has no delivery slot
+    /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
-    ///     .with_persistence(Persistence::new(store))
+    ///     .with_persistence(PersistenceProvider::new(store))
     ///     .build();
     /// system.saga_delivery_props::<ReservationSaga>();
     /// # }
     /// ```
-    fn saga_delivery_props<S: Saga>(&self) -> SagaDeliveryProps<S, Self::DeliveryCheckpoints>;
+    fn saga_delivery_props<S: Saga>(
+        &self,
+    ) -> SagaDeliveryProps<S, Self::DeliveryCheckpoints, Hosted>;
 }
 
-impl<P: DeliveryCheckpointProvider> SagaDeliveryExt for EventSourceSystem<P> {
-    type DeliveryCheckpoints = P::DeliveryCheckpoints;
+impl<St: DeliveryCheckpointSlot> SagaDeliveryExt for EventSourceSystem<St> {
+    type DeliveryCheckpoints = St::DeliveryCheckpoints;
 
-    fn saga_delivery_props<S: Saga>(&self) -> SagaDeliveryProps<S, Self::DeliveryCheckpoints> {
-        SagaDeliveryProps::new(self.persistence())
+    fn saga_delivery_props<S: Saga>(
+        &self,
+    ) -> SagaDeliveryProps<S, Self::DeliveryCheckpoints, Hosted> {
+        SagaDeliveryProps::new(self.persistence()).hosted(self.erase_store())
     }
 }
 
@@ -284,26 +285,11 @@ impl<P: DeliveryCheckpointProvider> SagaDeliveryExt for EventSourceSystem<P> {
 ///
 /// The journal store is already settled by the entry point that produced this
 /// builder, so what is left to carry is the `ProcessSystem` to spawn into.
-pub struct SagaSpawn<'a, S: Saga, B = SourceBindings<S>> {
-    ps: &'a ProcessSystem,
-    props: SagaProps<S, B>,
+pub struct SagaSpawn<S: Saga, B = SourceBindings<S>> {
+    props: SagaProps<S, B, Hosted>,
 }
 
-impl<'a, S: Saga> SagaSpawn<'a, S, SourceBindings<S>> {
-    fn new(
-        ps: &'a ProcessSystem,
-        saga_id: SagaId,
-        store: Arc<dyn EventStore>,
-        producer: impl Fn(SagaComponents<S>) -> S + Send + Sync + 'static,
-    ) -> Self {
-        SagaSpawn {
-            ps,
-            props: SagaProps::new(saga_id, store, producer),
-        }
-    }
-}
-
-impl<'a, S: Saga, B> SagaSpawn<'a, S, B> {
+impl<S: Saga, B> SagaSpawn<S, B> {
     /// Observe the declared source `E` through the records `subscription`
     /// selects, decoded with the codec `E` names.
     ///
@@ -314,19 +300,18 @@ impl<'a, S: Saga, B> SagaSpawn<'a, S, B> {
     pub fn subscribed_to<E>(
         self,
         subscription: Subscription,
-    ) -> SagaSpawn<'a, S, <B as BindSource<E>>::Bound>
+    ) -> SagaSpawn<S, <B as BindSource<E>>::Bound>
     where
         E: Event,
         B: BindSource<E>,
     {
         SagaSpawn {
-            ps: self.ps,
             props: self.props.subscribed_to::<E>(subscription),
         }
     }
 }
 
-impl<S: Saga, B> SagaSpawn<'_, S, B>
+impl<S: Saga, B> SagaSpawn<S, B>
 where
     B: AllSourcesSubscribed<S::Subscribe>,
 {
@@ -341,7 +326,8 @@ where
     /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::system::EventSourceSystem;
     /// # use nitinol_eventsource::Event;
-    /// # use nitinol_persistence::provider::Persistence;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
     /// # use nitinol_persistence::{EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt};
@@ -381,7 +367,7 @@ where
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// # let system = EventSourceSystem::builder(ps)
-    /// #     .with_persistence(Persistence::in_memory())
+    /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
     /// #     .build();
     /// system
     ///     .spawn_saga(SagaId::new("reservation"), |_| ReservationSaga)
@@ -399,7 +385,8 @@ where
     /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::system::EventSourceSystem;
     /// # use nitinol_eventsource::Event;
-    /// # use nitinol_persistence::provider::Persistence;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt};
@@ -449,7 +436,7 @@ where
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// # let system = EventSourceSystem::builder(ps)
-    /// #     .with_persistence(Persistence::in_memory())
+    /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
     /// #     .build();
     /// # let order_id = AggregateId::new("order");
     /// // `StockReserved` is declared and never bound, so `spawn` does not exist
@@ -470,7 +457,8 @@ where
     /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::system::EventSourceSystem;
     /// # use nitinol_eventsource::Event;
-    /// # use nitinol_persistence::provider::Persistence;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt};
@@ -510,7 +498,7 @@ where
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// # let system = EventSourceSystem::builder(ps)
-    /// #     .with_persistence(Persistence::in_memory())
+    /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
     /// #     .build();
     /// # let order_id = AggregateId::new("order");
     /// system
@@ -530,7 +518,8 @@ where
     /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::system::EventSourceSystem;
     /// # use nitinol_eventsource::Event;
-    /// # use nitinol_persistence::provider::Persistence;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
     /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt};
@@ -580,7 +569,7 @@ where
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
     /// # let system = EventSourceSystem::builder(ps)
-    /// #     .with_persistence(Persistence::in_memory())
+    /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
     /// #     .build();
     /// # let order_id = AggregateId::new("order");
     /// system
@@ -591,6 +580,6 @@ where
     /// # }
     /// ```
     pub async fn spawn(self) -> SagaProxy<S> {
-        self.props.spawn(self.ps).await
+        self.props.spawn().await
     }
 }

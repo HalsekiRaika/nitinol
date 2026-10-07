@@ -11,13 +11,13 @@ use std::time::Duration;
 use futures_util::{FutureExt, StreamExt};
 
 use nitinol_eventsource::codec;
+use nitinol_eventsource::system::SystemHandle;
 use nitinol_eventsource::Event;
 use nitinol_persistence::store::{CheckpointStore, EventStore};
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 use nitinol_runtime::error::HandlerError;
 use nitinol_runtime::process::{Driver, Process, ProcessContext, Receive};
 
-use crate::delivery::dispatch::ErasedSystem;
 use crate::delivery::error::SagaDeliveryError;
 use crate::delivery::id::{SagaDeliveryId, SagaDeliveryScope};
 use crate::delivery::outcome::{Hold, HoldCause, RecordOutcome, TickOutcome};
@@ -70,7 +70,7 @@ pub struct SagaDeliveryPartition<S: Saga, Cs: CheckpointStore> {
     scope: SagaDeliveryScope,
     journal: Arc<dyn EventStore>,
     checkpoints: Arc<Cs>,
-    system: ErasedSystem,
+    system: SystemHandle,
     poll_interval: Duration,
     /// Absent until the recorded progress has been read.
     ///
@@ -97,7 +97,7 @@ where
         partitions: NonZeroUsize,
         journal: Arc<dyn EventStore>,
         checkpoints: Arc<Cs>,
-        system: ErasedSystem,
+        system: SystemHandle,
         poll_interval: Duration,
     ) -> Self {
         Self {

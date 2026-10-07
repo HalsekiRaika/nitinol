@@ -20,7 +20,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{Event, ProjectionContext, Projector, ProjectorProps};
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
     CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
 };
@@ -189,8 +189,12 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("e2e-ckpt-alo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-alo");
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
 
     // Only append seq=1 initially; seq=2 is appended after the failure flag is set
     // to eliminate the race where the projector processes seq=2 before the flag is tripped.
@@ -300,8 +304,12 @@ async fn e2e_exactly_once_user_saves_checkpoint_prevents_reprocessing() {
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("e2e-ckpt-eo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-eo");
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
 
     append_evt(&event_store, &agg_id, 1).await;
     append_evt(&event_store, &agg_id, 2).await;
@@ -390,8 +398,12 @@ async fn e2e_at_most_once_failed_event_not_retried_on_restart() {
     let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
     let agg_id = AggregateId::new("e2e-ckpt-amo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-amo");
-    let persistence = Persistence::new(Arc::clone(&event_store) as Arc<dyn EventStore>)
-        .with_projection_checkpoints(Arc::clone(&checkpoint_store));
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
+            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .build(),
+    );
 
     append_evt(&event_store, &agg_id, 1).await;
 

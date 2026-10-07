@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -194,7 +194,11 @@ async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
     // the provider supplies.
     let provider_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps.clone())
-        .with_persistence(Persistence::new(Arc::clone(&provider_store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&provider_store))
+                .build(),
+        ))
         .build();
     append_ping(&provider_store, THROUGH_SYSTEM_EXT).await;
     append_ping(&provider_store, THROUGH_SYSTEM_MANAGER_PROPS).await;
@@ -231,7 +235,7 @@ async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
     let _through_system_manager_props = system
         .saga_manager_props(|_components| TrivialSaga::default())
         .subscribed_to::<Ping>(system.subscription(THROUGH_SYSTEM_MANAGER_PROPS))
-        .spawn(&ps)
+        .spawn()
         .await;
 
     let expected = [

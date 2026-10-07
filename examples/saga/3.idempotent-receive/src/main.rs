@@ -16,7 +16,7 @@ use futures_util::TryStreamExt;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
@@ -48,29 +48,38 @@ async fn main() {
     // the streams are what this demonstration verifies itself against.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&store))
+                .build(),
+        ))
         .build();
 
     let order_id = AggregateId::new("order-cobalt-42");
     let order = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
-    // The system is itself the shared handle, so the producer and the
-    // crash-restart factory each take a clone of it rather than a shared wrapper
-    // around it.
-    let system_for_producer = system.clone();
-    let system_for_factory = system.clone();
+    // The producer is handed the hosting system by the framework, so nothing
+    // is prepared for it here.  The crash-restart factory is registered on the
+    // props rather than called with the components, so it keeps a handle of
+    // its own.
+    let system_for_factory = system.erase_store();
 
     // One `subscribed_to` call per source the saga's alphabet declares — here
     // the order's stream, read as `OrderPlaced` — and `spawn` exists only once
     // every declared source has one.
-    let _manager = system
-        .saga_manager_props(move |_components| ReservationSaga::new(system_for_producer.clone()))
-        .subscribed_to::<OrderPlaced>(system.subscription(&order_id))
-        .with_crash_restart_factory(move |payload: &[u8]| {
-            ReservationSaga::crash_restart_intent(&system_for_factory, payload)
-        })
-        .spawn(system.process_system())
-        .await;
+    let _manager =
+        system
+            .saga_manager_props(move |components| {
+                ReservationSaga::new(components.system().cloned().expect(
+                    "a saga spawned through a system's own entry point is handed that system",
+                ))
+            })
+            .subscribed_to::<OrderPlaced>(system.subscription(&order_id))
+            .with_crash_restart_factory(move |payload: &[u8]| {
+                ReservationSaga::crash_restart_intent(&system_for_factory, payload)
+            })
+            .spawn()
+            .await;
 
     order
         .ask(PlaceOrder {

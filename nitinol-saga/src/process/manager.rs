@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
+use nitinol_eventsource::system::SystemHandle;
 use nitinol_eventsource::SystemEvent;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::LoadQuery;
@@ -40,6 +41,11 @@ use crate::scheduler::SchedulerProxy;
 pub(crate) struct SagaManagerProcess<S: Saga> {
     pub(crate) store: Arc<dyn EventStore>,
     pub(crate) producer: SagaProducer<S>,
+    /// The system this manager was wired from, where it was wired from one.
+    ///
+    /// Handed to every instance it spawns, so a correlated instance reaches
+    /// the host's resources on the same terms a standalone hosted saga does.
+    pub(crate) host: Option<SystemHandle>,
     pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
     /// One subscription per declared source, shared by every instance the
     /// manager fronts.
@@ -101,6 +107,7 @@ impl<S: Saga> SagaManagerProcess<S> {
             saga_id: saga_id.clone(),
             store: Arc::clone(&self.store),
             producer: Arc::clone(&self.producer),
+            host: self.host.clone(),
             enqueue_policy: Arc::clone(&self.enqueue_policy),
             // This manager holds the subscriptions; an instance that opened its
             // own would decode every observed record a second time.

@@ -7,16 +7,16 @@
 //! # Getting one running
 //!
 //! ```rust,ignore
-//! use std::sync::Arc;
-//!
-//! use nitinol_persistence::store::EventStore;
-//! use nitinol_sqlx::{sqlx::postgres::PgPoolOptions, PostgresEventStore};
+//! use nitinol_persistence::provider::PersistenceProvider;
+//! use nitinol_sqlx::{sqlx::postgres::PgPoolOptions, PostgresEventStore, PostgresStore};
 //!
 //! # async fn wire(url: &str) -> Result<(), Box<dyn std::error::Error>> {
 //! let pool = PgPoolOptions::new().connect(url).await?;
 //! PostgresEventStore::migrate(&pool).await?;
 //!
-//! let store: Arc<dyn EventStore> = Arc::new(PostgresEventStore::new(pool)?);
+//! // [`PostgresStore`] is this backend as one store: the journal and both
+//! // checkpoint slots over one database, and no snapshot slot.
+//! let persistence = PersistenceProvider::new(PostgresStore::new(pool)?);
 //! # Ok(())
 //! # }
 //! ```
@@ -116,8 +116,8 @@ mod postgres;
 
 #[cfg(feature = "postgres")]
 pub use self::postgres::{
-    postgres_persistence, CheckpointConflict, PostgresCheckpointStore, PostgresEventStore,
-    PostgresPersistence, UnknownEventType,
+    CheckpointConflict, PostgresCheckpointStore, PostgresEventStore, PostgresStore,
+    UnknownEventType,
 };
 
 /// The `sqlx` this crate links, so a caller builds the pool it is handed

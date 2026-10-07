@@ -45,7 +45,7 @@ async fn the_configured_interval_is_the_interval_between_queries() {
     let checkpoints = RecordingCheckpointStore::new();
 
     // When
-    let _host = SagaDeliveryProps::<DeliverySaga, RecordingCheckpointStore>::new(
+    let _host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingCheckpointStore>>::new(
         &delivery_persistence(&journal, &checkpoints),
     )
     .with_delivery_id(delivery_id())

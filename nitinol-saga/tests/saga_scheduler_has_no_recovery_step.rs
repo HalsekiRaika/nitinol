@@ -27,7 +27,7 @@ use std::time::Duration;
 use futures_util::TryStreamExt;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::provider::Persistence;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
@@ -88,7 +88,11 @@ async fn a_resident_scheduler_alone_restores_nothing() {
     // When: only the scheduler comes back, with that store as the default one
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(Persistence::new(Arc::clone(&saga_store)))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(Arc::clone(&saga_store))
+                .build(),
+        ))
         .build();
     // Asked for directly, with no saga in the system: the core comes up on its
     // own so that what it does at start-up is all that is under test here.
