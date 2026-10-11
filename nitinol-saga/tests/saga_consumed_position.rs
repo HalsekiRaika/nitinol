@@ -17,12 +17,13 @@
 //!   Scenario: a lost append among several withholds the position
 //!     Given one handle call whose effect reaches the store as two appends
 //!     And the opening one exhausted its retries
-//!     When the closing append lands and the saga restarts
-//!     Then no position is on the stream and handle runs again
+//!     When the closing append lands anyway
+//!     Then no position is on the stream
+//!     And handle runs again once the saga restarts
 //!
-//!   Scenario: a crash before the append is re-handled
-//!     Given the batch for upstream seq N never landed
-//!     When upstream redelivers seq N after a restart
+//!   Scenario: a batch that never landed brings its input back
+//!     Given the batch for upstream seq N exhausted its retries
+//!     When the saga restarts and upstream redelivers seq N
 //!     Then handle runs again (at-least-once; no position was written)
 //!
 //!   Scenario: a subscription resumes past the folded position
@@ -39,23 +40,51 @@
 //!
 //! `ConsumedPositionEvent` is `pub(crate)`, so every assertion below reads the
 //! record the way any other consumer of the column does — by the canonical path
-//! it is stored under, and the `oneof` its payload carries.
+//! it is stored under (`nitinol.saga.consumed`), and the `oneof` its payload
+//! carries: the upstream stream key, the sequence, and the canonical path of
+//! the declared source the position settled.
+//!
+//! # How a failed append is driven, and when it is over
+//!
+//! An append a `handle` decision required that never landed leaves the input
+//! unconsumed, and that is the whole of what it leaves: the failure is reported
+//! and the delivery answered, so the incarnation stays alive — staying alive is
+//! what lets the *next* input retry the decision, including an `End` whose
+//! `Ended` fact did not land.  Nothing durable claims the record either, so
+//! what re-opens it is a fresh incarnation: its subscription resumes from the
+//! position the journal holds for that source, which such a failure left
+//! exactly where it was.  Every failure test below spawns that successor by
+//! hand.
+//!
+//! Two things make those tests settled rather than sampled.  The store
+//! decorator refuses exactly as many appends as the one under test attempts —
+//! a `Persist` batch's staged retries, or the single attempt a schedule marker
+//! gets — so the first incarnation exhausts the whole budget and the successor
+//! meets a store that works.  And the first incarnation is stopped, and read
+//! only once it has left the runtime's registry, so no retry of its can still
+//! be in flight while the stream is being judged or while the successor is
+//! writing.
 //!
 //! Negative claims ("this never reached handle") are never settled by a sleep:
-//! each uses a later upstream record as a barrier.  The poller delivers a
-//! stream in ascending order and `ask`s one record at a time, so once the
-//! barrier has been handled the earlier record's fate is already decided.
+//! each uses a later upstream record, the position of the input under test, or
+//! the stop of the incarnation that could not write one, as a barrier — a stop
+//! is answered on the saga's own mailbox, so it is as much a fact about what
+//! has already finished as a row on the stream is.  The
+//! poller delivers a stream in ascending order and `ask`s one record at a time,
+//! so once the barrier has been handled the earlier record's fate is already
+//! decided.
+//!
+//! Run with:
+//! `cargo test -p nitinol-saga --test saga_consumed_position`.
 
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    dead_letter_of, encode_consumed_position, encode_outbox_tell_failed,
-    encode_outbox_tell_requested_with_target, failure_kind, outbox_kind_of,
-    readable_consumed_position_of, ConsumedPayload, JsonCodec, OutboxKind,
-    CONSUMED_POSITION_MARKER, DEAD_LETTER_MARKER, OUTBOX_MARKER, SCHEDULE_MARKER,
+    decode_consumed_fact, encode_consumed_fact, lifecycle_kind_of, readable_consumed_fact_of,
+    ConsumedFactPayload, JsonCodec, LifecycleKind, CONSUMED_MARKER, SCHEDULE_MARKER,
 };
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,15 +94,13 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event,
-};
+use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
+use nitinol_runtime::ident::Pid;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
     Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe,
@@ -108,41 +135,6 @@ impl Event for ReservationRequested {
     type Codec = JsonCodec;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct InventoryReserved {
-    sku: String,
-}
-
-impl Event for InventoryReserved {
-    const EVENT_TYPE: EventType = EventType::new(
-        Family::new("consumed_position"),
-        TypeName::new("InventoryReserved"),
-    );
-    type Codec = JsonCodec;
-}
-
-#[derive(Default)]
-struct Inventory;
-
-impl Aggregate for Inventory {
-    type Event = InventoryReserved;
-    fn apply(&mut self, _event: InventoryReserved) {}
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Reserve {
-    sku: String,
-}
-
-impl Decider<Reserve> for Inventory {
-    type Output = ();
-    type Rejection = std::convert::Infallible;
-
-    fn decide(&self, cmd: Reserve) -> Decision<InventoryReserved, (), Self::Rejection> {
-        Decision::persist(vec![InventoryReserved { sku: cmd.sku }]).output(())
-    }
-}
-
 /// Every `OrderPlaced` in this file belongs to the one saga each test spawns.
 const SAGA_ID: &str = "consumed-position-saga";
 
@@ -175,6 +167,8 @@ impl Codec<Reminder> for ReminderCodec {
 }
 
 impl DeadlineMessage for Reminder {
+    const TYPE_NAME: &'static str = "reminder";
+    const CODEC_NAME: &'static str = "reminder-codec";
     type Codec = ReminderCodec;
 }
 
@@ -197,7 +191,6 @@ enum TimerObserved {
 struct Seen {
     source: String,
     sequence: u64,
-    failed_tell_ids: Vec<u64>,
 }
 
 type Handled = Arc<Mutex<Vec<Seen>>>;
@@ -209,7 +202,6 @@ fn record(handled: &Handled, ctx: &SagaContext) {
         .push(Seen {
             source: ctx.upstream_aggregate_id().as_str().to_owned(),
             sequence: ctx.upstream_sequence(),
-            failed_tell_ids: ctx.failed_tell_ids().to_vec(),
         });
 }
 
@@ -218,6 +210,18 @@ fn seen(handled: &Handled) -> Vec<Seen> {
         .lock()
         .expect("handled buffer must not be poisoned")
         .clone()
+}
+
+/// How often one upstream record reached `handle`.
+///
+/// A failed append hands the record back to the poller, so "how many times"
+/// is the observable that separates "the position was withheld" from "the
+/// position was written anyway".
+fn times_handled(handled: &Handled, source: &AggregateId, sequence: u64) -> usize {
+    seen(handled)
+        .iter()
+        .filter(|s| s.source == source.as_str() && s.sequence == sequence)
+        .count()
 }
 
 /// Persists one decision per upstream record it is handed.
@@ -243,40 +247,6 @@ impl Saga for DecidingSaga {
         let Observed::Order(event) = input;
         record(&self.handled, ctx);
         Ok(SagaEffect::persist(ReservationRequested { sku: event.sku }))
-    }
-}
-
-/// Persists a decision *and* tells an aggregate, so one batch carries a user
-/// event, a `TellRequested` marker and the consumed position together.
-struct DecidingAndTellingSaga {
-    handled: Handled,
-    inventory: AggregateProxy<Inventory>,
-}
-
-#[async_trait]
-impl Saga for DecidingAndTellingSaga {
-    type Subscribe = Observed;
-    type Event = ReservationRequested;
-    type Error = std::convert::Infallible;
-
-    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
-        Some(SagaId::new(SAGA_ID))
-    }
-
-    async fn handle(
-        &mut self,
-        input: Self::Subscribe,
-        ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        let Observed::Order(event) = input;
-        record(&self.handled, ctx);
-        Ok(SagaEffect::persist(ReservationRequested {
-            sku: event.sku.clone(),
-        })
-        .combine(SagaEffect::tell(
-            self.inventory.clone(),
-            Reserve { sku: event.sku },
-        )))
     }
 }
 
@@ -472,32 +442,59 @@ impl EventStore for RecordingStore {
     }
 }
 
-/// Rejects any append carrying the saga's own decision event while `failing`
-/// is set, and accepts everything else.
+/// Rejects the first `budget` appends `reject` answers `true` for, and accepts
+/// everything else — including every append of that same shape once the budget
+/// is spent.
 ///
-/// Modelling a crash *before* the batch lands rather than a store that is
-/// wholly down: the dead letter reporting the failure still has to be
-/// writable, or the saga would refuse the upstream record instead of moving
-/// on, and the "no position was written" claim would be vacuous.
-struct FailDecisionAppendStore {
+/// One decorator rather than one type per injected failure: every failure in
+/// this file is "this particular append does not land, this many times", and
+/// only *which* append and *how often* vary.  Spending a budget that matches
+/// the staged retries of the append under test is what makes the recovery
+/// deterministic — the attempt under test exhausts it, and the redelivery that
+/// its failure causes meets a store that works, so each assertion below is
+/// about a settled stream rather than a moment in a retry loop.
+struct FailFirstAppendsStore {
     inner: InMemoryEventStore,
-    failing: Arc<AtomicBool>,
+    reject: fn(&[AppendingEvent]) -> bool,
+    budget: AtomicU64,
+}
+
+impl FailFirstAppendsStore {
+    /// A saga store that refuses the first `budget` appends `reject` answers
+    /// `true` for.  Handed back as the trait object a saga is spawned with,
+    /// because that is the only shape a test ever needs it in.
+    fn refusing(reject: fn(&[AppendingEvent]) -> bool, budget: u64) -> Arc<dyn EventStore> {
+        Arc::new(Self {
+            inner: InMemoryEventStore::default(),
+            reject,
+            budget: AtomicU64::new(budget),
+        })
+    }
+
+    /// Answers whether this append is refused, spending one unit of the budget
+    /// when it is.
+    fn refuses(&self, events: &[AppendingEvent]) -> bool {
+        if !(self.reject)(events) {
+            return false;
+        }
+        self.budget
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                (left > 0).then(|| left - 1)
+            })
+            .is_ok()
+    }
 }
 
 #[async_trait]
-impl EventStore for FailDecisionAppendStore {
+impl EventStore for FailFirstAppendsStore {
     async fn append(
         &self,
         key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        if self.failing.load(Ordering::SeqCst)
-            && events
-                .iter()
-                .any(|e| e.event_type == ReservationRequested::EVENT_TYPE)
-        {
+        if self.refuses(&events) {
             return Err(AppendError::Backend(
-                "injected: the decision batch never landed".into(),
+                "injected: this append never landed".into(),
             ));
         }
         self.inner.append(key, events).await
@@ -508,120 +505,35 @@ impl EventStore for FailDecisionAppendStore {
     }
 }
 
-/// Rejects the second append carrying the saga's own decision event while
-/// `failing` is set, letting the first one land.
+/// How many attempts one persist batch makes before giving its input back to
+/// redelivery — the default `RetryPolicy`'s `max_attempts`.
 ///
-/// Models a crash between the two appends a `Sequence` with a hard boundary
-/// (`CancelSchedule` or `End`) produces: the opening batch is durable, the
-/// closing batch — the one the position would ride — never lands.
-struct FailSecondDecisionAppendStore {
-    inner: InMemoryEventStore,
-    failing: Arc<AtomicBool>,
-    decision_appends: Arc<AtomicU64>,
+/// A budget of exactly this many refusals exhausts one `Persist` batch and
+/// nothing beyond it.
+const STAGED_RETRIES: u64 = 3;
+
+/// A budget no run of these tests can spend: the append under test never lands.
+const NEVER: u64 = u64::MAX;
+
+/// Carries one of the saga's own decisions.
+fn carries_a_decision(events: &[AppendingEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| e.event_type == ReservationRequested::EVENT_TYPE)
 }
 
-#[async_trait]
-impl EventStore for FailSecondDecisionAppendStore {
-    async fn append(
-        &self,
-        key: &str,
-        events: Vec<AppendingEvent>,
-    ) -> Result<AppendOutcome, AppendError> {
-        let carries_decision = events
-            .iter()
-            .any(|e| e.event_type == ReservationRequested::EVENT_TYPE);
-        if carries_decision {
-            let seen = self.decision_appends.fetch_add(1, Ordering::SeqCst) + 1;
-            if self.failing.load(Ordering::SeqCst) && seen >= 2 {
-                return Err(AppendError::Backend(
-                    "injected: the closing batch never landed".into(),
-                ));
-            }
-        }
-        self.inner.append(key, events).await
-    }
-
-    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        self.inner.load(query).await
-    }
-}
-
-/// Rejects every append carrying the saga's own decision event until the dead
-/// letter reporting that failure has landed, and accepts everything after it.
+/// Carries the consumed position of the input it closes out.
 ///
-/// Models the *opening* batch of a multi-append interpretation exhausting its
-/// retries: because the dead letter is writable, the interpreter treats the
-/// input as reportable rather than undeliverable and carries on, so the closing
-/// batch — the one the position rides — lands even though a decision this same
-/// input produced never did.  That is the one shape where a position could
-/// outlive the decision it was supposed to be as durable as.
-struct FailUntilReportedStore {
-    inner: InMemoryEventStore,
-    reported: AtomicBool,
+/// Within a `Sequence` only the append that lands last for the input carries
+/// one, so this names the *closing* append and no other.
+fn carries_a_position(events: &[AppendingEvent]) -> bool {
+    events.iter().any(|e| e.event_type == CONSUMED_MARKER)
 }
 
-#[async_trait]
-impl EventStore for FailUntilReportedStore {
-    async fn append(
-        &self,
-        key: &str,
-        events: Vec<AppendingEvent>,
-    ) -> Result<AppendOutcome, AppendError> {
-        let carries_decision = events
-            .iter()
-            .any(|e| e.event_type == ReservationRequested::EVENT_TYPE);
-        if carries_decision && !self.reported.load(Ordering::SeqCst) {
-            return Err(AppendError::Backend(
-                "injected: the opening batch never landed".into(),
-            ));
-        }
-        let reports_failure = events.iter().any(|e| e.event_type == DEAD_LETTER_MARKER);
-        let outcome = self.inner.append(key, events).await?;
-        if reports_failure {
-            self.reported.store(true, Ordering::SeqCst);
-        }
-        Ok(outcome)
-    }
-
-    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        self.inner.load(query).await
-    }
-}
-
-/// Rejects the append carrying a schedule marker while `failing` is set, and
-/// accepts everything else.
-///
-/// Models the *middle* append of a multi-append interpretation failing.  The
-/// `Persist` batches on either side of the `CancelSchedule` land, so the
-/// closing one — the append the position rides — succeeds even though an append
-/// this same input required did not.  Unlike a persist batch, this one is not
-/// retried and enqueues no dead letter, so it is the path on which a swallowed
-/// failure would be quietest.
-struct FailScheduleMarkerAppendStore {
-    inner: InMemoryEventStore,
-    failing: Arc<AtomicBool>,
-}
-
-#[async_trait]
-impl EventStore for FailScheduleMarkerAppendStore {
-    async fn append(
-        &self,
-        key: &str,
-        events: Vec<AppendingEvent>,
-    ) -> Result<AppendOutcome, AppendError> {
-        if self.failing.load(Ordering::SeqCst)
-            && events.iter().any(|e| e.event_type == SCHEDULE_MARKER)
-        {
-            return Err(AppendError::Backend(
-                "injected: the schedule marker never landed".into(),
-            ));
-        }
-        self.inner.append(key, events).await
-    }
-
-    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        self.inner.load(query).await
-    }
+/// Carries a schedule marker — the `CancelSchedule` append, which unlike a
+/// persist batch is attempted once and never retried.
+fn carries_a_schedule_marker(events: &[AppendingEvent]) -> bool {
+    events.iter().any(|e| e.event_type == SCHEDULE_MARKER)
 }
 
 /// Yields every stored record twice in one load.
@@ -741,6 +653,21 @@ async fn seed_saga_row(
         .expect("seeding a saga row must succeed");
 }
 
+/// The position every saga in this file writes for `sequence` of `source`.
+///
+/// `OrderPlaced` is the one declared source any of them observes, so the
+/// `source_event_type` field is the same throughout — but it is still named
+/// rather than left out: a position that could not say which source it settled
+/// would be a corrupted row, and one naming the wrong source would cover
+/// records nobody consumed.
+fn consumed(source: &AggregateId, sequence: u64) -> ConsumedFactPayload {
+    ConsumedFactPayload {
+        source: source.as_str().to_owned(),
+        sequence,
+        source_event_type: OrderPlaced::EVENT_TYPE.to_string(),
+    }
+}
+
 async fn seed_consumed_position(
     store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
@@ -752,16 +679,20 @@ async fn seed_consumed_position(
         store,
         saga_id,
         sequence,
-        CONSUMED_POSITION_MARKER,
-        encode_consumed_position(source.as_str(), upstream_sequence),
+        CONSUMED_MARKER,
+        encode_consumed_fact(
+            source.as_str(),
+            upstream_sequence,
+            &OrderPlaced::EVENT_TYPE.to_string(),
+        ),
     )
     .await;
 }
 
 /// Append an event carrying `OrderPlaced::EVENT_TYPE` but an invalid JSON
 /// payload, so the codec's `decode` call fails the same way a corrupted wire
-/// record would — exercising the `UpstreamMessage::DecodeFailed` path instead
-/// of `Decoded`.
+/// record would — exercising the source transform's decode-failure path
+/// instead of its decoded one.
 async fn append_corrupt_order_placed(
     store: &Arc<dyn EventStore>,
     source: &AggregateId,
@@ -799,42 +730,32 @@ fn decisions(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
 }
 
 /// Every position the stream holds that can be read as one.
-///
-/// Unreadable rows are left out rather than panicked on: one test seeds such a
-/// row deliberately, and [`position_rows`] is what counts what is physically
-/// there.
-fn positions(events: &[LoadedEvent]) -> Vec<ConsumedPayload> {
+fn positions(events: &[LoadedEvent]) -> Vec<ConsumedFactPayload> {
     events
         .iter()
-        .filter_map(readable_consumed_position_of)
+        .filter_map(readable_consumed_fact_of)
         .collect()
 }
 
-/// How many rows the stream carries under the consumed-position path,
-/// readable or not.
+/// How many rows the stream carries under the consumed path, readable or not.
+///
+/// Counted apart from [`positions`] so an assertion can say "and nothing
+/// unreadable was written here either" rather than only "every readable row is
+/// the one expected".
 fn position_rows(events: &[LoadedEvent]) -> usize {
     events
         .iter()
-        .filter(|e| e.event_type == CONSUMED_POSITION_MARKER)
-        .count()
-}
-
-/// How many dead letters of `kind` the stream carries.
-fn count_dead_letter_kind(events: &[LoadedEvent], kind: &'static str) -> usize {
-    events
-        .iter()
-        .filter_map(dead_letter_of)
-        .filter(|record| failure_kind(&record.failure) == kind)
+        .filter(|e| e.event_type == CONSUMED_MARKER)
         .count()
 }
 
 fn describe(events: &[LoadedEvent]) -> Vec<String> {
     events
         .iter()
-        .map(|e| match readable_consumed_position_of(e) {
+        .map(|e| match readable_consumed_fact_of(e) {
             Some(p) => format!(
-                "{}#{}: consumed({}, {})",
-                e.sequence, e.event_type, p.source, p.sequence
+                "{}#{}: consumed({}, {}, {})",
+                e.sequence, e.event_type, p.source, p.sequence, p.source_event_type
             ),
             None => format!("{}#{}", e.sequence, e.event_type),
         })
@@ -842,7 +763,7 @@ fn describe(events: &[LoadedEvent]) -> Vec<String> {
 }
 
 /// How long a positive barrier is given before the test calls it a failure.
-const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
+const BARRIER_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<Seen> {
@@ -855,6 +776,45 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<Seen> {
         assert!(
             std::time::Instant::now() < deadline,
             "timed out waiting for {expected} handle invocations; saw {current:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Stop the incarnation `proxy` addresses and wait until it has left the
+/// runtime's registry.
+///
+/// An append a saga could not make does *not* take it down — staying alive is
+/// what lets the next input retry the decision — so "the first incarnation is
+/// finished with this record" has to be made true rather than waited for.  A
+/// stop is delivered on the saga's own mailbox and the loop is already inside
+/// the delivery, so the signal is not looked at until `recv` returns: the pid
+/// leaving the registry therefore proves the whole interpretation is over,
+/// every staged retry of the refused batch included.
+///
+/// Every failure test below goes through this before reading the stream or
+/// spawning a successor.  Without it a retry still in flight could land a row
+/// between the read and the assertion, or race the successor's own appends for
+/// the same stream sequence.
+async fn stop_and_wait<S: Saga>(ps: &ProcessSystem, proxy: &nitinol_saga::SagaProxy<S>) {
+    proxy.stop().await.expect("stop must succeed");
+    wait_until_gone(ps, proxy.pid()).await;
+}
+
+/// The registry is what says an incarnation is gone: a process is unregistered
+/// as the last step of its own termination, after the delivery it was in has
+/// returned and its child poller has been stopped with it.
+async fn wait_until_gone(ps: &ProcessSystem, pid: Pid) {
+    let deadline = std::time::Instant::now() + BARRIER_TIMEOUT;
+    loop {
+        if ps.lookup(pid).await.is_none() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the stopped saga incarnation to leave the \
+             registry; until it does, a retry of its could still land a row the \
+             assertions below would read, or race the successor's appends"
         );
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -900,6 +860,44 @@ async fn spawn_deciding(
     .await
 }
 
+async fn spawn_two_batch(
+    ps: &ProcessSystem,
+    saga_store: &Arc<dyn EventStore>,
+    subscription: Subscription,
+    handled: &Handled,
+) -> nitinol_saga::SagaProxy<TwoBatchSaga> {
+    let handled = Arc::clone(handled);
+    SagaProps::<TwoBatchSaga>::new(
+        SagaId::new(SAGA_ID),
+        Arc::clone(saga_store),
+        move |_components| TwoBatchSaga {
+            handled: Arc::clone(&handled),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(subscription)
+    .spawn(ps)
+    .await
+}
+
+async fn spawn_persist_then_end(
+    ps: &ProcessSystem,
+    saga_store: &Arc<dyn EventStore>,
+    subscription: Subscription,
+    handled: &Handled,
+) -> nitinol_saga::SagaProxy<PersistThenEndSaga> {
+    let handled = Arc::clone(handled);
+    SagaProps::<PersistThenEndSaga>::new(
+        SagaId::new(SAGA_ID),
+        Arc::clone(saga_store),
+        move |_components| PersistThenEndSaga {
+            handled: Arc::clone(&handled),
+        },
+    )
+    .subscribed_to::<OrderPlaced>(subscription)
+    .spawn(ps)
+    .await
+}
+
 /// The one declared source of every saga in this file, read from the `source`
 /// stream of `upstream_store` from the beginning.
 fn from_source(upstream_store: &Arc<dyn EventStore>, source: &AggregateId) -> Subscription {
@@ -923,7 +921,8 @@ fn from_every_source(upstream_store: &Arc<dyn EventStore>) -> Subscription {
 /// Given a saga whose `handle` returns one decision for upstream seq 1,
 /// When the framework persists the result,
 /// Then a single append carries both the decision and the consumed position:
-/// neither is ever in the store without the other.
+/// neither is ever in the store without the other, and the position closes the
+/// batch.
 #[tokio::test]
 async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() {
     let ps = ProcessSystem::new().await;
@@ -948,7 +947,7 @@ async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() 
     .await;
 
     let saga_id = SagaId::new(SAGA_ID);
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
 
     let recorded = batches
         .lock()
@@ -963,36 +962,26 @@ async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() 
     );
 
     let batch = &recorded[0];
-    let decision_rows = batch
-        .iter()
-        .filter(|e| e.event_type == ReservationRequested::EVENT_TYPE)
-        .count();
-    let position_rows: Vec<&RecordedEvent> = batch
-        .iter()
-        .filter(|e| e.event_type == CONSUMED_POSITION_MARKER)
-        .collect();
+    let types: Vec<String> = batch.iter().map(|e| e.event_type.to_string()).collect();
     assert_eq!(
-        decision_rows,
-        1,
-        "the one append must carry the decision; stream held {:?}",
-        describe(&events)
-    );
-    assert_eq!(
-        position_rows.len(),
-        1,
-        "the one append must carry the position of the input it was decided \
-         from; stream held {:?}",
+        types,
+        vec![
+            ReservationRequested::EVENT_TYPE.to_string(),
+            CONSUMED_MARKER.to_string(),
+        ],
+        "the one append carries the decision and the position of the input it \
+         was decided from, in that order: the position closes the batch, and \
+         placed anywhere earlier it would shift every row after it; stream held \
+         {:?}",
         describe(&events)
     );
 
-    let consumed = common::decode_consumed_position(&position_rows[0].payload);
+    let position = batch.last().expect("the batch asserted above is not empty");
     assert_eq!(
-        consumed,
-        ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        },
-        "the position names the upstream stream and the sequence handled"
+        decode_consumed_fact(&position.payload),
+        consumed(&source, 1),
+        "the position names the upstream stream, the sequence handled and the \
+         declared source it settled"
     );
 
     let stamp = batch[0].occurred_at;
@@ -1004,97 +993,13 @@ async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() 
     );
 }
 
-/// Given a batch that also carries a tell,
-/// When it is persisted,
-/// Then the position is the last row: every `tell_id` still equals the stream
-/// sequence of its own `TellRequested` marker, which is the identity the outbox
-/// re-dispatch path resolves a pending tell by.
-#[tokio::test]
-async fn the_position_is_the_last_row_so_no_tell_id_moves() {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let source = AggregateId::new("tell-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
-
-    let inventory = system
-        .spawn_aggregate::<Inventory>(AggregateId::new("tell-inventory"))
-        .await;
-
-    let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore {
-        inner: InMemoryEventStore::default(),
-        batches: Arc::clone(&batches),
-    });
-    let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-
-    let handled_for_producer = Arc::clone(&handled);
-    let _proxy = SagaProps::<DecidingAndTellingSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(&saga_store),
-        move |_components| DecidingAndTellingSaga {
-            handled: Arc::clone(&handled_for_producer),
-            inventory: inventory.clone(),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-    .spawn(system.process_system())
-    .await;
-
-    let saga_id = SagaId::new(SAGA_ID);
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
-
-    let recorded = batches
-        .lock()
-        .expect("recorded batches must not be poisoned")
-        .clone();
-    let atomic_batch = recorded
-        .iter()
-        .find(|batch| {
-            batch
-                .iter()
-                .any(|e| e.event_type == ReservationRequested::EVENT_TYPE)
-        })
-        .expect("the decision batch must have been recorded");
-
-    let types: Vec<String> = atomic_batch
-        .iter()
-        .map(|e| e.event_type.to_string())
-        .collect();
-    assert_eq!(
-        types,
-        vec![
-            ReservationRequested::EVENT_TYPE.to_string(),
-            OUTBOX_MARKER.to_string(),
-            CONSUMED_POSITION_MARKER.to_string(),
-        ],
-        "the position goes last: placed anywhere earlier it would shift every \
-         row after it, and a tell_id is the sequence of its own row; stream held \
-         {:?}",
-        describe(&events)
-    );
-
-    let tell_row = &atomic_batch[1];
-    let tell_id = match common::decode_outbox_kind(&tell_row.payload) {
-        common::OutboxKind::TellRequested(m) => m.tell_id,
-        other => panic!("the second row must be a TellRequested marker, got {other:?}"),
-    };
-    assert_eq!(
-        tell_id, tell_row.sequence,
-        "a tell is identified by the stream sequence of the marker that requested \
-         it; adding a row before it would silently repoint every pending tell"
-    );
-}
-
 // CP-ATOMIC-FAIL / CP-ATLEASTONCE — a batch that never landed leaves no position
 
-/// Given an append that rejects the decision batch,
+/// Given a store that rejects every append carrying the saga's decision,
 /// When the saga handles the upstream record,
-/// Then no consumed position is on the saga's stream: a position is only ever
-/// as durable as the decision it was committed with.
+/// Then nothing at all is on the saga's stream — no decision, and above all no
+/// consumed position: a position is only ever as durable as the decision it was
+/// committed with.
 #[tokio::test]
 async fn a_batch_that_never_landed_writes_no_consumed_position() {
     let ps = ProcessSystem::new().await;
@@ -1103,14 +1008,10 @@ async fn a_batch_that_never_landed_writes_no_consumed_position() {
     let source = AggregateId::new("failed-batch-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let failing = Arc::new(AtomicBool::new(true));
-    let saga_store: Arc<dyn EventStore> = Arc::new(FailDecisionAppendStore {
-        inner: InMemoryEventStore::default(),
-        failing: Arc::clone(&failing),
-    });
+    let saga_store = FailFirstAppendsStore::refusing(carries_a_decision, NEVER);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
-    let _proxy = spawn_deciding(
+    let proxy = spawn_deciding(
         &ps,
         &saga_store,
         from_source(&upstream_store, &source),
@@ -1118,15 +1019,20 @@ async fn a_batch_that_never_landed_writes_no_consumed_position() {
     )
     .await;
 
-    // The dead letter the exhausted batch enqueues is the barrier: it is
-    // written after the last append attempt has failed, so the interpretation
-    // of this record is over by the time it appears.
+    // Stopping the incarnation is the barrier: the signal waits behind the
+    // delivery it is already inside, so once the pid is gone every staged
+    // retry of the refused batch has been made and nothing else can land.
     let saga_id = SagaId::new(SAGA_ID);
-    let events = wait_for_saga_rows(&saga_store, &saga_id, DEAD_LETTER_MARKER, 1).await;
+    let barrier = wait_for_handled(&handled, 1).await;
+    stop_and_wait(&ps, &proxy).await;
+    let events = load_saga_events(&saga_store, &saga_id).await;
 
     assert_eq!(
-        wait_for_handled(&handled, 1).await.len(),
-        1,
+        barrier,
+        vec![Seen {
+            source: source.as_str().to_owned(),
+            sequence: 1,
+        }],
         "the upstream record did reach handle — the store, not correlation, is \
          what stopped it; stream held {:?}",
         describe(&events)
@@ -1142,11 +1048,24 @@ async fn a_batch_that_never_landed_writes_no_consumed_position() {
          may be on the stream; stream held {:?}",
         describe(&events)
     );
+    assert!(
+        events.is_empty(),
+        "a batch that never landed leaves the saga's own stream exactly as it \
+         was — the position is the row that would be tempting to write anyway, \
+         and there is nothing else to write either; stream held {:?}",
+        describe(&events)
+    );
 }
 
-/// Given an input whose batch never landed before the saga stopped,
+/// Given an input whose batch exhausted its retries before the saga stopped,
 /// When a fresh incarnation is spawned and upstream redelivers it,
-/// Then `handle` runs again — at-least-once, because no position was written.
+/// Then `handle` runs again — at-least-once, because no position was written —
+/// and that attempt's batch carries the decision and the position together.
+///
+/// The store's budget is exactly one batch's staged retries, so the first
+/// incarnation spends it and the successor meets a store that works.  Were the
+/// first attempt credited with a position, `handle` would never see the record
+/// again and the decision would be lost for good.
 #[tokio::test]
 async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
     let ps = ProcessSystem::new().await;
@@ -1155,11 +1074,7 @@ async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
     let source = AggregateId::new("at-least-once-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let failing = Arc::new(AtomicBool::new(true));
-    let saga_store: Arc<dyn EventStore> = Arc::new(FailDecisionAppendStore {
-        inner: InMemoryEventStore::default(),
-        failing: Arc::clone(&failing),
-    });
+    let saga_store = FailFirstAppendsStore::refusing(carries_a_decision, STAGED_RETRIES);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
@@ -1170,12 +1085,17 @@ async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
         &handled,
     )
     .await;
-    wait_for_saga_rows(&saga_store, &saga_id, DEAD_LETTER_MARKER, 1).await;
-    first.stop().await.expect("stop must succeed");
+    wait_for_handled(&handled, 1).await;
+    stop_and_wait(&ps, &first).await;
     drop(first);
 
-    // The store recovers; the saga restarts over the same stream.
-    failing.store(false, Ordering::SeqCst);
+    let events = load_saga_events(&saga_store, &saga_id).await;
+    assert!(
+        events.is_empty(),
+        "the first attempt's batch never landed, so it left neither a decision \
+         nor a position behind; stream held {:?}",
+        describe(&events)
+    );
 
     let _second = spawn_deciding(
         &ps,
@@ -1185,17 +1105,14 @@ async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
     )
     .await;
 
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
 
-    let invocations = seen(&handled);
     assert_eq!(
-        invocations
-            .iter()
-            .filter(|s| s.source == source.as_str() && s.sequence == 1)
-            .count(),
+        times_handled(&handled, &source, 1),
         2,
         "the first attempt wrote no position, so redelivery must reach handle \
-         again; invocations: {invocations:?}"
+         again; invocations: {:?}",
+        seen(&handled)
     );
     assert_eq!(
         decisions(&events).len(),
@@ -1205,10 +1122,7 @@ async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
     );
     assert_eq!(
         positions(&events),
-        vec![ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        }],
+        vec![consumed(&source, 1)],
         "and the position lands with it; stream held {:?}",
         describe(&events)
     );
@@ -1244,7 +1158,7 @@ async fn a_consumed_input_never_reaches_handle_after_a_restart() {
         &handled,
     )
     .await;
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
     first.stop().await.expect("stop must succeed");
     drop(first);
 
@@ -1302,7 +1216,7 @@ async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it
         &handled,
     )
     .await;
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
     first.stop().await.expect("stop must succeed");
     drop(first);
 
@@ -1341,11 +1255,10 @@ async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it
 /// position the corrupt record sits at,
 /// When a fresh incarnation subscribes with a `Global` cursor — which keeps its
 /// configured position and so really does redeliver the corrupt record —
-/// Then the record never reaches `handle`, no `decode_failed` dead letter is
-/// appended for it, and the position it sits at is still named by exactly one
-/// row: an undecodable record is reported and skipped in the source's transform,
-/// before the instance sees it, so it settles nothing (see the decode-failure
-/// paragraph on `Saga::handle`).
+/// Then the record never reaches `handle`, and the position it sits at is still
+/// named by exactly one row: an undecodable record is reported and skipped in
+/// the source's transform, before the instance sees it, so it settles nothing
+/// (see the decode-failure paragraph on `Saga::handle`).
 #[tokio::test]
 async fn a_corrupt_record_redelivered_over_a_global_cursor_writes_nothing() {
     let ps = ProcessSystem::new().await;
@@ -1382,13 +1295,6 @@ async fn a_corrupt_record_redelivered_over_a_global_cursor_writes_nothing() {
         vec![2],
         "the corrupt seq 1 carries no typed event and must never reach handle; \
          stream held {:?}",
-        describe(&events)
-    );
-    assert_eq!(
-        count_dead_letter_kind(&events, "decode_failed"),
-        0,
-        "an undecodable upstream record is reported and skipped, so it must \
-         append no `decode_failed` dead letter; stream held {:?}",
         describe(&events)
     );
     let decode_position_rows = positions(&events)
@@ -1430,7 +1336,7 @@ async fn the_same_input_delivered_twice_in_one_incarnation_reaches_handle_once()
     )
     .await;
 
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
     append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
 
     let barrier = wait_for_handled(&handled, 2).await;
@@ -1448,68 +1354,6 @@ async fn the_same_input_delivered_twice_in_one_incarnation_reaches_handle_once()
         2,
         "two inputs, two decisions, however often they were delivered; stream \
          held {:?}",
-        describe(&events)
-    );
-}
-
-/// Given a saga whose replay recovered an unrecoverable tell failure,
-/// When a consumed input is redelivered before any new input arrives,
-/// Then the failure is still announced to the next input that does reach
-/// `handle`: a record that never reaches the saga must not consume the one
-/// report it was owed.
-#[tokio::test]
-async fn a_skipped_input_does_not_consume_the_failed_tell_report() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let source = AggregateId::new("drain-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
-    append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(SAGA_ID);
-    seed_saga_row(
-        &saga_store,
-        &saga_id,
-        1,
-        OUTBOX_MARKER,
-        encode_outbox_tell_requested_with_target(1, None, "drain-target"),
-    )
-    .await;
-    seed_saga_row(
-        &saga_store,
-        &saga_id,
-        2,
-        OUTBOX_MARKER,
-        encode_outbox_tell_failed(1),
-    )
-    .await;
-    seed_consumed_position(&saga_store, &saga_id, 3, &source, 1).await;
-
-    let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    // A `Global` cursor keeps its configured position, so seq 1 really is
-    // redelivered and really does meet the skip.
-    let _proxy = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_every_source(&upstream_store),
-        &handled,
-    )
-    .await;
-
-    let barrier = wait_for_handled(&handled, 1).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
-
-    assert_eq!(
-        barrier,
-        vec![Seen {
-            source: source.as_str().to_owned(),
-            sequence: 2,
-            failed_tell_ids: vec![1],
-        }],
-        "the skipped seq 1 must not have drained the failure: the report is \
-         delivered once, and seq 2 is the first invocation entitled to it; \
-         stream held {:?}",
         describe(&events)
     );
 }
@@ -1594,123 +1438,12 @@ async fn a_later_lower_position_does_not_move_the_position_backwards() {
     );
 }
 
-// CP-FOLD-POISON — an unreadable position is reported and skipped
-
-/// Given a position row whose payload carries no `oneof` at all,
-/// When the journal is folded,
-/// Then it is skipped rather than read as a position of its own: replay
-/// carries on, and the input it would falsely have covered still reaches
-/// `handle`.
-#[tokio::test]
-async fn an_unreadable_position_row_is_skipped_rather_than_read_as_a_default() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let source = AggregateId::new("poison-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(SAGA_ID);
-    seed_saga_row(
-        &saga_store,
-        &saga_id,
-        1,
-        CONSUMED_POSITION_MARKER,
-        Bytes::new(),
-    )
-    .await;
-
-    let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
-
-    let barrier = wait_for_handled(&handled, 1).await;
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 2).await;
-
-    assert_eq!(
-        barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
-        vec![1],
-        "an unreadable row says nothing about what was consumed, so the saga \
-         must still start and handle its input; stream held {:?}",
-        describe(&events)
-    );
-    assert_eq!(
-        position_rows(&events),
-        2,
-        "the poisoned row is left where it is — skipping it is a read-side \
-         decision, not a rewrite; stream held {:?}",
-        describe(&events)
-    );
-    assert_eq!(
-        positions(&events),
-        vec![ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        }],
-        "the only readable position is the one this incarnation wrote; a row \
-         read as a default would claim source \"\" at sequence 0; stream held \
-         {:?}",
-        describe(&events)
-    );
-}
-
-/// Given an unreadable position row followed by a readable one,
-/// When the journal is folded,
-/// Then the readable one still takes effect: one poisoned row must not abort
-/// the replay that the rows after it depend on.
-#[tokio::test]
-async fn a_poisoned_position_row_does_not_abort_the_rest_of_the_replay() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let source = AggregateId::new("poison-then-valid-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
-    append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(SAGA_ID);
-    seed_saga_row(
-        &saga_store,
-        &saga_id,
-        1,
-        CONSUMED_POSITION_MARKER,
-        Bytes::new(),
-    )
-    .await;
-    seed_consumed_position(&saga_store, &saga_id, 2, &source, 1).await;
-
-    let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_every_source(&upstream_store),
-        &handled,
-    )
-    .await;
-
-    let barrier = wait_for_handled(&handled, 1).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
-
-    assert_eq!(
-        barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
-        vec![2],
-        "the readable position after the poisoned row must still be folded; \
-         stream held {:?}",
-        describe(&events)
-    );
-}
-
 // CP-PER-SOURCE — positions belong to the source they were read from
 
 /// Given a position recorded for upstream stream A,
 /// When a record of upstream stream B at the same sequence arrives,
-/// Then it reaches `handle`: a position covers the source it was read from and
-/// nothing else, which is what a subscription over several sources will need.
+/// Then it reaches `handle`: a position covers the stream it was read from and
+/// nothing else, which is what a subscription over several sources needs.
 #[tokio::test]
 async fn a_position_of_one_source_does_not_cover_another() {
     let ps = ProcessSystem::new().await;
@@ -1742,7 +1475,6 @@ async fn a_position_of_one_source_does_not_cover_another() {
         vec![Seen {
             source: source_b.as_str().to_owned(),
             sequence: 1,
-            failed_tell_ids: Vec::new(),
         }],
         "A/1 is consumed and B/1 is not; a single position shared by every \
          source would silently swallow B/1; stream held {:?}",
@@ -1783,7 +1515,7 @@ async fn a_stream_subscription_resumes_past_the_folded_position() {
         &handled,
     )
     .await;
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 3).await;
+    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 3).await;
     first.stop().await.expect("stop must succeed");
     drop(first);
 
@@ -1846,7 +1578,7 @@ async fn the_configured_floor_survives_a_lower_consumed_position() {
         &handled,
     )
     .await;
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
     first.stop().await.expect("stop must succeed");
     drop(first);
 
@@ -1905,7 +1637,7 @@ async fn a_global_subscription_keeps_its_configured_cursor() {
         &handled,
     )
     .await;
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
     first.stop().await.expect("stop must succeed");
     drop(first);
 
@@ -1945,6 +1677,8 @@ async fn a_global_subscription_keeps_its_configured_cursor() {
     );
 }
 
+// CP-MULTI-APPEND — one handle call, several appends, one position
+
 /// Given one `handle` whose effect reaches the store as two appends — a
 /// `CancelSchedule` is a boundary the `Persist × Persist` fold does not cross,
 /// When both land,
@@ -1964,16 +1698,13 @@ async fn an_input_whose_effect_takes_two_appends_is_recorded_as_consumed_once() 
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let handled_for_producer = Arc::clone(&handled);
-    let _proxy =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            TwoBatchSaga {
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let _proxy = spawn_two_batch(
+        &ps,
+        &saga_store,
+        from_source(&upstream_store, &source),
+        &handled,
+    )
+    .await;
 
     // The second decision is the barrier: it belongs to the later append, so
     // once it is on the stream both batches are over.
@@ -1988,10 +1719,7 @@ async fn an_input_whose_effect_takes_two_appends_is_recorded_as_consumed_once() 
     );
     assert_eq!(
         positions(&events),
-        vec![ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        }],
+        vec![consumed(&source, 1)],
         "the position is committed with the last batch, once every decision \
          this input produced is durable, so the first batch must carry none; \
          stream held {:?}",
@@ -2019,21 +1747,18 @@ async fn an_input_closed_out_by_end_mid_sequence_is_recorded_as_consumed() {
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let handled_for_producer = Arc::clone(&handled);
-    let _proxy =
-        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            PersistThenEndSaga {
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let _proxy = spawn_persist_then_end(
+        &ps,
+        &saga_store,
+        from_source(&upstream_store, &source),
+        &handled,
+    )
+    .await;
 
     // The consumed position is the barrier: it only ever lands on the `Ended`
     // append, so waiting for it also waits for `End` to have been
     // interpreted.
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
 
     assert_eq!(
         seen(&handled).len(),
@@ -2050,10 +1775,7 @@ async fn an_input_closed_out_by_end_mid_sequence_is_recorded_as_consumed() {
     );
     assert_eq!(
         positions(&events),
-        vec![ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        }],
+        vec![consumed(&source, 1)],
         "the position must be durable even though it rides the `Ended` append \
          rather than the vector's physically last element; stream held {:?}",
         describe(&events)
@@ -2061,8 +1783,8 @@ async fn an_input_closed_out_by_end_mid_sequence_is_recorded_as_consumed() {
 }
 
 /// Given one `handle` whose effect reaches the store as two appends, the
-/// opening one lands but the closing one — the one the position would ride —
-/// never does before the saga stops,
+/// opening one landing but the closing one — the one the position would ride —
+/// exhausting its retries before the saga stops,
 /// When the saga restarts and upstream redelivers the same input,
 /// Then `handle` runs again and this time both appends land: the decision the
 /// first attempt could not durably record is not lost, and the position is
@@ -2075,31 +1797,26 @@ async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
     let source = AggregateId::new("two-batch-crash-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let failing = Arc::new(AtomicBool::new(true));
-    let decision_appends = Arc::new(AtomicU64::new(0));
-    let saga_store: Arc<dyn EventStore> = Arc::new(FailSecondDecisionAppendStore {
-        inner: InMemoryEventStore::default(),
-        failing: Arc::clone(&failing),
-        decision_appends: Arc::clone(&decision_appends),
-    });
+    // Only the closing append of a `Sequence` carries a position, so a budget
+    // spent on position-carrying appends refuses exactly that one, for exactly
+    // one batch's staged retries.
+    let saga_store = FailFirstAppendsStore::refusing(carries_a_position, STAGED_RETRIES);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let handled_for_first = Arc::clone(&handled);
-    let first =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            TwoBatchSaga {
-                handled: Arc::clone(&handled_for_first),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let first = spawn_two_batch(
+        &ps,
+        &saga_store,
+        from_source(&upstream_store, &source),
+        &handled,
+    )
+    .await;
 
-    // The opening batch lands (one `ReservationRequested` row), the closing
-    // batch keeps failing, and the exhausted retries end in a dead letter —
-    // the barrier that says interpretation of this record is over.
-    let events = wait_for_saga_rows(&saga_store, &saga_id, DEAD_LETTER_MARKER, 1).await;
+    wait_for_handled(&handled, 1).await;
+    stop_and_wait(&ps, &first).await;
+    drop(first);
+
+    let events = load_saga_events(&saga_store, &saga_id).await;
     assert_eq!(
         decisions(&events).len(),
         1,
@@ -2114,35 +1831,22 @@ async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
         describe(&events)
     );
 
-    first.stop().await.expect("stop must succeed");
-    drop(first);
+    let _second = spawn_two_batch(
+        &ps,
+        &saga_store,
+        from_source(&upstream_store, &source),
+        &handled,
+    )
+    .await;
 
-    // The store recovers; a fresh incarnation replays the same upstream
-    // record.
-    failing.store(false, Ordering::SeqCst);
+    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
 
-    let handled_for_second = Arc::clone(&handled);
-    let _second =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            TwoBatchSaga {
-                handled: Arc::clone(&handled_for_second),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
-
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
-
-    let invocations = seen(&handled);
     assert_eq!(
-        invocations
-            .iter()
-            .filter(|s| s.source == source.as_str() && s.sequence == 1)
-            .count(),
+        times_handled(&handled, &source, 1),
         2,
         "no position was durable after the first attempt, so redelivery must \
-         reach handle again; invocations: {invocations:?}"
+         reach handle again; invocations: {:?}",
+        seen(&handled)
     );
     assert_eq!(
         decisions(&events).len(),
@@ -2155,10 +1859,7 @@ async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
     );
     assert_eq!(
         positions(&events),
-        vec![ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        }],
+        vec![consumed(&source, 1)],
         "the position is committed exactly once, by the batch that finally \
          closes the input out; stream held {:?}",
         describe(&events)
@@ -2166,8 +1867,7 @@ async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
 }
 
 /// Given one `handle` whose effect reaches the store as two appends, the
-/// opening one exhausting its retries — its failure is reported as a dead
-/// letter, which is why interpretation carries on to the closing append at all,
+/// opening one exhausting its retries while the closing one lands anyway,
 /// When the saga restarts and upstream redelivers the same input,
 /// Then nothing on the stream says the input was consumed and `handle` runs
 /// again: an input is consumed only once *every* append it required has landed,
@@ -2181,33 +1881,27 @@ async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed()
     let source = AggregateId::new("two-batch-opening-crash-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(FailUntilReportedStore {
-        inner: InMemoryEventStore::default(),
-        reported: AtomicBool::new(false),
-    });
+    // The opening `Persist` is the first append carrying a decision, and its
+    // staged retries spend the whole budget — so the closing one, which the
+    // position would have ridden, is accepted.  That is the one shape where a
+    // position could outlive the decision it was supposed to be as durable as.
+    let saga_store = FailFirstAppendsStore::refusing(carries_a_decision, STAGED_RETRIES);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let handled_for_first = Arc::clone(&handled);
-    let first =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            TwoBatchSaga {
-                handled: Arc::clone(&handled_for_first),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let first = spawn_two_batch(
+        &ps,
+        &saga_store,
+        from_source(&upstream_store, &source),
+        &handled,
+    )
+    .await;
 
-    // Two barriers, in the order the interpretation reaches them: the dead
-    // letter says the opening batch is done failing, and the one decision row
-    // that follows it says the closing batch — the only append for this input
-    // a position could have ridden — has landed.  After that this input's
-    // interpretation is over, so what the stream does not hold, it never will.
-    wait_for_saga_rows(&saga_store, &saga_id, DEAD_LETTER_MARKER, 1).await;
-    let events =
-        wait_for_saga_rows(&saga_store, &saga_id, ReservationRequested::EVENT_TYPE, 1).await;
+    wait_for_handled(&handled, 1).await;
+    stop_and_wait(&ps, &first).await;
+    drop(first);
 
+    let events = load_saga_events(&saga_store, &saga_id).await;
     assert_eq!(
         decisions(&events).len(),
         1,
@@ -2224,31 +1918,22 @@ async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed()
         describe(&events)
     );
 
-    first.stop().await.expect("stop must succeed");
-    drop(first);
+    let _second = spawn_two_batch(
+        &ps,
+        &saga_store,
+        from_source(&upstream_store, &source),
+        &handled,
+    )
+    .await;
 
-    let handled_for_second = Arc::clone(&handled);
-    let _second =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            TwoBatchSaga {
-                handled: Arc::clone(&handled_for_second),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
 
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
-
-    let invocations = seen(&handled);
     assert_eq!(
-        invocations
-            .iter()
-            .filter(|s| s.source == source.as_str() && s.sequence == 1)
-            .count(),
+        times_handled(&handled, &source, 1),
         2,
         "no position was durable after the first attempt, so redelivery must \
-         reach handle again; invocations: {invocations:?}"
+         reach handle again; invocations: {:?}",
+        seen(&handled)
     );
     assert_eq!(
         decisions(&events).len(),
@@ -2260,10 +1945,7 @@ async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed()
     );
     assert_eq!(
         positions(&events),
-        vec![ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        }],
+        vec![consumed(&source, 1)],
         "the position is committed exactly once, by the attempt that landed \
          every append the input required; stream held {:?}",
         describe(&events)
@@ -2274,12 +1956,12 @@ async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed()
 /// opening `Persist` and a closing `End` — the opening one exhausting its
 /// retries before the closing append is ever attempted,
 /// When the closing `End` would otherwise run anyway,
-/// Then no durable `Ended` marker is written for it: closing the input out
-/// here would let the revival guard refuse every future spawn, permanently
-/// losing the opening decision that never landed. Only after the saga
-/// restarts and upstream redelivers the same input does `handle` run again,
-/// this time landing both appends and finally terminating the saga with the
-/// position riding the same append as `Ended`.
+/// Then no durable `Ended` fact is written for it: closing the input out here
+/// would let the revival guard refuse every future spawn, permanently losing
+/// the opening decision that never landed.  Only after the saga restarts and
+/// upstream redelivers the same input does `handle` run again, this time
+/// landing both appends and finally terminating the saga with the position
+/// riding the same append as `Ended`.
 #[tokio::test]
 async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritten() {
     let ps = ProcessSystem::new().await;
@@ -2288,31 +1970,26 @@ async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritte
     let source = AggregateId::new("opening-crash-then-end-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(FailUntilReportedStore {
-        inner: InMemoryEventStore::default(),
-        reported: AtomicBool::new(false),
-    });
+    // Only the opening `Persist` carries a decision; the closing `End` does
+    // not, so the store would have accepted that append had the interpreter
+    // attempted it.  Whether it did is exactly what is under test.
+    let saga_store = FailFirstAppendsStore::refusing(carries_a_decision, STAGED_RETRIES);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let handled_for_first = Arc::clone(&handled);
-    let first =
-        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            PersistThenEndSaga {
-                handled: Arc::clone(&handled_for_first),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let first = spawn_persist_then_end(
+        &ps,
+        &saga_store,
+        from_source(&upstream_store, &source),
+        &handled,
+    )
+    .await;
 
-    // The dead letter says the opening batch is done failing. The closing
-    // `End` does not carry `ReservationRequested`, so `FailUntilReportedStore`
-    // would have accepted it had the interpreter attempted it — this barrier
-    // gives that append a chance to happen before the assertions below check
-    // that it did not.
-    let events = wait_for_saga_rows(&saga_store, &saga_id, DEAD_LETTER_MARKER, 1).await;
+    wait_for_handled(&handled, 1).await;
+    stop_and_wait(&ps, &first).await;
+    drop(first);
 
+    let events = load_saga_events(&saga_store, &saga_id).await;
     assert!(
         decisions(&events).is_empty(),
         "the opening batch never landed, so no decision may be on the stream; \
@@ -2322,9 +1999,9 @@ async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritte
     assert!(
         !events
             .iter()
-            .any(|e| matches!(outbox_kind_of(e), Some(OutboxKind::Ended(_)))),
+            .any(|e| matches!(lifecycle_kind_of(e), Some(LifecycleKind::Ended(_)))),
         "a preceding append that never landed must withhold the closing `End` \
-         marker too — durably ending the saga here would refuse every future \
+         fact too — durably ending the saga here would refuse every future \
          revival and lose the opening decision for good; stream held {:?}",
         describe(&events)
     );
@@ -2335,31 +2012,22 @@ async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritte
         describe(&events)
     );
 
-    first.stop().await.expect("stop must succeed");
-    drop(first);
+    let _second = spawn_persist_then_end(
+        &ps,
+        &saga_store,
+        from_source(&upstream_store, &source),
+        &handled,
+    )
+    .await;
 
-    let handled_for_second = Arc::clone(&handled);
-    let _second =
-        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            PersistThenEndSaga {
-                handled: Arc::clone(&handled_for_second),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
 
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
-
-    let invocations = seen(&handled);
     assert_eq!(
-        invocations
-            .iter()
-            .filter(|s| s.source == source.as_str() && s.sequence == 1)
-            .count(),
+        times_handled(&handled, &source, 1),
         2,
         "no position was durable after the first attempt, so redelivery must \
-         reach handle again; invocations: {invocations:?}"
+         reach handle again; invocations: {:?}",
+        seen(&handled)
     );
     assert_eq!(
         decisions(&events).len(),
@@ -2369,22 +2037,29 @@ async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritte
          never interpreted; stream held {:?}",
         describe(&events)
     );
-    assert!(
+    assert_eq!(
         events
             .iter()
-            .any(|e| matches!(outbox_kind_of(e), Some(OutboxKind::Ended(_)))),
+            .filter_map(lifecycle_kind_of)
+            .filter(|kind| matches!(kind, LifecycleKind::Ended(_)))
+            .count(),
+        1,
         "the second attempt lands every append this input requires, so `End` \
-         finally closes it out; stream held {:?}",
+         finally closes it out — once, not once per attempt; stream held {:?}",
+        describe(&events)
+    );
+    assert_eq!(
+        position_rows(&events),
+        1,
+        "and the position is committed exactly once, by the `Ended` append that \
+         finally closes the input out; stream held {:?}",
         describe(&events)
     );
     assert_eq!(
         positions(&events),
-        vec![ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        }],
-        "the position is committed exactly once, by the `Ended` append that \
-         finally closes the input out; stream held {:?}",
+        vec![consumed(&source, 1)],
+        "the one position names the input the `Ended` append settled; stream \
+         held {:?}",
         describe(&events)
     );
 }
@@ -2396,10 +2071,10 @@ async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritte
 /// reaches `handle` again.
 ///
 /// The same invariant as the two tests above reached through a different leaf:
-/// a schedule-marker append is not retried and enqueues no dead letter, so if
-/// the interpreter treated its failure as an ordinary "carry on" the closing
-/// append would record the input as consumed and the cancellation would be lost
-/// for good.
+/// a schedule-marker append is attempted once and never retried, so if the
+/// interpreter treated its failure as an ordinary "carry on" the closing append
+/// would record the input as consumed and the cancellation would be lost for
+/// good.
 #[tokio::test]
 async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed() {
     let ps = ProcessSystem::new().await;
@@ -2408,34 +2083,36 @@ async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed()
     let source = AggregateId::new("middle-append-crash-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let failing = Arc::new(AtomicBool::new(true));
-    let saga_store: Arc<dyn EventStore> = Arc::new(FailScheduleMarkerAppendStore {
-        inner: InMemoryEventStore::default(),
-        failing: Arc::clone(&failing),
-    });
+    // One refusal is one attempt's worth here: unlike a persist batch, the
+    // cancellation marker's append is never retried.
+    let saga_store = FailFirstAppendsStore::refusing(carries_a_schedule_marker, 1);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let handled_for_first = Arc::clone(&handled);
-    let first =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            TwoBatchSaga {
-                handled: Arc::clone(&handled_for_first),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let first = spawn_two_batch(
+        &ps,
+        &saga_store,
+        from_source(&upstream_store, &source),
+        &handled,
+    )
+    .await;
 
-    // Both `Persist` batches landing is the barrier: the closing one is the
-    // last append this input makes, so once its decision is on the stream what
-    // the stream does not hold, it never will.
-    let events =
-        wait_for_saga_rows(&saga_store, &saga_id, ReservationRequested::EVENT_TYPE, 2).await;
+    wait_for_handled(&handled, 1).await;
+    stop_and_wait(&ps, &first).await;
+    drop(first);
 
+    let events = load_saga_events(&saga_store, &saga_id).await;
     assert!(
         !events.iter().any(|e| e.event_type == SCHEDULE_MARKER),
         "the middle append must have been the one that failed; stream held {:?}",
+        describe(&events)
+    );
+    assert_eq!(
+        decisions(&events).len(),
+        2,
+        "the `Persist` batches on either side of it landed, so the closing one \
+         — the append a position would have ridden — really did succeed; \
+         stream held {:?}",
         describe(&events)
     );
     assert!(
@@ -2445,41 +2122,44 @@ async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed()
         describe(&events)
     );
 
-    first.stop().await.expect("stop must succeed");
-    drop(first);
+    let _second = spawn_two_batch(
+        &ps,
+        &saga_store,
+        from_source(&upstream_store, &source),
+        &handled,
+    )
+    .await;
 
-    // The store recovers; a fresh incarnation replays the same upstream record.
-    failing.store(false, Ordering::SeqCst);
+    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
 
-    let handled_for_second = Arc::clone(&handled);
-    let _second =
-        SagaProps::<TwoBatchSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            TwoBatchSaga {
-                handled: Arc::clone(&handled_for_second),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
-
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
-
-    let invocations = seen(&handled);
     assert_eq!(
-        invocations
-            .iter()
-            .filter(|s| s.source == source.as_str() && s.sequence == 1)
-            .count(),
+        times_handled(&handled, &source, 1),
         2,
         "no position was durable after the first attempt, so redelivery must \
-         reach handle again; invocations: {invocations:?}"
+         reach handle again; invocations: {:?}",
+        seen(&handled)
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.event_type == SCHEDULE_MARKER)
+            .count(),
+        1,
+        "the cancellation the first attempt lost is re-made by the second, \
+         successful attempt; stream held {:?}",
+        describe(&events)
+    );
+    assert_eq!(
+        decisions(&events).len(),
+        4,
+        "both `Persist` batches of both attempts landed — the middle append is \
+         the only one that ever failed, and its failure is what re-ran the \
+         input; stream held {:?}",
+        describe(&events)
     );
     assert_eq!(
         positions(&events),
-        vec![ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        }],
+        vec![consumed(&source, 1)],
         "the position is committed exactly once, by the attempt that landed \
          every append the input required; stream held {:?}",
         describe(&events)
@@ -2488,8 +2168,8 @@ async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed()
 
 // CP-EMPTY-STILL-CONSUMED — a decision-less input is still consumed
 
-/// Given a `handle` that returns an all-empty `Persist` — no user event, tell
-/// or schedule for the interpreter to batch,
+/// Given a `handle` that returns an all-empty `Persist` — no user event or
+/// schedule for the interpreter to batch,
 /// When the saga restarts and the same input is redelivered,
 /// Then it does not reach `handle` again: the interpreter still committed a
 /// consumed-position-only append for it, because the input had a position to
@@ -2520,7 +2200,7 @@ async fn an_input_that_wrote_nothing_is_still_consumed() {
         .spawn(&ps)
         .await;
 
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
     first.stop().await.expect("stop must succeed");
     drop(first);
 
@@ -2553,11 +2233,8 @@ async fn an_input_that_wrote_nothing_is_still_consumed() {
         describe(&events)
     );
     assert_eq!(
-        positions(&events)
-            .iter()
-            .map(|p| p.sequence)
-            .collect::<Vec<_>>(),
-        vec![1, 2],
+        positions(&events),
+        vec![consumed(&source, 1), consumed(&source, 2)],
         "a position is recorded for seq 1 even though handle decided nothing \
          for it, and again for seq 2; stream held {:?}",
         describe(&events)
@@ -2624,10 +2301,7 @@ async fn a_timer_firing_writes_no_consumed_position() {
     );
     assert_eq!(
         positions(&events),
-        vec![ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        }],
+        vec![consumed(&source, 1)],
         "the only position on the stream is the upstream input's — the timer \
          firing added none; stream held {:?}",
         describe(&events)
@@ -2666,274 +2340,11 @@ async fn a_timer_firing_writes_no_consumed_position() {
         assert_eq!(
             batch
                 .iter()
-                .filter(|e| e.event_type == CONSUMED_POSITION_MARKER)
+                .filter(|e| e.event_type == CONSUMED_MARKER)
                 .count(),
             0,
             "the append a timer firing produced carries no position row; batch \
              held {rows:?}"
         );
     }
-}
-
-// CP-DLQ — an upstream record a dead letter settles commits its own position
-
-/// `Saga::handle` always fails, so every upstream record it is handed becomes
-/// a `HandleFailed` dead letter instead of a decision.
-struct AlwaysFailingSaga {
-    handled: Handled,
-}
-
-/// A concrete `Saga::Error` so `handle` has something to fail with.
-#[derive(Debug)]
-struct HandleBoom;
-
-impl std::fmt::Display for HandleBoom {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "handle always fails")
-    }
-}
-
-impl std::error::Error for HandleBoom {}
-
-#[async_trait]
-impl Saga for AlwaysFailingSaga {
-    type Subscribe = Observed;
-    type Event = ReservationRequested;
-    type Error = HandleBoom;
-
-    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
-        Some(SagaId::new(SAGA_ID))
-    }
-
-    async fn handle(
-        &mut self,
-        _input: Self::Subscribe,
-        ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        record(&self.handled, ctx);
-        Err(HandleBoom)
-    }
-}
-
-async fn spawn_always_failing(
-    ps: &ProcessSystem,
-    saga_store: &Arc<dyn EventStore>,
-    subscription: Subscription,
-    handled: &Handled,
-) -> nitinol_saga::SagaProxy<AlwaysFailingSaga> {
-    let handled = Arc::clone(handled);
-    SagaProps::<AlwaysFailingSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(saga_store),
-        move |_components| AlwaysFailingSaga {
-            handled: Arc::clone(&handled),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(subscription)
-    .spawn(ps)
-    .await
-}
-
-/// Given a saga whose `handle` fails for every upstream record it sees,
-/// When upstream seq 1 is delivered and settled as a `HandleFailed` dead
-/// letter — an `Ok` outcome the `DirectPoller` advances its cursor past —
-/// Then seq 1's consumed position lands in the same append as the dead
-/// letter, the same atomic-batch guarantee a successful decision gets, and a
-/// restart does not redeliver seq 1 into `handle` a second time.
-///
-/// Before the fix this dead letter settled the record without ever writing
-/// its position: the DLQ append carried the `handle_failed` row alone, so a
-/// restart's replay found nothing to skip and redelivered seq 1 into `handle`
-/// again, producing a second `handle_failed` dead letter for the same input.
-#[tokio::test]
-async fn a_handle_failed_dead_letter_commits_its_consumed_position() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let source = AggregateId::new("handle-failed-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let saga_id = SagaId::new(SAGA_ID);
-
-    let first = spawn_always_failing(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
-
-    // The dead letter and the position it settles land in one append, so by
-    // the time either row is visible the other already is too.
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
-
-    assert_eq!(
-        wait_for_handled(&handled, 1).await.len(),
-        1,
-        "handle must have run once to produce the failure this test settles; \
-         stream held {:?}",
-        describe(&events)
-    );
-    assert_eq!(
-        count_dead_letter_kind(&events, "handle_failed"),
-        1,
-        "the first incarnation's one failed attempt must be the only \
-         handle_failed dead letter so far; stream held {:?}",
-        describe(&events)
-    );
-    assert_eq!(
-        positions(&events),
-        vec![ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        }],
-        "a HandleFailed dead letter must commit its own input's consumed \
-         position — the same atomic-batch guarantee a successful decision \
-         gets; stream held {:?}",
-        describe(&events)
-    );
-
-    first.stop().await.expect("stop must succeed");
-    drop(first);
-
-    let _second = spawn_always_failing(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
-    append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
-
-    let barrier = wait_for_handled(&handled, 2).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
-
-    assert_eq!(
-        barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
-        vec![1, 2],
-        "seq 1 was already settled by the first incarnation's dead letter; \
-         the second incarnation must see only seq 2, not seq 1 redelivered \
-         into handle a second time; stream held {:?}",
-        describe(&events)
-    );
-    assert_eq!(
-        count_dead_letter_kind(&events, "handle_failed"),
-        2,
-        "one handle_failed dead letter per input actually handled — seq 1 \
-         once from the first incarnation, seq 2 once from the second; a \
-         redelivered seq 1 would have produced a third; stream held {:?}",
-        describe(&events)
-    );
-}
-
-/// Given a saga whose `handle` fails for the upstream record it is handed,
-/// When the framework settles that record as a `HandleFailed` dead letter,
-/// Then a single append carries both the dead letter and the position it
-/// settles: neither is ever in the store without the other.
-///
-/// Its sibling above fixes that both rows end up durable and that a restart
-/// does not redeliver the record.  That same outcome is reached by writing the
-/// dead letter first and the position in a second append — so the sibling
-/// passes under that implementation too.  It is not equivalent: a store
-/// failure between the two appends leaves the record settled by a durable dead
-/// letter carrying no position, and the caller has already been told the dead
-/// letter landed, so the cursor moves past a record the fold cannot restore as
-/// consumed.  That is the redelivery the position exists to stop, and only the
-/// batch boundary tells the two implementations apart.
-#[tokio::test]
-async fn a_dead_letter_and_the_position_it_settles_reach_the_store_in_one_append() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let source = AggregateId::new("atomic-dead-letter-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
-
-    let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore {
-        inner: InMemoryEventStore::default(),
-        batches: Arc::clone(&batches),
-    });
-    let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-
-    let _proxy = spawn_always_failing(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
-
-    let saga_id = SagaId::new(SAGA_ID);
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
-
-    let recorded = batches
-        .lock()
-        .expect("recorded batches must not be poisoned")
-        .clone();
-
-    let dead_letter_batches: Vec<&Vec<RecordedEvent>> = recorded
-        .iter()
-        .filter(|batch| batch.iter().any(|e| e.event_type == DEAD_LETTER_MARKER))
-        .collect();
-    assert_eq!(
-        dead_letter_batches.len(),
-        1,
-        "the one failed input must have produced exactly one dead-letter \
-         append for this test to say anything about it; stream held {:?}",
-        describe(&events)
-    );
-
-    let batch = dead_letter_batches[0];
-    let rows: Vec<String> = batch
-        .iter()
-        .map(|e| format!("{}#{}", e.sequence, e.event_type))
-        .collect();
-    assert_eq!(
-        batch
-            .iter()
-            .filter(|e| e.event_type == CONSUMED_POSITION_MARKER)
-            .count(),
-        1,
-        "the position of the record this dead letter settles must ride the \
-         dead letter's own append, the same atomic batch a decision's position \
-         rides; batch held {rows:?}"
-    );
-
-    let position_rows_appended = recorded
-        .iter()
-        .flatten()
-        .filter(|e| e.event_type == CONSUMED_POSITION_MARKER)
-        .count();
-    assert_eq!(
-        position_rows_appended,
-        1,
-        "and it is committed only there — a position written by an append of \
-         its own would leave a window where the settled record has none; \
-         stream held {:?}",
-        describe(&events)
-    );
-
-    let position = batch
-        .iter()
-        .find(|e| e.event_type == CONSUMED_POSITION_MARKER)
-        .expect("the dead letter's batch carries the position asserted above");
-    assert_eq!(
-        common::decode_consumed_position(&position.payload),
-        ConsumedPayload {
-            source: source.as_str().to_owned(),
-            sequence: 1,
-        },
-        "the position names the upstream stream and the sequence this dead \
-         letter settled; batch held {rows:?}"
-    );
-
-    let stamp = batch[0].occurred_at;
-    assert!(
-        batch.iter().all(|e| e.occurred_at == stamp),
-        "every row of one commit carries the commit's own timestamp; a position \
-         stamped from a second clock reading would break the one signal a reader \
-         has that the rows landed together; batch held {rows:?}"
-    );
 }

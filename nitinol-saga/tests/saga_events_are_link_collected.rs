@@ -8,7 +8,7 @@
 //!          stream restores it rather than failing with UnknownEventType
 //! ```
 //!
-//! The five markers below are `pub(crate)`, so what is named here is the wire
+//! The three markers below are `pub(crate)`, so what is named here is the wire
 //! form rather than the constant: the canonical path is what a journal column
 //! holds and what a registry is asked for, and it is the only part of these
 //! records the framework cannot change without changing what an existing
@@ -17,39 +17,56 @@
 //! A path missing from this list is not covered by this clause; a path in the
 //! list that the saga never writes would make the clause pass on a record no
 //! reader ever sees. Both are pinned against the declarations in
-//! `outbox/message.rs`, `scheduler/event.rs`, `dead_letter/event.rs`,
-//! `dead_letter/disposition.rs` and `consumed.rs`.
+//! `scheduler/event.rs`, `consumed.rs` and `lifecycle.rs`.
 //!
 //! Each of those is one declaration written down as one path. Which arm of it a
 //! row holds is carried by the payload's `oneof`, so no path beneath a marker
 //! is ever written — and `no_path_beneath_a_marker_is_collected` pins that a
 //! registry answers for none.
+//!
+//! Three declarations the saga used to carry are named there too, as the paths
+//! nothing owns any more. A registry that still answered for one of them would
+//! hand a 0.4 row to a reader, which is the opposite of what
+//! `saga_unknown_reserved_record_fails_fast.rs` settles: a stream holding one
+//! must refuse to load, not resolve.
 
 use nitinol_persistence::__private::linked_event_registry;
 use nitinol_saga::SagaId;
 
 /// Every canonical path the saga writes onto a saga's own stream: one per
 /// framework record it declares.
+///
+/// Four kinds of row make up a 0.5 saga stream, and this is three of them —
+/// the fourth is the domain event, which belongs to the user's own declaration
+/// rather than to this crate.
 const JOURNALLED_PATHS: &[&str] = &[
-    "nitinol.saga.outbox",
     "nitinol.saga.schedule",
-    "nitinol.saga.dead_letter",
-    "nitinol.saga.dead_letter_disposition",
-    "nitinol.saga.consumed_position",
+    "nitinol.saga.consumed",
+    "nitinol.saga.lifecycle",
 ];
 
-/// Paths the saga wrote before arms were removed from the grammar, and writes
-/// no longer. A registry that still answered for one of them would be serving
-/// an identity no declaration owns.
+/// Paths the saga wrote before arms were removed from the grammar, or before
+/// whole declarations were withdrawn, and writes no longer. A registry that
+/// still answered for one of them would be serving an identity no declaration
+/// owns.
 const PATHS_NO_DECLARATION_OWNS: &[&str] = &[
+    // Arms: each declaration is one path, and which arm a row holds lives in
+    // its payload.
+    "nitinol.saga.schedule.scheduled",
+    "nitinol.saga.schedule.cancelled",
+    "nitinol.saga.schedule.fired",
+    "nitinol.saga.consumed.consumed",
+    "nitinol.saga.lifecycle.ended",
+    // Withdrawn declarations: outbox push delivery, the persistent dead letter
+    // queue and its settlement markers, and the position under the name the
+    // old mechanism gave it.
+    "nitinol.saga.outbox",
     "nitinol.saga.outbox.tell_requested",
     "nitinol.saga.outbox.tell_acked",
     "nitinol.saga.outbox.tell_failed",
     "nitinol.saga.outbox.scheduled",
     "nitinol.saga.outbox.ended",
-    "nitinol.saga.schedule.scheduled",
-    "nitinol.saga.schedule.cancelled",
-    "nitinol.saga.schedule.fired",
+    "nitinol.saga.dead_letter",
     "nitinol.saga.dead_letter.tell_failed",
     "nitinol.saga.dead_letter.handle_failed",
     "nitinol.saga.dead_letter.persist_failed",
@@ -57,8 +74,10 @@ const PATHS_NO_DECLARATION_OWNS: &[&str] = &[
     "nitinol.saga.dead_letter.decode_failed",
     "nitinol.saga.dead_letter.scheduled_failed",
     "nitinol.saga.dead_letter.tell_failed_hook_failed",
+    "nitinol.saga.dead_letter_disposition",
     "nitinol.saga.dead_letter_disposition.processed",
     "nitinol.saga.dead_letter_disposition.evicted",
+    "nitinol.saga.consumed_position",
     "nitinol.saga.consumed_position.consumed",
 ];
 
@@ -125,6 +144,6 @@ fn no_path_beneath_a_marker_is_collected() {
         claimed.is_empty(),
         "a framework record is one declaration written down as one path, and the arm it holds is \
          carried by its payload; a registry answering for these would give a second identity to a \
-         record that has one: {claimed:?}"
+         record that has one — or revive a declaration this version withdrew: {claimed:?}"
     );
 }

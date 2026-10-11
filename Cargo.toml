@@ -34,7 +34,7 @@ description = "A utilities for event sourcing"
 
 [package]
 name = "nitinol"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]

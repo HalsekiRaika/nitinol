@@ -120,6 +120,8 @@ impl Codec<Reminder> for ReminderCodec {
 }
 
 impl DeadlineMessage for Reminder {
+    const TYPE_NAME: &'static str = "reminder";
+    const CODEC_NAME: &'static str = "reminder-codec";
     type Codec = ReminderCodec;
 }
 
@@ -221,6 +223,8 @@ fn scheduled_row(saga_id: &SagaId, name: &str, after: Duration) -> Bytes {
         saga_id,
         &TimerName::new(name),
         after,
+        Reminder::TYPE_NAME,
+        Reminder::CODEC_NAME,
         &payload,
         jiff::Timestamp::now().as_millisecond(),
     )

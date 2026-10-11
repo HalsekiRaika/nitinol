@@ -161,6 +161,8 @@ impl Codec<Reminder> for ReminderCodec {
 }
 
 impl DeadlineMessage for Reminder {
+    const TYPE_NAME: &'static str = "reminder";
+    const CODEC_NAME: &'static str = "reminder-codec";
     type Codec = ReminderCodec;
 }
 
@@ -282,6 +284,8 @@ impl Codec<GenerationReminder> for GenerationReminderCodec {
 }
 
 impl DeadlineMessage for GenerationReminder {
+    const TYPE_NAME: &'static str = "generation_reminder";
+    const CODEC_NAME: &'static str = "generation-reminder-codec";
     type Codec = GenerationReminderCodec;
 }
 
@@ -842,6 +846,8 @@ async fn replay_rearms_an_unfired_deadline_and_fires_it() {
                     &saga_id,
                     &name,
                     Duration::from_millis(400),
+                    Reminder::TYPE_NAME,
+                    Reminder::CODEC_NAME,
                     &payload,
                     jiff::Timestamp::now().as_millisecond(),
                 ),

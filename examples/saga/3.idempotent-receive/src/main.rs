@@ -1,12 +1,11 @@
 //! Runnable demonstration of the pattern this crate exists to show:
-//! `PlaceOrder` -> one fact event -> a reservation dispatched through the saga's
-//! outbox -> the same operation delivered a second time -> one reservation on
-//! the stock item's stream.
+//! `PlaceOrder` -> one fact event -> one saga decision -> a delivery host turns
+//! that decision into a `Reserve` at the stock item -> the same operation
+//! delivered a second time -> one reservation on the stock item's stream.
 //!
 //! The wiring mirrors what `tests/common/helpers.rs` builds for the integration
 //! tests; this binary demonstrates it end to end with self-verifying
-//! assertions, in the same shape as
-//! `examples/saga/2.fanout-pattern/src/main.rs`.
+//! assertions.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,10 +16,10 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaSystemExt;
+use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
 
 use saga_idempotent_receive::order::{Order, OrderPlaced, PlaceOrder};
 use saga_idempotent_receive::saga::ReservationSaga;
@@ -32,25 +31,40 @@ const SKU: &str = "sku-cobalt-ingot";
 /// How much the order reserves — the amount a second application would double.
 const ORDER_QUANTITY: u64 = 7;
 
-/// Budget for the order to reach the stock item through the outbox.  The manager
-/// polls its upstream every 250ms, so this is a generous deadline rather than a
-/// synchronisation device: the wait below polls an observable fact.
-const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// How often the delivery host asks the store what the saga has decided.
+///
+/// A pull consumer trades latency for load on the store; short here because the
+/// demonstration waits on the host's work.
+const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Budget for the order to reach the stock item through the delivery host.  This
+/// is a generous deadline rather than a synchronisation device: the wait below
+/// polls an observable fact.
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[tokio::main]
 async fn main() {
     let ps = ProcessSystem::new().await;
 
-    // One supplier for the whole example.  `EventStore` is stream-keyed, so the
-    // order's stream, the stock item's stream and the saga's journal are tenants
-    // of this one instance; the manager's subscription below is what narrows it
-    // back down to the order's stream.  The handle is kept here as well, because
-    // the streams are what this demonstration verifies itself against.
+    // One supplier for the whole example, naming two slots.
+    //
+    // `EventStore` is stream-keyed, so the order's stream, the stock item's
+    // stream and the saga's journal are tenants of this one instance; the
+    // manager's subscription narrows it back down to the order's stream, and the
+    // delivery host's narrows it down to the saga's own decision event type.
+    // How far the host has got is not a stream at all, so it is a slot of its
+    // own: without it there is no `saga_delivery_props` on this system to call,
+    // which is the wiring being told so while it is compiled rather than when
+    // the host first tries to record something.
+    //
+    // The journal handle is kept here as well, because the streams are what this
+    // demonstration verifies itself against.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(Arc::clone(&store))
+                .delivery_checkpoints(InMemoryCheckpointStore::default())
                 .build(),
         ))
         .build();
@@ -58,28 +72,31 @@ async fn main() {
     let order_id = AggregateId::new("order-cobalt-42");
     let order = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
-    // The producer is handed the hosting system by the framework, so nothing
-    // is prepared for it here.  The crash-restart factory is registered on the
-    // props rather than called with the components, so it keeps a handle of
-    // its own.
-    let system_for_factory = system.erase_store();
-
     // One `subscribed_to` call per source the saga's alphabet declares — here
     // the order's stream, read as `OrderPlaced` — and `spawn` exists only once
     // every declared source has one.
-    let _manager =
-        system
-            .saga_manager_props(move |components| {
-                ReservationSaga::new(components.system().cloned().expect(
-                    "a saga spawned through a system's own entry point is handed that system",
-                ))
-            })
-            .subscribed_to::<OrderPlaced>(system.subscription(&order_id))
-            .with_crash_restart_factory(move |payload: &[u8]| {
-                ReservationSaga::crash_restart_intent(&system_for_factory, payload)
-            })
-            .spawn()
-            .await;
+    //
+    // The saga holds nothing, because it sends nothing: its only effect is the
+    // decision it persists, so the producer needs none of the capabilities it is
+    // handed.
+    let _manager = system
+        .saga_manager_props(|_| ReservationSaga)
+        .subscribed_to::<OrderPlaced>(system.subscription(&order_id))
+        .spawn()
+        .await;
+
+    // The delivery host, which is what carries a decision anywhere. Its whole
+    // input is the store: it subscribes to the decision event type
+    // `ReservationSaga` declares, wherever an instance of it wrote one, so
+    // nothing about which instances exist is named here.
+    //
+    // Without this the saga would still decide and still journal, and no stock
+    // item would ever hear about it.
+    let _delivery = system
+        .saga_delivery_props::<ReservationSaga>()
+        .with_poll_interval(DELIVERY_POLL_INTERVAL)
+        .spawn()
+        .await;
 
     order
         .ask(PlaceOrder {
@@ -94,21 +111,20 @@ async fn main() {
     let stock_key = StockItem::stream_key(SKU);
     let first = wait_for_first_reservation(&store, &stock_key).await;
     println!(
-        "the saga dispatched the reservation; the stock item applied {} for {} unit(s)",
+        "the host delivered the reservation; the stock item applied {} for {} unit(s)",
         first.reservation, first.quantity
     );
 
     // The second delivery of the same operation.  The id is re-derived from the
-    // order's own fact event, which is what makes this the same operation arriving
-    // again rather than a new one that happens to look alike: a re-dispatch of the
-    // saga's pending marker would carry exactly this id, because it is the one the
-    // first dispatch carried.
+    // order's own fact event, which is what makes this the same operation
+    // arriving again rather than a new one that happens to look alike: a host
+    // resuming from a checkpoint that never moved re-reads the saga's decision
+    // and re-derives exactly this id, because the id is on that record.
     let reservation = ReservationSaga::reservation_id(&order_fact(&store, order_id.as_str()).await);
     system
         .aggregate_proxy::<StockItem>(AggregateId::new(&stock_key))
         .ask(Reserve {
             reservation: reservation.clone(),
-            stock: stock_key.clone(),
             quantity: ORDER_QUANTITY,
         })
         .await
@@ -177,20 +193,21 @@ async fn order_fact(store: &Arc<dyn EventStore>, order_key: &str) -> OrderPlaced
     decode(placed)
 }
 
-/// Poll the stock item's stream until the dispatched reservation lands on it.
+/// Poll the stock item's stream until the delivered reservation lands on it.
 ///
-/// Dispatch through the outbox is asynchronous and the stream is where it
-/// becomes observable, so this waits on that fact rather than sleeping for a
-/// guessed duration.
+/// Two asynchronous steps stand between the order and that record — the saga's
+/// subscription catching up, then the host's poll — and the stream is where the
+/// result becomes observable, so this waits on that fact rather than sleeping
+/// for a guessed duration.
 async fn wait_for_first_reservation(store: &Arc<dyn EventStore>, stock_key: &str) -> StockReserved {
-    let deadline = std::time::Instant::now() + DISPATCH_TIMEOUT;
+    let deadline = std::time::Instant::now() + DELIVERY_TIMEOUT;
     loop {
         if let Some(first) = reservations(store, stock_key).await.into_iter().next() {
             return first;
         }
         if std::time::Instant::now() >= deadline {
             panic!(
-                "the saga must drive a reservation into the stock item within {DISPATCH_TIMEOUT:?}"
+                "the saga must drive a reservation into the stock item within {DELIVERY_TIMEOUT:?}"
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

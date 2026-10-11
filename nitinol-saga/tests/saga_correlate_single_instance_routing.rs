@@ -15,9 +15,10 @@
 //! treating `None` as "mine" admits the `NONE-*` events, and dropping the
 //! self-comparison admits the `OTHER-*` events.
 //!
-//! "Ignored" is a *silent* outcome, not a dead letter — pinned separately below
-//! so that an implementation which dead-letters every event it declines is
-//! rejected rather than passing on the delivery assertion alone.
+//! "Ignored" is a *silent* outcome — nothing at all is written for a declined
+//! record, pinned separately below so that an implementation which leaves a
+//! durable trace for every event it declines is rejected rather than passing on
+//! the delivery assertion alone.
 //!
 //! `CT-02`: every spawn here calls `subscribed_to::<OrderPlaced>` with one
 //! argument (a [`Subscription`]) — the upstream format is named by the declared
@@ -27,7 +28,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{JsonCodec, DEAD_LETTER_MARKER};
+use common::{readable_consumed_fact_of, JsonCodec, CONSUMED_MARKER};
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -288,10 +289,11 @@ async fn only_events_correlating_to_this_saga_reach_handle() {
 
 /// Given the same stream,
 /// when the saga declines events by correlation,
-/// then declining is silent — no dead letter is written to the saga's own
-/// stream for the events it did not accept.
+/// then declining is silent — nothing is written to the saga's own stream for
+/// the events it did not accept, not even a position claiming to have consumed
+/// them.
 #[tokio::test]
-async fn correlation_mismatch_is_silent_and_writes_no_dead_letter() {
+async fn correlation_mismatch_is_silent_and_writes_nothing() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
@@ -316,22 +318,35 @@ async fn correlation_mismatch_is_silent_and_writes_no_dead_letter() {
     .await;
 
     // Reaching two accepted events proves the five declined ones were fetched
-    // and evaluated, so the DLQ assertion below is about work that happened.
+    // and evaluated, so the assertion below is about work that happened.
     wait_for_count(&captured, &notify, 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let events = load_saga_events(&saga_store, &SagaId::new(OWN_SAGA_ID)).await;
-    let dead_letters = events
+    let written: Vec<String> = events
         .iter()
-        .filter(|e| e.event_type == DEAD_LETTER_MARKER)
-        .map(|e| e.event_type.to_string())
-        .collect::<Vec<_>>();
+        .map(|e| format!("{}@{}", e.event_type, e.sequence))
+        .collect();
 
-    assert!(
-        dead_letters.is_empty(),
-        "an event this saga does not correlate to is not a failure — it belongs \
-         to somebody else.  Recording it as a dead letter would make every \
-         subscriber of a shared upstream accumulate one entry per foreign \
-         event; found: {dead_letters:?}"
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.event_type == CONSUMED_MARKER)
+            .count(),
+        events.len(),
+        "the two accepted records decide nothing, so a position each is the \
+         whole of what this saga writes; got {written:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(readable_consumed_fact_of)
+            .map(|fact| fact.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 5],
+        "an event this saga does not correlate to is not its business — it \
+         belongs to somebody else, so no position is written for it.  Claiming \
+         one would have this saga vouch for records it never handled; got \
+         {written:?}"
     );
 }

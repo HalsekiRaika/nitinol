@@ -6,25 +6,29 @@
 //!   translating saga whose every decision follows from its input alone has no
 //!   state to fold its own events into, and writing an empty method for it
 //!   would be ceremony with no reader.
-//! - `on_tell_failed(..)` defaults to a no-op that returns `SagaEffect::None`.
 //!
-//! [`StubSaga`] below overrides neither, so this file compiling at all is half
-//! of what it pins: the two tests pin what each default actually does when the
+//! [`StubSaga`] below overrides it, so this file compiling at all is half of
+//! what it pins: the test pins what the default actually does when the
 //! framework calls it.
+//!
+//! `dispatch(..)` carries a default too — a saga whose decisions are not
+//! commands for anyone maps none of them to a delivery — and what that default
+//! does is pinned where delivery is observed, in the `saga_delivery_*.rs`
+//! tests.
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{shape_of, JsonCodec, Shape};
+use common::JsonCodec;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::Event;
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe};
 
-// A saga that implements ONLY the required members, leaving `apply` and
-// `on_tell_failed` at their trait defaults.
+// A saga that implements ONLY the required members, leaving `apply` at its
+// trait default.
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct StubEvent;
@@ -99,26 +103,5 @@ fn default_apply_leaves_the_saga_state_untouched() {
         saga,
         StubSaga::default(),
         "the default apply must fold nothing into the saga's state"
-    );
-}
-
-/// The default `on_tell_failed` implementation must be a no-op that yields
-/// `SagaEffect::None`.  `StubSaga` implements only the required members, so this
-/// test also pins that a saga written before the hook existed still compiles
-/// and still reacts to a tell failure with no effect at all.
-#[tokio::test]
-async fn default_on_tell_failed_returns_none_effect() {
-    let mut saga = StubSaga::default();
-    let mut ctx = SagaContext::test_context(SagaId::new("on-tell-failed-default"), 0);
-
-    let effect = saga
-        .on_tell_failed(AggregateId::new("unreachable-target"), &mut ctx)
-        .await
-        .expect("the default on_tell_failed must return Ok");
-
-    assert_eq!(
-        shape_of(&effect),
-        Shape::None,
-        "the default on_tell_failed must produce SagaEffect::None"
     );
 }

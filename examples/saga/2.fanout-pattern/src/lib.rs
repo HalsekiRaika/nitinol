@@ -1,5 +1,5 @@
-//! The official fan-out pattern: one fact event, saga delivery, idempotent
-//! creation.
+//! The official fan-out pattern: one fact event, one saga decision, a delivery
+//! host, idempotent creation.
 //!
 //! nitinol has exactly one unit of atomicity — one `append` to one stream — and
 //! deliberately offers no atomic append spanning several streams.  That rule is
@@ -8,9 +8,9 @@
 //! *why* — prior art surveyed, and the conditions under which it could be
 //! revisited — is the ADR at
 //! <https://github.com/HalsekiRaika/nitinol/issues/74>.  Cross-stream
-//! consistency is expressed with fact events plus at-least-once
-//! process-manager delivery and idempotency.  This crate is that expression,
-//! written out, on a payroll run that owes 32 employees a payslip.
+//! consistency is expressed with fact events plus at-least-once delivery and
+//! idempotency.  This crate is that expression, written out, on a payroll run
+//! that owes 32 employees a payslip.
 //!
 //! # The shape
 //!
@@ -19,19 +19,76 @@
 //!    stream.  Several events in one stream are still one atomic write
 //!    (`append(Vec)`), so a decision that fits in one stream never needs more
 //!    than nitinol offers.
-//! 2. **Fan-out by process manager.**  [`saga::FanOutSaga`], run under a
-//!    `SagaManagerProps` manager, reacts to that fact and dispatches one issue
-//!    command per employee, at-least-once, through the outbox.  The fact itself
-//!    is fanned out once: its position is committed by the append that records
-//!    the fan-out, so a later delivery of it is dropped before
-//!    [`nitinol_saga::Saga::handle`].  What repeats is the dispatch — an issue
-//!    whose outbox marker was still pending when an incarnation died is
-//!    re-dispatched from that marker.
-//! 3. **Idempotent creation.**  [`payslip::Payslip`] answers a repeated
-//!    [`payslip::IssuePayslip`] with "already issued" instead of a second
-//!    write.  A creation-only fan-out therefore needs no compensation: the
-//!    recovery for an interrupted fan-out is to run the dispatches it never
-//!    settled again.
+//! 2. **One saga decision.**  [`saga::FanOutSaga`], run under a
+//!    `SagaManagerProps` manager, subscribes to that fact and persists a single
+//!    [`saga::FanOutStarted`] naming every one of the 32 payslips the fan-out
+//!    owes.  That append also commits the position of the fact it was derived
+//!    from, so a redelivery of the fact — the subscription is at-least-once
+//!    too — is dropped before [`nitinol_saga::Saga::handle`] and the fan-out is
+//!    not decided twice.
+//! 3. **A delivery host carries the commands.**
+//!    [`nitinol_saga::Saga::dispatch`] is a pure function from that one decision
+//!    to 32 [`nitinol_saga::SagaDelivery`] values, and a
+//!    [`nitinol_saga::SagaDeliveryProps`] host polls the saga's decisions, calls
+//!    the mapping, and delivers each command with `ask`.
+//! 4. **Idempotent creation.**  [`payslip::Payslip`] answers a repeated
+//!    [`payslip::IssuePayslip`] with "already issued" instead of a second write.
+//!    A creation-only fan-out therefore needs no compensation: the recovery for
+//!    an interrupted fan-out is to carry its commands again.
+//!
+//! # Where the durability actually is
+//!
+//! It is worth being precise, because this is the part the pattern turns on.
+//!
+//! * The saga's own stream holds **two rows** for one fan-out: the decision, and
+//!   the consumed position of the fact it was derived from, committed by the one
+//!   append.  Nothing per-child.  Nothing about delivery.
+//! * The delivery host's only state is a **checkpoint**: the position of the last
+//!   record whose deliveries all landed.  It is recorded *after* the deliveries,
+//!   never before.
+//! * Each payslip's own stream says whether that payslip exists.
+//!
+//! Three owners, three different facts, and no fact with two owners.  "How far
+//! did the fan-out get?" is answered by querying the payslip streams, not by a
+//! counter the saga keeps — a counter would be a second owner of the same fact,
+//! and a crash between the two writes would leave them disagreeing with no way
+//! to tell which is right.
+//!
+//! # Why a crash cannot lose part of the fan-out
+//!
+//! The decision is durable before anything is delivered, and the checkpoint
+//! moves only after a record's deliveries have landed.  Those two orderings are
+//! the whole argument:
+//!
+//! * A crash before the decision lands leaves the fact unconsumed, so the
+//!   subscription redelivers it and the fan-out is decided again from scratch.
+//! * A crash after the decision lands leaves a checkpoint still standing below
+//!   it.  A restarted host reads the decision again, re-derives all 32 commands
+//!   from it, and carries the remaining ones — together with some it already
+//!   carried, which the payslips absorb with a write-free acceptance.
+//!
+//! What there is *not* is a third state: a fan-out half recorded as having been
+//! dispatched.  Nothing of the dispatch is recorded, so there is nothing to be
+//! half of.  The commands are re-derived from the decision on every read.
+//!
+//! The same orderings are why delivery is at-least-once with no mode to choose:
+//! moving the checkpoint first would lose a delivery to the same crash instead
+//! of repeating one, and making the receiver's write and the checkpoint one
+//! transaction would need an atomic write across two stores.
+//! [`nitinol_saga::SagaDeliveryProps`] is where that is written down in full.
+//!
+//! # A refused delivery is held, not skipped
+//!
+//! A command the host cannot get carried out stops the host: it leaves its
+//! checkpoint where it is, retries the same record, and reports through
+//! `tracing`.  It does **not** move on to the rest of the fan-out.  That is
+//! deliberate — a command silently dropped because its target refused it is a
+//! decision the saga made and nobody carried out, with nothing left to say so —
+//! and it is directly observable here: a fan-out whose ninth payslip cannot be
+//! written stops at the ninth, rather than issuing the other 23 and leaving a
+//! gap nobody will ever notice.
+//! [`SagaDeliveryProxy::advance_checkpoint`](nitinol_saga::SagaDeliveryProxy::advance_checkpoint)
+//! is the way past such a hold, and it is deliberately a person's to take.
 //!
 //! # One store, many streams
 //!
@@ -41,7 +98,15 @@
 //! streams and the saga's own journal side by side, each owner reading only its
 //! own key.  This crate binds exactly one store to its `EventSourceSystem`, and
 //! every wiring point takes it from there: the run aggregate, the payslips, the
-//! saga journal, and the manager's subscription.
+//! saga journal, the manager's subscription, and the delivery host's input.
+//!
+//! The host needs one slot beyond the journal: somewhere to keep its checkpoint.
+//! That is the provider's *delivery-checkpoint* slot, and
+//! [`nitinol_saga::SagaDeliveryExt`] — the trait that supplies
+//! `system.saga_delivery_props::<FanOutSaga>()` — exists only on a system whose
+//! store holds one.  A deployment that forgot to name a store for its hosts'
+//! progress is told so while the wiring compiles, not when a host first tries to
+//! record where it got to.
 //!
 //! # Routing without a router
 //!
@@ -49,10 +114,15 @@
 //! stream key, name the aggregate that owns it".  That is what
 //! [`nitinol_eventsource::AggregateProxy`] is — a reference to an aggregate by
 //! identity, resolved when a command is dispatched rather than when the
-//! reference is built — so this crate keeps no registry of live children.  One
-//! consequence is worth stating: a reference stays valid across the death of the
-//! activation it reached, which is what lets the saga's crash-restart factory
-//! rebuild a target from an outbox marker written by an incarnation that is gone.
+//! reference is built — so this crate keeps no registry of live children.
+//! Building one is exactly what
+//! [`SagaDelivery::new`](nitinol_saga::SagaDelivery::new) does with the
+//! `AggregateId` the mapping hands it, inside the host.
+//!
+//! Note where that leaves the saga: holding nothing.  It needs no reference to
+//! anything, because it never sends anything — so [`saga::FanOutSaga`] is a unit
+//! struct, and the producer the manager calls ignores the components it is
+//! handed.
 //!
 //! A subscription does not need a store of its own either.  The manager is
 //! handed one [`nitinol_saga::Subscription`] per source the saga's alphabet
@@ -78,36 +148,34 @@
 //! * *Can the consequence be re-derived from the decision alone?*  If yes, the
 //!   consequence belongs downstream of a fact event, not inside the same write.
 //!
-//! # Modelling the in-between
+//! The second question is also the test the saga's own decision has to pass, for
+//! a stricter reason: [`nitinol_saga::Saga::dispatch`] is literally a pure
+//! function of it.
 //!
-//! Between the fact event and the last payslip there is a real intermediate
-//! state, and the pattern's answer is to *not* store it a second time.  Each
-//! payslip's own stream already says whether it exists, so the fan-out's
-//! progress is a query over those streams.  [`saga::FanOutSaga`] keeps no
-//! counter: a counter would be a second owner of the same fact, and a crash
-//! between the two writes would leave them disagreeing with no way to tell
-//! which is right.
+//! # Make the records self-sufficient
 //!
-//! What the saga's own stream does hold is its decision
-//! ([`saga::FanOutStarted`]), one outbox marker per dispatched command, and the
-//! position of the fact event all of it was derived from, committed in the same
-//! append — that is durable *intent* plus the record that its input is spent, not
-//! duplicated state.  The markers are what let a restarted incarnation finish a
-//! dispatch it never got to; the position is what stops it from deciding the
-//! fan-out a second time on the way.
+//! Both hops are handed a decoded record and nothing else:
 //!
-//! # Make the trigger event self-sufficient
+//! * `Saga::correlate` is handed the trigger — not the stream key it was read
+//!   from, not its sequence.  So
+//!   [`payroll_run::PayrollRunApproved`] carries its own `payroll_run` key and
+//!   the full employee list; together they are what
+//!   [`payslip::Payslip::stream_key`] needs.
+//! * `Saga::dispatch` is handed the saga's own decision — no `&self`, no system,
+//!   no saga anywhere, since a host keeps none resident and may be reading a
+//!   record written by an incarnation that is gone.  So
+//!   [`saga::FanOutStarted`] lists all 32 payslip stream keys.
 //!
-//! `Saga::correlate` is handed the decoded input and nothing else — not the
-//! stream key it was read from, not its sequence.  An event that leaves out
-//! what its consumers need forces every consumer to reach back to where it came
-//! from, and a consumer that cannot (a projection replaying an archive, a
-//! second saga on a different subscription) simply cannot act on it.  So
-//! [`payroll_run::PayrollRunApproved`] carries its own `payroll_run` key and
-//! the full employee list — together they are what
-//! [`payslip::Payslip::stream_key`] needs — and
-//! [`payslip::IssuePayslip`] carries the stream key of its target, which is
-//! also what makes it reconstructible from the outbox marker after a crash.
+//! An event that leaves out what its consumers need forces every consumer to
+//! reach back to where it came from, and a consumer that cannot — a projection
+//! replaying an archive, a second host on another subscription — simply cannot
+//! act on it.
+//!
+//! The usual third thing a decision must carry is the operation id its receiver
+//! recognises a repeat by.  This fan-out is the case where that degenerates:
+//! a payslip is issued at most once in its whole life, so its own existence
+//! *is* the repeat marker, and [`payslip::IssuePayslip`] carries no payload at
+//! all.  `examples/saga/3.idempotent-receive` is the general case.
 //!
 //! # Two further steps, not implemented here
 //!
@@ -123,15 +191,17 @@
 //! # What the tests fix
 //!
 //! * `tests/redelivery_is_noop.rs` — one approval reaches the run's stream as
-//!   one record and fans out to 32 payslips; 32 issues re-dispatched from
-//!   markers an interrupted incarnation left pending leave every payslip stream
-//!   byte-identical, while the fact event delivered with them is not fanned out
-//!   again; an issue replayed all the way down to the store conflicts on the
-//!   genesis sequence while leaving the first write intact; and two runs covering
-//!   one employee address separate payslip streams.
-//! * `tests/crash_replay_completes_fanout.rs` — a fan-out interrupted part-way
-//!   is completed by replay of its pending markers, without rewriting the
-//!   payslips that already existed.
+//!   one record, becomes one decision of two rows on the saga's own stream, and
+//!   fans out to 32 payslips; a second delivery host reading the same decision
+//!   from a checkpoint of its own carries all 32 commands again and leaves every
+//!   payslip stream byte-identical, without the saga's stream growing by a row;
+//!   an issue replayed all the way down to the store conflicts on the genesis
+//!   sequence while leaving the first write intact; and two runs covering one
+//!   employee address separate payslip streams.
+//! * `tests/crash_replay_completes_fanout.rs` — a fan-out whose host cannot
+//!   reach the last 24 payslips stops at the first of them with its checkpoint
+//!   unmoved, and a second host reading that same checkpoint completes all 32
+//!   without rewriting the 8 that already existed.
 
 pub mod codec;
 pub mod payroll_run;

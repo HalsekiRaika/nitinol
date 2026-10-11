@@ -42,16 +42,72 @@ const RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// cursor, the recorded progress, holding on a failure and backing off are all
 /// the host's; what the saga author writes is the mapping.
 ///
-/// # Delivery is at-least-once, and that is the only choice
+/// This type is where the delivery guarantee is written down. Everything else
+/// in the crate that needs it links here rather than restating it.
 ///
-/// A command may reach its target more than once — after a crash between a
-/// delivery and the recording of the position behind it, after a partition
-/// count changes, after an operator moves a position. There is no mode to pick
-/// here, because the alternatives cannot be honoured: at-most-once would need
-/// the position durable before the command is sent, and exactly-once would need
-/// the receiver's write and the position in one transaction across two stores.
-/// Receivers are therefore written to recognise a repeat, from the operation id
-/// the domain put on the command.
+/// # Delivery is at-least-once, and the checkpoint is where that comes from
+///
+/// A host is a pull consumer of the saga's own stream, and the only thing it
+/// keeps is how far it has finished: the checkpoint. Delivering and recording
+/// are two writes to two stores, and nothing makes them one — so the order is
+/// fixed and the window is the consequence. A record's deliveries are carried
+/// out first and the checkpoint moves past it only once every one of them has
+/// landed. A host that died in between resumes from the checkpoint it last
+/// recorded and carries the same deliveries again.
+///
+/// That window is the whole of why delivery is at-least-once, and it is why
+/// there is no mode to pick: at-most-once would mean moving the checkpoint
+/// before the command is sent, which loses a delivery to the same crash
+/// instead of repeating one; exactly-once would need the receiver's write and
+/// the checkpoint in one transaction across two stores, which nitinol does not
+/// offer and does not pretend to. Receivers are therefore written to recognise
+/// a repeat, from the operation id the domain put on the command — the saga
+/// author's own data, since the framework attaches no envelope of its own.
+///
+/// A repeat is not only a crash's doing. Changing the partition count
+/// reassigns stream keys across checkpoints (below), and
+/// [`SagaDeliveryProxy::advance_checkpoint`](crate::SagaDeliveryProxy) is an
+/// operator moving one by hand.
+///
+/// # Holding, and what it means
+///
+/// A delivery the receiver did not carry out is not passed over. The partition
+/// holds: it stops advancing its checkpoint, retries the same record, and says
+/// so through `tracing`. Nothing is skipped for failing, however permanently —
+/// a command silently dropped because its target refused it is a decision the
+/// saga made and nobody carried out, with nothing left to say so.
+///
+/// What a hold costs is the records behind it on the same partition: they wait.
+/// [`with_partitions`](Self::with_partitions) is how far that reaches — a hold
+/// is confined to the instances of one partition, each with its own
+/// checkpoint — and
+/// [`advance_checkpoint`](crate::SagaDeliveryProxy::advance_checkpoint) is the
+/// operator's way past one, which is a decision to abandon that delivery and is
+/// written down as such.
+///
+/// A hold is not a failure of the saga: the instance that decided has long
+/// since moved on, and its own stream already holds the decision. Stopping the
+/// saga for it would strip every other decision of its delivery.
+///
+/// # Two layers of failure, and only one of them is the host's
+///
+/// *Transport* failure is the host's: the target could not be reached, its
+/// mailbox was closed, the ask timed out, the receiver answered an error. The
+/// host retries it, holds while it persists, and reports it. A saga is not
+/// notified, and there is no hook to register for one — a saga that reacted to
+/// transport would be reacting to the framework's own plumbing.
+///
+/// *Business* failure is the domain's, and reaches the saga the only way a
+/// domain fact can: as an input. The addressed aggregate records what it
+/// decided, the saga observes that event through the source it declared for it,
+/// and "the answer never came" is the saga's own deadline firing — see
+/// [`Deadline`](crate::Deadline). So a compensation is written in the one
+/// `match` of [`Saga::handle`](crate::Saga::handle), beside the reaction to the
+/// answer that did arrive.
+///
+/// The two are kept apart because conflating them makes both unreadable: a
+/// refused command and an unreachable node are the same signal to a saga that
+/// hears about transport, and neither can be acted on correctly from there.
 ///
 /// # Changing the partition count
 ///

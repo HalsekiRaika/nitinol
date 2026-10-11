@@ -8,7 +8,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{encode_outbox_ended, JsonCodec, OUTBOX_MARKER};
+use common::{encode_lifecycle_ended, JsonCodec, LIFECYCLE_MARKER};
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SystemEvent};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemoryStore};
@@ -30,8 +30,7 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    DeadLetterEvent, Saga, SagaContext, SagaEffect, SagaFailure, SagaId, SagaManagerProps,
-    SagaSubscribe, Subscription,
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
 };
 
 /// Instance-id prefix used by [`HoldSaga`].
@@ -88,8 +87,8 @@ enum Observed {
 // Sagas.  Correlation belongs to the saga type, so each rule needs its own type.
 
 /// Always rejects the event.  Paired with a store whose appends fail, so the
-/// rejection cannot even be recorded as a dead letter and the instance reports
-/// the message as unprocessed.
+/// refused input cannot even be settled by its position and the instance
+/// reports the message as unprocessed.
 struct HoldSaga {
     seen: Arc<Mutex<Vec<String>>>,
     notify: Arc<Notify>,
@@ -181,10 +180,9 @@ impl Saga for FanOutSaga {
     }
 }
 
-/// An `EventStore` that rejects every append and reads back as empty.  Mirrors
-/// the shape of the crate-internal `AlwaysFailStore` used by the dead-letter
-/// unit tests: replay succeeds (nothing to replay) but no failure can ever be
-/// recorded durably.
+/// An `EventStore` that rejects every append and reads back as empty: replay
+/// succeeds (nothing to replay) but nothing an input produces — not even its
+/// consumed position — can ever be recorded durably.
 struct AlwaysFailAppendStore;
 
 #[async_trait]
@@ -263,20 +261,20 @@ async fn append_order_placed(
         .expect("append OrderPlaced must succeed");
 }
 
-/// Seed a durable `Ended` outbox marker so the instance replays as terminated.
-async fn seed_ended_marker(store: &Arc<dyn EventStore>, saga_id: &SagaId, sequence: u64) {
+/// Seed a durable `Ended` lifecycle fact so the instance replays as terminated.
+async fn seed_ended_fact(store: &Arc<dyn EventStore>, saga_id: &SagaId, sequence: u64) {
     store
         .append(
             saga_id.as_str(),
             vec![AppendingEvent {
                 sequence,
-                event_type: OUTBOX_MARKER,
-                payload: encode_outbox_ended(),
+                event_type: LIFECYCLE_MARKER,
+                payload: encode_lifecycle_ended(),
                 occurred_at: jiff::Timestamp::now(),
             }],
         )
         .await
-        .expect("seed Ended marker must succeed");
+        .expect("seed Ended fact must succeed");
 }
 
 async fn load_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
@@ -289,27 +287,18 @@ async fn load_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<Loade
         .expect("collect saga events must succeed")
 }
 
-fn count_ended_saga_dead_letters(events: &[LoadedEvent]) -> usize {
+fn describe(events: &[LoadedEvent]) -> Vec<String> {
     events
         .iter()
-        .filter(|e| {
-            e.event_type == <DeadLetterEvent as SystemEvent>::EVENT_TYPE
-                && matches!(
-                    <DeadLetterEvent as SystemEvent>::decode(&e.payload),
-                    Ok(DeadLetterEvent {
-                        failure: SagaFailure::EndedSagaReceivedMessage { .. },
-                        ..
-                    })
-                )
-        })
-        .count()
+        .map(|e| format!("{}@{}", e.event_type, e.sequence))
+        .collect()
 }
 
 // Tests
 
-/// The instance cannot settle the message durably (it
-/// rejects the event and the dead-letter append fails too), so the manager must
-/// not advance the shared cursor — the poller redelivers the same record.
+/// The instance cannot settle the message durably (it rejects the event and
+/// the position append that would settle the refusal fails too), so the manager
+/// must not advance the shared cursor — the poller redelivers the same record.
 #[tokio::test]
 async fn instance_handler_error_holds_the_shared_cursor() {
     let ps = ProcessSystem::new().await;
@@ -399,9 +388,17 @@ async fn uncorrelated_event_advances_the_cursor() {
     );
 }
 
-/// A record addressed to an instance that already ended must
-/// leave a durable trace on that instance's stream and still let the shared
+/// A record addressed to an instance that already ended must be dropped
+/// without a word on that instance's stream, and must still let the shared
 /// subscription move on to the next instance's record.
+///
+/// It used to leave a durable trace — a dead letter saying "an ended saga
+/// received a message". With the queue gone there is nothing to leave: a
+/// terminated saga produces no further facts, and writing one here would also
+/// buy nothing, because the manager spawns the instance afresh on every
+/// arrival and the trace would not stop the next one. What the arrival must
+/// still do is let the cursor past it; a record held for an ended instance
+/// would starve every instance behind it.
 #[tokio::test]
 async fn ended_instance_does_not_stall_the_shared_subscription() {
     let ps = ProcessSystem::new().await;
@@ -416,7 +413,7 @@ async fn ended_instance_does_not_stall_the_shared_subscription() {
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let ended_instance = SagaId::new(format!("{FANOUT_PREFIX}ended"));
-    seed_ended_marker(&saga_store, &ended_instance, 1).await;
+    seed_ended_fact(&saga_store, &ended_instance, 1).await;
 
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -445,23 +442,15 @@ async fn ended_instance_does_not_stall_the_shared_subscription() {
          not stop the record behind it from reaching the live instance"
     );
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let ended_dead_letters = loop {
-        let count = count_ended_saga_dead_letters(&load_stream(&saga_store, &ended_instance).await);
-        if count >= 1 {
-            break count;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the record addressed to the ended instance must be recorded as a \
-             SagaFailure::EndedSagaReceivedMessage on that instance's own stream, \
-             not dropped without a trace"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    };
+    // The live instance has already been served by this point, so the ended
+    // instance's arrival has had its chance to write.
+    let ended_stream = load_stream(&saga_store, &ended_instance).await;
     assert_eq!(
-        ended_dead_letters, 1,
-        "exactly one dead letter must be recorded for the single record the \
-         ended instance received"
+        describe(&ended_stream),
+        vec![format!("{LIFECYCLE_MARKER}@1")],
+        "a terminated saga writes nothing further: the stream must still hold \
+         only the lifecycle fact that terminated it — no dead letter, and no \
+         position either, since a record that reached no `handle` settles \
+         nothing the next incarnation could use"
     );
 }

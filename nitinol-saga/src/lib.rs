@@ -3,8 +3,10 @@
 //! This crate is the Layer-2 (temporal coordination) counterpart of the
 //! aggregate command/decide loop in `nitinol-eventsource`.  A saga subscribes
 //! to upstream events, replays its own event stream to reconstruct state, and
-//! emits [`SagaEffect`]s that the runtime interprets to persist saga events
-//! or send commands to other processes.
+//! emits [`SagaEffect`]s that the runtime interprets to persist the saga's own
+//! decisions and to set or cancel its own deadlines.  What a decision means for
+//! everybody else is the separate pure mapping [`Saga::dispatch`] answers, and
+//! carrying it out belongs to a delivery host ([`SagaDeliveryProps`]).
 //!
 //! # Mental model
 //!
@@ -40,11 +42,10 @@
 //!   written onto the saga's own stream by the append that closes out the
 //!   `handle` decision the input produced — the last one, when one `handle`
 //!   call reaches the store as more than one atomic append — so the position
-//!   is never durable before every append it depends on is.  A record that
-//!   arrives while an earlier correlated record is draining to a dead letter,
-//!   or gets an `Err` from `handle`, is instead settled by a dead-letter
-//!   append carrying the same position — these inputs are consumed without
-//!   ever producing a `handle` decision.  Either way, replay rebuilds those
+//!   is never durable before every append it depends on is.  An input
+//!   [`Saga::handle`] answered `Err` produces no decision at all and is
+//!   settled by a position-only append: it was seen, it produced nothing, and
+//!   that one row is all it leaves.  Either way, replay rebuilds those
 //!   positions from the stream alone, a redelivered record at or below one is
 //!   dropped before [`Saga::handle`] runs again, and a stream subscription
 //!   resumes past it instead of re-reading the upstream history.  An effect
@@ -52,11 +53,12 @@
 //!   so a no-op decision is not redelivered either; what the guarantee does
 //!   *not* cover — an append that never landed, and the entry points with no
 //!   input to consume — is stated on [`Saga::handle`].  Positions are held
-//!   per source stream, so one upstream stream's progress never covers a
-//!   record of another.  A record that fails to decode is settled by neither
-//!   path: it has no typed input to attribute to an instance, so nothing
-//!   durable is written for it and a restart repeats the same report instead
-//!   of resuming past it — detailed under "Correlation and routing" below.
+//!   per declared source of each upstream stream, so one source's progress
+//!   never covers a record of another.  A record that fails to decode is
+//!   settled by neither path: it has no typed input to attribute to an
+//!   instance, so nothing durable is written for it and a restart repeats the
+//!   same report instead of resuming past it — detailed under "Correlation and
+//!   routing" below.
 //! - Symmetric spawn: [`SagaSystemExt`] extends
 //!   [`nitinol_eventsource::system::EventSourceSystem`] with
 //!   [`spawn_saga`](SagaSystemExt::spawn_saga), the counterpart of
@@ -82,8 +84,8 @@
 //! - Reaching the host from inside: a saga spawned through [`SagaSystemExt`]
 //!   is handed the hosting system by
 //!   [`SagaComponents::system`](crate::SagaComponents::system), so a producer
-//!   that needs a reference to tell resolves it there rather than from a clone
-//!   of the system captured outside the spawn.
+//!   that needs a reference into the host resolves it there rather than from a
+//!   clone of the system captured outside the spawn.
 //! - Instance management: [`SagaManagerProps`] spawns one manager that holds
 //!   one upstream subscription per declared source, shared by every instance
 //!   of a saga type, so an upstream record is decoded once no matter how far
@@ -113,7 +115,9 @@
 //!   [`SagaDeliveryProxy::advance_checkpoint`] is the operator's way past one.
 //!   Delivery is at-least-once with no mode to choose: a repeat is recognised
 //!   by the receiver, from the operation id the domain put on the command.
-//!   The host runs beside the tell path rather than replacing it.
+//!   Where that guarantee comes from, what a hold means, and which failures are
+//!   the host's as opposed to the domain's are stated once, on
+//!   [`SagaDeliveryProps`].
 //! - A saga's own time: declaring a `#[subscribe(deadline)]` variant in the
 //!   alphabet is the whole of the wiring.  The host reads that declaration at
 //!   spawn and resolves the system's one resident timer core
@@ -132,67 +136,33 @@
 //!   is next activated (at-least-once delivery; handlers must be idempotent).
 //!   What the journal says is still pending is readable through
 //!   [`Deadline::pending`].
-//! - Dead-letter queue (DLQ): each saga failure kind is persisted as a
-//!   [`DeadLetterEvent`] on the saga's own EventStore stream, mixed into the
-//!   same envelope as domain events.
-//!   `TellFailed` and `PersistFailed` exhaust staged retry before being enqueued;
-//!   `HandleFailed`, `DecodeFailed`, `EndedSagaReceivedMessage`,
-//!   `ScheduledFailed`, and `TellFailedHookFailed` are enqueued immediately.
-//!   A subscriber catches up via
-//!   [`SagaProps::with_dead_letter_subscriber`] for a standalone saga, or
-//!   [`SagaManagerProps::with_dead_letter_subscriber`] to receive the dead
-//!   letters of every instance a manager spawns (DurableStream-based catchup
-//!   either way).  The [`EnqueuePolicy`] passed to
-//!   [`SagaProps::with_enqueue_policy`] — or to
-//!   [`SagaManagerProps::with_enqueue_policy`] for every instance of a manager
-//!   — controls which failure kinds reach the DLQ; the default enqueues every
-//!   kind.  That subscriber is the *push* path: an observability signal,
-//!   delivered whether or not anyone has acted on it.
-//! - DLQ pull API: [`DeadLetterQueue`] is the operator-facing recovery
-//!   counterpart of that push path.  [`list`](DeadLetterQueue::list) returns the
-//!   dead letters nobody has settled — ordered by their own stream sequence,
-//!   with `from_sequence` and `limit` for paging — and
-//!   [`mark_processed`](DeadLetterQueue::mark_processed) /
-//!   [`evict`](DeadLetterQueue::evict) settle one by appending a
-//!   `nitinol.saga.dead_letter_disposition` marker to the saga's own stream.
-//!   Eviction is a *logical* delete: the marker drops the dead letter from the
-//!   listing and leaves its original record in the store, which is the only
-//!   kind of delete an event log has.  Reprocessing is deliberately not part of
-//!   it: a [`DeadLetterEntry`] carries the recovery material (the failure's raw
-//!   payload plus its [`SourceContext`] coordinates) and acting on it is the
-//!   downstream application's decision.  The marker is a *sibling* declaration
-//!   of `nitinol.saga.dead_letter` rather than an arm of it, so settling a
-//!   dead letter changes what `list` returns and leaves the push path — which
-//!   selects on the dead letter's own path — untouched.
-//! - One writer per stream, dispositions included: a marker lands on the saga's
-//!   *own* stream, whose next sequence a resident instance holds in memory, so
-//!   an operator cannot append it beside a running saga.  Obtain the queue from
-//!   [`SagaManagerProxy::dead_letter_queue`] and the write is routed to that
-//!   manager — the single arbiter of every stream in its fan-out.  It appends
-//!   through the instance's own mailbox when the saga is resident, and writes
-//!   the marker itself when the saga is not; deciding which, and doing it,
-//!   happen together inside the manager's message handling, so a lazy spawn
-//!   cannot slip in between.  The operator waits for the outcome — a recovery
-//!   action whose result is not reported cannot be retried on purpose.
-//!   [`DeadLetterQueue::new`] still opens a queue with no arbiter, for offline
-//!   triage and for a saga spawned standalone through [`SagaProps`]; there the
-//!   caller is the one guaranteeing nothing else is writing that stream.
-//!
-//!   This is the same ownership pattern `nitinol-runtime` applies to its own
-//!   dead letters — one owner, writes arriving as messages — and nothing more.
-//!   The two mechanisms stay separate: runtime's is in-memory, best-effort and
-//!   system-wide; this one is persisted, ordered, and has a recovery API.
+//! - Termination is durable and final.  Interpreting [`SagaEffect::End`] writes
+//!   an `Ended` fact onto the saga's own stream and stops the process; a later
+//!   spawn over that stream replays the fact and declines to wire the upstream
+//!   subscription, so [`Saga::handle`] never runs again.  Anything still routed
+//!   to a terminated instance — an observed record a manager's shared
+//!   subscription delivers, a deadline reached after the end — is reported
+//!   through `tracing` and dropped, with nothing written: a terminated saga
+//!   records no further facts, and not even a position, since a record that
+//!   reached no `handle` settles nothing a later incarnation could use.  It is
+//!   still answered, so one ended instance never holds a shared cursor behind
+//!   it.
+//! - The two layers a failure belongs to: a *business* failure is a domain fact
+//!   and reaches the saga as an input — the answer the addressed aggregate
+//!   recorded, observed through the source declared for it, or the saga's own
+//!   deadline firing when no answer came.  A *transport* failure belongs to the
+//!   delivery host, which holds and reports it (see [`SagaDeliveryProps`]); the
+//!   saga is not notified and there is no hook to register for one.  Nothing in
+//!   between is persisted: there is no queue of type-less bytes a saga's own
+//!   failures accumulate in, and an input [`Saga::handle`] refused leaves its
+//!   position and a `tracing` report rather than a durable record of the
+//!   refusal.
 //! - Reserved namespace: `nitinol` belongs to the framework, in the stream-key
 //!   space and the event-type space alike.  [`SagaId`] refuses a name inside it
 //!   the way [`nitinol_persistence::AggregateId`] does, and `#[derive(Event)]`
 //!   refuses a `family` inside it at compile time.  One law, two enforcement
 //!   points — see [`nitinol_persistence::reserved`] for the boundary rule and
 //!   for what a hand-written `impl Event` is expected to honour on its own.
-//! - Tell-failure compensation: when a tell exhausts its retry budget the saga
-//!   is notified through [`Saga::on_tell_failed`] as soon as the failure
-//!   settles, so a compensating [`SagaEffect`] runs without waiting for another
-//!   upstream event.  Failures recovered by replay instead reach the saga
-//!   through [`SagaContext::failed_tell_ids`].
 //! - No snapshotting: a saga replays from its own event stream, and the [`Saga`]
 //!   trait carries no snapshot surface.  Snapshot support is planned as a
 //!   separate opt-in `SagaSnapshotable` extension trait, symmetrical to
@@ -208,22 +178,28 @@
 //!   and nothing durable is written for it.  A decode failure is deterministic and
 //!   permanent — a stalling escape hatch would stall forever — so re-reading the
 //!   record after a restart repeats the report rather than a decision.
-//! - Side-effect failures and persistence failures are enqueued to the DLQ
-//!   after staged retry, not silently logged and discarded.
+//! - A persist batch the store refuses is retried a bounded number of times and
+//!   then reported.  The input it was decided from stays unconsumed — no
+//!   position is written for a decision no store holds — so a later incarnation
+//!   reads the record again and decides it again.  The saga itself stays alive
+//!   rather than stopping, which is what lets its next input retry the same
+//!   decision, [`SagaEffect::End`] included; when that redelivery comes, and
+//!   how it differs from a refused input's, is stated on [`Saga::handle`].
 //!
-//! # What tell dispatch delivers
+//! # What a saga's own stream holds
 //!
-//! A tell dispatched through the outbox is neither plainly "at-least-once" nor
-//! ever exactly-once: what holds is stated per stage — intent recorded,
-//! dispatch attempted, accepted for delivery, committed by the receiver,
-//! business completion — and which stage a given saga reaches depends on how it
-//! was wired, in particular on whether
-//! [`SagaManagerProps::with_crash_restart_factory`] is registered.  That
-//! contract, the replay branches that decide a pending tell's fate, the finite
-//! retry budget, and the windows no wiring closes are stated once, on
-//! [`SagaEffect::tell`](SagaEffect::tell).
+//! Four kinds of row and no more: a domain event — the catch-all — plus the
+//! three facts the framework declares for itself, `nitinol.saga.schedule`,
+//! `nitinol.saga.consumed` and `nitinol.saga.lifecycle`.  A row inside the
+//! reserved namespace that matches none of those three is a corrupted stream or
+//! a version mismatch, and refuses the load rather than being read past: a
+//! withdrawn mechanism's bookkeeping may well decode cleanly as a domain event,
+//! so reading past it would fold it into the saga's state.
 //!
-//! The framework attaches no metadata or causation envelope to a dispatched
+//! This is also why 0.4 streams cannot be read by 0.5 — see the crate's
+//! CHANGELOG.
+//!
+//! The framework attaches no metadata or causation envelope to a delivered
 //! command, so a receiver that must not carry an operation out twice recognises
 //! the repeat from data the domain itself put on the command — the
 //! idempotent-receive pattern, worked through in
@@ -247,21 +223,22 @@
 //!    into one event per consequence would spread it across several appends and
 //!    leave a crash able to record half of it.
 //! 2. **Fan-out by process manager.**  A [`Saga`] running under a
-//!    [`SagaManagerProps`] manager subscribes to that fact and dispatches one
-//!    creation command per child with [`SagaEffect::tell`], whose delivery is
-//!    staged rather than a flat at-least-once — see
-//!    [`SagaEffect::tell`](SagaEffect::tell) for what each stage promises and
-//!    how wiring changes it.  The upstream subscription is at-least-once, so
-//!    the same fact can be *delivered* more than once; whether it is fanned out
-//!    again depends on whether the batch recording the fan-out landed.  Until
-//!    it does, the fact is unconsumed and a redelivery runs the fan-out again.
-//!    Once it has, the fact's position is on the saga's own stream and the
-//!    redelivery is dropped before [`Saga::handle`].
+//!    [`SagaManagerProps`] manager subscribes to that fact and records its own
+//!    decision — one event naming every child the fan-out owes a command.
+//!    [`Saga::dispatch`] maps that decision to one creation command per child,
+//!    and a [`SagaDeliveryProps`] host carries them (at-least-once; see that
+//!    type for where the guarantee comes from).  The upstream subscription is
+//!    at-least-once too, so the same fact can be *delivered* more than once;
+//!    whether it is decided again depends on whether the batch recording the
+//!    decision landed.  Until it does, the fact is unconsumed and a redelivery
+//!    runs the fan-out again.  Once it has, the fact's position is on the
+//!    saga's own stream and the redelivery is dropped before [`Saga::handle`].
 //! 3. **Idempotent creation.**  The child answers a repeated creation command
 //!    with "already created" rather than with a second write, which is what
 //!    lets a creation-only fan-out need no compensation.  A creation command
-//!    does repeat even when the fact behind it is not handled twice: a tell
-//!    left pending at a crash is re-dispatched from its own durable marker.
+//!    does repeat even when the fact behind it is not handled twice: the host's
+//!    checkpoint moves after the deliveries it covers, so a crash in between
+//!    carries them again.
 //!    Where a redelivered command reaches the store anyway, an
 //!    [`nitinol_persistence::error::AppendError::SequenceConflict`] on the
 //!    genesis sequence carries that same meaning — *this aggregate has already
@@ -298,12 +275,13 @@
 //!   whether it exists, so the fan-out's progress is a query over those
 //!   streams; a counter held by the saga would be a second owner of the same
 //!   fact, and a crash between the two writes would leave them disagreeing with
-//!   no way to tell which is right.  What the saga's own stream does hold is
-//!   its decision and one outbox marker per dispatched command, committed in
-//!   the same append — [`SagaEffect::combine`] folds the adjacent `Persist`
-//!   branches into one batch — which is durable *intent* rather than duplicated
-//!   state, and is what lets a restarted incarnation finish a dispatch it never
-//!   got to.
+//!   no way to tell which is right.  What the saga's own stream does hold is its
+//!   decision — and, where the same `handle` call also set a deadline, the
+//!   schedule fact in the very same append, since [`SagaEffect::combine`] folds
+//!   the adjacent `Persist` branches into one batch.  The decision is the whole
+//!   of the durable intent: what follows from it is re-derived by
+//!   [`Saga::dispatch`] every time the host reads it, so nothing of the
+//!   dispatch is duplicated state to fall out of step.
 //! - *Is the trigger event self-sufficient?*  [`Saga::correlate`] is handed the
 //!   decoded event and nothing else — not the stream key it was read from, not
 //!   its sequence.  An event that leaves out what its consumers need forces
@@ -311,23 +289,25 @@
 //!   cannot (a projection replaying an archive, a second saga on a different
 //!   subscription) cannot act on it at all.  So a trigger event should carry
 //!   the deciding stream's own key together with whatever else the children are
-//!   addressed by, and each dispatched command should carry its target's stream
-//!   key — which is also what makes the command reconstructible from its outbox
-//!   marker after a crash.
+//!   addressed by.  The same obligation falls on the saga's own decision, for
+//!   the same reason: [`Saga::dispatch`] is handed one of the saga's events and
+//!   nothing else, so a decision that leaves out whom it is addressed to — or
+//!   the operation id its receiver recognises a repeat by — cannot be carried
+//!   out by a host that keeps no saga resident.
 
 mod components;
 mod consumed;
 mod context;
-mod dead_letter;
 mod delivery;
 mod effect;
 mod error;
 mod id;
 mod journal;
+mod lifecycle;
 mod observability;
-mod outbox;
 mod persisted;
 mod process;
+mod retry_policy;
 mod saga;
 mod scheduler;
 mod subscribe;
@@ -336,22 +316,18 @@ mod system_ext;
 
 pub use self::components::{Deadline, DeadlineMessage, PendingDeadline, SagaComponents};
 pub use self::context::SagaContext;
-pub use self::dead_letter::{
-    DeadLetterEntry, DeadLetterEvent, DeadLetterQuery, DeadLetterQueue, DeadLetterQueueError,
-    EnqueueDecision, EnqueuePolicy, SagaFailure, SourceContext,
-};
 pub use self::delivery::{
     partition_of, SagaDelivery, SagaDeliveryError, SagaDeliveryId, SagaDeliveryProps,
     SagaDeliveryProxy, SagaDeliveryScope,
 };
-pub use self::effect::{SagaEffect, ScheduleSpec, TellIntent};
+pub use self::effect::{SagaEffect, ScheduleSpec};
 pub use self::id::SagaId;
 pub use self::process::{SagaManagerProps, SagaManagerProxy, SagaProps, SagaProxy};
 pub use self::saga::Saga;
 pub use self::scheduler::{ScheduleToken, SchedulerProcess, TimerName};
 pub use self::subscribe::{
-    DeadlineVariant, DeclaresDeadline, HasDeadline, NoDeadline, ReadDeadline, SagaSubscribe,
-    SourceBindings, SubscriptionSet, SubscriptionUnset,
+    DeadlineVariant, DeclaresDeadline, HasDeadline, NoDeadline, ReadDeadline, ReadDeadlineError,
+    SagaSubscribe, SourceBindings, SubscriptionSet, SubscriptionUnset,
 };
 pub use self::subscription::Subscription;
 pub use self::system_ext::{SagaDeliveryExt, SagaSpawn, SagaSystemExt};

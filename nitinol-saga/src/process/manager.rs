@@ -15,26 +15,15 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use futures_core::future::BoxFuture;
-use futures_util::TryStreamExt;
 use nitinol_eventsource::system::SystemHandle;
-use nitinol_eventsource::SystemEvent;
 use nitinol_persistence::store::EventStore;
-use nitinol_persistence::LoadQuery;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Terminated};
 use nitinol_runtime::IdleTimeout;
 
-use crate::dead_letter::{
-    DeadLetterDispositionEvent, DispositionArbiter, DlqChildSpawn, EnqueuePolicy,
-    RecordDisposition, SettleDeadLetter, SettleError,
-};
 use crate::error::SagaUpstreamHandlerError;
 use crate::id::SagaId;
-use crate::observability::report_system_event;
 use crate::process::instance::{SagaInstanceSpec, SagaProducer, ScheduleDelivery};
-use crate::process::saga_process::{
-    CrashRestartFactory, FireScheduled, OwnedUpstream, SagaProcess, UpstreamMessage,
-};
+use crate::process::saga_process::{FireScheduled, OwnedUpstream, SagaProcess, UpstreamMessage};
 use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
 
@@ -46,7 +35,6 @@ pub(crate) struct SagaManagerProcess<S: Saga> {
     /// Handed to every instance it spawns, so a correlated instance reaches
     /// the host's resources on the same terms a standalone hosted saga does.
     pub(crate) host: Option<SystemHandle>,
-    pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
     /// One subscription per declared source, shared by every instance the
     /// manager fronts.
     ///
@@ -64,15 +52,6 @@ pub(crate) struct SagaManagerProcess<S: Saga> {
     /// so a manager's instances get their deadlines on the same terms a
     /// standalone saga does.
     pub(crate) scheduler: Option<SchedulerProxy>,
-    /// DLQ subscriber wiring handed to every instance this manager spawns, so
-    /// each one starts its own poller over its own stream — mirrors
-    /// `SagaProps::with_dead_letter_subscriber` on the standalone builder.
-    pub(crate) dlq_child_spawn: Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>,
-    /// Crash-restart re-dispatch factory handed to every instance this manager
-    /// spawns, so a tell left pending when an instance was passivated is
-    /// reconstructed from its persisted payload on revival — mirrors
-    /// `SagaProps::with_crash_restart_factory` on the standalone builder.
-    pub(crate) crash_restart_factory: Option<CrashRestartFactory>,
     /// The instances currently resident, keyed by the id `Saga::correlate`
     /// named.  An id absent here is not an id that never existed — it is one
     /// with no *running* process, which is why a miss replays rather than
@@ -108,20 +87,15 @@ impl<S: Saga> SagaManagerProcess<S> {
             store: Arc::clone(&self.store),
             producer: Arc::clone(&self.producer),
             host: self.host.clone(),
-            enqueue_policy: Arc::clone(&self.enqueue_policy),
             // This manager holds the subscriptions; an instance that opened its
             // own would decode every observed record a second time.
             upstream: Vec::new(),
-            crash_restart_factory: self.crash_restart_factory.clone(),
             scheduler: self.scheduler.clone(),
             // A deadline this instance registers outlives it: the firing is
             // addressed here, with the instance's id, so a deadline reached
             // after passivation brings the instance back instead of landing in
             // a stopped process.
             delivery: ScheduleDelivery::ThroughTheManager(ctx.self_proxy().clone()),
-            dlq_child_spawn: self.dlq_child_spawn.clone(),
-            #[cfg(test)]
-            initial_tell_states: HashMap::new(),
         }
         .into_props()
         .with_idle_timeout(self.instance_idle_timeout);
@@ -133,70 +107,6 @@ impl<S: Saga> SagaManagerProcess<S> {
         ctx.watch(proxy.pid()).await;
         self.instances.insert(saga_id, proxy.clone());
         proxy
-    }
-
-    /// Put `marker` onto `saga_id`'s stream through whoever owns that stream's
-    /// next sequence.
-    ///
-    /// The whole decision — is anyone resident, and the write that follows from
-    /// the answer — happens here, inside the manager's own message handling.
-    /// That placement is the point: this manager is the only thing that spawns
-    /// an instance (`instance`, reached from `recv`) and the only thing that
-    /// retires one (`on_terminated`), and all three run on its single mailbox.
-    /// So residency cannot change between reading it and acting on it, and
-    /// there is no window in which "nobody is resident, write it myself" is
-    /// overtaken by a lazy spawn that then believes it owns the tail.
-    ///
-    /// A dormant saga is *not* woken to do this: settling a dead letter is
-    /// bookkeeping about a saga, not traffic for it.
-    async fn settle_dead_letter(
-        &mut self,
-        saga_id: SagaId,
-        marker: DeadLetterDispositionEvent,
-    ) -> Result<(), SettleError> {
-        if let Some(instance) = self.instances.get(&saga_id).cloned() {
-            return match instance.ask(RecordDisposition { marker }).await {
-                Ok(appended) => appended.map_err(SettleError::Append),
-                // The instance stopped between the registry read and the ask —
-                // `on_terminated` has not been processed yet.  Nothing was
-                // written, so the operator can retry.
-                Err(e) => Err(SettleError::Unreachable(e.to_string())),
-            };
-        }
-
-        let tail = self.stream_tail(&saga_id).await?;
-        self.store
-            .append(
-                saga_id.as_str(),
-                vec![marker.appending(tail + 1, jiff::Timestamp::now())],
-            )
-            .await?;
-        report_system_event!(
-            DeadLetterDispositionEvent::EVENT_TYPE,
-            marker.arm(),
-            saga_id.as_str(),
-            dead_letter_sequence = marker.dead_letter_sequence,
-        );
-        Ok(())
-    }
-
-    /// The highest sequence on `saga_id`'s stream, or 0 when it is empty.
-    ///
-    /// Read rather than remembered: the manager holds no sequence for a saga
-    /// with no resident instance, and the store offers no tail lookup that is
-    /// not a scan.
-    async fn stream_tail(&self, saga_id: &SagaId) -> Result<u64, SettleError> {
-        let stream: Vec<_> = self
-            .store
-            .load(LoadQuery::by_stream(saga_id))
-            .await?
-            .try_collect()
-            .await?;
-        Ok(stream
-            .iter()
-            .map(|loaded| loaded.sequence)
-            .max()
-            .unwrap_or(0))
     }
 }
 
@@ -301,60 +211,4 @@ impl<S: Saga> Receive<DeliverScheduled> for SagaManagerProcess<S> {
         }
         Ok(())
     }
-}
-
-impl<S: Saga> Receive<SettleDeadLetter> for SagaManagerProcess<S> {
-    /// The outcome is the *reply*, not the handler's result.
-    ///
-    /// A disposition the store refused is a failed operator action, not a
-    /// failing manager: raising it as `Err` would put an operator's bookkeeping
-    /// write through supervision and let it disturb a fan-out that is otherwise
-    /// healthy.
-    type Response = Result<(), SettleError>;
-    type Error = Infallible;
-
-    async fn recv(
-        &mut self,
-        msg: SettleDeadLetter,
-        _ctx: &mut ProcessContext<Self>,
-    ) -> Result<Result<(), SettleError>, Infallible> {
-        Ok(self.settle_dead_letter(msg.saga_id, msg.marker).await)
-    }
-}
-
-/// Concrete [`DispositionArbiter`] holding a typed handle to one manager.
-///
-/// `S` is erased at the trait boundary so `DeadLetterQueue` — which is not
-/// generic over the saga type — can route through a manager that is.
-struct TypedDispositionArbiter<S: Saga> {
-    manager: ProcessProxy<SagaManagerProcess<S>>,
-}
-
-impl<S: Saga> DispositionArbiter for TypedDispositionArbiter<S> {
-    fn settle<'a>(
-        &'a self,
-        saga_id: &'a SagaId,
-        marker: DeadLetterDispositionEvent,
-    ) -> BoxFuture<'a, Result<(), SettleError>> {
-        Box::pin(async move {
-            let asked = self
-                .manager
-                .ask(SettleDeadLetter {
-                    saga_id: saga_id.clone(),
-                    marker,
-                })
-                .await;
-            match asked {
-                Ok(settled) => settled,
-                Err(e) => Err(SettleError::Unreachable(e.to_string())),
-            }
-        })
-    }
-}
-
-/// Construct a type-erased [`DispositionArbiter`] over `manager`.
-pub(crate) fn make_disposition_arbiter<S: Saga>(
-    manager: ProcessProxy<SagaManagerProcess<S>>,
-) -> Arc<dyn DispositionArbiter> {
-    Arc::new(TypedDispositionArbiter { manager })
 }

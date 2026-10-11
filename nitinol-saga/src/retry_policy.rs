@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-/// Retry policy used by the outbox tell executor.
+/// How often the interpreter retries the atomic batch a decision is persisted
+/// as before giving the input back to redelivery.
 ///
 /// Default contract:
 /// - `max_attempts`: 3 (1 initial attempt + 2 retries)
@@ -28,7 +29,7 @@ impl RetryPolicy {
     /// 1-based index `next_attempt` (after the previous one failed).
     ///
     /// `next_attempt` is the upcoming attempt number (2, 3, ...).  The first
-    /// attempt has no preceding wait, so the executor only calls this for
+    /// attempt has no preceding wait, so the interpreter only calls this for
     /// `next_attempt >= 2`.
     pub(crate) fn backoff_before(&self, next_attempt: usize) -> Duration {
         // next_attempt = 2 → factor = multiplier^0 = 1.0

@@ -5,7 +5,6 @@
 
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,20 +14,33 @@ use futures_util::TryStreamExt;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{AggregateProxy, Event};
-use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
+use nitinol_persistence::error::CheckpointError;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
+use nitinol_persistence::store::{
+    CheckpointScope, CheckpointStore, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
+};
+use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaManagerProxy, SagaSystemExt};
+use nitinol_saga::{
+    SagaDeliveryId, SagaDeliveryProps, SagaDeliveryProxy, SagaDeliveryScope, SagaManagerProxy,
+    SagaSystemExt,
+};
 
 use saga_idempotent_receive::order::{Order, OrderPlaced};
 use saga_idempotent_receive::saga::{ReservationRequested, ReservationSaga};
-use saga_idempotent_receive::stock_item::{Reserve, StockItem, StockReserved};
+use saga_idempotent_receive::stock_item::{StockItem, StockReserved};
 
-/// The system this example's deployment assembles: one in-memory journal,
-/// named through an `Arc` because the fault-injecting store the restart
-/// clauses wrap it in is not a cloneable value of its own, and no other slot.
+/// The system an incarnation of this example assembles: one in-memory journal,
+/// named through an `Arc` because a handle that is not a cloneable value of its
+/// own is named in an assembly that way, and no other slot.
+///
+/// Where a delivery host keeps its progress is deliberately **not** on this
+/// store.  The restart clauses below hand two successive hosts two different
+/// checkpoint stores over one journal, which a slot on the system would make
+/// impossible without a second system — and a second system would also give the
+/// stock item a second activation, mixing "the receiver recognised the repeat"
+/// with "the receiver replayed first".  [`ExampleDeliveryStore`] is where the
+/// host's two slots are named instead.
 pub type ExampleSystem = EventSourceSystem<CustomStore<Arc<dyn EventStore>>>;
 
 /// The stock item every order in these tests reserves against.
@@ -41,20 +53,26 @@ pub const SKU: &str = "sku-cobalt-ingot";
 /// record rather than appended beside it still shows up as a difference.
 pub const ORDER_QUANTITY: u64 = 7;
 
-/// Budget for an order to reach the stock item through the outbox.  The manager
-/// polls its upstream every 250ms, so this is generous rather than tight — a
-/// deadline, not a synchronisation device: every wait below polls an observable
-/// condition.
-pub const DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// Budget for an order to reach the stock item through the delivery host.  Two
+/// poll loops stand in the way — the saga manager's subscription and the host's
+/// — so this is generous rather than tight: a deadline, not a synchronisation
+/// device, since every wait below polls an observable condition.
+pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How often a delivery host under test asks the journal what is new.
+///
+/// Named so that the waits above are not tuned against a hidden default.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Number of records the saga's own stream holds for one decision: the decision
-/// event, the outbox marker of the tell it dispatched, and the position of the
-/// fact event it was derived from — all committed by the one append.
+/// event and the position of the fact event it was derived from, committed by
+/// the one append.
 ///
-/// A dispatch that settles adds its terminal marker *after* that block, which is
-/// what makes "the dispatch was left unsettled" and "it settled" two record
-/// counts a test can wait on.
-pub const DECISION_BLOCK_LEN: usize = 3;
+/// Nothing a delivery host does adds to this stream.  How far a host has got
+/// lives in its checkpoint — [`recorded_progress`] is how a test reads it — so
+/// "the deliveries were made" and "the saga decided" are two separate
+/// observations here rather than two record counts on one stream.
+pub const DECISION_BLOCK_LEN: usize = 2;
 
 /// The one store an incarnation is wired with.
 ///
@@ -66,10 +84,10 @@ pub fn single_store() -> Arc<dyn EventStore> {
     Arc::new(InMemoryEventStore::default())
 }
 
-/// A system bound to `store`, with no saga on it.
+/// A system bound to `store`, with no saga and no delivery host on it.
 ///
-/// The direct-dispatch test drives the receiving aggregate itself, so it needs
-/// the aggregates without the process manager that would also address them.
+/// The direct-dispatch clause drives the receiving aggregate itself, so it needs
+/// the aggregates without the machinery that would also address them.
 pub async fn spawn_system(store: Arc<dyn EventStore>) -> ExampleSystem {
     let ps = ProcessSystem::new().await;
     EventSourceSystem::builder(ps)
@@ -82,8 +100,8 @@ pub async fn spawn_system(store: Arc<dyn EventStore>) -> ExampleSystem {
 /// Everything one incarnation of the example owns.
 ///
 /// `system` is kept because it is the handle to the `ProcessSystem` the
-/// aggregates and the manager run on; dropping the last handle early would take
-/// the incarnation down.
+/// aggregates, the manager and the delivery hosts run on; dropping the last
+/// handle early would take the incarnation down.
 pub struct ReservationWorld {
     pub system: ExampleSystem,
     pub order: AggregateProxy<Order>,
@@ -93,11 +111,9 @@ pub struct ReservationWorld {
 /// Spawn a complete incarnation: a fresh `ProcessSystem`, the order aggregate,
 /// and the saga manager subscribed to the order's stream.
 ///
-/// The store is a parameter because the re-dispatch tests hand the same durable
-/// state to two successive incarnations, wrapping the first one's in
-/// [`UnsettledDispatchStore`] — which is what makes the receiving aggregate
-/// restore its processed-id set from its own stream rather than inherit it from
-/// memory.
+/// No delivery host — the clauses that need one name its stores themselves,
+/// because which checkpoint store a host is wired with is the whole subject of
+/// the redelivery tests.  See [`spawn_delivery_host`].
 pub async fn spawn_world(order_id: &AggregateId, store: Arc<dyn EventStore>) -> ReservationWorld {
     let system = spawn_system(store).await;
 
@@ -118,29 +134,137 @@ pub async fn spawn_world(order_id: &AggregateId, store: Arc<dyn EventStore>) -> 
 /// second time over the same store delivers the order's fact event again.  The
 /// saga instance it addresses drops that delivery — the position of the fact is
 /// on the instance's own stream, committed by the append that carried the
-/// decision — so what a second incarnation re-does is not the decision but any
-/// dispatch whose settlement never landed.  That is the at-least-once delivery
-/// this pattern has to absorb.
+/// decision — so a second incarnation decides nothing new.  What a second
+/// incarnation *does* re-do is delivery, which is the delivery host's business
+/// and not the manager's.
 pub async fn spawn_manager(
     system: &ExampleSystem,
     order_id: &AggregateId,
 ) -> SagaManagerProxy<ReservationSaga> {
-    let system_for_factory = system.erase_store();
-
     system
-        .saga_manager_props(move |components| {
-            ReservationSaga::new(
-                components.system().cloned().expect(
-                    "a saga spawned through a system's own entry point is handed that system",
-                ),
-            )
-        })
+        .saga_manager_props(|_| ReservationSaga)
         .subscribed_to::<OrderPlaced>(system.subscription(order_id))
-        .with_crash_restart_factory(move |payload: &[u8]| {
-            ReservationSaga::crash_restart_intent(&system_for_factory, payload)
-        })
         .spawn()
         .await
+}
+
+// Delivery host wiring
+
+/// The identifier every host in these tests files its progress under.
+///
+/// One id for every incarnation on purpose: a second host under the same id
+/// resumes from where the first recorded, which is what makes "the first one
+/// never recorded" the whole of the difference.
+pub const TEST_DELIVERY_ID: &str = "reservation-delivery";
+
+pub fn delivery_id() -> SagaDeliveryId {
+    SagaDeliveryId::new(TEST_DELIVERY_ID)
+}
+
+/// The checkpoint scope of the single partition every host here is spawned with.
+///
+/// One partition, so every saga instance's decisions are this one consumer's and
+/// a test reads progress from a single key.
+pub fn delivery_scope() -> SagaDeliveryScope {
+    SagaDeliveryScope::new(&delivery_id(), 0)
+}
+
+/// The store a delivery host is wired from: `journal` as the store the saga's
+/// decisions are on, `checkpoints` as the slot its progress is recorded in, and
+/// no other slot named.
+///
+/// A host needs exactly those two, so nothing else is filled in — the snapshot
+/// and projection slots are left [`Unprovided`] rather than named with stores no
+/// clause here reads.
+pub type ExampleDeliveryStore<Cs> =
+    CustomStore<Arc<dyn EventStore>, Unprovided, Unprovided, Arc<Cs>>;
+
+/// The supplier a host is wired from, over the two slots it needs.
+pub fn delivery_persistence<Cs>(
+    journal: &Arc<dyn EventStore>,
+    checkpoints: &Arc<Cs>,
+) -> PersistenceProvider<ExampleDeliveryStore<Cs>>
+where
+    Cs: CheckpointStore + 'static,
+{
+    PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(Arc::clone(journal))
+            .delivery_checkpoints(Arc::clone(checkpoints))
+            .build(),
+    )
+}
+
+/// Start a delivery host for the reservation saga: reading `journal`, recording
+/// progress in `checkpoints`, and delivering through `system`.
+///
+/// The host is wired from a supplier of its own and delivers through whichever
+/// system the receiving aggregates resolve on — which is what lets two
+/// successive hosts with two different checkpoint stores both reach the one
+/// resident stock item.
+pub async fn spawn_delivery_host<Cs>(
+    system: &ExampleSystem,
+    journal: &Arc<dyn EventStore>,
+    checkpoints: &Arc<Cs>,
+) -> SagaDeliveryProxy<ReservationSaga>
+where
+    Cs: CheckpointStore + 'static,
+{
+    SagaDeliveryProps::<ReservationSaga, Arc<Cs>>::new(&delivery_persistence(journal, checkpoints))
+        .with_delivery_id(delivery_id())
+        .with_poll_interval(POLL_INTERVAL)
+        .spawn(system)
+        .await
+}
+
+/// A [`CheckpointStore`] whose saves never land.
+///
+/// This is the durable state a delivery host that died mid-record leaves behind:
+/// the commands it derived may already have reached their targets, but nothing
+/// says they did, so the next host resumes from the position the last one
+/// recorded — here, none at all — and carries the same deliveries again.  That
+/// window is the whole of why delivery is at-least-once, and it is stated once
+/// on [`nitinol_saga::SagaDeliveryProps`].
+///
+/// `load` delegates, because a host has to be able to read whatever progress
+/// *was* recorded; refusing `save` alone is what leaves exactly one thing
+/// missing.  Nothing ever lifts the refusal: the host wired with this one made
+/// its deliveries and is to be treated as gone, so a later success from it would
+/// record progress nobody is behind.
+pub struct UnrecordedProgressStore {
+    inner: Arc<InMemoryCheckpointStore>,
+}
+
+impl UnrecordedProgressStore {
+    /// A refusing view of `inner`, which the next incarnation reads directly.
+    pub fn over(inner: &Arc<InMemoryCheckpointStore>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::clone(inner),
+        })
+    }
+}
+
+#[async_trait]
+impl CheckpointStore for UnrecordedProgressStore {
+    type Tx = ();
+
+    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
+        self.inner.load(scope).await
+    }
+
+    async fn save(
+        &self,
+        scope: &dyn CheckpointScope,
+        sequence: u64,
+        _tx: Option<&mut Self::Tx>,
+    ) -> Result<(), CheckpointError> {
+        Err(CheckpointError::Backend(Box::new(std::io::Error::other(
+            format!(
+                "the host recording {} is gone, so {sequence} is not written down",
+                scope.checkpoint_key()
+            ),
+        ))))
+    }
 }
 
 // Store observation
@@ -159,7 +283,7 @@ pub async fn load_stream(store: &Arc<dyn EventStore>, key: &str) -> Vec<LoadedEv
 /// store-wide `global_sequence` assigned at commit, and the stored payload.
 ///
 /// Comparing two fingerprints of the same stream taken before and after a
-/// re-dispatch distinguishes "the first write was left intact" from "the record
+/// redelivery distinguishes "the first write was left intact" from "the record
 /// was rewritten with equal content".
 pub type StreamFingerprint = Vec<(u64, u64, Vec<u8>)>;
 
@@ -203,13 +327,35 @@ pub fn recorded_reservations(events: &[LoadedEvent]) -> Vec<String> {
 /// The operation ids the saga's own decisions name, in stream order.
 ///
 /// One per time the saga processed an upstream event, which is what makes a
-/// re-dispatch distinguishable from a suppressed one.
+/// repeated *delivery* distinguishable from a repeated *decision*.
 pub fn requested_reservations(events: &[LoadedEvent]) -> Vec<String> {
     events
         .iter()
         .filter(|event| event.event_type == ReservationRequested::EVENT_TYPE)
         .map(|event| decode::<ReservationRequested>(event).reservation)
         .collect()
+}
+
+/// The store-wide position of the one decision on the saga's stream.
+///
+/// A delivery host's progress is counted in these, so this is the number a test
+/// waits for a checkpoint to reach.
+pub async fn decision_position(store: &Arc<dyn EventStore>, saga_key: &str) -> u64 {
+    let events = load_stream(store, saga_key).await;
+    let decisions: Vec<&LoadedEvent> = events
+        .iter()
+        .filter(|event| event.event_type == ReservationRequested::EVENT_TYPE)
+        .collect();
+    let [decision] = decisions.as_slice() else {
+        panic!(
+            "the saga must have persisted exactly one decision (stream holds {:?})",
+            events
+                .iter()
+                .map(|event| event.event_type.to_string())
+                .collect::<Vec<String>>()
+        )
+    };
+    decision.global_sequence
 }
 
 /// Poll the stream `key` until it holds at least `expected` records.
@@ -235,76 +381,38 @@ pub async fn wait_for_records(
     }
 }
 
-// Fault injection
-
-/// `EventStore` decorator that leaves a dispatch unsettled: the saga's journal
-/// keeps the append that created it — the decision, the outbox marker of the tell
-/// it dispatched and the position of the fact it was derived from, all committed
-/// together — and every later append to that journal is refused.
-///
-/// That is the durable state an incarnation that dies mid-dispatch leaves behind:
-/// the command may already have reached its target, but nothing on the journal
-/// says the dispatch settled, so the marker is still pending and a later
-/// incarnation asks for the same operation again.  Refusing by stream key rather
-/// than allowing by key is what lets one store back the whole incarnation — the
-/// order's stream and the stock item's keep working, so the reservation this
-/// example is about is recorded exactly as in a healthy run.
-///
-/// `load` always delegates: a later incarnation has to be able to read the
-/// journal the interrupted one wrote.
-pub struct UnsettledDispatchStore {
-    inner: Arc<dyn EventStore>,
-    /// Stream key of the saga instance whose progress goes unrecorded.
-    journal: String,
-    interrupted: AtomicBool,
+/// What `checkpoints` holds for the single partition of the host under test.
+pub async fn recorded_progress(checkpoints: &Arc<InMemoryCheckpointStore>) -> Option<u64> {
+    checkpoints
+        .load(&delivery_scope())
+        .await
+        .expect("reading an in-memory checkpoint must succeed")
 }
 
-impl UnsettledDispatchStore {
-    pub fn new(inner: Arc<dyn EventStore>, journal: String) -> Arc<Self> {
-        Arc::new(Self {
-            inner,
-            journal,
-            interrupted: AtomicBool::new(true),
-        })
-    }
-
-    /// End the interruption.
-    ///
-    /// The incarnation that could not record its progress is gone, and the store
-    /// the next one writes to was never broken — which is what lets the tests
-    /// that keep the receiving aggregate resident hand the same system to a second
-    /// manager.
-    pub fn incarnation_ended(&self) {
-        self.interrupted.store(false, Ordering::Release);
-    }
-
-    /// Is `events` an append that would extend an already-created journal?
-    ///
-    /// The decision block opens the stream at its genesis sequence, so anything
-    /// starting above it is progress the interrupted incarnation never got to
-    /// record.
-    fn extends_the_journal(&self, key: &str, events: &[AppendingEvent]) -> bool {
-        key == self.journal && events.first().is_some_and(|event| event.sequence > 1)
-    }
-}
-
-#[async_trait]
-impl EventStore for UnsettledDispatchStore {
-    async fn append(
-        &self,
-        key: &str,
-        events: Vec<AppendingEvent>,
-    ) -> Result<AppendOutcome, AppendError> {
-        if self.interrupted.load(Ordering::Acquire) && self.extends_the_journal(key, &events) {
-            return Err(AppendError::Backend(Box::new(std::io::Error::other(
-                format!("the incarnation writing {key} is gone"),
-            ))));
+/// Poll `checkpoints` until the host has recorded progress at `want` or beyond.
+///
+/// This is the exact observable for "every delivery that record implied has
+/// landed": a host carries a record's deliveries first and moves its checkpoint
+/// past that record only once all of them have been answered.  Waiting on it is
+/// therefore a barrier rather than a guessed window — and because the host
+/// `ask`s, the receiver's own append is already done by the time the checkpoint
+/// moves.
+pub async fn wait_for_progress(checkpoints: &Arc<InMemoryCheckpointStore>, want: u64, label: &str) {
+    let deadline = std::time::Instant::now() + DELIVERY_TIMEOUT;
+    loop {
+        if recorded_progress(checkpoints)
+            .await
+            .is_some_and(|at| at >= want)
+        {
+            return;
         }
-        self.inner.append(key, events).await
-    }
-
-    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        self.inner.load(query).await
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "{label}: the host recorded {:?}, wanted at least {want}",
+                recorded_progress(checkpoints).await
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -313,27 +421,4 @@ impl EventStore for UnsettledDispatchStore {
 /// A reference to the stock item that owns the stream `key`.
 pub fn stock_ref(system: &ExampleSystem, key: &str) -> AggregateProxy<StockItem> {
     system.aggregate_proxy::<StockItem>(AggregateId::new(key))
-}
-
-/// Round-trip a command through the stock item's mailbox, so a re-dispatch that
-/// was merely still queued cannot be mistaken for one that was absorbed.
-///
-/// `AggregateProxy::tell` — how the outbox dispatches — returns once the command
-/// is queued, and `ask` through a reference to the same aggregate resolves to the
-/// same activation, whose process loop is single-threaded and FIFO.  The answer
-/// to this `ask` therefore cannot arrive before every command queued ahead of it
-/// has been handled.
-///
-/// The command sent is a repeat of `reservation`, which the pattern answers with
-/// an acceptance that appends nothing: draining the mailbox this way adds no
-/// record for the assertions that follow to see.
-pub async fn drain_stock_item(system: &ExampleSystem, stock_key: &str, reservation: &str) {
-    stock_ref(system, stock_key)
-        .ask(Reserve {
-            reservation: reservation.to_owned(),
-            stock: stock_key.to_owned(),
-            quantity: ORDER_QUANTITY,
-        })
-        .await
-        .expect("a repeat of an applied reservation must be accepted");
 }

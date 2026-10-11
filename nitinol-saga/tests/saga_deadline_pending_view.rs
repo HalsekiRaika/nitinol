@@ -131,6 +131,8 @@ impl Codec<Reminder> for ReminderCodec {
 }
 
 impl DeadlineMessage for Reminder {
+    const TYPE_NAME: &'static str = "reminder";
+    const CODEC_NAME: &'static str = "reminder-codec";
     type Codec = ReminderCodec;
 }
 
@@ -296,6 +298,8 @@ async fn seed_scheduled(
                     saga_id,
                     &TimerName::new(name),
                     after,
+                    Reminder::TYPE_NAME,
+                    Reminder::CODEC_NAME,
                     &payload,
                     anchor_unix_millis,
                 ),

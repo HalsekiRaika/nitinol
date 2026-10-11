@@ -1,33 +1,42 @@
-//! An upstream record whose bytes cannot be decoded is logged and skipped.
+//! An upstream record whose bytes cannot be decoded is reported and skipped.
 //! That is the whole of it — there is no other behaviour to configure.
 //!
 //! ```gherkin
 //!   Scenario: a corrupt record is skipped, standalone
 //!     Given an upstream stream whose first record cannot be decoded
 //!     When the saga runs
-//!     Then the next record is handled
-//!     And no dead letter is written for the corrupt one
-//!     And no consumed position is written for the corrupt one
+//!     Then the next record is handled — the cursor advanced past the corrupt one
+//!     And nothing durable is written for the corrupt one
 //!
 //!   Scenario: a corrupt record is skipped, under a manager
 //!     Given the same stream behind a saga manager
 //!     When the manager runs
 //!     Then the instance handles the next record
-//!     And no dead letter is written for the corrupt one
+//!     And nothing durable is written for the corrupt one on that instance's stream
 //! ```
 //!
 //! ## Why skipping, and why only skipping
 //!
 //! A decode failure is deterministic and permanent: the same bytes fail the
 //! same way every time, so retrying is pointless, and there is no typed event
-//! for `Saga::correlate` to name an owner from, so the stall-escape a correlated
-//! failure gets does not apply either.  Logging it and moving the cursor past it
-//! is the only action left — and being the only one, it is not a setting.
+//! for `Saga::correlate` to name an owner from, so a record that cannot be
+//! decoded cannot be attributed to any saga instance either.  Reporting it and
+//! moving the cursor past it is the only action left — and being the only one,
+//! it is not a setting.
 //!
-//! No durable position is written for the skipped record on purpose: nothing was
-//! decided from it, so there is no decision for a position to be as durable as.
+//! Not even a position is written for the skipped record, which makes a corrupt
+//! record the one input that leaves *no* row at all: an input `Saga::handle`
+//! refuses still gets its position (see
+//! `saga_handle_error_settles_with_position_only.rs`), because a decision was
+//! made about it.  Here nothing was decided — there was no typed event to
+//! decide from — so there is no decision for a position to be as durable as.
 //! The visible consequence is that a restart re-reads the corrupt record and
-//! logs it again, which is cheaper than a write per corrupt byte.
+//! reports it again, which is cheaper than a write per corrupt byte.
+//!
+//! The report itself reaches an operator as a `tracing::error!`.  That is not a
+//! durable record, so it is not something this file can read off a stream and
+//! not something it claims to pin; what it does pin is that the *absence* of a
+//! durable record is not an absence of progress.
 //!
 //! ## API contract assumed by this file
 //!
@@ -41,9 +50,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{
-    dead_letter_of, failure_kind, readable_consumed_position_of, ConsumedPayload, JsonCodec,
-};
+use common::{readable_consumed_fact_of, ConsumedFactPayload, JsonCodec, CONSUMED_MARKER};
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,6 +62,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::Event;
+use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -197,23 +205,42 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-fn dead_letter_kinds(events: &[LoadedEvent]) -> Vec<&'static str> {
+fn positions(events: &[LoadedEvent]) -> Vec<ConsumedFactPayload> {
     events
         .iter()
-        .filter_map(dead_letter_of)
-        .map(|record| failure_kind(&record.failure))
+        .filter_map(readable_consumed_fact_of)
         .collect()
 }
 
-fn positions(events: &[LoadedEvent]) -> Vec<ConsumedPayload> {
+/// Every row of the framework's own namespace that is *not* a consumed fact.
+///
+/// A corrupt record used to leave a durable trace of its own, so the negative
+/// claim is made row by row rather than against one retired identity: a trace
+/// written under a new name, or alongside the position of a record that *was*
+/// readable, is what this is here to catch.
+fn unexpected_framework_rows(events: &[LoadedEvent]) -> Vec<String> {
+    let reserved = reserved_family("nitinol.saga");
     events
         .iter()
-        .filter_map(readable_consumed_position_of)
+        .filter(|e| e.event_type.family() == reserved && e.event_type != CONSUMED_MARKER)
+        .map(|e| format!("{}@{}", e.event_type, e.sequence))
+        .collect()
+}
+
+fn describe(events: &[LoadedEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| format!("{}@{}", e.event_type, e.sequence))
         .collect()
 }
 
 const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// The upstream sequences the two seeded records sit at: the corrupt one, then
+/// the readable one behind it.
+const CORRUPT_SEQUENCE: u64 = 1;
+const READABLE_SEQUENCE: u64 = 2;
 
 async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<Seen> {
     let deadline = Instant::now() + BARRIER_TIMEOUT;
@@ -240,18 +267,27 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<Seen> {
 /// the corrupt seq 1's fate is already decided — no sleep settles the negative
 /// claims.
 async fn seed_upstream(store: &Arc<dyn EventStore>, stream: &AggregateId) {
-    append_corrupt(store, stream, 1).await;
-    append_order_placed(store, stream, 2, "ord-2").await;
+    append_corrupt(store, stream, CORRUPT_SEQUENCE).await;
+    append_order_placed(store, stream, READABLE_SEQUENCE, "ord-2").await;
+}
+
+/// The one position a readable record behind the corrupt one is entitled to.
+fn position_of_the_readable_record(upstream: &AggregateId) -> ConsumedFactPayload {
+    ConsumedFactPayload {
+        source: upstream.as_str().to_owned(),
+        sequence: READABLE_SEQUENCE,
+        source_event_type: OrderPlaced::EVENT_TYPE.to_string(),
+    }
 }
 
 // Tests
 
 /// Given an upstream stream whose first record cannot be decoded,
 /// When a standalone saga runs over it,
-/// Then the next record is handled, and the corrupt one leaves neither a dead
-/// letter nor a consumed position behind.
+/// Then the next record is handled — so the cursor advanced past the corrupt
+/// one — and the corrupt record leaves nothing durable behind at all.
 #[tokio::test]
-async fn a_corrupt_upstream_record_is_skipped_without_a_dead_letter() {
+async fn a_corrupt_upstream_record_is_skipped_and_writes_nothing() {
     let ps = ProcessSystem::new().await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -281,38 +317,40 @@ async fn a_corrupt_upstream_record_is_skipped_without_a_dead_letter() {
         observed,
         vec![Seen {
             order: "ord-2".to_owned(),
-            sequence: 2,
+            sequence: READABLE_SEQUENCE,
         }],
         "the corrupt record carries no typed event and must never reach \
-         `handle`; the next record must"
+         `handle`; the next record must — which is also the only evidence the \
+         cursor moved past bytes no position was written for"
     );
     assert_eq!(
-        dead_letter_kinds(&events),
-        Vec::<&'static str>::new(),
-        "a record that cannot be decoded has no owner to attribute it to, so it \
-         must leave no dead letter at all"
-    );
-    assert_eq!(
-        positions(&events)
-            .into_iter()
-            .map(|position| position.sequence)
-            .collect::<Vec<u64>>(),
-        vec![2],
+        positions(&events),
+        vec![position_of_the_readable_record(&upstream)],
         "nothing was decided from the corrupt record, so there is no decision \
          for a position to be as durable as — only the handled record's \
-         position may be on the stream"
+         position may be on the stream; it holds {:?}",
+        describe(&events)
+    );
+    assert_eq!(
+        unexpected_framework_rows(&events),
+        Vec::<String>::new(),
+        "a record that cannot be decoded has no owner to attribute it to, so it \
+         must leave no durable trace under any framework identity; the stream \
+         holds {:?}",
+        describe(&events)
     );
 }
 
 /// Given the same upstream stream behind a saga manager,
 /// When the manager runs,
 /// Then the correlated instance handles the next record, and the corrupt one
-/// leaves no dead letter on that instance's stream either.
+/// leaves nothing on that instance's stream either.
 ///
-/// Probed separately because the manager used to be the one place that decided
-/// *which* instance a corrupt record belonged to; removing the setting from the
-/// standalone path and leaving that decision here would keep the mechanism
-/// alive.
+/// Probed separately because the manager is the one place that decides *which*
+/// instance an upstream record belongs to, and it decides that from the typed
+/// event a corrupt record does not have.  A manager that invented an owner for
+/// it would write a row on some instance's stream, and that instance would then
+/// carry a record it never consumed.
 #[tokio::test]
 async fn a_corrupt_upstream_record_is_skipped_under_a_manager_too() {
     let ps = ProcessSystem::new().await;
@@ -343,15 +381,24 @@ async fn a_corrupt_upstream_record_is_skipped_under_a_manager_too() {
         observed,
         vec![Seen {
             order: "ord-2".to_owned(),
-            sequence: 2,
+            sequence: READABLE_SEQUENCE,
         }],
         "the manager must advance past the corrupt record and route the next one \
          to the instance `correlate` names"
     );
     assert_eq!(
-        dead_letter_kinds(&events),
-        Vec::<&'static str>::new(),
-        "the manager must not attribute a corrupt record to any instance, so no \
-         instance's stream may carry a dead letter for it"
+        positions(&events),
+        vec![position_of_the_readable_record(&upstream)],
+        "the manager must not attribute a corrupt record to any instance, so the \
+         only position the instance's stream may carry is the readable record's; \
+         it holds {:?}",
+        describe(&events)
+    );
+    assert_eq!(
+        unexpected_framework_rows(&events),
+        Vec::<String>::new(),
+        "no instance's stream may carry a durable trace of a record the manager \
+         could not decode an owner from; the stream holds {:?}",
+        describe(&events)
     );
 }

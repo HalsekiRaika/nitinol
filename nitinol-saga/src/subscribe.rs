@@ -45,22 +45,69 @@ use crate::saga::Saga;
 
 /// How a fired deadline is read back as the alphabet it belongs to.
 ///
+/// Takes the identity the schedule fact persisted alongside the payload —
+/// `message_type` and `message_codec`, [`DeadlineMessage::TYPE_NAME`] /
+/// [`DeadlineMessage::CODEC_NAME`] at the time the deadline was set — so the
+/// read-back can be checked against what this alphabet's deadline variant
+/// currently declares before the bytes are decoded.
+///
 /// A plain `fn` pointer rather than a method, because the answer depends on the
 /// alphabet alone and is therefore known at declaration time: an alphabet that
 /// declares no deadline has none, which is exactly what
 /// [`DeclaresDeadline::READ`] being `None` for [`NoDeadline`] says.
-pub type ReadDeadline<A> = fn(&[u8]) -> Result<A, CodecError>;
+pub type ReadDeadline<A> = fn(&str, &str, &[u8]) -> Result<A, ReadDeadlineError>;
+
+/// Why a firing's schedule fact could not be read back as the alphabet's
+/// deadline variant.
+#[derive(Debug, thiserror::Error)]
+pub enum ReadDeadlineError {
+    /// The schedule fact names a different message type or codec than this
+    /// alphabet's `#[subscribe(deadline)]` variant currently declares.
+    ///
+    /// Reached only where the two can disagree: a schedule fact set by an
+    /// earlier incarnation whose `DeadlineMessage` impl (or the alphabet
+    /// naming it) has since changed. The bytes are never decoded under a
+    /// declaration they were not written for — see [`DeadlineMessage`] for why
+    /// the fact names itself rather than leaving this to be inferred.
+    #[error(
+        "schedule fact named `{stored_type}`/`{stored_codec}`, but this saga's \
+         deadline variant currently declares `{declared_type}`/`{declared_codec}`"
+    )]
+    IdentityMismatch {
+        stored_type: String,
+        stored_codec: String,
+        declared_type: &'static str,
+        declared_codec: &'static str,
+    },
+    /// The identity matched, but the codec it names failed to decode the
+    /// bytes.
+    #[error(transparent)]
+    Codec(#[from] CodecError),
+}
 
 /// Read a deadline message through the [`Codec`](nitinol_eventsource::codec::Codec)
-/// its own type named.
+/// its own type named, after checking that `message_type` / `message_codec` —
+/// the identity the schedule fact persisted — are still what `M` declares.
 ///
 /// Private: the only caller is [`HasDeadline`]'s [`DeclaresDeadline`] impl
 /// below, which is also the only place a [`ReadDeadline`] is built. Neither the
 /// derive nor a hand-written `SagaSubscribe` calls this directly any more —
 /// they supply [`DeadlineVariant::wrap_deadline`], and this function is reached
 /// through that impl rather than restated at each call site.
-fn read_deadline_message<M: DeadlineMessage>(payload: &[u8]) -> Result<M, CodecError> {
-    nitinol_eventsource::codec::decode::<M::Codec, M>(payload)
+fn read_deadline_message<M: DeadlineMessage>(
+    message_type: &str,
+    message_codec: &str,
+    payload: &[u8],
+) -> Result<M, ReadDeadlineError> {
+    if message_type != M::TYPE_NAME || message_codec != M::CODEC_NAME {
+        return Err(ReadDeadlineError::IdentityMismatch {
+            stored_type: message_type.to_owned(),
+            stored_codec: message_codec.to_owned(),
+            declared_type: M::TYPE_NAME,
+            declared_codec: M::CODEC_NAME,
+        });
+    }
+    nitinol_eventsource::codec::decode::<M::Codec, M>(payload).map_err(ReadDeadlineError::Codec)
 }
 
 /// The whole alphabet of inputs a saga reacts to.
@@ -123,9 +170,11 @@ pub trait DeclaresDeadline<A: SagaSubscribe>: sealed::Sealed + Send + Sync + 'st
     ///
     /// `None` exactly when [`HAS_DEADLINE`](Self::HAS_DEADLINE) is `false`.
     ///
-    /// The bytes are the ones the schedule fact persisted, so they are read
-    /// through the [`Codec`](nitinol_eventsource::codec::Codec) the deadline
-    /// message type named, not through a format the framework picked.
+    /// The bytes are the ones the schedule fact persisted, checked against the
+    /// identity the same fact names before being read through the
+    /// [`Codec`](nitinol_eventsource::codec::Codec) the deadline message type
+    /// named, not through a format the framework picked — see
+    /// [`ReadDeadlineError::IdentityMismatch`].
     const READ: Option<ReadDeadline<A>>;
 }
 
@@ -159,8 +208,9 @@ where
     M: DeadlineMessage,
 {
     const HAS_DEADLINE: bool = true;
-    const READ: Option<ReadDeadline<A>> =
-        Some(|payload| read_deadline_message::<M>(payload).map(A::wrap_deadline));
+    const READ: Option<ReadDeadline<A>> = Some(|message_type, message_codec, payload| {
+        read_deadline_message::<M>(message_type, message_codec, payload).map(A::wrap_deadline)
+    });
 }
 
 /// How alphabet `A` constructs its `#[subscribe(deadline)]` variant from the
@@ -298,5 +348,90 @@ impl<A: 'static> SubscribedSource<A> {
             self.binding.upstream_store,
             self.binding.cursor,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use nitinol_eventsource::codec::Codec;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct Probe(u32);
+
+    struct ProbeCodec;
+
+    impl Codec<Probe> for ProbeCodec {
+        type Error = std::convert::Infallible;
+
+        fn encode(value: &Probe) -> Result<Bytes, Self::Error> {
+            Ok(Bytes::from(value.0.to_le_bytes().to_vec()))
+        }
+
+        fn decode(payload: &[u8]) -> Result<Probe, Self::Error> {
+            let bytes: [u8; 4] = payload.try_into().expect("4-byte payload");
+            Ok(Probe(u32::from_le_bytes(bytes)))
+        }
+    }
+
+    impl DeadlineMessage for Probe {
+        const TYPE_NAME: &'static str = "probe";
+        const CODEC_NAME: &'static str = "probe-codec";
+        type Codec = ProbeCodec;
+    }
+
+    /// A schedule fact whose `message_type` / `message_codec` agree with what
+    /// `Probe` currently declares reads back normally.
+    #[test]
+    fn matching_identity_decodes_through_the_named_codec() {
+        let payload = Bytes::from(7u32.to_le_bytes().to_vec());
+
+        let message = read_deadline_message::<Probe>("probe", "probe-codec", &payload)
+            .expect("an identity matching the declaration must decode");
+
+        assert_eq!(message.0, 7);
+    }
+
+    /// A schedule fact naming a different message type than `Probe` currently
+    /// declares is refused outright — the bytes are never handed to
+    /// `Probe::Codec`, so a coincidentally-compatible wire shape cannot slip
+    /// through under the wrong declaration.
+    #[test]
+    fn a_mismatched_type_name_is_refused_before_the_codec_ever_runs() {
+        let payload = Bytes::from(7u32.to_le_bytes().to_vec());
+
+        let error = read_deadline_message::<Probe>("stale-probe", "probe-codec", &payload)
+            .expect_err("a disagreeing message type must be refused, not decoded");
+
+        match error {
+            ReadDeadlineError::IdentityMismatch {
+                stored_type,
+                stored_codec,
+                declared_type,
+                declared_codec,
+            } => {
+                assert_eq!(stored_type, "stale-probe");
+                assert_eq!(stored_codec, "probe-codec");
+                assert_eq!(declared_type, Probe::TYPE_NAME);
+                assert_eq!(declared_codec, Probe::CODEC_NAME);
+            }
+            ReadDeadlineError::Codec(_) => {
+                panic!("a type-name mismatch must be reported as `IdentityMismatch`, not as a codec failure")
+            }
+        }
+    }
+
+    /// Same refusal for a disagreeing codec name — the two identity fields are
+    /// checked together, so either one alone can trip the Fail Fast path.
+    #[test]
+    fn a_mismatched_codec_name_is_refused_before_the_codec_ever_runs() {
+        let payload = Bytes::from(7u32.to_le_bytes().to_vec());
+
+        let error = read_deadline_message::<Probe>("probe", "stale-codec", &payload)
+            .expect_err("a disagreeing codec name must be refused, not decoded");
+
+        assert!(matches!(error, ReadDeadlineError::IdentityMismatch { .. }));
     }
 }

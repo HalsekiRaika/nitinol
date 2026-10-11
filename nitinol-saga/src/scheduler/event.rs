@@ -1,6 +1,7 @@
 //! `ScheduleEvent` — the `SystemEvent` persisted for each timer transition.
 //!
-//! Modelled one-for-one on the `OutboxEvent` canonical example: one reserved
+//! Shaped like every framework declaration on a saga's own stream — its
+//! siblings are [`crate::consumed`] and [`crate::lifecycle`]: one reserved
 //! [`EventType`] (`nitinol.saga.schedule`) every timer marker is written down
 //! as, with a prost `oneof` codec that owns its own serialization and carries
 //! which transition — `scheduled` / `cancelled` / `fired` — the marker records.
@@ -58,6 +59,13 @@ pub(crate) enum ScheduleEvent {
     Scheduled {
         token: ScheduleToken,
         after: Duration,
+        /// The identity `payload` was written under —
+        /// `DeadlineMessage::TYPE_NAME` / `DeadlineMessage::CODEC_NAME` at the
+        /// time `Deadline::set` ran — carried beside the bytes so a later
+        /// firing can be checked against what this fact says rather than only
+        /// against whichever alphabet happens to be linked into the reader.
+        message_type: String,
+        message_codec: String,
         payload: Bytes,
         scheduled_at_unix_millis: i64,
     },
@@ -90,6 +98,8 @@ impl SystemEvent for ScheduleEvent {
             ScheduleEvent::Scheduled {
                 token,
                 after,
+                message_type,
+                message_codec,
                 payload,
                 scheduled_at_unix_millis,
             } => Kind::Scheduled(Scheduled {
@@ -100,6 +110,8 @@ impl SystemEvent for ScheduleEvent {
                 after_nanos: u64::try_from(after.as_nanos()).unwrap_or(u64::MAX),
                 payload: payload.to_vec(),
                 scheduled_at_unix_millis: *scheduled_at_unix_millis,
+                message_type: message_type.clone(),
+                message_codec: message_codec.clone(),
             }),
             ScheduleEvent::Cancelled {
                 token,
@@ -129,6 +141,8 @@ impl SystemEvent for ScheduleEvent {
             Some(Kind::Scheduled(m)) => Ok(ScheduleEvent::Scheduled {
                 token: ScheduleToken::new(SagaId::new(m.saga_id), TimerName::new(m.name)),
                 after: Duration::from_nanos(m.after_nanos),
+                message_type: m.message_type,
+                message_codec: m.message_codec,
                 payload: Bytes::from(m.payload),
                 scheduled_at_unix_millis: m.scheduled_at_unix_millis,
             }),
@@ -157,10 +171,11 @@ impl nitinol_eventsource::DeclaresEventType for ScheduleEvent {
 
 /// Append a single schedule marker at `*sequence + 1` — plus the consumed
 /// position, when `input_position` names one this append is closing out —
-/// advancing `*sequence` past every row only on success.  Mirrors the
-/// terminal-append discipline used for outbox markers
-/// (`OutboxAppender::append_terminal`): a failed store append leaves the
-/// caller's sequence untouched so the next attempt does not skip numbers.
+/// advancing `*sequence` past every row only on success: a failed store append
+/// leaves the caller's sequence untouched so the next attempt does not skip
+/// numbers.  Every other append site on a saga's own stream keeps the same
+/// discipline — see [`crate::lifecycle::append_ended`] and
+/// [`crate::consumed::settle_with_position`].
 ///
 /// `input_position` is `None` at call sites with no upstream input to
 /// consume (a timer firing), and also whenever this marker is not the append
@@ -228,6 +243,8 @@ mod tests {
                 ScheduleEvent::Scheduled {
                     token: token(),
                     after: Duration::from_secs(1),
+                    message_type: "reminder".to_owned(),
+                    message_codec: "reminder-codec".to_owned(),
                     payload: Bytes::from_static(b"p"),
                     scheduled_at_unix_millis: 5,
                 },
@@ -258,6 +275,8 @@ mod tests {
         let event = ScheduleEvent::Scheduled {
             token: token(),
             after: Duration::from_millis(1_500),
+            message_type: "reminder".to_owned(),
+            message_codec: "reminder-codec".to_owned(),
             payload: Bytes::from_static(b"hello"),
             scheduled_at_unix_millis: 1_700_000_000_000,
         };
@@ -265,11 +284,15 @@ mod tests {
             Ok(ScheduleEvent::Scheduled {
                 token: t,
                 after,
+                message_type,
+                message_codec,
                 payload,
                 scheduled_at_unix_millis,
             }) => {
                 assert_eq!(t, token());
                 assert_eq!(after, Duration::from_millis(1_500));
+                assert_eq!(message_type, "reminder");
+                assert_eq!(message_codec, "reminder-codec");
                 assert_eq!(payload, Bytes::from_static(b"hello"));
                 assert_eq!(scheduled_at_unix_millis, 1_700_000_000_000);
             }
@@ -288,6 +311,8 @@ mod tests {
         let event = ScheduleEvent::Scheduled {
             token: token(),
             after: sub_ms,
+            message_type: "reminder".to_owned(),
+            message_codec: "reminder-codec".to_owned(),
             payload: Bytes::from_static(b""),
             scheduled_at_unix_millis: 0,
         };
@@ -313,6 +338,8 @@ mod tests {
         let event = ScheduleEvent::Scheduled {
             token: token(),
             after: one_hundred_years,
+            message_type: "reminder".to_owned(),
+            message_codec: "reminder-codec".to_owned(),
             payload: Bytes::from_static(b""),
             scheduled_at_unix_millis: 0,
         };

@@ -158,7 +158,11 @@ impl<S: Saga> SagaComponents<S> {
     /// #     fn encode(_: &Reminder) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
     /// #     fn decode(_: &[u8]) -> Result<Reminder, Self::Error> { Ok(Reminder) }
     /// # }
-    /// # impl DeadlineMessage for Reminder { type Codec = ReminderCodec; }
+    /// # impl DeadlineMessage for Reminder {
+    /// #     const TYPE_NAME: &'static str = "reminder";
+    /// #     const CODEC_NAME: &'static str = "reminder-codec";
+    /// #     type Codec = ReminderCodec;
+    /// # }
     /// struct Undeclared { deadline: Deadline<Reminder> }
     /// # #[async_trait]
     /// # impl Saga for Undeclared {

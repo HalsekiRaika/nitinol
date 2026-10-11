@@ -25,8 +25,10 @@ pub struct PlaceOrder {
 }
 
 impl Decider<PlaceOrder> for Order {
-    /// Placing the order asks nothing back: what follows from it is the saga's
-    /// reservation, which is observed on the inventory's own stream.
+    /// Placing the order asks nothing back.  What follows from it — the
+    /// reservation — is decided by a saga that observes this stream and carried
+    /// out on the inventory, so none of it is part of this decision and none of
+    /// it is awaited here.
     type Output = ();
     type Rejection = std::convert::Infallible;
 

@@ -128,6 +128,8 @@ impl Codec<Reminder> for PipeCodec {
 }
 
 impl DeadlineMessage for Reminder {
+    const TYPE_NAME: &'static str = "reminder";
+    const CODEC_NAME: &'static str = "pipe-codec";
     type Codec = PipeCodec;
 }
 
@@ -368,6 +370,8 @@ async fn a_firing_is_read_back_through_the_codec_the_message_type_names() {
                     &saga_id,
                     &TimerName::new("remind"),
                     Duration::from_millis(300),
+                    Reminder::TYPE_NAME,
+                    Reminder::CODEC_NAME,
                     &payload,
                     jiff::Timestamp::now().as_millisecond(),
                 ),

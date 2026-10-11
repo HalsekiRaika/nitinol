@@ -19,8 +19,8 @@
 /// | `arm` | which arm of that declaration the record holds, from the family's own fixed set |
 /// | `stream_id` | the stream the row landed on |
 ///
-/// Further `name = value` pairs are the calling site's context — a tell id, a
-/// timer, the sequence a dead letter occupies.
+/// Further `name = value` pairs are the calling site's context — a timer, a
+/// source, the sequence a consumed position occupies.
 ///
 /// Call this *after* the append succeeds: a record claiming a write that never
 /// happened would be worse than none.

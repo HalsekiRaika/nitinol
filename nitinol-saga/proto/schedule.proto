@@ -19,13 +19,20 @@ message ScheduleMarker {
 // (`remaining = scheduled_at + after - now`).  `payload` is the deadline
 // message encoded with its `DeadlineMessage::Codec`.  `after_nanos` stores the
 // full-precision nanosecond duration so that sub-millisecond timers and
-// durations up to ~584 years round-trip without loss.
+// durations up to ~584 years round-trip without loss.  `message_type` and
+// `message_codec` are the identity `DeadlineMessage::TYPE_NAME` and
+// `DeadlineMessage::CODEC_NAME` name for `payload` — carried beside it, the
+// same way a stored event's `event_type` column names its payload, so a
+// firing is validated against what this fact says rather than only against
+// whichever alphabet happens to be linked into the binary that reads it back.
 message Scheduled {
   string saga_id = 1;
   string name = 2;
   uint64 after_nanos = 3;
   bytes payload = 4;
   int64 scheduled_at_unix_millis = 5;
+  string message_type = 6;
+  string message_codec = 7;
 }
 
 // A cancelled timer (name-scoped cancel or re-schedule of the same name).

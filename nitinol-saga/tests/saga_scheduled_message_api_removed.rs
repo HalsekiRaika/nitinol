@@ -27,7 +27,7 @@
 //! ## API contract assumed by this file
 //!
 //! - `Saga` requires exactly `type Subscribe`, `type Event`, `type Error`,
-//!   `fn correlate`, and `async fn handle`.  `apply` and `on_tell_failed` carry
+//!   `fn correlate`, and `async fn handle`.  `apply` and `dispatch` carry
 //!   defaults, which is why neither appears below.
 //!
 //! Run with:

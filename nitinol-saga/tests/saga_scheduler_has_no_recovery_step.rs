@@ -76,6 +76,8 @@ async fn a_resident_scheduler_alone_restores_nothing() {
                     &saga_id,
                     &TimerName::new("reminder"),
                     DEADLINE,
+                    "opaque",
+                    "opaque-codec",
                     SCHEDULED_PAYLOAD,
                     jiff::Timestamp::now().as_millisecond(),
                 ),

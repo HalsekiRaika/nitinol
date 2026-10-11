@@ -48,26 +48,28 @@
 //!   [`tell`](crate::AggregateProxy::tell) escapes the store's arbitration, so a
 //!   duplicate activation can perform it twice.  A side effect that must be
 //!   cluster-safe belongs behind a persisted record — the events of a
-//!   [`Decision`](crate::Decision), or a saga outbox — whose own stream OCC
-//!   decides whether it happened at all.
+//!   [`Decision`](crate::Decision), or a saga's own decision carried by a
+//!   delivery host — whose own stream OCC decides whether it happened at all.
 //!
-//! Putting the side effect behind a saga outbox is what the second bullet
-//! recommends, and it is worth being precise about what that buys: the outbox
-//! makes the *intent* durable, so what it delivers is stated per stage —
-//! attempted, accepted by the target's mailbox, committed by the target — and
-//! the stage a given wiring reaches depends on how the saga was configured.  It
-//! is not a blanket at-least-once promise, and it is not exactly-once.  The
-//! per-stage contract is stated once, on `nitinol_saga::SagaEffect::tell`, and
-//! a receiver that must not carry an operation out twice is the one that has to
-//! recognise the repeat.
+//! Putting the side effect behind a saga's decision is what the second bullet
+//! recommends, and it is worth being precise about what that buys: the decision
+//! is durable before anything is carried out, and what carries it is a separate
+//! consumer of that stream whose progress is a checkpoint.  Delivery is
+//! therefore at-least-once, with no mode to pick: the window between a delivery
+//! and the checkpoint behind it is what a repeat comes out of.  That contract —
+//! where at-least-once comes from, what a held partition means, and which
+//! failures are the framework's to retry as opposed to the domain's to observe
+//! — is stated once, on `nitinol_saga::SagaDeliveryProps`, and a receiver that
+//! must not carry an operation out twice is the one that has to recognise the
+//! repeat.
 //!
 //! This clause is why that matters at all.  With duplicate activations a normal
 //! occurrence, a saga instance can be activated on two nodes, lose the append
 //! race on one, and be re-activated and replayed — so the replay window this
-//! clause makes routine is also what raises how often a pending outbox marker is
-//! re-evaluated.  Both outcomes of that evaluation get more frequent together:
-//! re-dispatch where the wiring allows it, and a recorded give-up where it does
-//! not.
+//! clause makes routine is also what raises how often an upstream record is
+//! handled again.  The saga's own consumed positions are what stop a second
+//! decision coming out of that, and the receiver's idempotency is what stops a
+//! second delivery of the first one mattering.
 //!
 //! Not fixed by a test: this clause is the *absence* of a guarantee, and a node
 //! cannot exhibit the cluster-wide behaviour it declines to promise.  What is

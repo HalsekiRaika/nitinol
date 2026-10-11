@@ -48,7 +48,7 @@ should be a free function in the first place.
 - **A type's own meaning belongs to the type.** Matching, classifying,
   constructing or converting a single type, where everything the answer rests on
   is inside that type or its trait, is a method or an associated function on it.
-  A stored identity is matched with `event_type.matches::<DeadLetterEvent>()`,
+  A stored identity is matched with `event_type.matches::<ScheduleEvent>()`,
   a timer handle is built with `ScheduleToken::new(saga_id, name)`, and an error
   family is crossed with `From`. Knowledge written outside its owner gets
   written a second time somewhere else, and the two copies disagree.
@@ -58,7 +58,7 @@ should be a free function in the first place.
 
 The question that separates them: *when the call site reads `module::fn`, is the
 module saying what the function is for, in place of a struct?* If it is —
-`saga_process::in_flight_count`, `dead_letter::default_enqueue_policy`,
+`consumed::settle_with_position`, `lifecycle::append_ended`,
 `scheduler::append_schedule_marker` — it stays a free function.
 
 Four free functions stay free for reasons of their own:

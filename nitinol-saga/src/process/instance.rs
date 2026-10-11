@@ -1,6 +1,5 @@
 //! The resolved ingredients of one saga instance process.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -12,13 +11,10 @@ use nitinol_runtime::Props;
 
 use crate::components::SagaComponents;
 use crate::consumed::ConsumedPositions;
-use crate::dead_letter::{DlqChildSpawn, EnqueuePolicy};
 use crate::id::SagaId;
-use crate::outbox::RetryPolicy;
 use crate::process::manager::{DeliverScheduled, SagaManagerProcess};
-use crate::process::saga_process::{
-    CrashRestartFactory, FireScheduled, Lifecycle, OwnedUpstream, SagaProcess, TellState,
-};
+use crate::process::saga_process::{FireScheduled, Lifecycle, OwnedUpstream, SagaProcess};
+use crate::retry_policy::RetryPolicy;
 use crate::saga::Saga;
 use crate::scheduler::{DispatchFn, SchedulerProxy, TimerName};
 
@@ -63,6 +59,8 @@ impl<S: Saga> ScheduleDelivery<S> {
         saga_id: &SagaId,
         ctx: &ProcessContext<SagaProcess<S>>,
         name: TimerName,
+        message_type: String,
+        message_codec: String,
         payload: Bytes,
     ) -> DispatchFn {
         match self {
@@ -72,6 +70,8 @@ impl<S: Saga> ScheduleDelivery<S> {
                     let proxy = proxy.clone();
                     let fire = FireScheduled {
                         name: name.clone(),
+                        message_type: message_type.clone(),
+                        message_codec: message_codec.clone(),
                         payload: payload.clone(),
                     };
                     Box::pin(async move {
@@ -94,6 +94,8 @@ impl<S: Saga> ScheduleDelivery<S> {
                         saga_id: saga_id.clone(),
                         fire: FireScheduled {
                             name: name.clone(),
+                            message_type: message_type.clone(),
+                            message_codec: message_codec.clone(),
                             payload: payload.clone(),
                         },
                     };
@@ -152,16 +154,11 @@ pub(crate) struct SagaInstanceSpec<S: Saga> {
     /// spawn. It is a handle: holding it keeps the host's process system and
     /// registry alive, and neither holds a saga instance back.
     pub(crate) host: Option<SystemHandle>,
-    pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
     /// One subscription per declared source.  Empty on an instance a manager
     /// fronts, which observes through the manager's subscriptions instead.
     pub(crate) upstream: Vec<OwnedUpstream<S::Subscribe>>,
-    pub(crate) crash_restart_factory: Option<CrashRestartFactory>,
     pub(crate) scheduler: Option<SchedulerProxy>,
     pub(crate) delivery: ScheduleDelivery<S>,
-    pub(crate) dlq_child_spawn: Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>,
-    #[cfg(test)]
-    pub(crate) initial_tell_states: HashMap<u64, TellState>,
 }
 
 /// How a saga instance is built: the capabilities in, the saga out.
@@ -178,10 +175,6 @@ impl<S: Saga> SagaInstanceSpec<S> {
     /// every supervised restart.
     pub(crate) fn into_props(self) -> Props<SagaProcess<S>> {
         Props::new(move || {
-            #[cfg(not(test))]
-            let tell_states: HashMap<u64, TellState> = HashMap::new();
-            #[cfg(test)]
-            let tell_states: HashMap<u64, TellState> = self.initial_tell_states.clone();
             // One cell per incarnation, shared between the saga's own `Deadline`
             // and the process that writes it: the saga reads the journal's
             // answer, and only the process can put one there.
@@ -198,15 +191,11 @@ impl<S: Saga> SagaInstanceSpec<S> {
                 // a freshly built process knows nothing of what it consumed.
                 consumed: ConsumedPositions::default(),
                 retry_policy: RetryPolicy::default(),
-                tell_states,
-                crash_restart_factory: self.crash_restart_factory.clone(),
                 lifecycle: Lifecycle::Running,
                 upstream: self.upstream.clone(),
                 scheduler: self.scheduler.clone(),
                 pending_deadlines,
                 delivery: self.delivery.clone(),
-                enqueue_policy: Arc::clone(&self.enqueue_policy),
-                dlq_child_spawn: self.dlq_child_spawn.clone(),
             }
         })
     }

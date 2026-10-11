@@ -3,6 +3,11 @@
 //! A reservation arrives as a command carrying the operation id that names it,
 //! and the stock item recognises a repeat from the ids its *own stream*
 //! records.
+//!
+//! Nothing in this module knows a saga exists.  The stock item is an ordinary
+//! [`Aggregate`] plus a [`Decider`], reached by the same reference any caller
+//! would resolve, which is what makes it addressable by a delivery host without
+//! implementing anything of the host's.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,20 +43,26 @@ impl Event for StockReserved {
 /// `reservation`.
 ///
 /// `reservation` is the operation id, carried as ordinary domain data because a
-/// dispatched command carries nothing else — what it does and does not carry is
-/// stated on [`SagaEffect::tell`](nitinol_saga::SagaEffect::tell).  That the
-/// same operation comes out with the same id every time it is constructed is the
-/// sender's obligation, discharged by
-/// [`ReservationSaga::reservation_id`](crate::saga::ReservationSaga::reservation_id).
+/// delivered command carries nothing else: the framework attaches no metadata
+/// and no causation envelope to what a delivery host hands over — see
+/// [`SagaDeliveryProps`](nitinol_saga::SagaDeliveryProps) — so recognising a
+/// repeat is the receiver's job, done with the domain's own id or not at all.
 ///
-/// `stock` is the target's own stream key.  [`Decider::decide`] never reads it;
-/// it is what makes the command routable on its own, which is what lets
-/// [`ReservationSaga::crash_restart_intent`](crate::saga::ReservationSaga::crash_restart_intent)
-/// rebuild a reference to the target out of these very bytes.
+/// That the same operation comes out with the same id every time it is
+/// constructed is the sender's obligation, discharged by
+/// [`ReservationSaga::reservation_id`](crate::saga::ReservationSaga::reservation_id)
+/// for a command built afresh from the order's fact event, and by the id being
+/// *written into the decision* for a command re-derived from that decision by
+/// [`Saga::dispatch`](nitinol_saga::Saga::dispatch).
+///
+/// Nothing here names the target.  Whom a command is addressed to belongs to
+/// the delivery rather than to the command — `Saga::dispatch` answers a target
+/// and a command side by side — and the host needs no copy of either to be
+/// written down, so this type carries neither `Clone` nor a serializer for the
+/// framework's sake.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reserve {
     pub reservation: String,
-    pub stock: String,
     pub quantity: u64,
 }
 
@@ -68,8 +79,9 @@ pub struct StockItem {
 impl StockItem {
     /// Stream key of the stock item for `sku`.
     ///
-    /// This derivation is the single owner of that format: the saga addresses
-    /// the item through it, and so does every reader that wants to find one.
+    /// This derivation is the single owner of that format: the saga writes its
+    /// answer into the decision it persists, and every reader that wants to
+    /// find one computes the same thing.
     pub fn stream_key(sku: &str) -> String {
         format!("stock/{sku}")
     }
@@ -91,8 +103,13 @@ impl Aggregate for StockItem {
 }
 
 impl Decider<Reserve> for StockItem {
-    /// The reservation asks nothing back — the saga dispatches it with `tell` —
-    /// and what it did is read from this item's own stream.
+    /// The reservation has nothing to report back, so the answer is the empty
+    /// one; what it did is read from this item's own stream.
+    ///
+    /// A delivery host still `ask`s rather than tells, because an answer is the
+    /// only way a refusal can be told apart from a command carried out — and a
+    /// repeat must therefore answer `Ok`, or the host would hold forever on an
+    /// operation that is already done.
     type Output = ();
     type Rejection = std::convert::Infallible;
 

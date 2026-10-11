@@ -182,8 +182,9 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
 ///   [`tell`](crate::AggregateProxy::tell) leaves the store's arbitration, so a
 ///   duplicate activation can perform it a second time and nothing detects it.
 ///   A side effect that must be cluster-safe is expressed as a persisted record
-///   — the events of a [`Decision`](crate::Decision), or a saga outbox — so that
-///   some stream's own OCC decides whether it happened at all.
+///   — the events of a [`Decision`](crate::Decision), or a saga's own decision
+///   carried by a delivery host — so that some stream's own OCC decides whether
+///   it happened at all.
 ///
 /// Starting a lifecycle explicitly, rather than resolving one, is
 /// [`AggregateProps::spawn`] on props built directly.
@@ -328,8 +329,8 @@ impl<St: Store> EventSourceSystem<St> {
     /// The aggregate is resolved on the reference's first dispatch, and resolved
     /// again after the activation it reached dies — the same reference the
     /// awaited entry points hand back, obtained where awaiting is not possible: a
-    /// `fold` over a decision, a crash-restart factory rebuilding a target from a
-    /// stored marker.
+    /// `fold` over a decision, or a saga's delivery addressing a target it has
+    /// not yet activated.
     ///
     /// Deferring the activation is what makes that sound.  A reference names the
     /// aggregate, not a process, so building one commits to nothing that could

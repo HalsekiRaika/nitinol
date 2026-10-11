@@ -88,8 +88,9 @@ impl<A: Aggregate> AggregateProps<A, Hosted> {
     /// nothing yet.
     ///
     /// The synchronous half of the resolve entry points: a caller that cannot
-    /// await — a `fold` over a decision, a crash-restart factory — still gets a
-    /// reference addressing the same aggregate every other entry point does.
+    /// await — a `fold` over a decision, or a saga's delivery addressing a
+    /// target it has not yet activated — still gets a reference addressing the
+    /// same aggregate every other entry point does.
     pub(crate) fn into_reference(self) -> AggregateProxy<A> {
         // The handle carries the system a later re-resolve spawns on, so the
         // activation this call may start and the one that replaces it are

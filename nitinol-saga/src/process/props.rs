@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use nitinol_eventsource::system::{Hosted, SystemHandle, Unhosted};
@@ -8,19 +6,14 @@ use nitinol_persistence::store::EventStore;
 use nitinol_runtime::ProcessSystem;
 
 use crate::components::SagaComponents;
-use crate::dead_letter::{self, DeadLetterEvent, DlqChildSpawn, EnqueuePolicy};
-use crate::effect::TellIntent;
 use crate::id::SagaId;
 use crate::process::instance::{SagaInstanceSpec, SagaProducer, ScheduleDelivery};
 use crate::process::proxy::SagaProxy;
-#[cfg(test)]
-use crate::process::saga_process::TellState;
-use crate::process::saga_process::{self, CrashRestartFactory, SagaProcess};
+use crate::process::saga_process;
 use crate::saga::Saga;
 use crate::scheduler;
 use crate::subscribe::{AllSourcesSubscribed, BindSource, SourceBinding, SourceBindings};
 use crate::subscription::Subscription;
-use nitinol_runtime::process::{Process, ProcessProxy, Receive};
 
 /// Builder for a saga spawn.
 ///
@@ -50,12 +43,7 @@ pub struct SagaProps<S: Saga, B = SourceBindings<S>, H = Unhosted> {
     store: Arc<dyn EventStore>,
     producer: SagaProducer<S>,
     bindings: B,
-    crash_restart_factory: Option<CrashRestartFactory>,
-    enqueue_policy: Option<Arc<dyn EnqueuePolicy>>,
-    dead_letter_subscriber: Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>,
     host: H,
-    #[cfg(test)]
-    initial_tell_states: HashMap<u64, TellState>,
 }
 
 impl<S: Saga> SagaProps<S, SourceBindings<S>, Unhosted> {
@@ -63,8 +51,8 @@ impl<S: Saga> SagaProps<S, SourceBindings<S>, Unhosted> {
     ///
     /// `producer` builds the saga instance from the capabilities the framework
     /// resolved for it, and is called again whenever the runtime rebuilds the
-    /// process — so anything the saga captures (e.g. an `AggregateProxy` to tell)
-    /// must be re-acquirable.  A saga that needs no capability is built by
+    /// process — so anything the saga captures (a reference it reads the world
+    /// through, say) must be re-acquirable.  A saga that needs no capability is built by
     /// `|_| S::default()`.
     pub fn new(
         saga_id: SagaId,
@@ -76,12 +64,7 @@ impl<S: Saga> SagaProps<S, SourceBindings<S>, Unhosted> {
             store,
             producer: Arc::new(producer),
             bindings: SourceBindings::<S>::default(),
-            crash_restart_factory: None,
-            enqueue_policy: None,
-            dead_letter_subscriber: None,
             host: Unhosted,
-            #[cfg(test)]
-            initial_tell_states: HashMap::new(),
         }
     }
 }
@@ -95,12 +78,7 @@ impl<S: Saga, B> SagaProps<S, B, Unhosted> {
             store: self.store,
             producer: self.producer,
             bindings: self.bindings,
-            crash_restart_factory: self.crash_restart_factory,
-            enqueue_policy: self.enqueue_policy,
-            dead_letter_subscriber: self.dead_letter_subscriber,
             host: Hosted::new(host),
-            #[cfg(test)]
-            initial_tell_states: self.initial_tell_states,
         }
     }
 }
@@ -142,60 +120,8 @@ impl<S: Saga, B, H> SagaProps<S, B, H> {
                 self.bindings,
                 SourceBinding::new(upstream_store, cursor),
             ),
-            crash_restart_factory: self.crash_restart_factory,
-            enqueue_policy: self.enqueue_policy,
-            dead_letter_subscriber: self.dead_letter_subscriber,
             host: self.host,
-            #[cfg(test)]
-            initial_tell_states: self.initial_tell_states,
         }
-    }
-
-    /// Register a factory for crash-restart re-dispatch.
-    ///
-    /// Which pending tells this recovers, which it cannot, and what the factory
-    /// is obliged to return are stated with the rest of the delivery contract on
-    /// [`SagaEffect::tell`](crate::SagaEffect::tell).
-    pub fn with_crash_restart_factory<F>(mut self, factory: F) -> Self
-    where
-        F: Fn(&[u8]) -> Option<TellIntent> + Send + Sync + 'static,
-    {
-        self.crash_restart_factory = Some(Arc::new(factory));
-        self
-    }
-
-    /// Override the [`EnqueuePolicy`] that filters which saga failures reach the
-    /// DLQ.  Without it the default enqueues every failure kind.
-    pub fn with_enqueue_policy(mut self, policy: Arc<dyn EnqueuePolicy>) -> Self {
-        self.enqueue_policy = Some(policy);
-        self
-    }
-
-    /// Register a dead-letter subscriber process.
-    ///
-    /// When the saga enqueues a [`DeadLetterEvent`] on its own stream, the
-    /// subscriber `P` receives it over a [`nitinol_eventsource::DurableSubscription`]
-    /// so it catches up from the EventStore even if it was down at enqueue time.
-    /// `P`'s type is erased so it never surfaces as a `SagaProps` type
-    /// parameter.
-    ///
-    /// The DLQ direct-poller is started as a **child** of the saga from
-    /// `SagaProcess::on_start`: when the saga stops the
-    /// runtime cascade-stops the poller automatically, releasing the subscription.
-    pub fn with_dead_letter_subscriber<P>(mut self, subscriber: ProcessProxy<P>) -> Self
-    where
-        P: Process + Receive<DeadLetterEvent, Response = ()> + 'static,
-    {
-        self.dead_letter_subscriber = Some(dead_letter::make_dlq_child_spawn::<SagaProcess<S>, P>(
-            subscriber,
-        ));
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_initial_tell_states(mut self, tell_states: HashMap<u64, TellState>) -> Self {
-        self.initial_tell_states = tell_states;
-        self
     }
 }
 
@@ -218,24 +144,17 @@ where
             store: self.store,
             producer: self.producer,
             host,
-            enqueue_policy: self
-                .enqueue_policy
-                .unwrap_or_else(dead_letter::default_enqueue_policy),
             upstream: self
                 .bindings
                 .into_sources()
                 .into_iter()
                 .map(saga_process::source_subscription)
                 .collect(),
-            crash_restart_factory: self.crash_restart_factory,
             scheduler,
             // Nothing fronts this saga, so a deadline's firing is addressed to
             // the process itself; there is no manager to restore it from its
             // own stream.
             delivery: ScheduleDelivery::ToTheInstance,
-            dlq_child_spawn: self.dead_letter_subscriber,
-            #[cfg(test)]
-            initial_tell_states: self.initial_tell_states,
         }
     }
 }

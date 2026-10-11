@@ -2,7 +2,6 @@ mod instance;
 mod interpreter;
 mod manager;
 mod manager_props;
-mod outbox_executor;
 mod props;
 mod proxy;
 mod replay;

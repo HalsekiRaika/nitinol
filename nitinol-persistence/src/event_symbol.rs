@@ -136,11 +136,10 @@ pub const fn is_verbatim_event_symbol(s: &str) -> bool {
 /// }
 /// ```
 ///
-/// `arm_type` is independent of `declared_by`: a record whose failure detail
-/// lives on a nested type (a dead letter's `SagaFailure`, say) names that
-/// nested type here, and a pattern may look into a field to reach it (a
-/// disposition's `Self { disposition: Disposition::Processed, .. }`, say)
-/// rather than matching the arm type itself. Omitting the visibility before an
+/// `arm_type` is independent of `declared_by`: a record whose arm is carried by
+/// a nested type names that nested type here, and a pattern may look into a
+/// field to reach it (`Self { kind: Kind::Processed, .. }`, say) rather than
+/// matching the arm type itself. Omitting the visibility before an
 /// arm's name keeps that constant private to the declaring module; only the
 /// arms another module names directly need one.
 ///

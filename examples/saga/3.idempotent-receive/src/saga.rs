@@ -3,39 +3,34 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::system::SystemHandle;
-use nitinol_eventsource::{AggregateProxy, Event};
+use nitinol_eventsource::Event;
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, TellIntent};
+use nitinol_saga::{Saga, SagaContext, SagaDelivery, SagaEffect, SagaId, SagaSubscribe};
 
 use crate::codec::JsonCodec;
 use crate::order::OrderPlaced;
 use crate::stock_item::{Reserve, StockItem};
 
-/// The hosting system, as the saga is handed it.
-///
-/// A saga's producer is given the system it was spawned from rather than a
-/// clone prepared outside the spawn, and what it is given has the store's type
-/// erased — one type for every deployment, since a saga type is written before
-/// anyone assembles a store. The journal survives the erasure, which is all an
-/// aggregate reference needs.
-pub type ReservationSystem = SystemHandle;
-
-/// A reference to the stock item that owns the stream `key`.
-///
-/// Routing is "given a stream key, name the aggregate", which is what an
-/// [`AggregateProxy`] already is — a reference resolved when a command is
-/// dispatched rather than when the reference is built — so this example keeps
-/// no registry of live items.  The reference is built without awaiting, which
-/// is what lets the crash-restart factory below produce one at all.
-fn stock_ref(system: &ReservationSystem, key: &str) -> AggregateProxy<StockItem> {
-    system.aggregate_proxy::<StockItem>(AggregateId::new(key))
-}
-
 /// The saga's own decision event: "this order's reservation was asked for".
 ///
-/// It restates the operation id, the target and the size rather than pointing
-/// back at the trigger, so the saga's stream can be read on its own.
+/// Every field is here because [`Saga::dispatch`] needs it and cannot reach
+/// anywhere else for it.  That mapping is handed this event and nothing else —
+/// not the saga instance, not the trigger it was decided from, not the stream
+/// the record was read off — so a decision that left something out could not be
+/// turned into a command at all:
+///
+/// * `reservation` is the operation id the dispatched command carries, and the
+///   only thing by which the receiver can recognise a second delivery of this
+///   operation.  An id minted inside the delivery path instead would be a fresh
+///   one every time, which is the mistake this crate exists to rule out.
+/// * `stock` is the stream key of the aggregate the command is addressed to.
+///   Nothing downstream knows the order's `sku`, so whom to ask is a fact of
+///   the decision too.
+/// * `quantity` is what the command asks for.
+///
+/// It restates all three rather than pointing back at the trigger, so the
+/// saga's own stream can be read on its own — by a delivery host now, by an
+/// archive replay later.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReservationRequested {
     /// The operation id the dispatched command carries.
@@ -69,15 +64,20 @@ pub enum Observed {
 }
 
 /// Asks the stock item to reserve what a placed order owes it.
-pub struct ReservationSaga {
-    system: ReservationSystem,
-}
+///
+/// A unit struct, and it has to be nothing more: a saga has no way to express
+/// "send this command" — [`SagaEffect`] persists the saga's own decisions and
+/// sets the saga's own deadlines, and that is all — so there is no reference to
+/// the stock item for this type to hold.  Whom the decision reaches is
+/// [`Saga::dispatch`]'s answer, and carrying it is a delivery host's work.
+///
+/// It keeps no state either, so [`Saga::apply`] is left to its no-op default.
+/// Whether the reservation was applied is already recorded — the stock item's
+/// own stream says so — and mirroring it here would give one fact two owners
+/// that a crash between the two writes could leave disagreeing.
+pub struct ReservationSaga;
 
 impl ReservationSaga {
-    pub fn new(system: ReservationSystem) -> Self {
-        Self { system }
-    }
-
     /// One reservation process per order.
     ///
     /// This is the single definition of that rule: [`Saga::correlate`] answers
@@ -88,37 +88,23 @@ impl ReservationSaga {
 
     /// The operation id for the reservation `event` owes.
     ///
-    /// It is a function of the upstream event's own domain content because a
-    /// re-dispatched marker is only one of the ways the same operation is asked
-    /// for twice — the others reach [`Saga::handle`] again and build the command
-    /// from scratch (see [`SagaEffect::tell`]): a batch that never landed leaves
-    /// its input unconsumed, and two activations of one instance can both decide
-    /// from an input before either's batch is durable.  An id minted per `handle`
-    /// call survives the marker route and fails those, invisibly, until the stock
-    /// item applies the reservation twice.  `order_id` is the derivation base
-    /// because an order owes its reservation exactly once: something every order
-    /// shares would be just as stable and would make the *next* order's
-    /// reservation look like a repeat the receiver then silently withholds.
+    /// It is a function of the upstream event's own domain content because
+    /// deciding is not something that happens exactly once either.  A decision
+    /// can be durable while the position of the input it was decided from is
+    /// not, and two activations of one instance can both decide from an input
+    /// before either's append lands; in both cases the order's fact event
+    /// reaches [`Saga::handle`] again and the command is built from scratch.  An
+    /// id minted per `handle` call would make those two decisions two
+    /// operations, and the stock item — which has nothing but the id to go on —
+    /// would reserve twice.  Derived from the event, they are one operation
+    /// asked for twice, which is exactly what the receiver absorbs.
+    ///
+    /// `order_id` is the derivation base because an order owes its reservation
+    /// exactly once: something every order shares would be just as stable and
+    /// would make the *next* order's reservation look like a repeat the receiver
+    /// then silently withholds.
     pub fn reservation_id(event: &OrderPlaced) -> String {
         format!("{}/reservation", event.order_id)
-    }
-
-    /// Rebuild a pending reservation from the bytes a `TellRequested` marker
-    /// kept for it.
-    ///
-    /// After a full process crash only the marker survives, so the command has
-    /// to be rebuilt from its serialized form — which is why [`Reserve`] carries
-    /// the target's stream key as well as the operation id.  That what comes
-    /// back is the command and target originally dispatched is this function's
-    /// obligation, not the framework's; when and how the bytes are handed over
-    /// is stated on [`SagaEffect::tell`].
-    pub fn crash_restart_intent(
-        system: &ReservationSystem,
-        crash_restart_payload: &[u8],
-    ) -> Option<TellIntent> {
-        let cmd: Reserve = serde_json::from_slice(crash_restart_payload).ok()?;
-        let target = stock_ref(system, &cmd.stock);
-        Some(TellIntent::new::<StockItem, Reserve, _>(target, cmd))
     }
 }
 
@@ -133,48 +119,56 @@ impl Saga for ReservationSaga {
         Some(Self::instance_id(&event.order_id))
     }
 
-    // The saga keeps no state, so `apply` is left to its no-op default.
-    //
-    // Whether the reservation was applied is already recorded — the stock item's
-    // own stream says so.  Mirroring it here would give the same fact two owners
-    // that a crash between the two writes could leave disagreeing.
+    /// What a reservation request means for everybody else: ask that stock item
+    /// to reserve, under that operation id.
+    ///
+    /// An associated function taking the decision alone, because a delivery host
+    /// keeps no saga resident — it reads decisions out of the store, including
+    /// ones written by an incarnation that no longer exists — so there is no
+    /// `&self` for it to ask and no trigger for it to reach back to.  That is
+    /// what makes the operation id's presence on
+    /// [`ReservationRequested`] structural rather than advisory: nothing here
+    /// could mint one, and nothing could look one up.
+    ///
+    /// How often what this answers is carried out, and why that number is not
+    /// one, is stated on
+    /// [`SagaDeliveryProps`](nitinol_saga::SagaDeliveryProps).
+    fn dispatch(event: &Self::Event) -> Vec<SagaDelivery> {
+        vec![SagaDelivery::new::<StockItem, Reserve>(
+            AggregateId::new(event.stock.clone()),
+            Reserve {
+                reservation: event.reservation.clone(),
+                quantity: event.quantity,
+            },
+        )]
+    }
 
     /// Nothing here suppresses a repeat, on purpose.
     ///
-    /// Two things could: the framework drops an input whose decision is already
-    /// durable before this method sees it, and the stock item answers a
-    /// reservation it has already applied with a write-free acceptance.  Both are
-    /// backed by a stream.  A check inside this method would not be: it would hold
-    /// only as long as this incarnation's memory does, and it would do nothing at
-    /// all about the dispatch a pending marker repeats, which never passes through
-    /// here.  The operation id is what lets the stock item recognise that repeat.
+    /// Two things do, and both are backed by a stream: the framework drops an
+    /// input whose position is already on this saga's own stream before this
+    /// method sees it, and the stock item answers a reservation it has already
+    /// applied with a write-free acceptance.  A check inside this method would
+    /// be backed by neither — it would hold only as long as this incarnation's
+    /// memory does, and it would do nothing at all about a *delivery* repeated
+    /// from a decision already written, which never passes through here.  The
+    /// operation id is what lets the stock item recognise that one.
+    ///
+    /// The decision is the whole of the effect.  There is no second branch to
+    /// combine it with and no append to keep it atomic with: what the decision
+    /// implies for the stock item is derived from this very record, later, by
+    /// [`Saga::dispatch`], so there is nothing a crash could leave half-written.
     async fn handle(
         &mut self,
         input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         let Observed::OrderPlaced(event) = input;
-        let reservation = Self::reservation_id(&event);
-        let stock = StockItem::stream_key(&event.sku);
 
-        let decision = SagaEffect::persist(ReservationRequested {
-            reservation: reservation.clone(),
-            stock: stock.clone(),
+        Ok(SagaEffect::persist(ReservationRequested {
+            reservation: Self::reservation_id(&event),
+            stock: StockItem::stream_key(&event.sku),
             quantity: event.quantity,
-        });
-
-        // `combine` folds adjacent `Persist` branches, so the decision and its
-        // outbox marker reach the store as one append.  A crash between the two
-        // could otherwise leave the saga believing it had asked for a
-        // reservation it never enqueued.
-        let target = stock_ref(&self.system, &stock);
-        Ok(decision.combine(SagaEffect::tell::<StockItem, Reserve, _>(
-            target,
-            Reserve {
-                reservation,
-                stock,
-                quantity: event.quantity,
-            },
-        )))
+        }))
     }
 }

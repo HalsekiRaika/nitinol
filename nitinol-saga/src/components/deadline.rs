@@ -21,7 +21,22 @@ use crate::scheduler::TimerName;
 /// Naming a [`Codec`] rather than a serde bound is what keeps the rule "anything
 /// persisted describes its own format" whole: the framework picks no format for
 /// a value the domain owns.
+///
+/// Unlike [`Snapshotable`](nitinol_eventsource::Snapshotable), a deadline
+/// message also names itself: [`TYPE_NAME`](Self::TYPE_NAME) and
+/// [`CODEC_NAME`](Self::CODEC_NAME) are written beside the bytes `Codec`
+/// produces, inside the schedule fact. A schedule outlives the incarnation
+/// that set it — it is read back by whichever binary happens to be linked in
+/// when the timer fires, possibly long after `set` ran — so the fact itself
+/// has to say what its payload is rather than leaving that to the reader's
+/// compiled-in alphabet. [`Deadline::set`] writes the pair down, and a firing
+/// is refused rather than guessed at when they no longer match what the
+/// current declaration says.
 pub trait DeadlineMessage: Sized + Send + Sync + 'static {
+    /// The name this message type claims on the wire.
+    const TYPE_NAME: &'static str;
+    /// The name of the format [`Self::Codec`] writes this message as.
+    const CODEC_NAME: &'static str;
     /// The format this message is written into the schedule fact as.
     type Codec: Codec<Self>;
 }
@@ -69,7 +84,11 @@ pub struct PendingDeadline {
 /// #     fn encode(_: &Reminder) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
 /// #     fn decode(_: &[u8]) -> Result<Reminder, Self::Error> { Ok(Reminder) }
 /// # }
-/// # impl DeadlineMessage for Reminder { type Codec = ReminderCodec; }
+/// # impl DeadlineMessage for Reminder {
+/// #     const TYPE_NAME: &'static str = "reminder";
+/// #     const CODEC_NAME: &'static str = "reminder-codec";
+/// #     type Codec = ReminderCodec;
+/// # }
 /// // There is no constructor to call: `Deadline::new` is the framework's own.
 /// let deadline: Deadline<Reminder> = Deadline::new(Default::default());
 /// let _: SagaEffect<u32> =
@@ -88,7 +107,11 @@ pub struct PendingDeadline {
 /// #     fn encode(_: &Reminder) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
 /// #     fn decode(_: &[u8]) -> Result<Reminder, Self::Error> { Ok(Reminder) }
 /// # }
-/// # impl DeadlineMessage for Reminder { type Codec = ReminderCodec; }
+/// # impl DeadlineMessage for Reminder {
+/// #     const TYPE_NAME: &'static str = "reminder";
+/// #     const CODEC_NAME: &'static str = "reminder-codec";
+/// #     type Codec = ReminderCodec;
+/// # }
 /// // Nor is there a `Default`: a saga cannot default its way into its own time.
 /// let deadline: Deadline<Reminder> = Deadline::default();
 /// let _: SagaEffect<u32> =
@@ -124,12 +147,10 @@ impl<M: DeadlineMessage> Deadline<M> {
     ///
     /// # Panics
     ///
-    /// Panics if `M::Codec` fails to encode `message` — the same contract
-    /// [`SagaEffect::tell`](crate::SagaEffect::tell) has for the command it
-    /// serializes.  A deadline whose message cannot be written has no silent
-    /// reading: dropping it would lose the promise, and reporting it as a
-    /// domain error would oblige every saga to convert a framework fault into
-    /// its own error type.
+    /// Panics if `M::Codec` fails to encode `message`.  A deadline whose
+    /// message cannot be written has no silent reading: dropping it would lose
+    /// the promise, and reporting it as a domain error would oblige every saga
+    /// to convert a framework fault into its own error type.
     pub fn set<E>(&self, name: TimerName, after: Duration, message: M) -> SagaEffect<E> {
         let payload = nitinol_eventsource::codec::encode::<M::Codec, M>(&message).expect(
             "Deadline::set: the deadline message's own codec failed to encode it; \
@@ -137,8 +158,13 @@ impl<M: DeadlineMessage> Deadline<M> {
         );
         SagaEffect::Persist {
             events: Vec::new(),
-            tells: Vec::new(),
-            schedules: vec![ScheduleSpec::new(name, after, payload)],
+            schedules: vec![ScheduleSpec::new(
+                name,
+                after,
+                M::TYPE_NAME,
+                M::CODEC_NAME,
+                payload,
+            )],
         }
     }
 
@@ -267,6 +293,8 @@ mod tests {
     }
 
     impl DeadlineMessage for Reminder {
+        const TYPE_NAME: &'static str = "reminder";
+        const CODEC_NAME: &'static str = "reminder-codec";
         type Codec = ReminderCodec;
     }
 
@@ -320,16 +348,27 @@ mod tests {
             "the message must be written through `DeadlineMessage::Codec`, not \
              through a format the framework picked"
         );
+        assert_eq!(
+            schedules[0].message_type,
+            Reminder::TYPE_NAME,
+            "the schedule fact must name the message type it carries, not \
+             leave it to be inferred from whichever alphabet reads it back"
+        );
+        assert_eq!(
+            schedules[0].message_codec,
+            Reminder::CODEC_NAME,
+            "the schedule fact must name the codec `payload` was written with"
+        );
     }
 
     /// Setting a deadline is not a decision about anything else: the branch
     /// carries the schedule alone.
     ///
     /// Asserted on the effect rather than on a stream because a spurious event
-    /// or tell smuggled in here would be appended in the decision's own atomic
-    /// batch and read as the saga's doing.
+    /// smuggled in here would be appended in the decision's own atomic batch
+    /// and read as the saga's doing.
     #[test]
-    fn set_adds_no_user_event_and_no_tell() {
+    fn set_adds_no_user_event() {
         let effect = component().set::<u32>(
             TimerName::new("reminder"),
             Duration::from_secs(1),
@@ -339,13 +378,8 @@ mod tests {
         );
 
         match &effect {
-            SagaEffect::Persist {
-                events,
-                tells,
-                schedules,
-            } => {
+            SagaEffect::Persist { events, schedules } => {
                 assert!(events.is_empty(), "`set` must persist no user event");
-                assert!(tells.is_empty(), "`set` must attach no tell");
                 assert_eq!(schedules.len(), 1);
             }
             _ => panic!("`Deadline::set` must build a `Persist` branch"),

@@ -1,6 +1,33 @@
+//! A saga's own events are stored transparently: raw codec bytes under the
+//! domain `EventType` the user declared, with no framework framing wrapped
+//! around them.
+//!
+//! A saga's stream is mixed. Its own decisions share it with the framework's
+//! records — `nitinol.saga.schedule`, `nitinol.saga.consumed`,
+//! `nitinol.saga.lifecycle` — and the framework could have paid for that by
+//! wrapping every row in one envelope declaration, so that the column named the
+//! envelope and the payload carried what kind of row it really was. It does not:
+//! the identity a row is stored under *is* the declaration, and the saga's own
+//! events keep theirs.
+//!
+//! Two consequences, one per test:
+//!
+//! - what reaches the store for a persisted domain event is byte-for-byte what
+//!   the event's own `Codec` produces, under the event's own `EventType`. A
+//!   reader outside this framework can decode the saga's history knowing only
+//!   the domain codec — and no row of a saga's own decisions lands inside the
+//!   reserved `nitinol.*` namespace.
+//! - replay classifies each row by the identity it is stored under, so a
+//!   framework record is folded as framework bookkeeping and never reaches
+//!   `Saga::apply`. Were it handed over, the saga's state would be rebuilt from
+//!   rows it never decided — and a decode of those bytes through the domain
+//!   codec would be a domain event the saga never emitted.
+//!
+//! Run with: `cargo test -p nitinol-saga --test saga_persisted_envelope_transparency`.
+
 #[path = "common/helpers.rs"]
 mod common;
-use common::{encode_outbox_tell_acked, JsonCodec, OUTBOX_MARKER};
+use common::{encode_consumed_fact, JsonCodec, CONSUMED_MARKER, LIFECYCLE_MARKER, SCHEDULE_MARKER};
 
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -15,7 +42,8 @@ use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decisio
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
+    is_within_reserved_namespace, AggregateId, AppendingEvent, EventType, Family, LoadQuery,
+    LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
@@ -204,14 +232,43 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
         "stored bytes must equal a fresh codec encode (no envelope proto framing)"
     );
 
+    // The three identities a framework record can be stored under are the whole
+    // of the reserved vocabulary a saga stream has; naming them individually
+    // says which one a regression confused the domain event for.
+    for framework_record in [SCHEDULE_MARKER, CONSUMED_MARKER, LIFECYCLE_MARKER] {
+        assert_ne!(
+            domain_event.event_type, framework_record,
+            "a domain event must never be stored under a framework record's \
+             identity: replay classifies by that identity alone, so the saga's \
+             own decision would be folded as bookkeeping and never applied"
+        );
+    }
     assert!(
-        common::outbox_kind_of(&domain_event).is_none(),
-        "a domain event must never appear as an outbox marker on the wire"
+        !is_within_reserved_namespace(&domain_event.event_type.to_string()),
+        "a saga's own event must stay outside the reserved `nitinol.*` \
+         namespace; a row in there matching none of the three framework \
+         declarations refuses the load outright"
     );
 }
 
+/// The upstream stream [`EnvelopeSaga`] is wired to in the replay test. It
+/// holds nothing, so replay of the seeded rows is the only thing that can reach
+/// `Saga::apply` — and it is also the stream the seeded consumed fact names, so
+/// the fact is one a real incarnation could have written.
+const UNUSED_UPSTREAM: &str = "no-such-upstream";
+
+/// Given a saga stream holding one domain event and one framework record,
+/// When a fresh incarnation replays it,
+/// Then only the domain event reaches `Saga::apply`.
+///
+/// The framework record seeded here is a `nitinol.saga.consumed` position: a
+/// row a real incarnation writes on this very stream, carrying prost bytes that
+/// the saga's JSON codec would refuse. Classification is by the identity the
+/// row is stored under, never by trying the domain codec and seeing what
+/// happens — so a regression that handed it over would not be caught by a
+/// decode failure, it would be caught here.
 #[tokio::test]
-async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
+async fn replay_applies_domain_event_and_never_applies_a_framework_record() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
@@ -231,17 +288,17 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
         occurred_at: jiff::Timestamp::now(),
     };
 
-    // The marker is seeded the way the framework writes it: under the outbox
-    // identity, with the transition carried by the payload.
-    let outbox_event = AppendingEvent {
+    // The framework record is seeded the way the framework writes it: under the
+    // consumed identity, with the fact carried by the payload's `oneof`.
+    let framework_record = AppendingEvent {
         sequence: 2,
-        event_type: OUTBOX_MARKER,
-        payload: encode_outbox_tell_acked(99),
+        event_type: CONSUMED_MARKER,
+        payload: encode_consumed_fact(UNUSED_UPSTREAM, 7, &Triggered::EVENT_TYPE.to_string()),
         occurred_at: jiff::Timestamp::now(),
     };
 
     store
-        .append(saga_id.as_str(), vec![domain_event, outbox_event])
+        .append(saga_id.as_str(), vec![domain_event, framework_record])
         .await
         .expect("seeding the saga stream must succeed");
 
@@ -260,7 +317,7 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
                 note: "unused-on-replay".to_owned(),
             }
         })
-        .subscribed_to::<Triggered>(Subscription::stream(&upstream_store, "no-such-upstream"))
+        .subscribed_to::<Triggered>(Subscription::stream(&upstream_store, UNUSED_UPSTREAM))
         .spawn(system.process_system())
         .await;
 
@@ -287,8 +344,9 @@ async fn replay_applies_domain_event_and_never_applies_outbox_marker() {
     assert_eq!(
         applied.len(),
         1,
-        "replay must apply exactly the one domain event; the outbox marker must \
-         be classified by path prefix and never delivered to Saga::apply"
+        "replay must apply exactly the one domain event; the framework record \
+         must be classified by the identity it is stored under and never \
+         delivered to Saga::apply"
     );
     assert_eq!(
         applied[0],

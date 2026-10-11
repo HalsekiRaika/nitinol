@@ -6,25 +6,41 @@
 //! firing later — that is what
 //! `saga_scheduler_fires_into_passivated_instance.rs` pins down.  The same
 //! `on_stop` branch must not also keep the deadline armed once the saga has
-//! durably ended: nothing is left to consume the firing but a dead letter,
-//! and reaching that dead letter means the manager respawned an instance that
-//! has nothing left to do.
+//! durably ended: an ended saga drops whatever reaches it, so the firing
+//! could only be delivered to an instance the manager respawned to do
+//! nothing.
 //!
 //! What got this wrong is observable here: if `on_stop` released the timer
 //! only by delivery kind and not by whether the saga had ended, the deadline
 //! stays registered with the resident scheduler past `End`, elapses anyway,
 //! and the manager respawns the already-ended instance to deliver it — a
-//! second lifecycle, and an `ended_saga_received_message` dead letter on the
-//! saga's own stream. Correct behaviour cancels the timer when `End` runs, so
-//! neither ever happens.
+//! second lifecycle, and a `fired` row on a stream whose saga had already
+//! said it was finished.  Correct behaviour cancels the timer when `End` runs,
+//! so neither ever happens.
+//!
+//! ```gherkin
+//!   Scenario: End cancels the live timer it was decided alongside
+//!     Given a manager-fronted instance whose one decision arms a deadline and
+//!           ends the saga
+//!     When the `Ended` lifecycle fact is durable
+//!     Then no second instance is ever built
+//!     And the deadline never reaches `fired`, however long it is waited out
+//!     And nothing further lands on the saga's own stream
+//! ```
+//!
+//! The `Ended` fact is both the barrier this file synchronises on and half of
+//! what it pins: a run that cancelled the timer by never ending at all would
+//! satisfy every negative claim below and none of the contract.  That the fact
+//! is written under `nitinol.saga.lifecycle` with the `ended` arm is
+//! `saga_lifecycle_ended_declaration.rs`; this file only needs it to be there.
 //!
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_manager_fronted_end_cancels_live_timer`.
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{dead_letter_of, failure_kind, outbox_kind_of, schedule_kind_of};
-use common::{JsonCodec, OutboxKind, ScheduleKind};
+use common::{lifecycle_kind_of, schedule_kind_of};
+use common::{JsonCodec, LifecycleKind, ScheduleKind};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -95,6 +111,8 @@ impl Codec<Due> for DueCodec {
 }
 
 impl DeadlineMessage for Due {
+    const TYPE_NAME: &'static str = "due";
+    const CODEC_NAME: &'static str = "due-codec";
     type Codec = DueCodec;
 }
 
@@ -178,10 +196,10 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-/// Poll the saga stream until its durable `Ended` outbox marker is present, or
+/// Poll the saga stream until its durable `Ended` lifecycle fact is present, or
 /// the timeout elapses.  Returns the full stream snapshot so the caller can
 /// make additional assertions on what led up to it.
-async fn wait_for_ended_marker(
+async fn wait_for_ended_fact(
     store: &Arc<dyn EventStore>,
     saga_id: &SagaId,
     timeout: Duration,
@@ -191,14 +209,14 @@ async fn wait_for_ended_marker(
         let events = load_saga_events(store, saga_id).await;
         if events
             .iter()
-            .filter_map(outbox_kind_of)
-            .any(|kind| matches!(kind, OutboxKind::Ended(_)))
+            .filter_map(lifecycle_kind_of)
+            .any(|kind| matches!(kind, LifecycleKind::Ended(_)))
         {
             return events;
         }
         if Instant::now() >= deadline {
             panic!(
-                "timed out waiting for the saga's own `Ended` outbox marker; \
+                "timed out waiting for the saga's own `Ended` lifecycle fact; \
                  stream held: {:?}",
                 events
                     .iter()
@@ -210,15 +228,24 @@ async fn wait_for_ended_marker(
     }
 }
 
+/// The rows of a stream as `identity@sequence`, which is what a negative claim
+/// about the stream reports when it fails.
+fn describe(events: &[LoadedEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| format!("{}@{}", e.event_type, e.sequence))
+        .collect()
+}
+
 // Test
 
 /// Given a manager-fronted instance whose single decision both schedules a
 /// deadline and ends the saga,
 /// when the saga has durably ended,
 /// then the deadline must already be released from the resident scheduler, so
-/// waiting past it produces neither a second instance (the manager restoring
-/// an ended saga to deliver a firing it cannot use) nor the
-/// `ended_saga_received_message` dead letter that delivery would leave behind.
+/// waiting past it produces neither a second instance — the manager restoring
+/// an ended saga to deliver a firing it can only drop — nor any further row on
+/// the saga's own stream.
 #[tokio::test]
 async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
     // Given
@@ -246,19 +273,20 @@ async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
         .await;
 
     append_ping(&upstream_store, 1).await;
-    let events = wait_for_ended_marker(&saga_store, &saga_id, Duration::from_secs(5)).await;
+    // The `Ended` fact is the barrier: once it is durable, the terminal
+    // `on_stop` has run and whatever it did or did not release is settled.  It
+    // is also the half of the contract that is positive — `End` under a manager
+    // has to terminate the saga, not merely fail to fire a timer.
+    let at_end = wait_for_ended_fact(&saga_store, &saga_id, Duration::from_secs(5)).await;
 
     assert!(
-        events
+        at_end
             .iter()
             .filter_map(schedule_kind_of)
             .any(|kind| matches!(kind, ScheduleKind::Scheduled(_))),
         "the saga must have registered its deadline before ending, or this \
          test exercises no live timer at all; recorded: {:?}",
-        events
-            .iter()
-            .map(|e| e.event_type.to_string())
-            .collect::<Vec<_>>()
+        describe(&at_end)
     );
     assert_eq!(
         instances_spawned.load(Ordering::SeqCst),
@@ -273,12 +301,6 @@ async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
 
     // Then
     let events = load_saga_events(&saga_store, &saga_id).await;
-    let recorded = || {
-        events
-            .iter()
-            .map(|e| e.event_type.to_string())
-            .collect::<Vec<_>>()
-    };
 
     assert!(
         !events
@@ -288,24 +310,26 @@ async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
         "the deadline must never reach `fired` once the saga has durably \
          ended: `on_stop`'s release must remove it from the resident \
          scheduler before it elapses; recorded: {:?}",
-        recorded()
-    );
-    assert!(
-        !events
-            .iter()
-            .filter_map(dead_letter_of)
-            .any(|dl| failure_kind(&dl.failure) == "ended_saga_received_message"),
-        "no `ended_saga_received_message` dead letter may appear: that record \
-         only exists when a respawned instance received the firing the \
-         cancelled timer should have prevented; recorded: {:?}",
-        recorded()
+        describe(&events)
     );
     assert_eq!(
         instances_spawned.load(Ordering::SeqCst),
         1,
         "a timer released on the terminal stop must never respawn the \
-         already-ended instance to deliver a firing it can only dead-letter; \
+         already-ended instance to deliver a firing it can only drop; \
          recorded: {:?}",
-        recorded()
+        describe(&events)
+    );
+    // An ended saga drops what reaches it and writes nothing, so a firing that
+    // *was* delivered would leave no row of its own — which is why the two
+    // clauses above are not enough on their own, and why this one asks the
+    // broader question: the stream must be byte-for-byte the one the `End`
+    // left, with nothing appended in the five deadlines since.
+    assert_eq!(
+        describe(&events),
+        describe(&at_end),
+        "nothing may land on the saga's own stream after it has ended: a row \
+         appended here would mean the resident scheduler still held the timer \
+         and something was revived to act on it"
     );
 }

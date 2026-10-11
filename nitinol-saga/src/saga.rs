@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 
 use nitinol_eventsource::Event;
-use nitinol_persistence::AggregateId;
 
 use crate::context::SagaContext;
 use crate::delivery::SagaDelivery;
@@ -16,7 +15,9 @@ use crate::subscribe::SagaSubscribe;
 /// A saga reacts to the inputs it declares — events emitted by the aggregates it
 /// observes, and deadlines of its own — and produces a declarative
 /// [`SagaEffect`] describing what should happen next: persist new saga events,
-/// send commands to other processes, set or cancel a deadline, or do nothing.
+/// set or cancel a deadline, terminate, or do nothing.  What a decision means
+/// for everybody else is the separate pure mapping [`Saga::dispatch`] answers,
+/// and carrying it out belongs to a delivery host.
 ///
 /// # One alphabet, one entry point
 ///
@@ -81,9 +82,11 @@ pub trait Saga: Send + Sync + 'static {
 
     /// Domain-level error type produced by [`Saga::handle`].
     ///
-    /// The MVP only logs handle errors and continues; this type exists
-    /// to keep the signature symmetrical with `Decider::Rejection` and to
-    /// give the implementation a place to surface diagnostics.
+    /// A refused input is reported through `tracing` and settled by its
+    /// position alone — see [`Saga::handle`] for what that means for
+    /// redelivery.  This type exists to keep the signature symmetrical with
+    /// `Decider::Rejection` and to give the implementation a place to surface
+    /// diagnostics.
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Derive the identity of the business process instance an observed input
@@ -282,55 +285,53 @@ pub trait Saga: Send + Sync + 'static {
     /// stream records for that record's source is dropped before it reaches
     /// here, so de-duplicating the *input* is not this method's to do.
     ///
-    /// This method is not the only way a record becomes consumed. A record
-    /// that arrives while an earlier record from the same correlation is
-    /// already draining to a dead letter, and a record for which this method
-    /// returns `Err`, never produce a decision from this method at all —
-    /// instead each is settled by a dead-letter append that carries the same
-    /// consumed position. Once that append lands, the record is consumed the
-    /// same way a decision's position would be, and does not reach this method
-    /// again on redelivery, even though no decision of this method's was ever
-    /// durable for it.
+    /// A decision is not the only way a record becomes consumed. A record this
+    /// method returns `Err` for produces no decision at all: it was seen, it
+    /// produced nothing, and it must not come round again — so its position is
+    /// written on its own, and is the only row such an input leaves. Once that
+    /// append lands the record is consumed exactly as a decision's position
+    /// would make it, and it does not reach this method again on redelivery.
     ///
     /// A record whose upstream bytes fail to decode is the one case that is
     /// neither decided nor settled: it is reported and skipped, its source's
     /// cursor advances past it, and nothing durable is written for it. A decode
     /// failure is deterministic and permanent — there is no typed input to
-    /// correlate, so not even the dead-letter path has an instance to attribute
-    /// it to — so re-reading the record after a restart repeats the report
-    /// rather than a decision.
+    /// correlate, so there is no instance it could be attributed to — so
+    /// re-reading the record after a restart repeats the report rather than a
+    /// decision.
     ///
     /// Where that guarantee stops:
     ///
-    /// - A record decided by this method's own returned effect, or settled
-    ///   by the dead letter this method's `Err` produces, is not consumed
-    ///   until that settling append lands; if it does not, the record
+    /// - A record decided by this method's own returned effect, or settled by
+    ///   the position-only append this method's `Err` produces, is not
+    ///   consumed until that settling append lands; if it does not, the record
     ///   reaches this method again on redelivery.  That holds for the
-    ///   closing append too — including a durable `Ended` marker, which is
+    ///   closing append too — including the durable `Ended` fact, which is
     ///   withheld the same way when an earlier append the same effect needed
     ///   did not land, so the saga is never durably terminated around a
     ///   decision no store holds.
-    /// - A record settled without ever reaching this method — because it
-    ///   arrived while this saga was already draining to a dead letter — is
-    ///   not consumed until that dead-letter append lands either; if it does
-    ///   not, the record stays unconsumed and is redelivered into the same
-    ///   dead-letter handling it came from, not into this method.  This is
-    ///   at-least-once, not exactly-once.
+    ///
+    ///   *When* that redelivery comes differs between the two.  A refused
+    ///   input whose position-only append failed holds its source's cursor, so
+    ///   the record comes round again on the next poll.  A *decision* whose
+    ///   batch never landed does not hold the cursor: the saga stays alive
+    ///   instead — which is what lets its next input retry the decision, `End`
+    ///   included — and the record comes round when a later incarnation reads
+    ///   the source again, since nothing durable claims it.
     /// - An effect that writes nothing else still commits a consumed-position-only
     ///   append when the input it was decided from has a position not yet
     ///   durable — which is always the case for an observed event, since one
     ///   only ever reaches here when its position has not already landed — so a
-    ///   no-op decision is not redelivered either. The inputs with no position
-    ///   to consume — a deadline firing, and the tell-failure hook — write no
-    ///   position at all, because they have none to commit.
+    ///   no-op decision is not redelivered either. A deadline firing has no
+    ///   position to consume, so nothing it decides records one.
     /// - A position names both the stream it was read from and the declared
     ///   source it settled, so progress on one upstream stream never covers a
     ///   record of another, and progress on one declared source never covers a
     ///   record of another source sharing its stream.
     ///
-    /// None of this makes what the saga *sends* idempotent: what a tell
-    /// delivers, and how often, is stated on
-    /// [`SagaEffect::tell`](crate::SagaEffect::tell).
+    /// None of this makes what follows from a decision idempotent: what a
+    /// delivery host carries, and how often, is stated on
+    /// [`SagaDeliveryProps`](crate::SagaDeliveryProps).
     ///
     /// # A source with no reaction is a compile error
     ///
@@ -405,40 +406,4 @@ pub trait Saga: Send + Sync + 'static {
         input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error>;
-
-    /// Failure entry point invoked when a tell dispatched by this saga has
-    /// exhausted its retry budget.
-    ///
-    /// Without this hook a saga whose upstream fell silent would never learn
-    /// that its tell failed, and its compensation would never run.  The hook is
-    /// therefore called the moment the failure settles, and the
-    /// [`SagaEffect`] it returns is interpreted exactly like the one
-    /// [`Saga::handle`] returns — so a compensating event reaches the saga's
-    /// stream with no further upstream event involved.
-    ///
-    /// `target` is the target aggregate's stream key, and
-    /// [`SagaContext::failed_tell_ids`] carries the single failed tell this
-    /// invocation is about, so a saga with several outstanding tells can tell
-    /// them apart.  A failure announced here is not repeated through
-    /// `failed_tell_ids` on the next [`Saga::handle`] call.
-    ///
-    /// The hook is skipped — and the failure survives only as a dead letter —
-    /// once the saga has ended and is draining its in-flight tells, because a
-    /// terminated saga must produce no further effects.
-    ///
-    /// Delivered at-least-once across restarts: an incarnation that dies before
-    /// the compensation is durable replays the failure, which then reaches
-    /// [`Saga::handle`] through `failed_tell_ids`.  Compensations must
-    /// therefore be idempotent.
-    ///
-    /// The default is a no-op returning [`SagaEffect::None`].  Returning `Err`
-    /// records a dead letter instead of a compensation.
-    async fn on_tell_failed(
-        &mut self,
-        target: AggregateId,
-        ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
-        let _ = (target, ctx);
-        Ok(SagaEffect::None)
-    }
 }

@@ -1,6 +1,6 @@
 //! Monoid laws for the `SagaEffect` ADT.
 //!
-//! The variants are `None / Persist { events, tells, schedules } / End /
+//! The variants are `None / Persist { events, schedules } / End /
 //! Sequence(Vec<...>) / CancelSchedule`.  `None` is the identity, `combine` is
 //! the associative binary operation that constructs a *flat* `Sequence` (no
 //! nesting) and folds the newly adjacent `Persist × Persist` junction into a
@@ -25,7 +25,6 @@ use nitinol_saga::{SagaEffect, TimerName};
 fn persist_shape(events: Vec<u32>) -> Shape<u32> {
     Shape::Persist {
         events,
-        tells: 0,
         schedules: vec![],
     }
 }
@@ -82,22 +81,6 @@ fn combine_none_right_is_identity_for_end() {
     assert!(
         matches!(result, SagaEffect::End),
         "End.combine(None) must return End unchanged"
-    );
-}
-
-#[tokio::test]
-async fn combine_none_right_identity_holds_for_tell_shaped_persist() {
-    let tell = common::make_tell_effect::<u32>().await;
-    let result = tell.combine(SagaEffect::None);
-
-    assert_eq!(
-        shape_of(&result),
-        Shape::Persist {
-            events: vec![],
-            tells: 1,
-            schedules: vec![],
-        },
-        "Persist-with-tells.combine(None) must return the Persist branch unchanged"
     );
 }
 
@@ -253,25 +236,6 @@ fn combine_merges_two_adjacent_persist_leaves_into_one_persist() {
     );
 }
 
-#[tokio::test]
-async fn combine_merges_persist_with_tell_shaped_persist() {
-    let persist = SagaEffect::persist(7u32);
-    let tell = common::make_tell_effect::<u32>().await;
-    let result = persist.combine(tell);
-
-    assert_eq!(
-        shape_of(&result),
-        Shape::Persist {
-            events: vec![7u32],
-            tells: 1,
-            schedules: vec![],
-        },
-        "persist(e).combine(tell(..)) must yield ONE Persist carrying both the \
-         domain event and the tell intent — splitting them across two Persist \
-         branches reopens the at-most-once tell-loss window"
-    );
-}
-
 #[test]
 fn combine_preserves_left_to_right_order() {
     let result = SagaEffect::persist(10u32)
@@ -335,9 +299,9 @@ fn combine_merges_persists_across_a_trailing_none_leaf() {
         Shape::Sequence(vec![persist_shape(vec![1u32, 2])]),
         "None is the identity: it must not sit on the junction and split the two \
          Persist branches into separate append batches — an identity element that \
-         decides whether a tell survives a crash is observable, which the identity \
-         law forbids.  Unlike End and CancelSchedule, None carries no \
-         interpretation of its own"
+         decides whether a schedule fact shares its decision's batch is \
+         observable, which the identity law forbids.  Unlike End and \
+         CancelSchedule, None carries no interpretation of its own"
     );
 }
 

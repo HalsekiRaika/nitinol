@@ -45,17 +45,13 @@ use crate::subscription::Subscription;
 /// which names a store; journalling into one is [`SagaProps::new`] on the store
 /// a second provider supplies. Both are explicit, which is what reaching two
 /// destinations has to be.
-///
-/// [`SagaProps`] remains the way to spawn a saga that needs the settings this
-/// entry point does not take (a dead-letter subscriber, an enqueue policy, or a
-/// crash-restart factory).
 pub trait SagaSystemExt {
     /// Begin a saga spawn journalling onto the store the provider supplies.
     ///
     /// `producer` builds the saga instance from the capabilities the framework
     /// resolved for it, and is called again if the runtime restarts the process,
-    /// so anything the saga captures (e.g. an `AggregateProxy` to tell) must be
-    /// re-acquirable.  A saga that needs no capability is built by
+    /// so anything the saga captures (a reference it reads the world through,
+    /// say) must be re-acquirable.  A saga that needs no capability is built by
     /// `|_| S::default()`.
     ///
     /// The returned builder needs every source its alphabet declares bound

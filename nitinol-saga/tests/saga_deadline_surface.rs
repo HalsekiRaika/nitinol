@@ -90,6 +90,8 @@ impl Codec<Reminder> for UnitCodec {
 }
 
 impl DeadlineMessage for Reminder {
+    const TYPE_NAME: &'static str = "reminder";
+    const CODEC_NAME: &'static str = "unit-codec";
     type Codec = UnitCodec;
 }
 

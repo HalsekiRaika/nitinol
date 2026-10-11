@@ -5,10 +5,17 @@
 //! saga emits a structured tracing record at each point where it writes one, so
 //! that arm-level visibility exists in the place operators already watch.
 //!
+//! Exactly three declarations can appear on a saga's own stream —
+//! `nitinol.saga.schedule`, `nitinol.saga.consumed` and
+//! `nitinol.saga.lifecycle` — and this file covers all three, because the
+//! contract is about the *set* of records the framework writes itself: one of
+//! them reporting and another not would leave an operator with a blind spot
+//! they cannot see the shape of.
+//!
 //! ```gherkin
 //!   Scenario: a framework record written, a record emitted
-//!     Given a saga that fails a handle, fails a tell, fires a timer and
-//!           consumes an upstream input
+//!     Given a saga that registers a deadline, fires it, consumes an upstream
+//!           input and terminates
 //!     When each framework record lands on the saga's own stream
 //!     Then a tracing record names the event type, the arm and the stream
 //!
@@ -27,6 +34,10 @@
 //! the three required fields, so this file does not turn a level or a target
 //! string into a contract the requirement never stated.
 //!
+//! The one exception is the consumed fact, whose context fields *are* the
+//! progress an operator reads: see
+//! [`the_position_a_batch_consumed_is_reported_with_its_own_arm`].
+//!
 //! Emission is tied to the *write*: every assertion below waits on the record
 //! landing in the store first, then reads the capture. A tracing record claiming
 //! a write that never happened would be worse than none.
@@ -37,20 +48,21 @@
 //! would not see it. A process has one global subscriber, so the tests in this
 //! binary share one and tell their records apart by `stream_id` — each test
 //! drives a saga id of its own.
+//!
+//! Run with:
+//! `cargo test -p nitinol-saga --test saga_system_event_tracing`.
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{JsonCodec, CONSUMED_POSITION_MARKER, DEAD_LETTER_MARKER, SCHEDULE_MARKER};
+use common::{JsonCodec, CONSUMED_MARKER, LIFECYCLE_MARKER, SCHEDULE_MARKER};
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -59,15 +71,10 @@ use tracing::span::{Attributes, Id, Record};
 use tracing::{Metadata, Subscriber};
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateTellTarget, Decider, Decision, Event, TellError,
-};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
-use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
-};
-use nitinol_runtime::error::SendError;
+use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
     Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe,
@@ -81,9 +88,10 @@ const EVENT_TYPE: &str = "event_type";
 const ARM: &str = "arm";
 const STREAM_ID: &str = "stream_id";
 
-/// The context a record about a consumed position adds to those three: which
-/// upstream stream was read, and how far.
+/// The context a record about a consumed fact adds to those three: which
+/// upstream stream was read, which declared source of it, and how far.
 const SOURCE: &str = "source";
+const SOURCE_EVENT_TYPE: &str = "source_event_type";
 const UPSTREAM_SEQUENCE: &str = "upstream_sequence";
 
 /// Why the capture buffer's lock cannot be poisoned: it guards a push and a
@@ -231,12 +239,13 @@ impl Capture {
     }
 }
 
-// The paths a framework record is written down as
+// The three paths a framework record is written down as.  Spelled as literals
+// so a rename of a declaration has to be made here too: the string is what an
+// operator's dashboards and an existing journal both hold.
 
-const OUTBOX: &str = "nitinol.saga.outbox";
 const SCHEDULE: &str = "nitinol.saga.schedule";
-const DEAD_LETTER: &str = "nitinol.saga.dead_letter";
-const CONSUMED_POSITION: &str = "nitinol.saga.consumed_position";
+const CONSUMED: &str = "nitinol.saga.consumed";
+const LIFECYCLE: &str = "nitinol.saga.lifecycle";
 
 // Domain fixtures
 
@@ -267,17 +276,6 @@ impl Event for SagaLog {
 enum Observed {
     Ping(Ping),
 }
-
-#[derive(Debug)]
-struct SagaBoom;
-
-impl std::fmt::Display for SagaBoom {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("saga boom")
-    }
-}
-
-impl std::error::Error for SagaBoom {}
 
 async fn append_ping(store: &Arc<dyn EventStore>, stream_key: &str, sequence: u64, tag: &str) {
     let payload = serde_json::to_vec(&Ping {
@@ -336,205 +334,7 @@ async fn wait_for_rows(
     }
 }
 
-// Scenario 1 — a dead letter written, a record naming which failure it was
-
-const HANDLE_FAIL_SAGA_ID: &str = "tracing-handle-saga";
-
-struct HandleFailSaga;
-
-#[async_trait]
-impl Saga for HandleFailSaga {
-    type Subscribe = Observed;
-    type Event = SagaLog;
-    type Error = SagaBoom;
-
-    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
-        Some(SagaId::new(HANDLE_FAIL_SAGA_ID))
-    }
-
-    async fn handle(
-        &mut self,
-        input: Self::Subscribe,
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        let Observed::Ping(_event) = input;
-        Err(SagaBoom)
-    }
-}
-
-/// Given a saga whose `handle` fails, When the dead letter lands on its own
-/// stream, Then a record names the dead-letter event type, the `handle_failed`
-/// arm, and the stream it was written to.
-#[tokio::test]
-async fn a_dead_letter_is_reported_with_its_event_type_arm_and_stream() {
-    let capture = Capture::installed();
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    append_ping(&upstream_store, "tracing-handle-upstream", 1, "boom").await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(HANDLE_FAIL_SAGA_ID);
-
-    let _proxy = SagaProps::<HandleFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), |_| {
-        HandleFailSaga
-    })
-    .subscribed_to::<Ping>(Subscription::stream(
-        &upstream_store,
-        "tracing-handle-upstream",
-    ))
-    .spawn(system.process_system())
-    .await;
-
-    // The record is about a write, so the write is what the test waits on first.
-    wait_for_rows(&saga_store, &saga_id, DEAD_LETTER_MARKER, 1).await;
-
-    capture
-        .wait_for(HANDLE_FAIL_SAGA_ID, DEAD_LETTER, "handle_failed")
-        .await;
-}
-
-// Scenario 2 — a tell that exhausts its budget, reported at both records it writes
-
-const TELL_FAIL_SAGA_ID: &str = "tracing-tell-saga";
-const TELL_FAIL_TARGET_ID: &str = "tracing-inventory-target";
-
-struct FailingTellTarget<A: Aggregate> {
-    target_id: AggregateId,
-    _phantom: PhantomData<fn() -> A>,
-}
-
-impl<A: Aggregate> Clone for FailingTellTarget<A> {
-    fn clone(&self) -> Self {
-        Self {
-            target_id: self.target_id.clone(),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<A: Aggregate> AggregateTellTarget<A> for FailingTellTarget<A> {
-    fn tell<'a, C>(&'a self, _cmd: C) -> BoxFuture<'a, Result<(), TellError>>
-    where
-        A: Decider<C>,
-        C: Send + Sync + 'static,
-    {
-        Box::pin(async move { Err(TellError::Send(SendError)) })
-    }
-
-    fn aggregate_id(&self) -> &AggregateId {
-        &self.target_id
-    }
-}
-
-#[derive(Default)]
-struct Inventory;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct InventoryReserved;
-
-impl Event for InventoryReserved {
-    const EVENT_TYPE: EventType = EventType::new(
-        Family::new("tracing_it"),
-        TypeName::new("InventoryReserved"),
-    );
-    type Codec = JsonCodec;
-}
-
-impl Aggregate for Inventory {
-    type Event = InventoryReserved;
-    fn apply(&mut self, _event: InventoryReserved) {}
-}
-
-#[derive(Clone, Copy, Serialize, Deserialize)]
-struct Reserve;
-
-impl Decider<Reserve> for Inventory {
-    type Output = ();
-    type Rejection = std::convert::Infallible;
-
-    fn decide(&self, _cmd: Reserve) -> Decision<InventoryReserved, (), Self::Rejection> {
-        Decision::persist(vec![InventoryReserved]).output(())
-    }
-}
-
-struct TellFailSaga {
-    target: FailingTellTarget<Inventory>,
-}
-
-#[async_trait]
-impl Saga for TellFailSaga {
-    type Subscribe = Observed;
-    type Event = SagaLog;
-    type Error = std::convert::Infallible;
-
-    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
-        Some(SagaId::new(TELL_FAIL_SAGA_ID))
-    }
-
-    async fn handle(
-        &mut self,
-        input: Self::Subscribe,
-        _ctx: &mut SagaContext,
-    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
-        let Observed::Ping(_event) = input;
-        Ok(SagaEffect::tell(self.target.clone(), Reserve))
-    }
-}
-
-/// Given a tell that fails every attempt, When the outbox request, the terminal
-/// outbox marker and the dead letter are written, Then each is reported with the
-/// arm it recorded.
-///
-/// The three arms are what the column no longer distinguishes: `tell_requested`
-/// and `tell_failed` share the outbox event type, and the dead letter's
-/// `tell_failed` shares its event type with every other failure kind.
-#[tokio::test]
-async fn each_marker_of_a_failing_tell_is_reported_with_its_own_arm() {
-    let capture = Capture::installed();
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    append_ping(&upstream_store, "tracing-tell-upstream", 1, "order").await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(TELL_FAIL_SAGA_ID);
-
-    let _proxy = SagaProps::<TellFailSaga>::new(saga_id.clone(), Arc::clone(&saga_store), |_| {
-        TellFailSaga {
-            target: FailingTellTarget {
-                target_id: AggregateId::new(TELL_FAIL_TARGET_ID),
-                _phantom: PhantomData,
-            },
-        }
-    })
-    .subscribed_to::<Ping>(Subscription::stream(
-        &upstream_store,
-        "tracing-tell-upstream",
-    ))
-    .spawn(system.process_system())
-    .await;
-
-    wait_for_rows(&saga_store, &saga_id, DEAD_LETTER_MARKER, 1).await;
-
-    capture
-        .wait_for(TELL_FAIL_SAGA_ID, OUTBOX, "tell_requested")
-        .await;
-    capture
-        .wait_for(TELL_FAIL_SAGA_ID, OUTBOX, "tell_failed")
-        .await;
-    capture
-        .wait_for(TELL_FAIL_SAGA_ID, DEAD_LETTER, "tell_failed")
-        .await;
-}
-
-// Scenario 3 — the scheduler's own records
+// Scenario 1 — the scheduler's own records
 
 const SCHEDULE_SAGA_ID: &str = "tracing-schedule-saga";
 
@@ -559,6 +359,8 @@ impl Codec<Reminder> for ReminderCodec {
 }
 
 impl DeadlineMessage for Reminder {
+    const TYPE_NAME: &'static str = "reminder";
+    const CODEC_NAME: &'static str = "reminder-codec";
     type Codec = ReminderCodec;
 }
 
@@ -613,6 +415,10 @@ impl Saga for ScheduleSaga {
 /// Given a saga that sets a deadline, When the registration and the firing are
 /// each written to its stream, Then both are reported under the schedule event
 /// type with the arm each recorded.
+///
+/// Two arms share one declaration here, which is the whole reason the arm is
+/// reported at all: `nitinol.saga.schedule` in the column cannot tell "a timer
+/// was armed" from "a timer elapsed".
 #[tokio::test]
 async fn a_registered_and_a_fired_timer_are_reported_with_distinct_arms() {
     let capture = Capture::installed();
@@ -653,7 +459,7 @@ async fn a_registered_and_a_fired_timer_are_reported_with_distinct_arms() {
     capture.wait_for(SCHEDULE_SAGA_ID, SCHEDULE, "fired").await;
 }
 
-// Scenario 4 — the position a batch consumed is reported like any other
+// Scenario 2 — the position a batch consumed is reported like any other
 // framework record
 
 const POSITION_SAGA_ID: &str = "tracing-position-saga";
@@ -687,9 +493,16 @@ impl Saga for PositionSaga {
 /// Given a saga whose decision batch also carries the position of the input it
 /// was decided from, When that batch lands, Then a record names the position's
 /// event type, its arm and the stream — the framework reports every record it
-/// writes itself, and this is one of them — and names the upstream stream and
-/// sequence the write recorded, which is the progress the arm alone leaves
-/// unsaid.
+/// writes itself, and this is one of them — and names the upstream stream, the
+/// declared source and the sequence the write recorded, which is the progress
+/// the arm alone leaves unsaid.
+///
+/// The consumed fact is the one framework record whose context fields are part
+/// of the contract: `consumed` holds for every position ever written, so an
+/// operator asking how far a saga has got reads nothing from the arm. The
+/// declared source is named alongside the stream key because two declared
+/// sources can share one key, and a report that named only the key would not
+/// say which of them the position settled.
 #[tokio::test]
 async fn the_position_a_batch_consumed_is_reported_with_its_own_arm() {
     let capture = Capture::installed();
@@ -720,30 +533,104 @@ async fn the_position_a_batch_consumed_is_reported_with_its_own_arm() {
     // The row has to be on the stream before the record about it means
     // anything: a record claiming a write that never happened would be worse
     // than none.
-    wait_for_rows(&saga_store, &saga_id, CONSUMED_POSITION_MARKER, 1).await;
+    wait_for_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
 
     capture
-        .wait_for(POSITION_SAGA_ID, CONSUMED_POSITION, "consumed")
+        .wait_for(POSITION_SAGA_ID, CONSUMED, "consumed")
         .await;
 
-    let reported = capture.records_of(POSITION_SAGA_ID, CONSUMED_POSITION, "consumed");
-    let progress: Vec<(Option<&String>, Option<&String>)> = reported
+    let reported = capture.records_of(POSITION_SAGA_ID, CONSUMED, "consumed");
+    let progress: Vec<(Option<&String>, Option<&String>, Option<&String>)> = reported
         .iter()
-        .map(|fields| (fields.get(SOURCE), fields.get(UPSTREAM_SEQUENCE)))
+        .map(|fields| {
+            (
+                fields.get(SOURCE),
+                fields.get(SOURCE_EVENT_TYPE),
+                fields.get(UPSTREAM_SEQUENCE),
+            )
+        })
         .collect();
     assert_eq!(
         progress,
         vec![(
             Some(&POSITION_UPSTREAM_KEY.to_owned()),
+            Some(&Ping::EVENT_TYPE.to_string()),
             Some(&"1".to_owned())
         )],
         "the arm says a position landed but not which input it closed out; an \
-         operator reading how far the saga has consumed each upstream stream \
-         needs the source and the sequence named too; the capture held {reported:?}"
+         operator reading how far the saga has consumed each declared source of \
+         each upstream stream needs the source, its event type and the sequence \
+         named too; the capture held {reported:?}"
     );
 }
 
-// Scenario 5 — a user's own event is not reported
+// Scenario 3 — the saga's own termination
+
+const LIFECYCLE_SAGA_ID: &str = "tracing-lifecycle-saga";
+
+struct EndingSaga;
+
+#[async_trait]
+impl Saga for EndingSaga {
+    type Subscribe = Observed;
+    type Event = SagaLog;
+    type Error = std::convert::Infallible;
+
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
+        Some(SagaId::new(LIFECYCLE_SAGA_ID))
+    }
+
+    async fn handle(
+        &mut self,
+        input: Self::Subscribe,
+        _ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<SagaLog>, Self::Error> {
+        let Observed::Ping(event) = input;
+        Ok(SagaEffect::persist(SagaLog { note: event.tag }).then_end())
+    }
+}
+
+/// Given a saga that terminates, When the `Ended` fact lands on its own stream,
+/// Then a record names the lifecycle event type, the `ended` arm and the stream.
+///
+/// The termination is the last thing a saga ever writes, so it is also the last
+/// chance to say so: nothing afterwards will report on this instance again, and
+/// an unreported `Ended` leaves an operator watching a stream that has simply
+/// gone quiet with no way to tell that from a stall.
+#[tokio::test]
+async fn a_terminated_saga_reports_the_ended_lifecycle_fact() {
+    let capture = Capture::installed();
+    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+
+    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    append_ping(&upstream_store, "tracing-lifecycle-upstream", 1, "last").await;
+
+    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_id = SagaId::new(LIFECYCLE_SAGA_ID);
+
+    let _proxy =
+        SagaProps::<EndingSaga>::new(saga_id.clone(), Arc::clone(&saga_store), |_components| {
+            EndingSaga
+        })
+        .subscribed_to::<Ping>(Subscription::stream(
+            &upstream_store,
+            "tracing-lifecycle-upstream",
+        ))
+        .spawn(system.process_system())
+        .await;
+
+    // The record is about a write, so the write is what the test waits on first.
+    wait_for_rows(&saga_store, &saga_id, LIFECYCLE_MARKER, 1).await;
+
+    capture
+        .wait_for(LIFECYCLE_SAGA_ID, LIFECYCLE, "ended")
+        .await;
+}
+
+// Scenario 4 — a user's own event is not reported
 
 const DOMAIN_ONLY_SAGA_ID: &str = "tracing-domain-saga";
 

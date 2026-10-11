@@ -121,8 +121,9 @@ fn aggregate_id_returns_the_implementors_typed_id() {
     );
 }
 
-/// contract-wiring: `MockAggregateProxy::aggregate_id` is non-empty
-/// so it is safe to use in TellIntent-based tests.
+/// contract-wiring: `MockAggregateProxy::aggregate_id` is non-empty, so a test
+/// that stands it in for a real proxy can still name whom a command was
+/// addressed to.
 #[test]
 fn mock_aggregate_proxy_aggregate_id_is_non_empty() {
     let proxy: MockAggregateProxy<Target> = MockAggregateProxy::new();
@@ -130,6 +131,8 @@ fn mock_aggregate_proxy_aggregate_id_is_non_empty() {
         <MockAggregateProxy<Target> as AggregateTellTarget<Target>>::aggregate_id(&proxy);
     assert!(
         !id.as_str().is_empty(),
-        "MockAggregateProxy must return a non-empty aggregate_id for safe TellIntent use"
+        "MockAggregateProxy must return a non-empty aggregate_id, so a caller \
+         that names its target reads the stand-in the same way it reads a real \
+         proxy"
     );
 }

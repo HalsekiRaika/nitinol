@@ -188,9 +188,10 @@ where
             Some(value) => {
                 // Use ask() so the cursor only advances when the subscriber's
                 // handler completes successfully.  When the handler returns Err
-                // (e.g. Saga DLQ append failure), ask() propagates that error
-                // and the cursor stays at the same position — the upstream
-                // message is NOT treated as processed (state consistency).
+                // (e.g. a saga whose own append the store refused), ask()
+                // propagates that error and the cursor stays at the same
+                // position — the upstream message is NOT treated as processed
+                // (state consistency).
                 match proxy.ask(value).await {
                     Ok(_) => cursor.advance(observed),
                     Err(e) => {

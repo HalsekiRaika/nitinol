@@ -1,22 +1,26 @@
 //! A saga that has durably terminated must not be revived.
 //!
-//! Termination is recorded by a durable `Ended` outbox marker in the saga's
+//! Termination is recorded by a durable `Ended` lifecycle fact in the saga's
 //! own event stream (persisted when `SagaEffect::End` is interpreted).  On a
 //! subsequent spawn, `on_start` replays the stream, detects the `Ended`
-//! marker, and refuses to wire up the upstream subscription — so `Saga::handle`
+//! fact, and refuses to wire up the upstream subscription — so `Saga::handle`
 //! is never invoked again, no matter how many routed upstream events arrive.
 //!
 //! The three tests below pin the contract from both directions:
-//! - baseline: a saga with *no* `Ended` marker DOES handle a routed event
+//! - baseline: a saga with *no* `Ended` fact DOES handle a routed event
 //!   (proves the harness actually delivers events);
-//! - skip: a saga whose stream carries a seeded `Ended` marker does NOT handle
+//! - skip: a saga whose stream carries a seeded `Ended` fact does NOT handle
 //!   the routed event;
-//! - end-to-end: a saga that reaches `End` (persisting the marker itself) is
+//! - end-to-end: a saga that reaches `End` (persisting the fact itself) is
 //!   skipped when a fresh process is spawned over the same store.
+//!
+//! Which identity the fact is written down under — `nitinol.saga.lifecycle`
+//! rather than an envelope shared with a transport mechanism — is
+//! `saga_lifecycle_ended_declaration.rs`; here it is only the signal.
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{encode_outbox_ended, JsonCodec, OUTBOX_MARKER};
+use common::{encode_lifecycle_ended, JsonCodec, LIFECYCLE_MARKER};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -107,8 +111,8 @@ impl Saga for RecordingSaga {
 }
 
 /// Persists one event and immediately terminates via `End` on the first
-/// routed upstream event.  Used to drive the durable `Ended` marker for the
-/// end-to-end restart test.
+/// routed upstream event.  Used to drive the durable `Ended` lifecycle fact for
+/// the end-to-end restart test.
 struct EndOnFirstSaga {
     handle_count: Arc<AtomicUsize>,
 }
@@ -161,21 +165,21 @@ async fn append_order_placed(
         .expect("append OrderPlaced must succeed");
 }
 
-/// Seed a raw durable `Ended` marker at `sequence` on the saga's own stream,
-/// simulating a saga that terminated in a previous incarnation.
-async fn seed_ended_marker(store: &Arc<dyn EventStore>, saga_id: &SagaId, sequence: u64) {
+/// Seed a raw durable `Ended` lifecycle fact at `sequence` on the saga's own
+/// stream, simulating a saga that terminated in a previous incarnation.
+async fn seed_ended_fact(store: &Arc<dyn EventStore>, saga_id: &SagaId, sequence: u64) {
     store
         .append(
             saga_id.as_str(),
             vec![AppendingEvent {
                 sequence,
-                event_type: OUTBOX_MARKER,
-                payload: encode_outbox_ended(),
+                event_type: LIFECYCLE_MARKER,
+                payload: encode_lifecycle_ended(),
                 occurred_at: jiff::Timestamp::now(),
             }],
         )
         .await
-        .expect("seed Ended marker must succeed");
+        .expect("seed Ended fact must succeed");
 }
 
 async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
@@ -251,7 +255,7 @@ async fn non_terminated_saga_handles_routed_event() {
     );
 }
 
-/// When the saga stream already carries a durable `Ended` marker,
+/// When the saga stream already carries a durable `Ended` lifecycle fact,
 /// `on_start` must refuse to spawn the upstream subscription, so `handle` is
 /// never called for a routed upstream event.
 #[tokio::test]
@@ -269,7 +273,7 @@ async fn terminated_saga_skips_subscription_and_never_handles() {
     let saga_id = SagaId::new(SAGA_ID);
 
     // Simulate a saga that ended in a previous incarnation.
-    seed_ended_marker(&saga_store, &saga_id, 1).await;
+    seed_ended_fact(&saga_store, &saga_id, 1).await;
 
     let handle_count = Arc::new(AtomicUsize::new(0));
     let handled = Arc::new(Notify::new());
@@ -291,13 +295,14 @@ async fn terminated_saga_skips_subscription_and_never_handles() {
     assert_eq!(
         handle_count.load(Ordering::SeqCst),
         0,
-        "a saga whose stream carries a durable Ended marker must not wire up its \
-         upstream subscription; Saga::handle must never be invoked"
+        "a saga whose stream carries a durable Ended lifecycle fact must not wire \
+         up its upstream subscription; Saga::handle must never be invoked"
     );
 }
 
-/// End-to-end: a saga that reaches `End` persists the durable `Ended` marker
-/// itself; a freshly spawned process over the same store must then be skipped.
+/// End-to-end: a saga that reaches `End` persists the durable `Ended` lifecycle
+/// fact itself; a freshly spawned process over the same store must then be
+/// skipped.
 #[tokio::test]
 async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     let ps = ProcessSystem::new().await;
@@ -326,7 +331,7 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     .spawn(system.process_system())
     .await;
 
-    // Wait until the End interpretation has durably persisted the Ended marker.
+    // Wait until the End interpretation has durably persisted the Ended fact.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let events = load_saga_events(&saga_store, &saga_id).await;
@@ -334,8 +339,8 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
             .iter()
             .filter(|e| {
                 matches!(
-                    common::outbox_kind_of(e),
-                    Some(common::OutboxKind::Ended(_))
+                    common::lifecycle_kind_of(e),
+                    Some(common::LifecycleKind::Ended(_))
                 )
             })
             .count();
@@ -344,7 +349,7 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "timed out waiting for the first saga to persist its Ended marker; events: {:?}",
+            "timed out waiting for the first saga to persist its Ended fact; events: {:?}",
             events
                 .iter()
                 .map(|e| e.event_type.to_string())

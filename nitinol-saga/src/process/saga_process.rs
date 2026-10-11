@@ -1,30 +1,22 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use nitinol_eventsource::{DurableSubscription, SequenceCursor, SystemEvent};
-use nitinol_persistence::error::AppendError;
+use nitinol_eventsource::{DurableSubscription, SequenceCursor};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{AggregateId, LoadedEvent};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::components::{deadline, PendingDeadlineCell};
-use crate::consumed::{ConsumedPositionEvent, ConsumedPositions, PositionSource};
+use crate::consumed::{self, ConsumedPositionEvent, ConsumedPositions, PositionSource};
 use crate::context::SagaContext;
-use crate::dead_letter::{
-    self, DeadLetterDispositionEvent, DlqChildSpawn, EnqueueOutcome, EnqueuePolicy,
-    RecordDisposition, SagaFailure, SourceContext,
-};
-use crate::effect::TellIntent;
 use crate::error::SagaUpstreamHandlerError;
 use crate::id::SagaId;
 use crate::journal::ActiveSchedule;
-use crate::observability::report_system_event;
-use crate::outbox::{OutboxAppender, RetryPolicy, TellOutcome};
 use crate::process::instance::ScheduleDelivery;
 use crate::process::interpreter::{self, InterpretOutcome, InterpreterCtx};
 use crate::process::replay;
+use crate::retry_policy::RetryPolicy;
 use crate::saga::Saga;
 use crate::scheduler::{self, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName};
@@ -51,9 +43,6 @@ pub(crate) struct UpstreamMessage<A> {
     /// cover the other's records.
     pub(crate) source: PositionSource,
     pub(crate) input: A,
-    /// Raw bytes as loaded from the upstream EventStore, preserved through
-    /// the transform so the dead letter carries the actual payload.
-    pub(crate) raw_payload: Bytes,
 }
 
 /// The subscription one declared source is observed through.
@@ -101,9 +90,6 @@ where
             if loaded.event_type != event_type {
                 return None;
             }
-            // Capture the raw payload before decoding so the draining branch can
-            // preserve it in `SagaFailure::EndedSagaReceivedMessage`.
-            let raw_payload = loaded.payload.clone();
             let aggregate_id = AggregateId::new(loaded.stream_key);
             let sequence = loaded.sequence;
             match decode(&loaded.payload) {
@@ -112,7 +98,6 @@ where
                     sequence,
                     source: of_source.clone(),
                     input,
-                    raw_payload,
                 }),
                 Err(e) => {
                     // Reported and skipped, which is the whole of the handling:
@@ -120,7 +105,7 @@ where
                     // record. A codec that refused these bytes once refuses them
                     // every time, and with no typed input there is no instance
                     // to attribute the failure to — so there is nothing a
-                    // retry, a dead letter or a held cursor could recover.
+                    // retry or a held cursor could recover.
                     // Nothing durable is written, so a restart re-reads the
                     // record and repeats this report.
                     tracing::error!(
@@ -139,50 +124,16 @@ where
     }
 }
 
+/// Whether this saga instance can still reach [`Saga::handle`].
+///
+/// `Ended` is set when `SagaEffect::End`'s durable fact lands, and when replay
+/// finds that fact from an earlier incarnation.  It is final: nothing moves an
+/// instance back to `Running`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Lifecycle {
     Running,
-    Draining,
+    Ended,
 }
-
-#[cfg_attr(test, derive(Clone))]
-pub(crate) enum TellState {
-    Pending(TellIntent),
-    AppendFailed(TellIntent),
-    Failed,
-}
-
-impl TellState {
-    /// The intent this tell can still be re-dispatched from, if any.
-    ///
-    /// A tell that is pending and one whose terminal marker failed to append
-    /// both still hold what they were told to send; a failed one has given it
-    /// up, so there is nothing to re-dispatch.
-    pub(crate) fn intent(&self) -> Option<&TellIntent> {
-        match self {
-            TellState::Pending(intent) | TellState::AppendFailed(intent) => Some(intent),
-            TellState::Failed => None,
-        }
-    }
-
-    /// Is this tell still out, with its outcome unknown?
-    ///
-    /// Only `Pending` is: `AppendFailed` and `Failed` have both reached their
-    /// outcome, and what is left of them is a marker to write rather than a
-    /// delivery to wait for.
-    pub(crate) fn is_in_flight(&self) -> bool {
-        matches!(self, TellState::Pending(_))
-    }
-}
-
-pub(crate) fn in_flight_count(tell_states: &HashMap<u64, TellState>) -> usize {
-    tell_states
-        .values()
-        .filter(|state| state.is_in_flight())
-        .count()
-}
-
-pub(crate) type CrashRestartFactory = Arc<dyn Fn(&[u8]) -> Option<TellIntent> + Send + Sync>;
 
 pub struct SagaProcess<S: Saga> {
     pub(crate) state: S,
@@ -193,14 +144,12 @@ pub struct SagaProcess<S: Saga> {
     ///
     /// Restored by replay from the saga's own stream and advanced by every
     /// batch that lands, so a record already consumed — whether by a
-    /// [`Saga::handle`] decision or by a dead-letter append that settled it
-    /// without one — is dropped before it reaches [`Saga::handle`] again,
-    /// whether the position was folded out of the journal or written by this
-    /// incarnation.
+    /// [`Saga::handle`] decision or by the position-only append that settles
+    /// an input `handle` refused — is dropped before it reaches
+    /// [`Saga::handle`] again, whether the position was folded out of the
+    /// journal or written by this incarnation.
     pub(crate) consumed: ConsumedPositions,
     pub(crate) retry_policy: RetryPolicy,
-    pub(crate) tell_states: HashMap<u64, TellState>,
-    pub(crate) crash_restart_factory: Option<CrashRestartFactory>,
     pub(crate) lifecycle: Lifecycle,
     /// One subscription per declared source, each cascade-stopped with this
     /// process.
@@ -221,13 +170,6 @@ pub struct SagaProcess<S: Saga> {
     /// Where a deadline's firing is addressed, and so whether this instance's
     /// deadlines survive it stopping.
     pub(crate) delivery: ScheduleDelivery<S>,
-    pub(crate) enqueue_policy: Arc<dyn EnqueuePolicy>,
-    /// DLQ child poller spawner.
-    ///
-    /// When `with_dead_letter_subscriber` is configured, `on_start` spawns the
-    /// DLQ direct-poller as a child so the saga stop's cascade stops the poller
-    /// automatically.  `None` when no subscriber was registered.
-    pub(crate) dlq_child_spawn: Option<Arc<dyn DlqChildSpawn<Self>>>,
 }
 
 /// A timer firing delivered to the saga: the scheduled message payload keyed by
@@ -241,6 +183,12 @@ pub struct SagaProcess<S: Saga> {
 #[derive(Clone)]
 pub(crate) struct FireScheduled {
     pub(crate) name: TimerName,
+    /// The identity the schedule fact persisted `payload` under — checked
+    /// against what the firing alphabet currently declares before the bytes
+    /// are decoded, so a stale or disagreeing declaration is refused rather
+    /// than guessed at.
+    pub(crate) message_type: String,
+    pub(crate) message_codec: String,
     pub(crate) payload: Bytes,
 }
 
@@ -315,69 +263,16 @@ impl<S: Saga> SagaProcess<S> {
                 // remaining > 0 here; cast to u64 is safe.
                 Duration::from_millis(remaining as u64)
             };
-            let dispatch =
-                self.delivery
-                    .dispatch(&self.saga_id, ctx, sched.name.clone(), sched.payload);
+            let dispatch = self.delivery.dispatch(
+                &self.saga_id,
+                ctx,
+                sched.name.clone(),
+                sched.message_type,
+                sched.message_codec,
+                sched.payload,
+            );
             timers.start_single(sched.name, after, dispatch).await;
         }
-    }
-
-    fn drain_failed_tell_ids(&mut self) -> Vec<u64> {
-        let failed: Vec<u64> = self
-            .tell_states
-            .iter()
-            .filter(|(_, state)| matches!(state, TellState::Failed))
-            .map(|(tell_id, _)| *tell_id)
-            .collect();
-        for tell_id in &failed {
-            self.tell_states.remove(tell_id);
-        }
-        failed
-    }
-
-    fn ready_to_stop(&self) -> bool {
-        matches!(self.lifecycle, Lifecycle::Draining) && in_flight_count(&self.tell_states) == 0
-    }
-
-    /// Route a saga failure to the DLQ (policy-gated append on the saga's own
-    /// stream) — plus the consumed position, when `input_position` names the
-    /// upstream record this failure settles.  The single per-process entry
-    /// point so every failure site funnels through one named operation.
-    ///
-    /// `input_position` is `Some` exactly where this call is the `Ok` outcome
-    /// a `DirectPoller` will advance its cursor past: the record must become
-    /// durably consumed in the same call, or a restart before the next
-    /// incarnation's own progress covers it would redeliver it into the same
-    /// failure forever.  Every other caller — tell-outcome reports, timer
-    /// firings, replay re-dispatch — has no upstream record to settle and
-    /// passes `None`.
-    ///
-    /// Returns `true` when the dead letter (and position, if any) was written
-    /// — or ignored by policy, which still durably records a bare position
-    /// when one was given — and `false` when the store append failed.
-    /// Callers that receive `false` **must** stop the process so the upstream
-    /// message is not treated as processed — the persisted DLQ must stay
-    /// authoritative.
-    async fn record_dead_letter(
-        &mut self,
-        failure: SagaFailure,
-        source: SourceContext,
-        input_position: Option<ConsumedPositionEvent>,
-    ) -> bool {
-        !matches!(
-            dead_letter::enqueue_dead_letter(
-                &self.store,
-                &self.saga_id,
-                &mut self.sequence,
-                self.enqueue_policy.as_ref(),
-                failure,
-                source,
-                input_position.as_ref(),
-                &mut self.consumed,
-            )
-            .await,
-            EnqueueOutcome::AppendFailed
-        )
     }
 
     /// Lend the interpreter everything it mutates on this process, so every
@@ -398,186 +293,31 @@ impl<S: Saga> SagaProcess<S> {
             store: Arc::clone(&self.store),
             retry_policy: self.retry_policy.clone(),
             process_ctx,
-            tell_states: &mut self.tell_states,
             lifecycle: &mut self.lifecycle,
             scheduler: self.scheduler.clone(),
             pending_deadlines: Arc::clone(&self.pending_deadlines),
             delivery: &self.delivery,
-            enqueue_policy: Arc::clone(&self.enqueue_policy),
             consumed: &mut self.consumed,
             input_position,
-        }
-    }
-
-    /// Account for a tell whose terminal `tell_failed` marker has just been
-    /// persisted: record it durably, then either notify the saga or — once the
-    /// saga has ended — drop the report.
-    ///
-    /// The failure leaves this method through exactly one of two channels, so
-    /// it is never announced twice: the entry is removed from `tell_states`
-    /// when the hook is notified, and kept there for
-    /// [`SagaContext::failed_tell_ids`] otherwise.
-    async fn settle_failed_tell(&mut self, tell_id: u64, ctx: &mut ProcessContext<Self>) {
-        // The target and crash-restart payload live only in the in-memory
-        // intent, so they are captured before the entry is disposed of.
-        let captured = self
-            .tell_states
-            .get(&tell_id)
-            .and_then(|state| match state {
-                TellState::Pending(intent) | TellState::AppendFailed(intent) => Some((
-                    intent.target_id.clone(),
-                    intent.crash_restart_payload.clone().unwrap_or_default(),
-                )),
-                TellState::Failed => None,
-            });
-        let Some((target, message)) = captured else {
-            tracing::warn!(
-                tell_id,
-                "saga: TellFailed received for unknown or already-failed tell; \
-                 DLQ entry skipped (target not available)"
-            );
-            self.tell_states.insert(tell_id, TellState::Failed);
-            return;
-        };
-
-        // The terminal `tell_failed` outbox marker is already persisted (staged
-        // retry exhausted), so this dead letter lands after it — and before any
-        // compensation the saga runs in response.
-        if !self
-            .record_dead_letter(
-                SagaFailure::TellFailed {
-                    target: target.clone(),
-                    message,
-                },
-                SourceContext::without_upstream(),
-                None,
-            )
-            .await
-        {
-            // DLQ append failed — the failure is not durably recorded, so it
-            // must not drive a compensation.  Stop instead; a supervised
-            // restart replays it from the terminal outbox marker.
-            self.tell_states.insert(tell_id, TellState::Failed);
-            tracing::error!(
-                saga_id = self.saga_id.as_str(),
-                tell_id,
-                "saga DLQ append failed for TellFailed; stopping for supervised restart"
-            );
-            let _ = ctx.stop_self().await;
-            return;
-        }
-
-        if matches!(self.lifecycle, Lifecycle::Draining) {
-            // A saga that has already written its terminal marker must produce
-            // no further effects, so the report is dropped; the dead letter
-            // above is what keeps the failure observable.
-            self.tell_states.insert(tell_id, TellState::Failed);
-            tracing::debug!(
-                tell_id,
-                "saga ended while this tell was in flight; its failure is dropped \
-                 instead of reaching the tell-failure hook"
-            );
-            return;
-        }
-
-        // Dropping the entry before the hook runs both keeps the failure out of
-        // the drain path and lets an `End` returned by the hook stop the saga
-        // at once rather than leaving it waiting on this settled tell.
-        self.tell_states.remove(&tell_id);
-        self.notify_tell_failed(target, tell_id, ctx).await;
-    }
-
-    /// Hand a settled tell failure to the saga and interpret whatever
-    /// compensation it returns, so a saga whose upstream has gone quiet still
-    /// reacts to the failure.
-    ///
-    /// `tell_id` reaches the saga through the context rather than the `target`
-    /// argument because several tells may share one target aggregate.
-    async fn notify_tell_failed(
-        &mut self,
-        target: AggregateId,
-        tell_id: u64,
-        ctx: &mut ProcessContext<Self>,
-    ) {
-        let current_sequence = self.sequence;
-        let mut saga_ctx = SagaContext::new(
-            self.saga_id.clone(),
-            current_sequence,
-            AggregateId::new(""),
-            0,
-            jiff::Timestamp::now(),
-            vec![tell_id],
-        );
-        let effect = match self.state.on_tell_failed(target, &mut saga_ctx).await {
-            Ok(effect) => effect,
-            Err(e) => {
-                tracing::warn!(error = %e, tell_id, "saga on_tell_failed failed");
-                if !self
-                    .record_dead_letter(
-                        SagaFailure::TellFailedHookFailed {
-                            error: e.to_string(),
-                        },
-                        SourceContext::without_upstream(),
-                        None,
-                    )
-                    .await
-                {
-                    // DLQ append failed — stop so the rejected compensation is
-                    // not treated as accounted for; a supervised restart
-                    // replays the failure from the terminal outbox marker.
-                    tracing::error!(
-                        saga_id = self.saga_id.as_str(),
-                        tell_id,
-                        "saga DLQ append failed for TellFailedHookFailed; \
-                         stopping for supervised restart"
-                    );
-                    let _ = ctx.stop_self().await;
-                }
-                return;
-            }
-        };
-
-        // A tell failure is not an upstream record, so a compensation persisted
-        // for it consumes nothing.
-        let mut ictx = self.interpreter_ctx(ctx, None);
-        // The outcome report does not arrive through the DirectPoller, so there
-        // is no upstream cursor to withhold; stop instead when the compensation
-        // could neither be persisted nor dead-lettered.
-        if matches!(
-            interpreter::run_saga_effect(effect, &mut ictx).await,
-            InterpretOutcome::DlqFailed
-        ) {
-            tracing::error!(
-                saga_id = self.saga_id.as_str(),
-                tell_id,
-                "saga DLQ append failed for PersistFailed (tell-failure hook); \
-                 stopping for supervised restart"
-            );
-            let _ = ctx.stop_self().await;
         }
     }
 }
 
 impl<S: Saga> Process for SagaProcess<S> {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
-        let factory_ref = self.crash_restart_factory.as_ref().map(|f| f.as_ref());
-        let outcome = match replay::replay_and_redispatch(
+        let outcome = match replay::replay(
             &self.saga_id,
             &mut self.state,
             &self.store,
             &mut self.sequence,
-            &mut self.tell_states,
-            factory_ref,
-            self.retry_policy.clone(),
-            self.enqueue_policy.as_ref(),
-            ctx,
         )
         .await
         {
             Ok(o) => o,
-            // store.load() failed — the terminated state cannot be determined.
-            // Fail safe: stop the process without subscribing so a possibly-
-            // terminated saga is not revived.
+            // The stream could not be read to its end — the store refused the
+            // load, or a row belongs to no declaration this version owns.
+            // Fail safe: stop the process without subscribing, so a saga whose
+            // own history cannot be read never acts on it.
             Err(()) => {
                 tracing::error!(
                     saga_id = self.saga_id.as_str(),
@@ -589,36 +329,34 @@ impl<S: Saga> Process for SagaProcess<S> {
                 return;
             }
         };
-        for tell_id in outcome.failed {
-            self.tell_states.insert(tell_id, TellState::Failed);
-        }
         // What earlier incarnations consumed is theirs to hand over: it decides
         // both which redelivered records this one drops and where its
         // subscription resumes.
         self.consumed = outcome.consumed;
 
-        // A saga whose stream carries a durable `Ended` marker terminated in a
-        // previous incarnation, so this one starts in the same drained
+        // A saga whose stream carries a durable `Ended` fact terminated in a
+        // previous incarnation, so this one starts in the same terminal
         // lifecycle an in-process `End` leaves behind: `Saga::handle` can never
-        // run again, and anything still routed here becomes a dead letter.
+        // run again, and anything still routed here is dropped.
         if outcome.ended {
-            self.lifecycle = Lifecycle::Draining;
+            self.lifecycle = Lifecycle::Ended;
             tracing::info!(
                 saga_id = self.saga_id.as_str(),
-                "saga already terminated (Ended marker present); skipping subscription"
+                "saga already terminated (Ended fact present); skipping subscription"
             );
             // Owning the subscription and declining to wire it means nothing
             // can reach this process again, so the inert incarnation releases
             // its resources by stopping.  Under a manager the shared
-            // subscription keeps delivering here and each arrival must be
-            // recorded on this saga's own stream, so the instance instead stays
-            // resident until the manager passivates it — and its dead letters
-            // still need the poller spawned below to reach the subscriber.
+            // subscription keeps delivering here, and the manager reads this
+            // instance's answer to decide whether that source's cursor may
+            // advance — so the instance stays resident to accept and drop each
+            // arrival until the manager passivates it.  Stopping instead would
+            // make every such arrival unanswerable and hold the shared cursor
+            // behind an instance that will never act again.
             if self.owns_its_subscriptions() {
                 if let Err(e) = ctx.stop_self().await {
                     tracing::warn!(error = %e, "terminated saga stop_self failed");
                 }
-                return;
             }
         } else {
             // Re-register timers that were still pending at the previous
@@ -638,14 +376,6 @@ impl<S: Saga> Process for SagaProcess<S> {
                 upstream.config.spawn_child(ctx, cursor).await;
             }
         }
-
-        // Spawn the DLQ direct-poller as a child of
-        // this saga process so that when the saga stops the runtime
-        // cascade-stops the DLQ poller automatically.  Without child binding
-        // the poller would outlive the saga as long as the subscriber is alive.
-        if let Some(ref dlq) = self.dlq_child_spawn {
-            dlq.spawn_as_child(ctx, &self.saga_id, &self.store).await;
-        }
     }
 
     async fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) {
@@ -659,12 +389,12 @@ impl<S: Saga> Process for SagaProcess<S> {
         // the deadline itself.
         //
         // That exception holds only while the saga is still `Running`: once
-        // `SagaEffect::End` has landed (or replay found the `Ended` marker
-        // from a previous incarnation), `lifecycle` is `Draining` and there is
-        // no future activation this deadline could still serve — restoring the
-        // instance to hand it a firing only produces the dead letter
-        // the deadline arm can never run to settle any other way. So a draining
-        // stop always releases, manager-fronted or not.
+        // `SagaEffect::End` has landed (or replay found the `Ended` fact from a
+        // previous incarnation), `lifecycle` is `Ended` and there is no
+        // future activation this deadline could still serve — restoring the
+        // instance to hand it a firing only wakes a saga whose deadline arm can
+        // never run again. So a terminal stop always releases, manager-fronted
+        // or not.
         //
         // Either way this is an in-memory release only — no `Cancelled` marker
         // is persisted, so a non-terminal later incarnation replays and
@@ -695,12 +425,11 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
             sequence,
             source: declared_source,
             input,
-            raw_payload,
         } = msg;
 
         // Correlation is decided before the lifecycle is consulted: an event
-        // belonging to another instance is none of this saga's business even
-        // while it drains, so it must not become a dead letter here.
+        // belonging to another instance is none of this saga's business, ended
+        // or not.
         let Some(target_id) = S::correlate(&input) else {
             return Ok(());
         };
@@ -709,13 +438,11 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
         }
 
         // A record already consumed — whether by a `Saga::handle` decision or
-        // by a dead-letter append that settled it without one — must not
-        // reach `Saga::handle` again, and delivery is at-least-once, so the
+        // by the position-only append that settled one `handle` refused — must
+        // not reach `Saga::handle` again, and delivery is at-least-once, so the
         // same record can arrive again — after a restart, or while this
         // incarnation is still running.  It is dropped here, before anything
-        // else looks at it: `Saga::handle` must not see an input it has
-        // already consumed, and the drop must not spend the lifecycle's dead
-        // letter or the one report a failed tell is owed.
+        // else looks at it.
         if self
             .consumed
             .covers(aggregate_id.as_str(), &declared_source, sequence)
@@ -729,12 +456,8 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
             return Ok(());
         }
 
-        let source = SourceContext {
-            aggregate_id: aggregate_id.clone(),
-            upstream_sequence: sequence,
-        };
-        // The position every settle path below writes: the stream, the declared
-        // source that read the record, and its sequence. Built once so the three
+        // The position each settle path below writes: the stream, the declared
+        // source that read the record, and its sequence. Built once so the
         // paths cannot drift on what they claim to have settled.
         let input_position = ConsumedPositionEvent {
             source: aggregate_id.clone(),
@@ -742,73 +465,59 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
             sequence,
         };
 
-        // Once `End` has been interpreted and the durable
-        // `Ended` marker persisted, the lifecycle transitions to `Draining`
-        // while in-flight tells settle.  Upstream events routed here during
-        // draining must not reach `Saga::handle` — doing so could produce
-        // additional effects that violate the terminal lifecycle contract.  The
-        // dropped message is recorded as a dead letter immediately, with its
-        // raw wire payload preserved.
-        if matches!(self.lifecycle, Lifecycle::Draining) {
-            // This call settles the record with `Ok`, so its position must
-            // become durable in the same append as the dead letter — see
-            // `record_dead_letter`'s doc comment.
-            if !self
-                .record_dead_letter(
-                    SagaFailure::EndedSagaReceivedMessage {
-                        message: raw_payload,
-                    },
-                    source,
-                    Some(input_position),
-                )
-                .await
-            {
-                // Return Err so the DirectPoller (via ask()) does NOT
-                // advance the upstream cursor — the runtime will stop this
-                // process via handler-failure supervision.
-                tracing::error!(
-                    saga_id = self.saga_id.as_str(),
-                    "saga DLQ append failed for EndedSagaReceivedMessage; signalling upstream handler error"
-                );
-                return Err(SagaUpstreamHandlerError);
-            }
+        // Once `End` has been interpreted and the durable `Ended` fact
+        // persisted, the lifecycle is `Ended`.  Upstream events routed here
+        // afterwards must not reach `Saga::handle` — doing so could produce
+        // additional effects that violate the terminal lifecycle contract — so
+        // the arrival is reported and dropped.  Nothing durable is written for
+        // it: a terminated saga records no further facts, and a position would
+        // claim an input a `handle` never saw.  The record is still answered
+        // with `Ok` so the cursor moves past it; holding it would starve every
+        // instance behind this one on a shared subscription.
+        if matches!(self.lifecycle, Lifecycle::Ended) {
+            tracing::warn!(
+                saga_id = self.saga_id.as_str(),
+                upstream_key = aggregate_id.as_str(),
+                upstream_sequence = sequence,
+                "saga has terminated; dropping an observed record routed to it"
+            );
             return Ok(());
         }
 
         let current_sequence = self.sequence;
-        let drained_failed = self.drain_failed_tell_ids();
         let mut saga_ctx = SagaContext::new(
             self.saga_id.clone(),
             current_sequence,
             aggregate_id.clone(),
             sequence,
             jiff::Timestamp::now(),
-            drained_failed,
         );
         let effect = match self.state.handle(input, &mut saga_ctx).await {
             Ok(effect) => effect,
             Err(e) => {
-                tracing::warn!(error = %e, "saga handle failed");
-                // This call settles the record with `Ok`, so its position
-                // must become durable in the same append as the dead letter —
-                // see `record_dead_letter`'s doc comment.
-                if !self
-                    .record_dead_letter(
-                        SagaFailure::HandleFailed {
-                            error: e.to_string(),
-                        },
-                        source,
-                        Some(input_position),
-                    )
-                    .await
+                // The refusal produces no decision, so the position is the only
+                // row the input leaves — it was seen, it produced nothing, and
+                // it must not come round again.  The error itself reaches an
+                // operator here and nowhere else.
+                tracing::error!(
+                    error = %e,
+                    saga_id = self.saga_id.as_str(),
+                    upstream_key = aggregate_id.as_str(),
+                    upstream_sequence = sequence,
+                    "saga refused an observed record; settling it by its position alone"
+                );
+                if !consumed::settle_with_position(
+                    &self.store,
+                    &self.saga_id,
+                    &mut self.sequence,
+                    &input_position,
+                    &mut self.consumed,
+                )
+                .await
                 {
                     // Return Err so the DirectPoller (via ask()) does NOT
-                    // advance the upstream cursor — the runtime will stop this
-                    // process via handler-failure supervision.
-                    tracing::error!(
-                        saga_id = self.saga_id.as_str(),
-                        "saga DLQ append failed for HandleFailed; signalling upstream handler error"
-                    );
+                    // advance the upstream cursor: with no position the input is
+                    // unconsumed, and a redelivery must reach `handle` again.
                     return Err(SagaUpstreamHandlerError);
                 }
                 return Ok(());
@@ -823,19 +532,26 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
         // preceding append in the batch has landed — so a decision can become
         // durable without its input's consumed position becoming durable too.
         let mut ictx = self.interpreter_ctx(ctx, Some(input_position));
-        // If the interpreter signals DlqFailed (PersistFailed DLQ
-        // append also failed), propagate Err so the DirectPoller (via ask())
-        // does NOT advance the upstream cursor.
+        // An append the effect required never landed, so no position was
+        // written and this input is not consumed.  Reported and answered with
+        // `Ok`: raising it would put this process through handler-failure
+        // supervision, and a saga that stops here is exactly what must not
+        // happen — staying alive is what lets the *next* input retry the
+        // decision, including an `End` whose `Ended` fact did not land. Nothing
+        // durable claims the record either, so a restart re-reads it from
+        // upstream: the subscription resumes from the position the journal
+        // records for this source, which this failure left where it was.
         if matches!(
             interpreter::run_saga_effect(effect, &mut ictx).await,
-            InterpretOutcome::DlqFailed
+            InterpretOutcome::AppendFailed
         ) {
             tracing::error!(
                 saga_id = self.saga_id.as_str(),
-                "saga DLQ append failed for PersistFailed (upstream handler); \
-                 signalling upstream handler error"
+                upstream_key = aggregate_id.as_str(),
+                upstream_sequence = sequence,
+                "saga could not persist what it decided from an observed record; \
+                 the record stays unconsumed, so a restart decides it again"
             );
-            return Err(SagaUpstreamHandlerError);
         }
         Ok(())
     }
@@ -850,48 +566,41 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         msg: FireScheduled,
         ctx: &mut ProcessContext<Self>,
     ) -> Result<(), std::convert::Infallible> {
-        // Mirror the observed-record guard — a firing must also be dropped while
-        // draining, so the deadline arm of `Saga::handle` cannot produce further
-        // effects after the terminal `Ended` marker has been written.  The
-        // dropped firing is recorded as a dead letter (its raw payload retained).
-        if matches!(self.lifecycle, Lifecycle::Draining) {
-            if !self
-                .record_dead_letter(
-                    SagaFailure::EndedSagaReceivedMessage {
-                        message: msg.payload.clone(),
-                    },
-                    SourceContext::without_upstream(),
-                    None,
-                )
-                .await
-            {
-                // DLQ append failed — stop so the timer firing is not
-                // treated as processed; a supervised restart will retry.
-                tracing::error!(
-                    saga_id = self.saga_id.as_str(),
-                    "saga DLQ append failed for EndedSagaReceivedMessage (timer); stopping for supervised restart"
-                );
-                let _ = ctx.stop_self().await;
-            }
+        // Mirror the observed-record guard — a firing must also be dropped once
+        // the saga has ended, so the deadline arm of `Saga::handle` cannot
+        // produce further effects after the terminal `Ended` fact is written.
+        if matches!(self.lifecycle, Lifecycle::Ended) {
+            tracing::warn!(
+                saga_id = self.saga_id.as_str(),
+                timer = msg.name.as_str(),
+                "saga has terminated; dropping a deadline firing addressed to it"
+            );
             return Ok(());
         }
 
-        let FireScheduled { name, payload } = msg;
+        let FireScheduled {
+            name,
+            message_type,
+            message_codec,
+            payload,
+        } = msg;
         // A firing is read back as the alphabet's own deadline variant, through
         // the codec the message type named — the same one that wrote it into the
-        // schedule fact.
+        // schedule fact — after checking the fact's own identity against what
+        // this alphabet currently declares: a stale or disagreeing declaration
+        // is refused rather than guessed at (see `ReadDeadlineError`).
         //
         // `READ` is derived from `S::Subscribe::Deadline` (see
         // `DeclaresDeadline`), not a fact the alphabet sets on its own, so it is
         // `None` only where `Deadline` itself is `NoDeadline` — a schedule fact
         // written by an incarnation that declared a deadline, fired at one that
         // does not. There is no arm to deliver it to, and no retry that would
-        // make one appear, so it is recorded as the unreadable payload it is.
+        // make one appear, so it is reported and dropped.
         let read_back = match <<S::Subscribe as SagaSubscribe>::Deadline as DeclaresDeadline<
             S::Subscribe,
         >>::READ
         {
-            Some(read) => read(&payload).map_err(|e| e.to_string()),
+            Some(read) => read(&message_type, &message_codec, &payload).map_err(|e| e.to_string()),
             None => Err(
                 "this saga's alphabet declares no deadline variant, so a firing \
                  for it has no arm to be delivered to"
@@ -901,68 +610,37 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         let input = match read_back {
             Ok(input) => input,
             Err(error) => {
-                tracing::warn!(
+                tracing::error!(
                     error = %error,
+                    saga_id = self.saga_id.as_str(),
                     timer = name.as_str(),
                     "saga could not read a deadline firing; dropping it"
                 );
-                if !self
-                    .record_dead_letter(
-                        SagaFailure::DecodeFailed { error },
-                        SourceContext::without_upstream(),
-                        None,
-                    )
-                    .await
-                {
-                    // DLQ append failed — stop so the timer firing is not
-                    // treated as processed; a supervised restart will retry.
-                    tracing::error!(
-                        saga_id = self.saga_id.as_str(),
-                        "saga DLQ append failed for DecodeFailed (deadline); stopping for supervised restart"
-                    );
-                    let _ = ctx.stop_self().await;
-                }
                 return Ok(());
             }
         };
 
         let current_sequence = self.sequence;
-        let drained_failed = self.drain_failed_tell_ids();
         let mut saga_ctx = SagaContext::new(
             self.saga_id.clone(),
             current_sequence,
             AggregateId::new(""),
             0,
             jiff::Timestamp::now(),
-            drained_failed,
         );
         let effect = match self.state.handle(input, &mut saga_ctx).await {
             Ok(effect) => effect,
             Err(e) => {
-                // The failure kind names the entry the input arrived at, not the
-                // method that ran: a deadline that could not be handled is
-                // `ScheduledFailed` whether or not it shares `handle` with the
-                // observed records, which is what keeps an `EnqueuePolicy`
-                // written against the kind meaning the same thing.
-                tracing::warn!(error = %e, "saga failed to handle a deadline firing");
-                if !self
-                    .record_dead_letter(
-                        SagaFailure::ScheduledFailed {
-                            error: e.to_string(),
-                        },
-                        SourceContext::without_upstream(),
-                        None,
-                    )
-                    .await
-                {
-                    // DLQ append failed — stop so the timer firing is not
-                    // treated as processed; a supervised restart will retry.
-                    tracing::error!(
-                        saga_id = self.saga_id.as_str(),
-                        "saga DLQ append failed for ScheduledFailed; stopping for supervised restart"
-                    );
-                    let _ = ctx.stop_self().await;
-                }
+                // A firing carries no position to settle — it was addressed to
+                // this instance rather than read from an upstream stream — so a
+                // refusal leaves nothing durable behind and reaches an operator
+                // here alone.
+                tracing::error!(
+                    error = %e,
+                    saga_id = self.saga_id.as_str(),
+                    timer = name.as_str(),
+                    "saga refused a deadline firing"
+                );
                 return Ok(());
             }
         };
@@ -1006,148 +684,22 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         }
 
         let mut ictx = self.interpreter_ctx(ctx, None);
-        // FireScheduled is not delivered via DirectPoller so there is no
-        // upstream cursor to withhold; call stop_self() to ensure the process
-        // does not silently continue when a PersistFailed DLQ append also fails.
+        // A firing does not arrive through a `DirectPoller`, so there is no
+        // upstream cursor to withhold and no redelivery to wait for: an append
+        // this effect needed that never landed is reported here, and the
+        // unfired-schedule fact still on the stream is what a later activation
+        // re-arms the deadline from.
         if matches!(
             interpreter::run_saga_effect(effect, &mut ictx).await,
-            InterpretOutcome::DlqFailed
+            InterpretOutcome::AppendFailed
         ) {
             tracing::error!(
                 saga_id = self.saga_id.as_str(),
-                "saga DLQ append failed for PersistFailed (timer handler); stopping for supervised restart"
-            );
-            let _ = ctx.stop_self().await;
-        }
-        Ok(())
-    }
-}
-
-pub(crate) struct OutboxReport {
-    pub(crate) tell_id: u64,
-    pub(crate) outcome: TellOutcome,
-}
-
-async fn append_terminal_and_claim(
-    store: &Arc<dyn EventStore>,
-    saga_id: &SagaId,
-    sequence: &mut u64,
-    outcome: TellOutcome,
-    tell_id: u64,
-) -> bool {
-    let candidate = *sequence + 1;
-    let appended =
-        OutboxAppender::append_terminal(store, saga_id, candidate, outcome, tell_id).await;
-    if appended {
-        *sequence = candidate;
-    }
-    appended
-}
-
-impl<S: Saga> Receive<OutboxReport> for SagaProcess<S> {
-    type Response = ();
-    type Error = std::convert::Infallible;
-
-    async fn recv(
-        &mut self,
-        msg: OutboxReport,
-        ctx: &mut ProcessContext<Self>,
-    ) -> Result<(), std::convert::Infallible> {
-        let appended = append_terminal_and_claim(
-            &self.store,
-            &self.saga_id,
-            &mut self.sequence,
-            msg.outcome,
-            msg.tell_id,
-        )
-        .await;
-
-        if appended {
-            match msg.outcome {
-                TellOutcome::Acked => {
-                    self.tell_states.remove(&msg.tell_id);
-                }
-                TellOutcome::Failed => self.settle_failed_tell(msg.tell_id, ctx).await,
-            }
-        } else {
-            match self.tell_states.remove(&msg.tell_id) {
-                Some(TellState::Pending(intent)) => {
-                    self.tell_states
-                        .insert(msg.tell_id, TellState::AppendFailed(intent));
-                }
-                Some(other) => {
-                    self.tell_states.insert(msg.tell_id, other);
-                }
-                None => {}
-            }
-            tracing::debug!(
-                tell_id = msg.tell_id,
-                "saga outbox terminal append failed; \
-                 tell state preserved as AppendFailed for supervised-restart re-dispatch"
+                timer = name.as_str(),
+                "saga could not persist what it decided from a deadline firing"
             );
         }
-
-        if self.ready_to_stop() {
-            if let Err(e) = ctx.stop_self().await {
-                tracing::warn!(
-                    error = %e,
-                    "saga deferred End: stop_self failed after all outbox executors settled"
-                );
-            }
-        }
         Ok(())
-    }
-}
-
-impl<S: Saga> Receive<RecordDisposition> for SagaProcess<S> {
-    /// The append's outcome is the *reply*, not the handler's result.
-    ///
-    /// A saga instance's default supervision strategy is `Stop`, so returning
-    /// `Err` here would let an operator's failed bookkeeping write take down a
-    /// perfectly healthy saga.  The operator asked a question; they get the
-    /// answer, and the saga carries on either way.
-    type Response = Result<(), AppendError>;
-    type Error = std::convert::Infallible;
-
-    async fn recv(
-        &mut self,
-        msg: RecordDisposition,
-        _ctx: &mut ProcessContext<Self>,
-    ) -> Result<Result<(), AppendError>, std::convert::Infallible> {
-        // This instance owns its stream's next sequence, and this handler runs
-        // on the same mailbox as everything else that appends to it — which is
-        // what makes the marker's position uncontended rather than guessed.
-        //
-        // No lifecycle guard: a dead letter left behind by a saga that has
-        // since ended still has to be settleable.
-        let candidate = self.sequence + 1;
-        let appending = msg.marker.appending(candidate, jiff::Timestamp::now());
-        match self
-            .store
-            .append(self.saga_id.as_str(), vec![appending])
-            .await
-        {
-            Ok(_) => {
-                // Advance only on success, so a refused marker leaves no gap
-                // for the saga's own next append to fall into.
-                self.sequence = candidate;
-                report_system_event!(
-                    DeadLetterDispositionEvent::EVENT_TYPE,
-                    msg.marker.arm(),
-                    self.saga_id.as_str(),
-                    dead_letter_sequence = msg.marker.dead_letter_sequence,
-                );
-                Ok(Ok(()))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    saga_id = self.saga_id.as_str(),
-                    error = %e,
-                    "saga dead letter disposition append failed; reported to the caller"
-                );
-                Ok(Err(e))
-            }
-        }
     }
 }
 
@@ -1162,8 +714,14 @@ mod tests {
     use futures_core::Stream;
     use nitinol_persistence::error::{AppendError, LoadError};
     use nitinol_persistence::store::EventStream;
-    use nitinol_persistence::{AppendOutcome, AppendingEvent, LoadQuery};
+    use nitinol_persistence::{
+        AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
+    };
 
+    use crate::consumed::{self, ConsumedPositionEvent, ConsumedPositions, PositionSource};
+
+    /// Refuses the first append and accepts every one after it, so a test can
+    /// observe both halves of "the sequence advances only on success".
     struct FailOnceStore {
         has_failed: AtomicBool,
     }
@@ -1205,147 +763,68 @@ mod tests {
         }
     }
 
-    use nitinol_eventsource::codec::Codec;
-    use nitinol_eventsource::test_helpers::MockAggregateProxy;
-    use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
-    use nitinol_persistence::{EventType, Family, TypeName};
+    const OBSERVED: EventType = EventType::new(
+        Family::new("saga_process_unit_test"),
+        TypeName::new("Observed"),
+    );
 
-    #[derive(Clone)]
-    struct Noted;
-
-    struct UnitCodec;
-
-    impl Codec<Noted> for UnitCodec {
-        type Error = std::convert::Infallible;
-
-        fn encode(_: &Noted) -> Result<Bytes, Self::Error> {
-            Ok(Bytes::new())
-        }
-
-        fn decode(_: &[u8]) -> Result<Noted, Self::Error> {
-            Ok(Noted)
+    fn position(sequence: u64) -> ConsumedPositionEvent {
+        ConsumedPositionEvent {
+            source: AggregateId::new("order-stream"),
+            source_event_type: PositionSource::of(OBSERVED),
+            sequence,
         }
     }
 
-    impl Event for Noted {
-        const EVENT_TYPE: EventType = EventType::new(
-            Family::new("saga_process_unit_test"),
-            TypeName::new("Noted"),
-        );
-
-        type Codec = UnitCodec;
-    }
-
-    #[derive(Default)]
-    struct NotingAggregate;
-
-    impl Aggregate for NotingAggregate {
-        type Event = Noted;
-
-        fn apply(&mut self, _event: Noted) {}
-    }
-
-    #[derive(Clone)]
-    struct Note;
-
-    impl Decider<Note> for NotingAggregate {
-        type Output = ();
-        type Rejection = std::convert::Infallible;
-
-        fn decide(&self, _cmd: Note) -> Decision<Noted, (), Self::Rejection> {
-            Decision::persist(Vec::new()).output(())
-        }
-    }
-
-    /// A tell to hold in a [`TellState`].  What it would send is immaterial
-    /// here: these tests read which states still hold one.
-    fn intent() -> TellIntent {
-        TellIntent::new::<NotingAggregate, Note, _>(
-            MockAggregateProxy::<NotingAggregate>::new(),
-            Note,
-        )
-    }
-
-    /// Given each state a tell can be in, When it is asked for the intent it
-    /// can be re-dispatched from, Then the two states that still hold one
-    /// answer with it and the one that has given it up answers with nothing.
-    ///
-    /// A tell whose terminal marker failed to append is still a tell that was
-    /// sent, so replay re-dispatches it; a failed one has already been recorded
-    /// as failed, and re-sending it would repeat a delivery the stream says is
-    /// over.
-    #[test]
-    fn only_a_tell_that_still_holds_its_intent_answers_with_one() {
-        assert!(
-            TellState::Pending(intent()).intent().is_some(),
-            "a pending tell must still offer the intent it is waiting on"
-        );
-        assert!(
-            TellState::AppendFailed(intent()).intent().is_some(),
-            "a tell whose terminal marker did not land must still offer its intent"
-        );
-        assert!(
-            TellState::Failed.intent().is_none(),
-            "a failed tell has no intent left to re-dispatch"
-        );
-    }
-
-    /// Given each state a tell can be in, When it is asked whether it is still
-    /// in flight, Then only the pending one is.
-    ///
-    /// This is what a draining saga waits on before it stops, so counting a
-    /// tell that has already reached its outcome would keep the saga alive
-    /// with nothing left to wait for.
-    #[test]
-    fn only_a_pending_tell_is_in_flight() {
-        assert!(
-            TellState::Pending(intent()).is_in_flight(),
-            "a pending tell is out with its outcome unknown"
-        );
-        assert!(
-            !TellState::AppendFailed(intent()).is_in_flight(),
-            "a tell whose outcome is known is not in flight, marker or no marker"
-        );
-        assert!(
-            !TellState::Failed.is_in_flight(),
-            "a failed tell has reached its outcome"
-        );
-    }
-
-    /// The count a draining saga reads is the number of pending tells, and
-    /// nothing else in the registry contributes to it.
-    #[test]
-    fn in_flight_count_counts_the_pending_tells_alone() {
-        let mut tell_states = HashMap::new();
-        tell_states.insert(1, TellState::Pending(intent()));
-        tell_states.insert(2, TellState::AppendFailed(intent()));
-        tell_states.insert(3, TellState::Failed);
-        tell_states.insert(4, TellState::Pending(intent()));
-
-        assert_eq!(
-            in_flight_count(&tell_states),
-            2,
-            "two of the four tells are pending, so two are in flight"
-        );
-    }
-
+    /// Given a store that refuses the first append, When a refused input is
+    /// settled by its position alone, Then the failed attempt leaves the saga's
+    /// sequence where it was and the input stays unconsumed — so a redelivery
+    /// can reach `handle` again — and the next attempt claims the sequence with
+    /// no gap.
     #[tokio::test]
-    async fn append_terminal_does_not_advance_sequence_on_store_failure() {
+    async fn settling_a_refused_input_claims_its_sequence_only_once_the_append_lands() {
         let store: Arc<dyn EventStore> = Arc::new(FailOnceStore::new());
-        let saga_id = SagaId::new("sequence-skip-regression");
+        let saga_id = SagaId::new("position-only-settle");
         let mut sequence: u64 = 0;
+        let mut consumed = ConsumedPositions::default();
 
-        let ok =
-            append_terminal_and_claim(&store, &saga_id, &mut sequence, TellOutcome::Acked, 1).await;
-        assert!(!ok, "must return false when EventStore::append fails");
+        let settled = consumed::settle_with_position(
+            &store,
+            &saga_id,
+            &mut sequence,
+            &position(4),
+            &mut consumed,
+        )
+        .await;
+
+        assert!(
+            !settled,
+            "a store that refused the append has not settled the input"
+        );
         assert_eq!(sequence, 0, "sequence must not advance on store failure");
+        assert!(
+            !consumed.covers("order-stream", &PositionSource::of(OBSERVED), 4),
+            "an input whose position never landed must stay unconsumed, so a \
+             redelivery reaches `handle` again"
+        );
 
-        let ok =
-            append_terminal_and_claim(&store, &saga_id, &mut sequence, TellOutcome::Acked, 1).await;
-        assert!(ok, "must return true when EventStore::append succeeds");
+        let settled = consumed::settle_with_position(
+            &store,
+            &saga_id,
+            &mut sequence,
+            &position(4),
+            &mut consumed,
+        )
+        .await;
+
+        assert!(settled, "the retried append lands, settling the input");
         assert_eq!(
             sequence, 1,
-            "sequence must be 1 (no gap from the failed attempt)"
+            "the position claims the next sequence, with no gap from the failed attempt"
+        );
+        assert!(
+            consumed.covers("order-stream", &PositionSource::of(OBSERVED), 4),
+            "the durable position is what stops the record coming round again"
         );
     }
 }

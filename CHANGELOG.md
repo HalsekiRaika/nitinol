@@ -58,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invites the opposite reading. It is the one clause no test fixes, and says so
   with the reason.
 
+> **Note on the entries below.** Several of them refine the saga's outbox push
+> delivery and its persistent dead letter queue — `SagaEffect::tell_intent`,
+> the `EnqueuePolicy` filter, the crash-restart factory, the DLQ pull API and
+> the records behind them. Both mechanisms are **withdrawn** in this same
+> release; see the two "withdrawn" entries under *Removed*, which supersede
+> every earlier mention of them here. Nothing they describe reaches 0.5.0.
+
 - (`nitinol-store-conformance`): `provider::verify` puts a whole store through
   its clauses, beside the per-store suites. A backend implements
   `provider::ProviderUnderTest` — a `bring_up` handing back a `Store` holding
@@ -559,6 +566,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (`nitinol-saga`, `nitinol`): the workspace is **0.5.0**, and a
+  saga stream written by 0.4 or earlier cannot be read by it.
+
+  A saga's own stream now holds four kinds of row and no more: a domain event —
+  the catch-all — plus the three facts the framework declares for itself,
+  `nitinol.saga.schedule`, `nitinol.saga.consumed` and
+  `nitinol.saga.lifecycle`. A row inside the reserved namespace matching none of
+  those three is a corrupted stream or a version mismatch, and `SagaPersisted`
+  refuses it: the load fails rather than reading past it. So every 0.4 stream
+  carrying an outbox marker, a dead letter, a disposition marker, or a position
+  under the old `nitinol.saga.consumed_position` name is unreadable, and so is
+  one carrying only the `Ended` arm of the outbox envelope.
+
+  That refusal is deliberate and there is no way round it. "Recognise it and
+  skip it" would mean keeping a reader for a mechanism that no longer exists,
+  and a withdrawn record's bytes may well decode cleanly as a domain event — so
+  reading past one would quietly fold a bygone mechanism's bookkeeping into the
+  saga's state. No migration tool, no skip switch and no quiescing procedure is
+  provided; development and test stores are wiped.
+
+- **BREAKING** (`nitinol-saga`): a saga terminates, consumes and refuses
+  through the three facts above.
+
+  `Ended` has a declaration of its own, `nitinol.saga.lifecycle`, instead of
+  sharing an envelope with a transport mechanism's transitions: "this saga
+  terminated" is a fact about the saga's own life, and reading it no longer
+  requires knowing that mechanism's grammar. The consumed position is
+  `nitinol.saga.consumed`, naming both the upstream stream it was read from and
+  the declared source it settled.
+
+  An input `Saga::handle` answers `Err` is now settled by a **position-only
+  append** — it was seen, it produced nothing, and that one row is all it
+  leaves — with the error itself reaching an operator through `tracing::error!`.
+  A record routed to a saga that has already terminated, a deadline firing that
+  cannot be read back, and a firing `handle` refuses are each reported and
+  dropped with nothing durable written: a terminated saga records no further
+  facts, and a firing carries no position to settle.
+
+- **BREAKING** (`nitinol-saga`): replay is a fold and nothing else.
+
+  `process::replay` restores the saga's state and its consumed positions and
+  reports the schedules still pending; it decides nothing and writes nothing.
+  The branches that decided a pending tell's fate — re-dispatch from a durable
+  marker, appending a synthetic `TellFailed`, writing a dead letter mid-replay —
+  are gone with the mechanism they served. What a restart still does is
+  idempotent reconnection: re-subscribe each declared source from the position
+  the journal records for it, and re-arm every unfired deadline.
+
+- (`nitinol-saga`, `nitinol-eventsource`): the delivery guarantee is written
+  down on `SagaDeliveryProps` rather than on the withdrawn `SagaEffect::tell`.
+
+  It states where at-least-once comes from — the host's checkpoint moves only
+  after every delivery a record implied has landed, and that window is the whole
+  of it — what a held partition means and what it costs, and the two layers a
+  failure belongs to: transport is the host's to retry, hold and report, while a
+  business failure reaches the saga the only way a domain fact can, as an input
+  (the answer the addressed aggregate recorded, or the saga's own deadline
+  firing when none came). `nitinol-eventsource`'s `R-2` resolve clause links
+  there instead of restating a per-stage contract.
+
 - **BREAKING** (`nitinol-eventsource`, `nitinol-saga`): every wiring point
   resolves its stores from a supplier instead of being handed each store at the
   call.
@@ -646,7 +713,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is persisted, replacing the removed `ScheduledMessage: Serialize +
   DeserializeOwned` bound — a schedule fact is written through the same `Codec`
   discipline as every other persisted record, not through `serde_json` fixed
-  by the trait. `Saga::correlate` and `Saga::handle` both `match` on
+  by the trait. `DeadlineMessage::TYPE_NAME` / `DeadlineMessage::CODEC_NAME`
+  carry that identity onto the wire itself: the `Scheduled` fact's
+  `message_type` / `message_codec` fields, alongside `payload`, so a firing is
+  checked against what the fact says rather than decoded under whatever
+  alphabet happens to be linked into the reader. A stored identity that
+  disagrees with the current declaration is refused (`ReadDeadlineError`)
+  instead of being decoded under the wrong `Codec`. `Saga::correlate` and
+  `Saga::handle` both `match` on
   `Self::Subscribe`, so a source added to the alphabet without a reaction
   leaves either `match` non-exhaustive at compile time.
 
@@ -756,8 +830,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Journal migration.** Every row an enum event or a framework record wrote
   carries a path that no declaration answers for any more — `a.b.OrderEvent.
   Placed` where the declaration is now `a.b.OrderEvent`, and
-  `nitinol.saga.outbox.tell_requested` where the record is now
-  `nitinol.saga.outbox`. Such a row fails its load as an unknown event type
+  `nitinol.saga.schedule.scheduled` where the record is now
+  `nitinol.saga.schedule`. Such a row fails its load as an unknown event type
   rather than being restored, so an existing journal has to have its
   `event_type` column rewritten to the declaring type's path before it is read
   by this version. The payloads are untouched: which arm a framework record
@@ -988,6 +1062,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `type State = ...;` line; no other change is required.
 
 ### Removed
+
+- **BREAKING** (`nitinol-saga`): outbox push delivery is withdrawn, with no
+  replacement surface of its own.
+
+  Gone: `SagaEffect::tell` and `SagaEffect::tell_intent`, the `tells` field of
+  `SagaEffect::Persist`, `TellIntent`, `CrashRestartFactory` with
+  `SagaProps::with_crash_restart_factory` and
+  `SagaManagerProps::with_crash_restart_factory`, the outbox executor process
+  and its appender, `Saga::on_tell_failed`, `SagaContext::failed_tell_ids`, and
+  the `nitinol.saga.outbox` declaration with every arm of it.
+
+  What replaces it is the subscription-based delivery host that already ran
+  beside it: `Saga::dispatch` is the pure mapping from one of the saga's own
+  events to the commands it implies and whom each is addressed to, and
+  `SagaDeliveryProps` starts the host that carries them. A saga therefore
+  persists decisions and sets its own deadlines, and nothing else — "send this
+  command" is no longer expressible from inside `handle`, which is what moves
+  the knowledge of delivery (polling, the checkpoint, holding on a failure) out
+  of the saga and into one owner.
+
+  The old mechanism persisted a duplicate byte copy of a command as an outbox
+  marker and asked the user to hand-write a `CrashRestartFactory` to rebuild it
+  after a crash — an unnamed payload plus a user-written restore hook, with no
+  precedent in the rest of the framework. Nothing takes its place because
+  nothing needs to: the decision is durable before anything is delivered, and
+  the host re-derives what follows from it on every read.
+
+  There is deliberately **no** replacement hook for a transport failure.
+  Notifying a saga that a command could not be carried out had it reacting to
+  the framework's own plumbing; what a saga reacts to is a domain fact — the
+  answer, or its own deadline passing.
+
+- **BREAKING** (`nitinol-saga`): the persistent dead letter queue is withdrawn.
+  The contract is not redefined elsewhere; it is abolished.
+
+  Gone: `DeadLetterQueue` with `list` / `mark_processed` / `evict`,
+  `SagaManagerProxy::dead_letter_queue`, `DeadLetterEvent`, `DeadLetterEntry`,
+  `DeadLetterQuery`, `DeadLetterQueueError`, `SagaFailure`, `SourceContext`,
+  `EnqueuePolicy`, `EnqueueDecision`, `SagaProps::with_enqueue_policy` and
+  `with_dead_letter_subscriber` with their `SagaManagerProps` counterparts, the
+  disposition mechanism, and the `nitinol.saga.dead_letter` /
+  `nitinol.saga.dead_letter_disposition` declarations.
+
+  It was a shop of type-less bytes kept for ever, and appending to it was a
+  single point of failure on the saga's own startup and subscription path: a
+  refused dead-letter append stopped a saga that was otherwise healthy. In its
+  place, failure has two layers and each is observable where it belongs — see
+  `SagaDeliveryProps` for the host's half, and `Saga::handle` for the saga's.
+
+  `nitinol-runtime`'s `DeadLetterProcess` is a different mechanism — an
+  in-memory, best-effort, system-wide signal for undeliverable messages — and
+  is untouched.
 
 - **BREAKING** (`nitinol-eventsource`, `nitinol-saga`): removed every entry
   point that named a store at the call, now that one provider supplies them:

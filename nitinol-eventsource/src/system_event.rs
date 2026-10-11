@@ -2,8 +2,8 @@
 //!
 //! `SystemEvent` is the framework-internal counterpart to the user-facing
 //! [`crate::Event`] marker.  It describes messages the framework persists on a
-//! stream to coordinate its own machinery (the saga outbox markers are the
-//! first and only current user).  Unlike [`crate::Event`], a `SystemEvent`
+//! stream to coordinate its own machinery (a saga's schedule, consumed-position
+//! and lifecycle facts are the current users).  Unlike [`crate::Event`], a `SystemEvent`
 //! owns its serialization: there is no user codec involved, so the replay path
 //! can decode the markers without going through `Saga::Event`'s codec.
 //!

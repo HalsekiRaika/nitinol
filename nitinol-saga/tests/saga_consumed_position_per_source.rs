@@ -9,11 +9,6 @@
 //!     Then source A's records at or below seq 3 are dropped
 //!     And source B's record at seq 2 is still delivered
 //!
-//!   Scenario: a position written before sources were named covers the stream
-//!     Given a consumed-position row naming no declared source
-//!     When the saga starts
-//!     Then every source's record at or below that sequence is dropped
-//!
 //!   Scenario: a position the saga writes names its own source
 //!     Given a saga that decides on a record of source B
 //!     When the decision lands
@@ -31,11 +26,14 @@
 //!
 //! ## API contract assumed by this file
 //!
-//! - The `nitinol.saga.consumed_position` record carries the declared source's
+//! - The `nitinol.saga.consumed` record carries the declared source's
 //!   event type alongside the stream key and sequence, as proto field 3
 //!   (`source_event_type`), written as the event type's canonical path string.
-//!   An empty field 3 is a row from before sources were named and covers every
-//!   source of that stream.
+//!   Field 3 is never empty: a row that cannot say which source it settled is a
+//!   corrupted payload and refuses the load rather than being read as covering
+//!   the whole stream — pinned in
+//!   `saga_consumed_fact_declaration.rs::a_consumed_fact_naming_no_source_refuses_the_load`,
+//!   which is why nothing here seeds one.
 //! - `#[derive(SagaSubscribe)]`, `Saga::Subscribe`, and
 //!   `subscribed_to::<E>(Subscription)` — see
 //!   `saga_multi_source_observation.rs` for the full assumed surface.
@@ -45,7 +43,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{JsonCodec, CONSUMED_POSITION_MARKER};
+use common::{JsonCodec, CONSUMED_MARKER};
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -64,7 +62,7 @@ use nitinol_persistence::{
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription};
 
-// The consumed-position record, mirrored from `proto/consumed_position.proto`.
+// The consumed-position record, mirrored from `proto/consumed.proto`.
 //
 // `ConsumedPositionEvent` is `pub(crate)` in `nitinol-saga`, so this reads the
 // row the way any other consumer of the column does: by decoding the payload's
@@ -109,7 +107,7 @@ fn encode_consumed_position(source: &str, sequence: u64, source_event_type: &str
 }
 
 fn consumed_position_of(event: &LoadedEvent) -> Option<PerSourceConsumedPayload> {
-    if event.event_type != CONSUMED_POSITION_MARKER {
+    if event.event_type != CONSUMED_MARKER {
         return None;
     }
     <PerSourceConsumedMarker as prost::Message>::decode(&event.payload[..])
@@ -281,7 +279,7 @@ async fn seed_position(
         saga_store,
         saga_id.as_str(),
         row_sequence,
-        CONSUMED_POSITION_MARKER,
+        CONSUMED_MARKER,
         encode_consumed_position(source.as_str(), upstream_sequence, source_event_type),
     )
     .await;
@@ -403,42 +401,6 @@ async fn one_sources_position_does_not_cover_another_sources_record() {
         "a position recorded for source A must drop A's records only: keyed by \
          the stream alone it would also cover source B's seq 2, which no \
          incarnation ever consumed; saw {observed:?}"
-    );
-}
-
-/// Given a consumed-position row that names no declared source — the shape a
-/// stream written before sources were named still holds,
-/// When the saga starts,
-/// Then every source's record at or below that sequence is dropped.
-///
-/// Covering is the safe reading: a row from before sources were named cannot
-/// say which source it settled, and treating it as covering nothing would
-/// re-deliver input whose decision is already durable.
-#[tokio::test]
-async fn a_position_naming_no_source_covers_every_source_of_that_stream() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let shared = AggregateId::new("legacy-shared");
-    seed_shared_upstream(&upstream_store, &shared).await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(SAGA_ID);
-    seed_position(&saga_store, &saga_id, 1, &shared, 3, "").await;
-
-    let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_shared(&ps, &saga_store, &upstream_store, &shared, &handled).await;
-
-    let observed = wait_for_handled(&handled, 1).await;
-
-    assert_eq!(
-        observed,
-        vec![Seen {
-            variant: "Second",
-            sequence: 4
-        }],
-        "a source-less position covers the whole stream up to its sequence, so \
-         only seq 4 may reach handle; saw {observed:?}"
     );
 }
 

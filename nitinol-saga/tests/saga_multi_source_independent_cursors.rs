@@ -34,7 +34,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{JsonCodec, CONSUMED_POSITION_MARKER};
+use common::{JsonCodec, CONSUMED_MARKER};
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -270,7 +270,7 @@ async fn wait_for_positions(store: &Arc<dyn EventStore>, saga_id: &SagaId, expec
             .expect("collect saga events must succeed");
         let positions = rows
             .iter()
-            .filter(|row| row.event_type == CONSUMED_POSITION_MARKER)
+            .filter(|row| row.event_type == CONSUMED_MARKER)
             .count();
         if positions >= expected {
             return;

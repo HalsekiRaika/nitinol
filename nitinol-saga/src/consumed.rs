@@ -1,9 +1,9 @@
 //! `ConsumedPositionEvent` — the position of an upstream record the saga has
 //! consumed, recorded as a fact on the saga's own stream.
 //!
-//! Modelled on the outbox and schedule declarations: one reserved
-//! [`EventType`] (`nitinol.saga.consumed_position`) every position is written
-//! down as, with a prost `oneof` codec that owns its own serialization.
+//! Modelled on the schedule and lifecycle declarations: one reserved
+//! [`EventType`] (`nitinol.saga.consumed`) every position is written down as,
+//! with a prost `oneof` codec that owns its own serialization.
 //!
 //! # What makes an input consumed
 //!
@@ -14,13 +14,9 @@
 //! batch that never landed leaves no position behind, and the input is
 //! handled again on redelivery.
 //!
-//! An input can also be consumed without ever producing a `handle` decision:
-//! a record that arrives while an earlier record from the same correlation is
-//! already draining to a dead letter, and a record for which `handle` returns
-//! `Err`, are each settled by a dead-letter append that carries the same
-//! position instead.  That append landing is what makes the input consumed in
-//! these cases — see `Saga::handle` for the rule these settle paths are
-//! exceptions to.
+//! An input `handle` refused is consumed without producing a decision at all:
+//! it was seen, it produced nothing, and it must not come round again, so the
+//! position is the only row it leaves.
 //!
 //! A record whose upstream bytes fail to decode writes no position at all: it
 //! is reported and skipped, and the subscription's cursor advances past it
@@ -30,8 +26,8 @@
 //!
 //! Either way, de-duplication of the input is moved off the user's `handle`
 //! and onto the framework, and nothing here decides *when* to write a
-//! position on its own; the interpreter or the dead-letter path hands one to
-//! whichever append site is closing out the input.
+//! position on its own; the interpreter hands one to whichever append site is
+//! closing out the input.
 //!
 //! # Why a position per declared source
 //!
@@ -46,38 +42,39 @@
 //! (stream, source) pair, and one source's progress can never mask a record of
 //! another.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use nitinol_eventsource::{SequenceCursor, SystemEvent, SystemEventDecodeError};
+use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{
     is_within_reserved_namespace, reserved_event, AggregateId, AppendingEvent, EventType,
 };
 
+use crate::id::SagaId;
 use crate::observability::report_system_event;
 
 mod proto {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/nitinol.saga.consumed_position.rs"
-    ));
+    include!(concat!(env!("OUT_DIR"), "/nitinol.saga.consumed.rs"));
 }
 
-use self::proto::consumed_position_marker::Kind;
-use self::proto::{Consumed, ConsumedPositionMarker};
+use self::proto::consumed_marker::Kind;
+use self::proto::{Consumed, ConsumedMarker};
 
 reserved_event! {
-    /// The one identity every consumed-position record is written down as.
+    /// The one identity every consumed fact is written down as.
     ///
     /// What a binary linking this crate collects for the position, so that a
     /// load of a saga's own stream restores it rather than failing on it.
-    pub(crate) const CONSUMED_POSITION_MARKER {
+    pub(crate) const CONSUMED_MARKER {
         family = "nitinol.saga",
-        type_name = "consumed_position",
+        type_name = "consumed",
         declared_by = ConsumedPositionEvent,
     }
 
-    // The one fact a consumed-position record states.  A stored row names the
+    // The one fact a consumed record states.  A stored row names the
     // declaration, so the fact lives in the payload's `oneof`; this is the name
     // that `oneof` is reported under.
     arm_type = ConsumedPositionEvent;
@@ -85,30 +82,26 @@ reserved_event! {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("consumed position payload carried no `oneof` kind")]
+#[error("consumed payload carried no `oneof` kind")]
 struct MissingConsumedKind;
 
 #[derive(Debug, thiserror::Error)]
-#[error("consumed position `source` must not be empty or within the reserved namespace")]
+#[error("consumed `source` must not be empty or within the reserved namespace")]
 struct InvalidConsumedSource;
 
-/// Which declared source a consumed position settled.
+#[derive(Debug, thiserror::Error)]
+#[error("consumed `source_event_type` must name the declared source it settled")]
+struct MissingConsumedSourceEventType;
+
+/// Which declared source a consumed position settled, named by the canonical
+/// path of its event type.
 ///
-/// The framework always writes [`PositionSource::Declared`]: a record reaches
-/// `handle` as one variant of the saga's alphabet, so the source it belongs to
-/// is known at the moment the position is built.
+/// A record reaches `handle` as one variant of the saga's alphabet, so the
+/// source it belongs to is known at the moment the position is built — and a
+/// row that cannot name one is a corrupted payload rather than a position
+/// covering the whole stream.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PositionSource {
-    /// The declared source, named by the canonical path of its event type.
-    Declared(String),
-    /// A row written before positions named a source.
-    ///
-    /// Such a row cannot say which source it settled, so it is read as covering
-    /// every source of its stream.  Covering is the safe reading: treating it
-    /// as covering nothing would re-deliver input whose decision is already
-    /// durable.
-    WholeStream,
-}
+pub(crate) struct PositionSource(String);
 
 impl PositionSource {
     /// The declared source an event type names.
@@ -116,27 +109,12 @@ impl PositionSource {
         // `Display` on `EventType` is the canonical wire string — the same one
         // `to_path().to_string()` produces — so both sides of the column agree
         // on the encoding without this module restating it.
-        Self::Declared(event_type.to_string())
+        Self(event_type.to_string())
     }
 
-    /// The wire form: the canonical path, or the empty string for a row that
-    /// names no source.
+    /// The wire form: the canonical path of the declared source.
     fn as_wire(&self) -> &str {
-        match self {
-            Self::Declared(path) => path,
-            Self::WholeStream => "",
-        }
-    }
-
-    /// Read the wire form back.  Proto3 decodes an unset field as the empty
-    /// string, which is exactly the shape a row written before sources were
-    /// named has.
-    fn from_wire(wire: String) -> Self {
-        if wire.is_empty() {
-            Self::WholeStream
-        } else {
-            Self::Declared(wire)
-        }
+        &self.0
     }
 }
 
@@ -150,10 +128,10 @@ pub(crate) struct ConsumedPositionEvent {
 }
 
 impl SystemEvent for ConsumedPositionEvent {
-    const EVENT_TYPE: EventType = CONSUMED_POSITION_MARKER;
+    const EVENT_TYPE: EventType = CONSUMED_MARKER;
 
     fn encode(&self) -> Bytes {
-        let marker = ConsumedPositionMarker {
+        let marker = ConsumedMarker {
             kind: Some(Kind::Consumed(Consumed {
                 source: self.source.as_str().to_owned(),
                 sequence: self.sequence,
@@ -164,30 +142,33 @@ impl SystemEvent for ConsumedPositionEvent {
     }
 
     fn decode(payload: &[u8]) -> Result<Self, SystemEventDecodeError> {
-        let marker = <ConsumedPositionMarker as prost::Message>::decode(payload)
+        let marker = <ConsumedMarker as prost::Message>::decode(payload)
             .map_err(SystemEventDecodeError::new)?;
         match marker.kind {
             Some(Kind::Consumed(m)) => {
                 // `source` is proto3, so an unset field decodes as the empty
                 // string rather than a missing `oneof` — that case is caught
-                // above.  An empty or reserved-namespace source can only be a
+                // below.  An empty or reserved-namespace source can only be a
                 // corrupted row: `encode` above only ever writes a position
                 // built from an already-valid `AggregateId`, and the
                 // framework never mints one of those from either.  Reading
                 // it as sound would fold in a position that covers a record
                 // no saga ever decided from, or reach `AggregateId::new`'s
                 // reserved-namespace guard and panic replay outright instead
-                // of reporting a decode error the caller can skip.
+                // of reporting a decode error the caller refuses the load on.
                 if m.source.is_empty() || is_within_reserved_namespace(&m.source) {
                     return Err(SystemEventDecodeError::new(InvalidConsumedSource));
                 }
+                // A row that names no source cannot say which of two declared
+                // sources sharing its stream it settled.  Such a row used to
+                // be read as covering every source of its stream; 0.5 writes
+                // none, so no reader for one is kept.
+                if m.source_event_type.is_empty() {
+                    return Err(SystemEventDecodeError::new(MissingConsumedSourceEventType));
+                }
                 Ok(Self {
                     source: AggregateId::new(m.source),
-                    // An empty `source_event_type`, unlike an empty `source`,
-                    // is a row the framework really did write — before
-                    // positions named a source — so it is read rather than
-                    // refused.
-                    source_event_type: PositionSource::from_wire(m.source_event_type),
+                    source_event_type: PositionSource(m.source_event_type),
                     sequence: m.sequence,
                 })
             }
@@ -236,10 +217,9 @@ impl ConsumedPositions {
     /// Has `sequence` of the declared source `source` on stream `stream`
     /// already been consumed?
     ///
-    /// Answers for the named source alone, plus whatever a source-less row of
-    /// the same stream covers: a position of *another* declared source says
-    /// nothing about this record, and neither does a position of another
-    /// stream.
+    /// Answers for the named source alone: a position of *another* declared
+    /// source says nothing about this record, and neither does a position of
+    /// another stream.
     pub(crate) fn covers(&self, stream: &str, source: &PositionSource, sequence: u64) -> bool {
         self.highest(stream, source)
             .is_some_and(|highest| highest >= sequence)
@@ -247,17 +227,8 @@ impl ConsumedPositions {
 
     /// The highest sequence of `source` on `stream` that is consumed, or `None`
     /// when nothing of it has been.
-    ///
-    /// A source-less row of the same stream contributes too: it cannot say
-    /// which source it settled, so it covers them all.
     fn highest(&self, stream: &str, source: &PositionSource) -> Option<u64> {
-        let of_stream = self.0.get(stream)?;
-        let named = of_stream.get(source).copied();
-        let whole_stream = of_stream.get(&PositionSource::WholeStream).copied();
-        match (named, whole_stream) {
-            (None, None) => None,
-            (named, whole_stream) => Some(named.unwrap_or(0).max(whole_stream.unwrap_or(0))),
-        }
+        self.0.get(stream)?.get(source).copied()
     }
 
     /// Where a subscription over the declared source `source` configured with
@@ -291,10 +262,8 @@ impl ConsumedPositions {
 /// Add the position of the upstream record this append settles to the batch
 /// being built, and answer with the position it now carries.
 ///
-/// Called from two kinds of call site: the interpreter, closing out a
-/// `handle` decision, and the dead-letter path, settling a record that never
-/// produced one (a record dropped while draining, a `handle` error, or a
-/// failure the policy decided to ignore). One `handle`
+/// Called from the interpreter, closing out a `handle` decision, and from the
+/// upstream handler, settling a record `handle` refused. One `handle`
 /// invocation's decisions can reach the store as more than one atomic
 /// append — a `CancelSchedule` or `End` is a hard boundary the
 /// `Persist × Persist` fold does not cross — so on that call site the
@@ -327,14 +296,56 @@ pub(crate) fn append_consumed_position(
     Some(position.clone())
 }
 
+/// Append the position of an input that produced no decision at all, at
+/// `*sequence + 1` on the saga's own stream, advancing `*sequence` only on
+/// success.
+///
+/// Written for an input [`Saga::handle`](crate::Saga::handle) refused: it was
+/// seen, it produced nothing, and it must not come round again — so the
+/// position is the only row it leaves.  Nothing else about the refusal is
+/// durable; the error itself reaches an operator through `tracing`.
+///
+/// Returns `false` when the store refused the append, which leaves the input
+/// unconsumed so a redelivery can reach `handle` again.
+pub(crate) async fn settle_with_position(
+    store: &Arc<dyn EventStore>,
+    saga_id: &SagaId,
+    sequence: &mut u64,
+    position: &ConsumedPositionEvent,
+    consumed: &mut ConsumedPositions,
+) -> bool {
+    let now = jiff::Timestamp::now();
+    let mut appending = Vec::with_capacity(1);
+    let mut next_seq = *sequence;
+    let recorded =
+        append_consumed_position(&mut appending, Some(position), consumed, &mut next_seq, now);
+    if appending.is_empty() {
+        // The position is already durable — a redelivery whose earlier
+        // attempt landed it. Nothing left to write, and the input is consumed.
+        return true;
+    }
+    if let Err(e) = store.append(saga_id.borrow(), appending).await {
+        tracing::warn!(
+            error = %e,
+            saga_id = saga_id.as_str(),
+            "saga could not settle a refused input; it stays unconsumed so a \
+             redelivery can decide it again"
+        );
+        return false;
+    }
+    *sequence = next_seq;
+    finalize_consumed_position(consumed, saga_id.as_str(), recorded);
+    true
+}
+
 /// Fold a position that just landed into the in-memory record and report it.
 ///
 /// Call this only after the append carrying `recorded` has actually
 /// succeeded.  Shared by every append site that can close out an input — a
-/// `Persist` batch, a `CancelSchedule` marker, the `Ended` marker, a
-/// dead-letter append, or the position-only append a policy-ignored failure
-/// still writes — so the running incarnation answers `covers` the same way a
-/// replayed one does no matter which of them happened to land last.
+/// `Persist` batch, a `CancelSchedule` marker, the `Ended` fact, or the
+/// position-only append an input `handle` refused still writes — so the
+/// running incarnation answers `covers` the same way a replayed one does no
+/// matter which of them happened to land last.
 pub(crate) fn finalize_consumed_position(
     consumed: &mut ConsumedPositions,
     saga_id: &str,
@@ -383,16 +394,13 @@ mod tests {
     }
 
     #[test]
-    fn consumed_position_reserves_a_single_event_type() {
+    fn consumed_reserves_a_single_event_type() {
         assert_eq!(
             ConsumedPositionEvent::EVENT_TYPE,
-            CONSUMED_POSITION_MARKER,
+            CONSUMED_MARKER,
             "the record is written down under the one identity it declares"
         );
-        assert_eq!(
-            CONSUMED_POSITION_MARKER.to_string(),
-            "nitinol.saga.consumed_position"
-        );
+        assert_eq!(CONSUMED_MARKER.to_string(), "nitinol.saga.consumed");
     }
 
     /// The arm a record reports is the name of the `oneof` its payload carries.
@@ -412,7 +420,7 @@ mod tests {
                 read, written,
                 "the stream, the declared source and the sequence must all \
                  survive the round trip; a position that lost its source would \
-                 cover every source of its stream"
+                 name nothing a reader could key on"
             ),
             Err(e) => panic!("decode failed: {e}"),
         }
@@ -445,7 +453,7 @@ mod tests {
     /// it, and it would cover records nobody consumed.
     #[test]
     fn decode_reports_error_for_an_empty_source_instead_of_a_default() {
-        let marker = ConsumedPositionMarker {
+        let marker = ConsumedMarker {
             kind: Some(Kind::Consumed(Consumed {
                 source: String::new(),
                 sequence: 5,
@@ -461,12 +469,13 @@ mod tests {
         );
     }
 
-    /// An empty `source_event_type`, unlike an empty `source`, is a row the
-    /// framework itself wrote before positions named a source.  It reads as a
-    /// position that covers the whole stream rather than as a decode error.
+    /// A row naming no declared source cannot say which of two sources sharing
+    /// its stream it settled.  It used to be read as covering every source of
+    /// its stream; nothing writes one any more, so it is refused rather than
+    /// given a reader of its own.
     #[test]
-    fn a_row_naming_no_source_reads_as_covering_the_whole_stream() {
-        let marker = ConsumedPositionMarker {
+    fn decode_reports_error_for_a_row_naming_no_source() {
+        let marker = ConsumedMarker {
             kind: Some(Kind::Consumed(Consumed {
                 source: "order-stream".to_owned(),
                 sequence: 5,
@@ -475,15 +484,11 @@ mod tests {
         };
         let payload = Bytes::from(prost::Message::encode_to_vec(&marker));
 
-        match ConsumedPositionEvent::decode(&payload) {
-            Ok(read) => assert_eq!(
-                read.source_event_type,
-                PositionSource::WholeStream,
-                "a row from before sources were named must be readable, and \
-                 what it covers is the whole stream"
-            ),
-            Err(e) => panic!("decode failed: {e}"),
-        }
+        assert!(
+            ConsumedPositionEvent::decode(&payload).is_err(),
+            "a fact that cannot say which source it settled is a corrupted \
+             payload, not a position covering every source of its stream"
+        );
     }
 
     /// `encode` only ever writes a position built from an already-valid
@@ -493,7 +498,7 @@ mod tests {
     /// letting that panic take down replay.
     #[test]
     fn decode_reports_error_for_a_reserved_source_instead_of_panicking() {
-        let marker = ConsumedPositionMarker {
+        let marker = ConsumedMarker {
             kind: Some(Kind::Consumed(Consumed {
                 source: "nitinol.saga.poisoned".to_owned(),
                 sequence: 5,
@@ -557,22 +562,6 @@ mod tests {
             !positions.covers("shared", &beta(), 2),
             "keyed by the stream alone, source A's progress would drop source \
              B's record at a lower sequence — input no incarnation ever consumed"
-        );
-    }
-
-    /// A row that names no source cannot say which source it settled, so it
-    /// covers them all.  The alternative — covering nothing — would re-deliver
-    /// input whose decision is already durable.
-    #[test]
-    fn a_source_less_position_covers_every_source_of_its_stream() {
-        let mut positions = ConsumedPositions::default();
-        positions.record("shared", PositionSource::WholeStream, 3);
-
-        assert!(positions.covers("shared", &alpha(), 3));
-        assert!(positions.covers("shared", &beta(), 2));
-        assert!(
-            !positions.covers("shared", &beta(), 4),
-            "it covers up to its own sequence and no further"
         );
     }
 
