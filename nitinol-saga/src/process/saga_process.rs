@@ -296,10 +296,58 @@ impl<S: Saga> SagaProcess<S> {
             lifecycle: &mut self.lifecycle,
             scheduler: self.scheduler.clone(),
             pending_deadlines: Arc::clone(&self.pending_deadlines),
+            landed_schedules: Vec::new(),
             delivery: &self.delivery,
             consumed: &mut self.consumed,
             input_position,
         }
+    }
+
+    /// Settle a deadline firing: append the `fired` marker that closes it out,
+    /// and drop it from the pending view once that marker is durable.
+    ///
+    /// This marker is to a firing what the consumed position is to an observed
+    /// record — the row that says the input is dealt with and must not come
+    /// round again.  A firing was addressed to this instance rather than read
+    /// from a stream, so it carries no position and this is the only row that
+    /// can say so.  Which is why it is appended *after* whatever the firing
+    /// decided: written first, a decision that never became durable would leave
+    /// behind a deadline replay folds out of the journal for good — the firing
+    /// lost, the decision with it.
+    ///
+    /// Appended once, with no retry.  An append that did not land leaves the
+    /// schedule fact unfired on the stream, so the deadline stays pending and a
+    /// later activation re-arms and re-delivers it: a repeated firing, which
+    /// [`Saga::handle`] is already obliged to tolerate, in place of a lost one.
+    async fn settle_fired(&mut self, name: &TimerName) {
+        let fired_event = ScheduleEvent::Fired {
+            token: ScheduleToken::new(self.saga_id.clone(), name.clone()),
+            fired_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
+        };
+        // A deadline firing is not an observed record, so it consumes nothing.
+        if scheduler::append_schedule_marker(
+            &self.store,
+            &self.saga_id,
+            &mut self.sequence,
+            fired_event,
+            jiff::Timestamp::now(),
+            None,
+            &mut self.consumed,
+        )
+        .await
+        {
+            // The view follows the journal: the deadline leaves it when its
+            // `fired` marker is durable, and not when the firing arrived.
+            deadline::forget_pending(&self.pending_deadlines, name);
+            return;
+        }
+        tracing::error!(
+            saga_id = self.saga_id.as_str(),
+            timer = name.as_str(),
+            "saga could not settle a deadline firing; the schedule fact stays \
+             unfired, so the deadline is still pending and a later activation \
+             re-arms and re-delivers it"
+        );
     }
 }
 
@@ -557,6 +605,22 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
     }
 }
 
+/// A deadline of this instance has come due.
+///
+/// The firing settles behind its decision, the way every other input a saga
+/// takes does: the `fired` marker that closes the deadline out is appended only
+/// once what the firing decided is durable — see `SagaProcess::settle_fired` —
+/// and is withheld entirely where there is nothing left to close:
+///
+/// - the decision never became durable, so the deadline stays pending and a
+///   later activation re-arms and re-delivers it;
+/// - the effect re-set this very deadline and that fact landed, so the new
+///   schedule supersedes the old one by name on its own;
+/// - the saga terminated on this firing, so it re-arms nothing ever again.
+///
+/// A firing that decides nothing at all — refused, unreadable, or
+/// `SagaEffect::None` — is settled by the marker alone, which is the discipline
+/// the upstream path settles a refused record by its position alone with.
 impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
     type Response = ();
     type Error = std::convert::Infallible;
@@ -610,12 +674,21 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         let input = match read_back {
             Ok(input) => input,
             Err(error) => {
+                // Nothing readable reached `handle`, so there is no decision to
+                // settle behind and the marker is the whole of what this firing
+                // leaves — the discipline an undecodable observed record is read
+                // past by.  The schedule fact names an identity this alphabet
+                // does not declare, which no restart changes: left unsettled,
+                // the deadline would be re-armed by every later activation only
+                // to repeat this report.
                 tracing::error!(
                     error = %error,
                     saga_id = self.saga_id.as_str(),
                     timer = name.as_str(),
-                    "saga could not read a deadline firing; dropping it"
+                    "saga could not read a deadline firing; settling it by its \
+                     `fired` marker alone"
                 );
+                self.settle_fired(&name).await;
                 return Ok(());
             }
         };
@@ -631,73 +704,62 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         let effect = match self.state.handle(input, &mut saga_ctx).await {
             Ok(effect) => effect,
             Err(e) => {
-                // A firing carries no position to settle — it was addressed to
-                // this instance rather than read from an upstream stream — so a
-                // refusal leaves nothing durable behind and reaches an operator
-                // here alone.
+                // A refusal produces no decision, so the marker that closes the
+                // deadline out is the only row the firing leaves — the
+                // discipline an observed record `handle` refused is settled by,
+                // where its position alone is that row.  The error itself
+                // reaches an operator here and nowhere else.
                 tracing::error!(
                     error = %e,
                     saga_id = self.saga_id.as_str(),
                     timer = name.as_str(),
-                    "saga refused a deadline firing"
+                    "saga refused a deadline firing; settling it by its `fired` \
+                     marker alone"
                 );
+                self.settle_fired(&name).await;
                 return Ok(());
             }
         };
 
-        // Record the fire durably BEFORE running the handler's effect so that
-        // if the deadline arm re-sets under the same `TimerName` the event
-        // stream order becomes:
-        //
-        //   … Scheduled → Fired → (new) Scheduled
-        //
-        // Replay folds these left-to-right per name:
-        //   insert(name) → remove(name) → insert(name)  ⟹  net: active (correct)
-        //
-        // The opposite order (… Scheduled → (new) Scheduled → Fired) would
-        // cause replay to remove the new schedule when it processes the Fired
-        // marker, breaking timer cancellation and re-registration.
-        //
-        // Best-effort once: an append failure is tolerated (at-least-once
-        // delivery permits a replay re-fire).
-        let fired_event = ScheduleEvent::Fired {
-            token: ScheduleToken::new(self.saga_id.clone(), name.clone()),
-            fired_at_unix_millis: jiff::Timestamp::now().as_millisecond(),
+        // What the firing decided goes to the store first, and only what landed
+        // decides how the firing is settled: `landed_schedules` names the timers
+        // whose `Scheduled` marker became durable while this effect ran, so a
+        // reset the store refused is not mistaken for one that took effect.
+        let (outcome, reset_this_deadline) = {
+            let mut ictx = self.interpreter_ctx(ctx, None);
+            let outcome = interpreter::run_saga_effect(effect, &mut ictx).await;
+            let reset_this_deadline = ictx.landed_schedules.contains(&name);
+            (outcome, reset_this_deadline)
         };
-        // A deadline firing is not an observed record, so it consumes nothing.
-        if scheduler::append_schedule_marker(
-            &self.store,
-            &self.saga_id,
-            &mut self.sequence,
-            fired_event,
-            jiff::Timestamp::now(),
-            None,
-            &mut self.consumed,
-        )
-        .await
-        {
-            // The view follows the journal: the deadline leaves it when its
-            // `fired` marker is durable, and not when the firing arrived. An
-            // append that did not land leaves the deadline pending, which is
-            // what a replay would also conclude from the stream.
-            deadline::forget_pending(&self.pending_deadlines, &name);
-        }
 
-        let mut ictx = self.interpreter_ctx(ctx, None);
-        // A firing does not arrive through a `DirectPoller`, so there is no
-        // upstream cursor to withhold and no redelivery to wait for: an append
-        // this effect needed that never landed is reported here, and the
-        // unfired-schedule fact still on the stream is what a later activation
-        // re-arms the deadline from.
-        if matches!(
-            interpreter::run_saga_effect(effect, &mut ictx).await,
-            InterpretOutcome::AppendFailed
-        ) {
-            tracing::error!(
-                saga_id = self.saga_id.as_str(),
-                timer = name.as_str(),
-                "saga could not persist what it decided from a deadline firing"
-            );
+        match outcome {
+            // A firing does not arrive through a `DirectPoller`, so there is no
+            // upstream cursor to withhold and no redelivery to wait for.  The
+            // settlement is withheld instead: with no `fired` marker the
+            // schedule fact stays unfired on the stream, so a later activation
+            // re-arms the deadline — at once, its due time being past — and
+            // decides it again.  Nothing is retried while this incarnation
+            // lives.
+            InterpretOutcome::AppendFailed => {
+                tracing::error!(
+                    saga_id = self.saga_id.as_str(),
+                    timer = name.as_str(),
+                    "saga could not persist what it decided from a deadline \
+                     firing; the deadline stays pending, so a later activation \
+                     re-arms and re-delivers it"
+                );
+            }
+            // `End`'s durable fact has landed and the process is stopping.  A
+            // terminated saga re-arms nothing, so there is no later activation
+            // for a settlement to keep this deadline from.
+            InterpretOutcome::Stop => {}
+            // The effect re-set this very deadline and that fact is durable.
+            // Folding the journal replaces a schedule by name, so the new fact
+            // supersedes the one that fired all on its own — while a `fired`
+            // marker written after it would be folded by the same name and
+            // remove the deadline the saga has just re-armed.
+            InterpretOutcome::Continue if reset_this_deadline => {}
+            InterpretOutcome::Continue => self.settle_fired(&name).await,
         }
         Ok(())
     }

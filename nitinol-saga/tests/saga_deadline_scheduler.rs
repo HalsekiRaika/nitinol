@@ -645,9 +645,9 @@ async fn setting_and_firing_persist_schedule_markers_on_the_saga_stream() {
     .await;
     assert!(ok, "the deadline must fire so a `fired` marker is written");
 
-    // The `fired:` decision is the barrier for the post-fire append: it is the
-    // effect the deadline arm returned, so once it is on the stream the fire's
-    // own marker is too.
+    // The `fired` marker is the last row the firing writes — it settles the
+    // deadline only once the `fired:` decision the arm returned is durable — so
+    // waiting for the marker is waiting for the whole post-fire append.
     let deadline_for_rows = Instant::now() + Duration::from_secs(5);
     let events = loop {
         let events = load_saga_events(&saga_store, &saga_id).await;
@@ -958,10 +958,11 @@ async fn a_deadline_beyond_the_old_wheel_horizon_fires() {
 /// second incarnation (replay) must still see the re-set deadline as pending
 /// and eventually fire it.
 ///
-/// Without the ordering fix the stream reads `Scheduled → (new) Scheduled →
-/// Fired`, and replay's `Fired` handling removes the new schedule by name,
-/// leaving it invisible to the second incarnation.  With it the order is
-/// `Scheduled → Fired → (new) Scheduled`.
+/// A `Fired` marker written for the firing that re-set the name would do just
+/// what the fix prevents: replay folds `Fired` by name, so it would remove the
+/// *new* schedule and leave it invisible to the second incarnation.  Nothing
+/// has to be written at all — the new `Scheduled` supersedes the old deadline
+/// by name on its own — so the stream reads `Scheduled → (new) Scheduled`.
 #[tokio::test]
 async fn a_deadline_reset_from_its_own_firing_survives_replay() {
     let ps = ProcessSystem::new().await;
@@ -1002,16 +1003,19 @@ async fn a_deadline_reset_from_its_own_firing_survives_replay() {
     .await;
     assert!(ok, "incarnation #1 must fire the first deadline");
 
-    // The three markers landing is the barrier for the ordering assertion.
+    // The second `scheduled` marker landing is the barrier for the ordering
+    // assertion: it is the re-set deadline's own fact, so once it is on the
+    // stream the firing that re-set it has been fully dealt with.
     let deadline_for_rows = Instant::now() + Duration::from_secs(5);
     let events = loop {
         let events = load_saga_events(&saga_store, &saga_id).await;
-        if schedule_transitions(&events).len() >= 3 {
+        if count_schedule_transition(&events, "scheduled") >= 2 {
             break events;
         }
         assert!(
             Instant::now() < deadline_for_rows,
-            "timed out waiting for three schedule markers; stream held {:?}",
+            "timed out waiting for the re-set deadline's `scheduled` marker; \
+             stream held {:?}",
             schedule_transitions(&events)
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1019,9 +1023,10 @@ async fn a_deadline_reset_from_its_own_firing_survives_replay() {
 
     assert_eq!(
         schedule_transitions(&events),
-        vec!["scheduled", "fired", "scheduled"],
-        "the stream must hold the re-set deadline after the fire it followed, \
-         and nothing between"
+        vec!["scheduled", "scheduled"],
+        "the re-set deadline must be the last word on this name: a `fired` \
+         marker for the firing that re-set it would be folded by name and \
+         remove the very schedule the arm just wrote"
     );
 
     // Incarnation #2 shares the store but subscribes to an empty upstream, so

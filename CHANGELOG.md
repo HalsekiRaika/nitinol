@@ -1376,6 +1376,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- (`nitinol-saga`): a deadline firing is no longer closed out before the
+  decision it produced is durable, so a firing whose decision could not be
+  persisted is tried again instead of being lost.
+
+  The `fired` fact of a schedule is to a firing what the consumed position is to
+  an observed record — the row that says the input is dealt with — but it was
+  appended *before* the deadline arm's effect was interpreted, to keep a
+  same-name reset ordered as `Scheduled → Fired → (new) Scheduled` on the
+  stream. Replay folds a `fired` fact by name, so once it landed the deadline
+  was gone from the journal: a decision whose append then failed — a crash, or
+  simply the staged retries running out — left the firing settled, the decision
+  in no store, and the saga waiting on an input that was never coming. Deadlines
+  were the one input delivered at-most-once, and the only way a saga observes
+  that an answer never came.
+
+  The firing's effect is now interpreted first, and the `fired` fact is appended
+  after it, only when there is something left to close out. It is withheld where
+  the effect's append did not land — the schedule fact stays unfired, so a later
+  activation re-arms the deadline (at once, its due time being past) and decides
+  it again — where the arm re-set the same `TimerName` and that fact landed,
+  since replacing a schedule by name already supersedes the old deadline, and
+  where the saga terminated on the firing. A same-name reset is judged by the
+  schedule fact that actually became durable rather than by what the effect
+  asked for, so a reset the store refused does not pass for one that took
+  effect.
+
+  Firing is therefore at-least-once: a stop between the decision landing and the
+  `fired` fact landing repeats the firing, and a deadline arm has to tolerate
+  seeing the same one twice. Nothing is retried while the failing incarnation is
+  still alive; the retry is a later activation.
+
+  Three firings that previously vanished are now settled once, matching how the
+  upstream path settles a record it cannot decide from: one the deadline arm
+  returns `Err` for, one whose schedule fact names a message identity the
+  alphabet no longer declares, and one whose effect writes nothing. Each used to
+  leave no `fired` fact and so was re-armed and repeated by every later
+  activation; each now leaves that fact and nothing else.
+
 - **BREAKING** (`nitinol-eventsource`, `nitinol-persistence`): a projector no
   longer lets its subscription move past an event it failed to apply. Under
   `AtLeastOnce` and `ExactlyOnce`, the delivery engine already declined to

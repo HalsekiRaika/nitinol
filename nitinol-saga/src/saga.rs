@@ -269,7 +269,8 @@ pub trait Saga: Send + Sync + 'static {
     /// What differs is only how the input got here: an observed event came
     /// through its source's subscription and carries a position to consume, a
     /// firing was addressed to this instance and carries none — which is why the
-    /// consumed-position rules below speak of observed events alone.
+    /// consumed-position rules below speak of observed events alone, and why a
+    /// firing has a settling row of its own (see *How a firing settles*).
     ///
     /// # What "already consumed" means
     ///
@@ -328,6 +329,31 @@ pub trait Saga: Send + Sync + 'static {
     ///   source it settled, so progress on one upstream stream never covers a
     ///   record of another, and progress on one declared source never covers a
     ///   record of another source sharing its stream.
+    ///
+    /// # How a firing settles
+    ///
+    /// A firing carries no position, so the row that settles it is the `fired`
+    /// fact of its own schedule — and that fact is written only once whatever
+    /// this method returned for the firing is durable.  Same discipline, same
+    /// reason: an input is not closed out before the decision it produced is in
+    /// a store.  A decision that never became durable therefore leaves the
+    /// deadline pending on the stream, and the next activation re-arms it — at
+    /// once, its due time being past — and hands the firing here again.
+    ///
+    /// Firing is at-least-once as a result: a stop between the decision landing
+    /// and the `fired` fact landing repeats the firing, so a deadline arm has to
+    /// tolerate being handed the same one twice.  Nothing is retried while this
+    /// incarnation lives; the retry is a later activation.
+    ///
+    /// A firing this method returns `Err` for is settled by the `fired` fact
+    /// alone — the counterpart of the position-only append a refused observed
+    /// record leaves — and so is one whose effect writes nothing, and one whose
+    /// schedule fact names a message identity this alphabet no longer declares,
+    /// which never reaches this method at all.  Two firings leave no `fired`
+    /// fact: one the saga terminated on, since the `Ended` fact closes every
+    /// deadline out, and one whose returned effect re-set the same
+    /// [`TimerName`](crate::TimerName) and had that fact land, since replacing a
+    /// schedule by name is itself what closes the old deadline.
     ///
     /// None of this makes what follows from a decision idempotent: what a
     /// delivery host carries, and how often, is stated on

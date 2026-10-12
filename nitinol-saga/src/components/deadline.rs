@@ -65,6 +65,32 @@ pub struct PendingDeadline {
 /// the proxy with the hosting machinery is what leaves effect → append → arm as
 /// the only path.
 ///
+/// # How a firing is settled
+///
+/// A deadline that comes due reaches the deadline arm of
+/// [`Saga::handle`](crate::Saga::handle), and the `fired` fact that closes it
+/// out is written onto the saga's own stream only once what the firing decided
+/// is durable.  That is the discipline every other input settles by — an
+/// observed record's consumed position rides the append its decision lands in —
+/// and a firing carries no position, so this fact is the row that plays the same
+/// part.  A decision no store holds therefore leaves the deadline pending, and
+/// the next activation re-arms it from the schedule fact still on the stream and
+/// delivers the firing again: a deadline is not lost to a failed append.
+///
+/// Firing is at-least-once, which is the other side of that order: a stop
+/// between the decision landing and the `fired` fact landing repeats the firing,
+/// so a deadline arm has to tolerate seeing the same one twice.  Nothing is
+/// retried while the incarnation that failed is still alive — the retry is a
+/// later activation, which is the one place the journal is read again.
+///
+/// A firing that decides nothing is settled all the same, by the `fired` fact
+/// alone: whether the arm refused it, answered [`SagaEffect::None`], or the
+/// schedule fact names a message identity the current declaration disagrees with
+/// and nothing could be read back.  Two firings leave no `fired` fact at all —
+/// one the saga terminated on, since the `Ended` fact closes every deadline out,
+/// and one whose arm re-set the same [`TimerName`] and had that fact land, since
+/// replacing a schedule by name is itself what closes the old deadline.
+///
 /// # How one is obtained
 ///
 /// From [`SagaComponents::deadline`](crate::SagaComponents::deadline), inside
@@ -182,7 +208,11 @@ impl<M: DeadlineMessage> Deadline<M> {
     ///
     /// Restored by replay from the saga's own stream and moved by each schedule
     /// marker that becomes durable — never by a call to [`Deadline::set`] whose
-    /// append has not landed.  So the view and the stream cannot disagree.
+    /// append has not landed, and never by a firing arriving.  A deadline leaves
+    /// this view when its own `fired` marker is durable, or when a schedule fact
+    /// of the same name replaces it; a firing whose decision could not be
+    /// persisted leaves it right here, which is also what replay would read off
+    /// the stream.  So the view and the stream cannot disagree.
     pub fn pending(&self) -> Vec<PendingDeadline> {
         let held = self
             .pending

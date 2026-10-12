@@ -38,6 +38,16 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     /// marker becomes durable so the saga's own `Deadline` view never reports a
     /// deadline whose fact did not land.
     pub(crate) pending_deadlines: PendingDeadlineCell,
+    /// The timers whose `Scheduled` marker became durable while this effect was
+    /// interpreted.
+    ///
+    /// Read by the deadline-firing path to tell whether the effect re-set the
+    /// very deadline that fired: folding the journal replaces a schedule by
+    /// name, so a same-name fact supersedes the one that fired on its own and
+    /// the firing needs no settlement of its own.  Collected from what landed
+    /// rather than from what the effect asked for, so a reset whose append never
+    /// made it does not pass for one that did.
+    pub(crate) landed_schedules: Vec<TimerName>,
     /// Where a deadline this effect registers must address its firing.
     pub(crate) delivery: &'a ScheduleDelivery<S>,
     /// How far each upstream source has been consumed, advanced here as each
@@ -73,9 +83,14 @@ pub(crate) enum InterpretOutcome {
     /// which is exactly what must not happen here.  No cursor is held open for
     /// this: the live upstream cursor advances regardless, and recovery comes
     /// instead from what never became durable — a restart's subscription
-    /// resumes from the position the journal records for that source, or, for
-    /// a deadline firing, the unfired-schedule fact still on the stream is
-    /// what a later activation re-arms from.
+    /// resumes from the position the journal records for that source.
+    ///
+    /// A deadline firing recovers the same way, through the row that settles
+    /// *it*: no `fired` marker is written for this outcome, so the schedule fact
+    /// stays unfired on the stream and a later activation re-arms the deadline
+    /// from it — immediately, its due time being past — and the decision is made
+    /// again.  Firing is at-least-once for that reason, and nothing is retried
+    /// while the incarnation that failed is still alive.
     AppendFailed,
     Stop,
 }
@@ -351,8 +366,9 @@ async fn persist_batch<S: Saga>(
     finalize_consumed_position(ictx.consumed, ictx.saga_id.as_str(), recorded_position);
 
     // The schedule markers of this batch are durable now, so what they record
-    // can be reported — and only now may the pending view hold them: a batch
-    // that never landed must leave the view exactly as it was. The timers
+    // can be reported — and only now may the pending view hold them, or the
+    // firing path read them as a deadline this effect actually re-set: a batch
+    // that never landed must leave both exactly as they were. The timers
     // themselves are registered further below, after every marker has landed.
     for reg in &registrations {
         deadline::record_pending(
@@ -360,6 +376,7 @@ async fn persist_batch<S: Saga>(
             reg.name.clone(),
             deadline::due_at(reg.scheduled_at_unix_millis, reg.after),
         );
+        ictx.landed_schedules.push(reg.name.clone());
         report_system_event!(
             ScheduleEvent::EVENT_TYPE,
             SCHEDULED_ARM,
