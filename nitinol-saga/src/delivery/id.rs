@@ -1,8 +1,13 @@
 //! What a delivery host is called, and the key each of its partitions keeps
 //! its progress under.
 
-use nitinol_persistence::store::CheckpointScope;
-use nitinol_persistence::RESERVED_NAMESPACE;
+use nitinol_persistence::store::OffsetScope;
+
+/// The part of the framework a delivery host's offsets belong to.
+///
+/// Carries no `.`, which is what
+/// [`OffsetScope::framework_owned`] asks of a part name.
+const SAGA_DELIVERY_PART: &str = "saga-delivery";
 
 /// Identifier of a delivery host — what its recorded progress is filed under.
 ///
@@ -14,24 +19,25 @@ use nitinol_persistence::RESERVED_NAMESPACE;
 ///
 /// # Invariants
 ///
-/// None on the text. A delivery scope is kept apart from a projection's key by
-/// the fixed prefix [`SagaDeliveryScope`] renders, so nothing about the
+/// None on the text. The key is rendered by
+/// [`OffsetScope::framework_owned`], which puts it inside the framework's own
+/// namespace whatever the identifier contains, so nothing about the
 /// identifier's own content has to be refused — and a saga whose events belong
 /// to a framework-owned family would have its derived default refused if it
 /// were.
 ///
 /// `SagaDeliveryId` is a distinct newtype — it is **not** interchangeable with
-/// [`ProjectionId`](nitinol_persistence::ProjectionId), which names a different
+/// [`ProjectionId`](nitinol_eventsource::ProjectionId), which names a different
 /// kind of consumer. The following must fail to compile:
 ///
 /// ```compile_fail
-/// use nitinol_persistence::ProjectionId;
+/// use nitinol_eventsource::ProjectionId;
 /// use nitinol_saga::SagaDeliveryId;
 /// let _: SagaDeliveryId = ProjectionId::new("same-text");
 /// ```
 ///
 /// ```compile_fail
-/// use nitinol_persistence::ProjectionId;
+/// use nitinol_eventsource::ProjectionId;
 /// use nitinol_saga::SagaDeliveryId;
 /// let _ = ProjectionId::new("same-text") == SagaDeliveryId::new("same-text");
 /// ```
@@ -46,49 +52,17 @@ impl SagaDeliveryId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
 
-/// The checkpoint key of one partition of one delivery host.
-///
-/// Progress is per partition rather than per host: a host recording one
-/// position for all its partitions would have them overwrite each other, and a
-/// held partition would drag the rest back to its own position on restart. The
-/// key is therefore the identifier together with the partition number.
-///
-/// # Why the key cannot collide with a projection's
-///
-/// The rendering begins with the framework's own
-/// [reserved namespace](nitinol_persistence::reserved), which every
-/// user-facing identifier constructor refuses while it is being constructed. A
-/// [`ProjectionId`](nitinol_persistence::ProjectionId) that rendered the same
-/// text as a scope below therefore cannot exist, so the two key spaces are
-/// disjoint by construction and one provider table serves both.
-///
-/// # Why the rendering is injective
-///
-/// The partition number is decimal and comes last, so splitting at the final
-/// separator recovers the pair. An identifier that itself ends in something
-/// readable as a partition number does not collide with the pair that would
-/// render the same text, because that pair's number would then be the
-/// identifier's own trailing part and the identifier the shorter prefix.
-pub struct SagaDeliveryScope {
-    rendered: String,
-}
-
-impl SagaDeliveryScope {
-    /// The key partition `partition` of the host named `id` records under.
-    pub fn new(id: &SagaDeliveryId, partition: usize) -> Self {
-        Self {
-            rendered: format!(
-                "{RESERVED_NAMESPACE}.saga.delivery.{}.{partition}",
-                id.as_str()
-            ),
-        }
-    }
-}
-
-impl CheckpointScope for SagaDeliveryScope {
-    fn checkpoint_key(&self) -> &str {
-        &self.rendered
+    /// The key partition `partition` of this host records its progress under.
+    ///
+    /// Progress is per partition rather than per host: a host recording one
+    /// position for all its partitions would have them overwrite each other,
+    /// and a held partition would drag the rest back to its own position on
+    /// restart. The key is therefore this identifier together with the
+    /// partition number, and that the two render one key injectively — inside
+    /// the framework's own namespace, where no user-named scope can reach — is
+    /// [`OffsetScope`]'s obligation rather than this type's.
+    pub fn offset_scope(&self, partition: usize) -> OffsetScope {
+        OffsetScope::framework_owned(SAGA_DELIVERY_PART, self.as_str(), partition)
     }
 }

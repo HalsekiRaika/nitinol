@@ -6,7 +6,7 @@
 //!
 //! | space | what carries the name | how the law is enforced |
 //! |---|---|---|
-//! | stream keys | [`AggregateId`](crate::AggregateId), [`ProjectionId`](crate::ProjectionId), `nitinol_saga::SagaId` — runtime strings | [`reject_reserved_id`] panics |
+//! | stream keys | [`AggregateId`](crate::AggregateId), [`store::OffsetScope`](crate::store::OffsetScope), `nitinol_eventsource::ProjectionId`, `nitinol_saga::SagaId` — runtime strings | [`reject_reserved_id`] panics |
 //! | event types | the `family` of an [`EventType`](crate::EventType) — a compile-time literal | [`Family::new`](crate::Family::new) panics while the constant holding it is evaluated |
 //!
 //! The two differ only in *when* the name is known, and therefore in what a

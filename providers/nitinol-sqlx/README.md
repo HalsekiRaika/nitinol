@@ -1,10 +1,10 @@
 # nitinol-sqlx
 
-A Postgres `EventStore` and `CheckpointStore` for `nitinol`, built on `sqlx`.
+A Postgres `EventStore` and `OffsetStore` for `nitinol`, built on `sqlx`.
 
 The crate carries its own schema as `sqlx` migrations and puts itself through
 `nitinol-store-conformance`, the executable form of the store contracts — the
-`EventStore` OCC clauses and the `CheckpointStore` clauses, each against a
+`EventStore` OCC clauses and the `OffsetStore` clauses, each against a
 schema of its own.
 
 ## Using it
@@ -26,7 +26,7 @@ use nitinol::sqlx::{PostgresEventStore, PostgresStore};
 let pool = PgPoolOptions::new().connect(&std::env::var("DATABASE_URL")?).await?;
 PostgresEventStore::migrate(&pool).await?;
 
-// One store: the journal and both checkpoint slots over this database.
+// One store: the journal and both offset slots over this database.
 let persistence = PersistenceProvider::new(PostgresStore::new(pool)?);
 
 let system = EventSourceSystem::builder(ProcessSystem::new().await)
@@ -43,12 +43,12 @@ has to look like:
 
 ```rust,ignore
 use nitinol::persistence::provider::CustomStore;
-use nitinol::sqlx::{PostgresCheckpointStore, PostgresEventStore};
+use nitinol::sqlx::{PostgresOffsetStore, PostgresEventStore};
 
 let persistence = PersistenceProvider::new(
     CustomStore::builder()
         .eventstore(PostgresEventStore::new(pool.clone())?)
-        .checkpoints(PostgresCheckpointStore::new(pool.clone()))
+        .offsets(PostgresOffsetStore::new(pool.clone()))
         .snapshot(snapshots_from_somewhere_else)
         .build(),
 );
@@ -100,13 +100,13 @@ managed Postgres that requires TLS is not supported by this crate as it stands.
 ## Projecting with `ExactlyOnce`
 
 A read model that counts — anything an overwrite cannot absorb — needs the
-update and the checkpoint that covers it to be one commit. `PostgresCheckpointStore`
-is the half of that this crate owns: it keeps a projection's checkpoint in the
+update and the offset that covers it to be one commit. `PostgresOffsetStore`
+is the half of that this crate owns: it keeps a projection's offset in the
 same database as the journal, and its `Tx` is a `sqlx` transaction, so a
 projector can write both inside one.
 
 **The table comes with the migration you already run.** `PostgresEventStore::migrate`
-applies the crate's whole schema, the checkpoint table included. There is no
+applies the crate's whole schema, the offset table included. There is no
 second migration step to forget.
 
 **The transaction is yours.** This crate implements no `TxProvider`. That trait
@@ -155,8 +155,10 @@ impl TxProvider for PoolTransactions {
 }
 ```
 
-Hand it to the projector, whose journal and checkpoint store both come from the
-supplier, and write the read model through the transaction `project` is given:
+Hand it to the projector, whose journal and offset store both come from the
+supplier, and write the read model through the transaction `project` is given.
+`ProjectionId` is `nitinol_eventsource::ProjectionId`, beside the projector it
+names:
 
 ```rust,ignore
 system
@@ -182,7 +184,7 @@ async fn project(
 ) -> Result<(), Self::Error> {
     // Writing anywhere but through this transaction is what the mode exists to
     // stop: an update on a connection of its own does not roll back with the
-    // checkpoint.
+    // offset.
     let tx = ctx.tx().ok_or(ProjectionFailed::NoTransaction)?;
     sqlx::query("UPDATE order_totals SET placed = placed + 1")
         .execute(&mut **tx)
@@ -191,40 +193,44 @@ async fn project(
 }
 ```
 
-`with_tx_provider` requires the checkpoint store's `Tx` to be the provider's, so
+`with_tx_provider` requires the offset store's `Tx` to be the provider's, so
 a pairing that would not share a transaction does not compile. The framework
-then drives `begin → project → checkpoint save → commit` for each event, and
+then drives `begin → project → offset save → commit` for each event, and
 rolls back — leaving the event to be redelivered — if any of the four fails.
 
-### A checkpoint moves forward or not at all
+### An offset moves forward or not at all
 
-A save carrying a sequence the projection has already reached, or one behind it,
-is refused as `CheckpointConflict`. It is never absorbed as a successful no-op
+A save carrying a sequence the consumer has already reached, or one behind it,
+is refused as `OffsetConflict`. It is never absorbed as a successful no-op
 and never folded away with a `GREATEST`. The comparison and the write are one
-statement against one row, so two writers racing for one projection cannot both
-be told they won — including the race to write a projection's *first*
-checkpoint, where there is no row yet to compare against.
+statement against one row, so two writers racing for one key cannot both
+be told they won — including the race to write a key's *first*
+offset, where there is no row yet to compare against.
 
-Under `ExactlyOnce` that refusal is what rolls the read-model update back. A
-second writer on a projection meant to have one consumer becomes an error
-somebody can see, rather than a counter quietly incremented twice.
+Such a save means another writer holds that key. Refusing is this backend's
+answer to `OFS-4`, which leaves the answer open, and the consumer's half of it
+is that it does not stop: it carries on and saves again at its next move
+forward. Under `ExactlyOnce` the refusal is also what rolls the read-model
+update back, so a second writer becomes something somebody can see rather than
+a counter quietly incremented twice.
 
 A save that skips numbers is still taken: a projection following the store-wide
-order moves its checkpoint over events it has no handler for, so the rule is
-that the checkpoint moves *forward*, not that it moves by one.
+order moves its offset over events it has no handler for, so the rule is
+that the offset moves *forward*, not that it moves by one.
 
 ### Telling a conflict from a failure worth retrying
 
-Both reach you as `CheckpointError::Backend`, and they call for different
-answers. A `CheckpointConflict` is a premise that was broken: retrying reaches
-the same refusal, and what has to change is the deployment. Anything else — a
-connection that dropped, a database that was not there — arrives as the `sqlx`
-error that raised it, and a retry may well clear it.
+Both reach you as `OffsetError::Backend`, and they call for different
+answers. A `OffsetConflict` says another writer holds this key, so retrying
+*this* save reaches the same refusal; what moves the offset on is the consumer's
+next move forward. Anything else — a connection that dropped, a database that
+was not there — arrives as the `sqlx` error that raised it, and a retry may well
+clear it.
 
 ```rust,ignore
-let CheckpointError::Backend(cause) = failure;
-if cause.downcast_ref::<CheckpointConflict>().is_some() {
-    // Another writer holds this projection. Retrying will not help.
+let OffsetError::Backend(cause) = failure;
+if cause.downcast_ref::<OffsetConflict>().is_some() {
+    // Another writer holds this key. The consumer saves again when it moves on.
 } else {
     // The database was not reachable. This one is worth retrying.
 }
@@ -232,14 +238,14 @@ if cause.downcast_ref::<CheckpointConflict>().is_some() {
 
 ### What this guarantees, and what it does not
 
-`ExactlyOnce` is guaranteed for **one consumer per `projection_id`**. Run a
+`ExactlyOnce` is guaranteed for **one consumer per offset scope**. Run a
 projection from one place.
 
-The refusal above is a defence that makes a broken premise visible — it detects
-a duplicate and a checkpoint going backwards. It is not a general answer to
-running one projection from two places. A projector loads its checkpoint once at
+The refusal above is what makes a second writer visible — it detects a
+duplicate and an offset going backwards. It is not a general answer to
+running one projection from two places. A projector loads its offset once at
 startup and carries it in memory, and a sequence genuinely past the stored
-checkpoint is taken from whoever saves it first. Acquiring and revalidating the
+offset is taken from whoever saves it first. Acquiring and revalidating the
 right to process a projection, and ordering events between concurrent
 projectors, are not things this crate does.
 

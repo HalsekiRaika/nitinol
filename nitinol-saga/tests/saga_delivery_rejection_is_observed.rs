@@ -22,7 +22,7 @@
 mod delivery;
 use delivery::{
     append_decided, in_memory_system, scope_of, settle, spawn_host, wait_until_loads,
-    RecordingCheckpointStore, RecordingEventStore, RefusedSaga,
+    RecordingEventStore, RecordingOffsetStore, RefusedSaga,
 };
 
 use std::sync::Arc;
@@ -37,27 +37,27 @@ async fn a_refused_delivery_does_not_become_progress() {
     let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("refuser-rejection-observed");
 
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<RefusedSaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<RefusedSaga>(&system, &journal, &offsets, 1).await;
     wait_until_loads(&recording, 4, "the host must keep polling while held").await;
     settle().await;
 
     // Then
     assert!(
-        checkpoints
+        offsets
             .stored(&scope_of(0))
             .is_none_or(|held| held < position),
         "a record whose delivery was refused is not finished with, so its \
          position must not be recorded as progress"
     );
     assert!(
-        !checkpoints
+        !offsets
             .save_calls()
             .iter()
             .any(|(_, sequence)| *sequence >= position),
@@ -72,14 +72,14 @@ async fn the_same_record_is_asked_for_again() {
     let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("refuser-asked-again");
 
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<RefusedSaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<RefusedSaga>(&system, &journal, &offsets, 1).await;
     let queries = wait_until_loads(&recording, 4, "the host must keep polling while held").await;
 
     // Then

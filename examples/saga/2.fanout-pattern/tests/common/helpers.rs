@@ -18,13 +18,12 @@ use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
 use nitinol_persistence::store::{
-    CheckpointScope, CheckpointStore, EventStore, EventStream, InMemoryCheckpointStore,
+    EventStore, EventStream, InMemoryOffsetStore, OffsetScope, OffsetStore,
 };
 use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    SagaDeliveryExt, SagaDeliveryId, SagaDeliveryProxy, SagaDeliveryScope, SagaManagerProxy,
-    SagaSystemExt,
+    SagaDeliveryExt, SagaDeliveryId, SagaDeliveryProxy, SagaManagerProxy, SagaSystemExt,
 };
 
 use saga_fanout_pattern::payroll_run::{PayrollRun, PayrollRunApproved};
@@ -33,7 +32,7 @@ use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 
 /// The store this example's deployment assembles: one in-memory journal, named
 /// through an `Arc` because the fault-injecting store the crash clauses wrap it
-/// in is not a cloneable value of its own, plus the delivery-checkpoint slot a
+/// in is not a cloneable value of its own, plus the saga-offset slot a
 /// host keeps its progress in.
 ///
 /// Those two slots are exactly what a delivery host needs, and naming the second
@@ -43,7 +42,7 @@ use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 /// progress would not compile.  The snapshot and projection slots are left
 /// unprovided rather than filled with stores nothing here reads.
 pub type ExampleStore =
-    CustomStore<Arc<dyn EventStore>, Unprovided, Unprovided, InMemoryCheckpointStore>;
+    CustomStore<Arc<dyn EventStore>, Unprovided, Unprovided, InMemoryOffsetStore>;
 
 /// The system this example's deployment assembles.
 pub type ExampleSystem = EventSourceSystem<ExampleStore>;
@@ -101,7 +100,7 @@ pub fn payslip_keys(payroll_run: &str, employees: &[String]) -> Vec<String> {
 /// aggregates, the manager and the delivery host run on; dropping the last
 /// handle early would take the incarnation down.
 ///
-/// `checkpoints` is kept because a delivery host's progress is the thing these
+/// `offsets` is kept because a delivery host's progress is the thing these
 /// tests observe it by, and it is read as an operator or a second consumer would
 /// read it — through the store, not through the host.
 pub struct FanOutWorld {
@@ -109,7 +108,7 @@ pub struct FanOutWorld {
     pub payroll_run: AggregateProxy<PayrollRun>,
     pub manager: SagaManagerProxy<FanOutSaga>,
     pub delivery: SagaDeliveryProxy<FanOutSaga>,
-    pub checkpoints: InMemoryCheckpointStore,
+    pub offsets: InMemoryOffsetStore,
 }
 
 /// Spawn a complete incarnation: a fresh `ProcessSystem`, the payroll run
@@ -122,16 +121,16 @@ pub struct FanOutWorld {
 /// the saga's own stream are tenants of the same instance and each owner still
 /// reads only its own key.
 ///
-/// Both the journal and the checkpoint store are parameters because the tests
+/// Both the journal and the offset store are parameters because the tests
 /// hand the same durable state to two successive incarnations — that is what
-/// makes "a restarted host resumes from the checkpoint the dead one left" a
+/// makes "a restarted host resumes from the offset the dead one left" a
 /// thing a test can set up, and wrapping the journal in
 /// [`UnreachablePayslipStore`] is what makes an interrupted fan-out
 /// reproducible.
 pub async fn spawn_world(
     run_id: &AggregateId,
     store: Arc<dyn EventStore>,
-    checkpoints: InMemoryCheckpointStore,
+    offsets: InMemoryOffsetStore,
     delivery_id: &SagaDeliveryId,
 ) -> FanOutWorld {
     let ps = ProcessSystem::new().await;
@@ -139,7 +138,7 @@ pub async fn spawn_world(
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(store)
-                .delivery_checkpoints(checkpoints.clone())
+                .saga_offsets(offsets.clone())
                 .build(),
         ))
         .build();
@@ -154,7 +153,7 @@ pub async fn spawn_world(
         payroll_run,
         manager,
         delivery,
-        checkpoints,
+        offsets,
     }
 }
 
@@ -189,7 +188,7 @@ pub async fn spawn_manager(
 /// Nothing else is named: the journal it reads, the slot it records in and the
 /// system it delivers through are all the system's.  The identifier is named
 /// explicitly rather than left to the default derived from the saga's event
-/// type, because it is half of the checkpoint key these tests read — see
+/// type, because it is half of the offset key these tests read — see
 /// [`delivery_scope`].
 pub async fn spawn_delivery_host(
     system: &ExampleSystem,
@@ -205,28 +204,25 @@ pub async fn spawn_delivery_host(
 
 // The delivery host's progress
 
-/// The checkpoint key the only partition of the host named `delivery_id`
+/// The offset key the only partition of the host named `delivery_id`
 /// records under.
 ///
 /// Progress is per partition, not per host; these tests leave the count at the
 /// default of one, so partition zero is the whole of it.
-pub fn delivery_scope(delivery_id: &SagaDeliveryId) -> SagaDeliveryScope {
-    SagaDeliveryScope::new(delivery_id, 0)
+pub fn delivery_scope(delivery_id: &SagaDeliveryId) -> OffsetScope {
+    delivery_id.offset_scope(0)
 }
 
 /// What the store holds for `scope`, as an operator would read it.
 ///
 /// `None` is "this host has never finished a record", which is not the same as
-/// "it is at zero": the distinction is part of the checkpoint contract, and it is
+/// "it is at zero": the distinction is part of the offset contract, and it is
 /// what lets a test say "the interrupted host recorded no progress at all".
-pub async fn delivered_through(
-    checkpoints: &InMemoryCheckpointStore,
-    scope: &dyn CheckpointScope,
-) -> Option<u64> {
-    checkpoints
+pub async fn delivered_through(offsets: &InMemoryOffsetStore, scope: &OffsetScope) -> Option<u64> {
+    offsets
         .load(scope)
         .await
-        .expect("loading an in-memory checkpoint must succeed")
+        .expect("loading an in-memory offset must succeed")
 }
 
 /// Poll until `scope` holds at least `want`, then answer what it holds.
@@ -235,14 +231,14 @@ pub async fn delivered_through(
 /// record implied has landed, so this is the observable point that says "the
 /// whole fan-out was carried" — not a guessed settle window.
 pub async fn wait_for_delivery_through(
-    checkpoints: &InMemoryCheckpointStore,
-    scope: &dyn CheckpointScope,
+    offsets: &InMemoryOffsetStore,
+    scope: &OffsetScope,
     want: u64,
     timeout: Duration,
 ) -> u64 {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if let Some(held) = delivered_through(checkpoints, scope).await {
+        if let Some(held) = delivered_through(offsets, scope).await {
             if held >= want {
                 return held;
             }
@@ -250,8 +246,8 @@ pub async fn wait_for_delivery_through(
         if std::time::Instant::now() >= deadline {
             panic!(
                 "timed out waiting for delivery progress to reach {want} on {} (held {:?})",
-                scope.checkpoint_key(),
-                delivered_through(checkpoints, scope).await
+                scope.as_str(),
+                delivered_through(offsets, scope).await
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -382,7 +378,7 @@ pub fn decisions(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
 /// The one decision on the saga's own stream, and the store-wide position it was
 /// committed at.
 ///
-/// That position is what a delivery host's checkpoint is compared against: a
+/// That position is what a delivery host's offset is compared against: a
 /// host that has recorded it has finished every delivery the decision implied.
 pub async fn decision_position(store: &Arc<dyn EventStore>, saga_key: &str) -> u64 {
     let stream = load_stream(store, saga_key).await;

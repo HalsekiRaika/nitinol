@@ -17,12 +17,12 @@
 mod delivery;
 use delivery::{
     append_decided, in_memory_system, scope_of, settle, spawn_host, wait_until_stored, Ledger,
-    RecordingCheckpointStore, SelectiveSaga,
+    RecordingOffsetStore, SelectiveSaga,
 };
 
 use std::sync::Arc;
 
-use nitinol_persistence::store::{CheckpointScope, EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
@@ -32,7 +32,7 @@ async fn each_partition_records_under_its_own_key() {
     // accept.
     let (system, _aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
 
     let first_target = AggregateId::new("ledger-per-partition-a");
     let second_target = AggregateId::new("ledger-per-partition-b");
@@ -55,13 +55,13 @@ async fn each_partition_records_under_its_own_key() {
     .await;
 
     // When
-    let _host = spawn_host::<SelectiveSaga>(&system, &journal, &checkpoints, 2).await;
+    let _host = spawn_host::<SelectiveSaga>(&system, &journal, &offsets, 2).await;
 
     // Then
     for partition in [0usize, 1] {
         assert_eq!(
             wait_until_stored(
-                &checkpoints,
+                &offsets,
                 &scope_of(partition),
                 last,
                 "each partition must record its own progress"
@@ -76,10 +76,10 @@ async fn each_partition_records_under_its_own_key() {
     settle().await;
 
     assert_eq!(
-        checkpoints.keys(),
+        offsets.keys(),
         vec![
-            scope_of(0).checkpoint_key().to_owned(),
-            scope_of(1).checkpoint_key().to_owned(),
+            scope_of(0).as_str().to_owned(),
+            scope_of(1).as_str().to_owned(),
         ],
         "the host holds exactly one position per partition, under keys naming \
          the identifier and the partition number, and no position of its own \

@@ -1,8 +1,8 @@
-//! A Postgres [`EventStore`] and [`CheckpointStore`] for `nitinol`, built on
+//! A Postgres [`EventStore`] and [`OffsetStore`] for `nitinol`, built on
 //! `sqlx`.
 //!
 //! [`EventStore`]: nitinol_persistence::store::EventStore
-//! [`CheckpointStore`]: nitinol_persistence::store::CheckpointStore
+//! [`OffsetStore`]: nitinol_persistence::store::OffsetStore
 //!
 //! # Getting one running
 //!
@@ -15,7 +15,7 @@
 //! PostgresEventStore::migrate(&pool).await?;
 //!
 //! // [`PostgresStore`] is this backend as one store: the journal and both
-//! // checkpoint slots over one database, and no snapshot slot.
+//! // offset slots over one database, and no snapshot slot.
 //! let persistence = PersistenceProvider::new(PostgresStore::new(pool)?);
 //! # Ok(())
 //! # }
@@ -33,9 +33,9 @@
 //!
 //! # Projecting with `ExactlyOnce`
 //!
-//! [`PostgresCheckpointStore`] keeps a projection's checkpoint in the same
+//! [`PostgresOffsetStore`] keeps a projection's offset in the same
 //! database as the journal, and its `Tx` is a `sqlx` transaction, so the
-//! read-model update and the checkpoint that covers it can be one commit.
+//! read-model update and the offset that covers it can be one commit.
 //! `PostgresEventStore::migrate` creates the table it uses.
 //!
 //! The transaction itself is the caller's. This crate defines no `TxProvider`:
@@ -45,51 +45,55 @@
 //! README for the implementation to copy, and for what a projection has to hold
 //! to for `ExactlyOnce` to mean what it says.
 //!
-//! [`ProjectorProps::with_tx_provider`] requires the checkpoint store's `Tx` to
+//! [`ProjectorProps::with_tx_provider`] requires the offset store's `Tx` to
 //! be the provider's, so a pairing that would not share a transaction does not
 //! compile.
 //!
 //! [`ProjectorProps::with_tx_provider`]: https://docs.rs/nitinol-eventsource
 //!
-//! ## A checkpoint moves forward or not at all
+//! ## An offset moves forward or not at all
 //!
-//! A save carrying a sequence the projection has already reached, or one behind
-//! it, is refused as [`CheckpointConflict`] — never absorbed as a successful
-//! no-op. Under `ExactlyOnce` that refusal is what rolls the read-model update
-//! back, so a second writer on a projection meant to have one consumer becomes
-//! an error someone can see rather than a counter incremented twice.
+//! A save carrying a sequence the consumer has already reached, or one behind
+//! it, is refused as [`OffsetConflict`] — never absorbed as a successful
+//! no-op. Such a save means another writer holds that key, and under
+//! `ExactlyOnce` the refusal is what rolls the read-model update back, so a
+//! second writer becomes something someone can see rather than a counter
+//! incremented twice. Refusing is this backend's answer to `OFS-4`, which
+//! leaves the answer open; a consumer does not stop on it and saves again at
+//! its next move forward.
 //!
-//! The refusal is worth telling apart from the other way a save fails.
-//! [`CheckpointConflict`] is a broken premise: retrying reaches the same
-//! refusal, and what has to change is the deployment. Anything else — a dropped
-//! connection, a database that was not there — arrives as the `sqlx` error that
-//! raised it, and a retry may well clear it. Both reach a caller as
-//! [`CheckpointError::Backend`], so which one it is, is a `downcast_ref` away:
+//! The refusal is worth telling apart from the other way a save fails. A
+//! [`OffsetConflict`] says another writer holds this key, so retrying *this*
+//! save reaches the same refusal; what moves the offset on is the consumer's
+//! next move forward. Anything else — a dropped connection, a database that was
+//! not there — arrives as the `sqlx` error that raised it, and a retry may well
+//! clear it. Both reach a caller as [`OffsetError::Backend`], so which one it
+//! is, is a `downcast_ref` away:
 //!
 //! ```rust,ignore
-//! use nitinol_persistence::error::CheckpointError;
-//! use nitinol_sqlx::CheckpointConflict;
+//! use nitinol_persistence::error::OffsetError;
+//! use nitinol_sqlx::OffsetConflict;
 //!
-//! # fn classify(failure: &CheckpointError) -> &'static str {
-//! let CheckpointError::Backend(cause) = failure;
-//! if cause.downcast_ref::<CheckpointConflict>().is_some() {
-//!     "another writer holds this projection; retrying will not help"
+//! # fn classify(failure: &OffsetError) -> &'static str {
+//! let OffsetError::Backend(cause) = failure;
+//! if cause.downcast_ref::<OffsetConflict>().is_some() {
+//!     "another writer holds this key; the consumer saves again when it moves on"
 //! } else {
 //!     "the database was not reachable; this one is worth retrying"
 //! }
 //! # }
 //! ```
 //!
-//! [`CheckpointError::Backend`]: nitinol_persistence::error::CheckpointError::Backend
+//! [`OffsetError::Backend`]: nitinol_persistence::error::OffsetError::Backend
 //!
 //! ## What the rule does and does not guarantee
 //!
-//! It detects a duplicate and a checkpoint going backwards. It is not a general
+//! It detects a duplicate and an offset going backwards. It is not a general
 //! answer to running one projection from two places: a sequence genuinely past
-//! the checkpoint is taken from whoever saves it, and a projector holds the
-//! checkpoint it loaded at startup in memory. `ExactlyOnce` is guaranteed for a
-//! single consumer per `projection_id`; the refusal above is the defence that
-//! makes a broken premise visible, not a licence to break it.
+//! the offset is taken from whoever saves it, and a projector holds the
+//! offset it loaded at startup in memory. `ExactlyOnce` is guaranteed for a
+//! single consumer per offset scope; the refusal above is what makes a second
+//! writer visible, not a licence to run one.
 //!
 //! # What a stream key has to be
 //!
@@ -116,8 +120,7 @@ mod postgres;
 
 #[cfg(feature = "postgres")]
 pub use self::postgres::{
-    CheckpointConflict, PostgresCheckpointStore, PostgresEventStore, PostgresStore,
-    UnknownEventType,
+    OffsetConflict, PostgresEventStore, PostgresOffsetStore, PostgresStore, UnknownEventType,
 };
 
 /// The `sqlx` this crate links, so a caller builds the pool it is handed

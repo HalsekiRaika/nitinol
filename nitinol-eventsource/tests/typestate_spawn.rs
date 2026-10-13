@@ -5,11 +5,11 @@ use bytes::Bytes;
 
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, ProjectionContext,
-    Projector, ProjectorProps,
+    ProjectionId, Projector, ProjectorProps,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, Family, ProjectionId, TypeName};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // Fixtures: minimal aggregate
@@ -107,11 +107,11 @@ async fn projector_props_correct_chain_compiles_and_spawns() {
     // Given
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(store)
-            .projection_checkpoints(checkpoint_store)
+            .projection_offsets(offset_store)
             .build(),
     );
 
@@ -144,11 +144,11 @@ async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
     // Given
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(store)
-            .projection_checkpoints(checkpoint_store)
+            .projection_offsets(offset_store)
             .build(),
     );
 
@@ -175,11 +175,11 @@ async fn projector_props_catchup_from_aggregate_enables_spawn() {
     // Given
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(store)
-            .projection_checkpoints(checkpoint_store)
+            .projection_offsets(offset_store)
             .build(),
     );
 

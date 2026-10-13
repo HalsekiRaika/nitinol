@@ -14,16 +14,15 @@ use futures_util::TryStreamExt;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{AggregateProxy, Event};
-use nitinol_persistence::error::CheckpointError;
+use nitinol_persistence::error::OffsetError;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
 use nitinol_persistence::store::{
-    CheckpointScope, CheckpointStore, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
+    EventStore, InMemoryEventStore, InMemoryOffsetStore, OffsetScope, OffsetStore,
 };
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    SagaDeliveryId, SagaDeliveryProps, SagaDeliveryProxy, SagaDeliveryScope, SagaManagerProxy,
-    SagaSystemExt,
+    SagaDeliveryId, SagaDeliveryProps, SagaDeliveryProxy, SagaManagerProxy, SagaSystemExt,
 };
 
 use saga_idempotent_receive::order::{Order, OrderPlaced};
@@ -36,7 +35,7 @@ use saga_idempotent_receive::stock_item::{StockItem, StockReserved};
 ///
 /// Where a delivery host keeps its progress is deliberately **not** on this
 /// store.  The restart clauses below hand two successive hosts two different
-/// checkpoint stores over one journal, which a slot on the system would make
+/// offset stores over one journal, which a slot on the system would make
 /// impossible without a second system — and a second system would also give the
 /// stock item a second activation, mixing "the receiver recognised the repeat"
 /// with "the receiver replayed first".  [`ExampleDeliveryStore`] is where the
@@ -69,7 +68,7 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// the one append.
 ///
 /// Nothing a delivery host does adds to this stream.  How far a host has got
-/// lives in its checkpoint — [`recorded_progress`] is how a test reads it — so
+/// lives in its offset — [`recorded_progress`] is how a test reads it — so
 /// "the deliveries were made" and "the saga decided" are two separate
 /// observations here rather than two record counts on one stream.
 pub const DECISION_BLOCK_LEN: usize = 2;
@@ -112,7 +111,7 @@ pub struct ReservationWorld {
 /// and the saga manager observing the order's stream.
 ///
 /// No delivery host — the clauses that need one name its stores themselves,
-/// because which checkpoint store a host is wired with is the whole subject of
+/// because which offset store a host is wired with is the whole subject of
 /// the redelivery tests.  See [`spawn_delivery_host`].
 pub async fn spawn_world(order_id: &AggregateId, store: Arc<dyn EventStore>) -> ReservationWorld {
     let system = spawn_system(store).await;
@@ -161,16 +160,16 @@ pub fn delivery_id() -> SagaDeliveryId {
     SagaDeliveryId::new(TEST_DELIVERY_ID)
 }
 
-/// The checkpoint scope of the single partition every host here is spawned with.
+/// The offset scope of the single partition every host here is spawned with.
 ///
 /// One partition, so every saga instance's decisions are this one consumer's and
 /// a test reads progress from a single key.
-pub fn delivery_scope() -> SagaDeliveryScope {
-    SagaDeliveryScope::new(&delivery_id(), 0)
+pub fn delivery_scope() -> OffsetScope {
+    delivery_id().offset_scope(0)
 }
 
 /// The store a delivery host is wired from: `journal` as the store the saga's
-/// decisions are on, `checkpoints` as the slot its progress is recorded in, and
+/// decisions are on, `offsets` as the slot its progress is recorded in, and
 /// no other slot named.
 ///
 /// A host needs exactly those two, so nothing else is filled in — the snapshot
@@ -182,42 +181,42 @@ pub type ExampleDeliveryStore<Cs> =
 /// The supplier a host is wired from, over the two slots it needs.
 pub fn delivery_persistence<Cs>(
     journal: &Arc<dyn EventStore>,
-    checkpoints: &Arc<Cs>,
+    offsets: &Arc<Cs>,
 ) -> PersistenceProvider<ExampleDeliveryStore<Cs>>
 where
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
     PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(journal))
-            .delivery_checkpoints(Arc::clone(checkpoints))
+            .saga_offsets(Arc::clone(offsets))
             .build(),
     )
 }
 
 /// Start a delivery host for the reservation saga: reading `journal`, recording
-/// progress in `checkpoints`, and delivering through `system`.
+/// progress in `offsets`, and delivering through `system`.
 ///
 /// The host is wired from a supplier of its own and delivers through whichever
 /// system the receiving aggregates resolve on — which is what lets two
-/// successive hosts with two different checkpoint stores both reach the one
+/// successive hosts with two different offset stores both reach the one
 /// resident stock item.
 pub async fn spawn_delivery_host<Cs>(
     system: &ExampleSystem,
     journal: &Arc<dyn EventStore>,
-    checkpoints: &Arc<Cs>,
+    offsets: &Arc<Cs>,
 ) -> SagaDeliveryProxy<ReservationSaga>
 where
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
-    SagaDeliveryProps::<ReservationSaga, Arc<Cs>>::new(&delivery_persistence(journal, checkpoints))
+    SagaDeliveryProps::<ReservationSaga, Arc<Cs>>::new(&delivery_persistence(journal, offsets))
         .with_delivery_id(delivery_id())
         .with_poll_interval(POLL_INTERVAL)
         .spawn(system)
         .await
 }
 
-/// A [`CheckpointStore`] whose saves never land.
+/// A [`OffsetStore`] whose saves never land.
 ///
 /// This is the durable state a delivery host that died mid-record leaves behind:
 /// the commands it derived may already have reached their targets, but nothing
@@ -232,12 +231,12 @@ where
 /// its deliveries and is to be treated as gone, so a later success from it would
 /// record progress nobody is behind.
 pub struct UnrecordedProgressStore {
-    inner: Arc<InMemoryCheckpointStore>,
+    inner: Arc<InMemoryOffsetStore>,
 }
 
 impl UnrecordedProgressStore {
     /// A refusing view of `inner`, which the next incarnation reads directly.
-    pub fn over(inner: &Arc<InMemoryCheckpointStore>) -> Arc<Self> {
+    pub fn over(inner: &Arc<InMemoryOffsetStore>) -> Arc<Self> {
         Arc::new(Self {
             inner: Arc::clone(inner),
         })
@@ -245,23 +244,23 @@ impl UnrecordedProgressStore {
 }
 
 #[async_trait]
-impl CheckpointStore for UnrecordedProgressStore {
+impl OffsetStore for UnrecordedProgressStore {
     type Tx = ();
 
-    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
+    async fn load(&self, scope: &OffsetScope) -> Result<Option<u64>, OffsetError> {
         self.inner.load(scope).await
     }
 
     async fn save(
         &self,
-        scope: &dyn CheckpointScope,
+        scope: &OffsetScope,
         sequence: u64,
         _tx: Option<&mut Self::Tx>,
-    ) -> Result<(), CheckpointError> {
-        Err(CheckpointError::Backend(Box::new(std::io::Error::other(
+    ) -> Result<(), OffsetError> {
+        Err(OffsetError::Backend(Box::new(std::io::Error::other(
             format!(
                 "the host recording {} is gone, so {sequence} is not written down",
-                scope.checkpoint_key()
+                scope.as_str()
             ),
         ))))
     }
@@ -339,7 +338,7 @@ pub fn requested_reservations(events: &[LoadedEvent]) -> Vec<String> {
 /// The store-wide position of the one decision on the saga's stream.
 ///
 /// A delivery host's progress is counted in these, so this is the number a test
-/// waits for a checkpoint to reach.
+/// waits for an offset to reach.
 pub async fn decision_position(store: &Arc<dyn EventStore>, saga_key: &str) -> u64 {
     let events = load_stream(store, saga_key).await;
     let decisions: Vec<&LoadedEvent> = events
@@ -381,26 +380,26 @@ pub async fn wait_for_records(
     }
 }
 
-/// What `checkpoints` holds for the single partition of the host under test.
-pub async fn recorded_progress(checkpoints: &Arc<InMemoryCheckpointStore>) -> Option<u64> {
-    checkpoints
+/// What `offsets` holds for the single partition of the host under test.
+pub async fn recorded_progress(offsets: &Arc<InMemoryOffsetStore>) -> Option<u64> {
+    offsets
         .load(&delivery_scope())
         .await
-        .expect("reading an in-memory checkpoint must succeed")
+        .expect("reading an in-memory offset must succeed")
 }
 
-/// Poll `checkpoints` until the host has recorded progress at `want` or beyond.
+/// Poll `offsets` until the host has recorded progress at `want` or beyond.
 ///
 /// This is the exact observable for "every delivery that record implied has
-/// landed": a host carries a record's deliveries first and moves its checkpoint
+/// landed": a host carries a record's deliveries first and moves its offset
 /// past that record only once all of them have been answered.  Waiting on it is
 /// therefore a barrier rather than a guessed window — and because the host
-/// `ask`s, the receiver's own append is already done by the time the checkpoint
+/// `ask`s, the receiver's own append is already done by the time the offset
 /// moves.
-pub async fn wait_for_progress(checkpoints: &Arc<InMemoryCheckpointStore>, want: u64, label: &str) {
+pub async fn wait_for_progress(offsets: &Arc<InMemoryOffsetStore>, want: u64, label: &str) {
     let deadline = std::time::Instant::now() + DELIVERY_TIMEOUT;
     loop {
-        if recorded_progress(checkpoints)
+        if recorded_progress(offsets)
             .await
             .is_some_and(|at| at >= want)
         {
@@ -409,7 +408,7 @@ pub async fn wait_for_progress(checkpoints: &Arc<InMemoryCheckpointStore>, want:
         if std::time::Instant::now() >= deadline {
             panic!(
                 "{label}: the host recorded {:?}, wanted at least {want}",
-                recorded_progress(checkpoints).await
+                recorded_progress(offsets).await
             );
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

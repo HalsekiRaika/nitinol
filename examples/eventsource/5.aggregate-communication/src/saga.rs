@@ -44,8 +44,8 @@ use crate::counter::{Counter, Increment, Incremented};
 ///   again yields the same id.
 ///
 /// Persisting it is also what makes the relay survive a crash: the host's
-/// checkpoint only moves past a decision once the commands it implied have
-/// landed, so a host that died in between resumes from the checkpoint it last
+/// offset only moves past a decision once the commands it implied have
+/// landed, so a host that died in between resumes from the offset it last
 /// recorded and carries this decision again.
 #[derive(Clone, Debug, Serialize, Deserialize, Event)]
 #[event(family = "agg_comm.saga", codec = JsonCodec)]
@@ -98,7 +98,7 @@ impl Saga for RelaySaga {
 
     // `apply` is left to its default: the relay keeps no state.  Whether B was
     // incremented is recorded on B's own stream, and how far the relays have
-    // been carried out is the delivery host's checkpoint — neither is the
+    // been carried out is the delivery host's offset — neither is the
     // saga's to mirror.
 
     /// What one relay decision means for everybody else.

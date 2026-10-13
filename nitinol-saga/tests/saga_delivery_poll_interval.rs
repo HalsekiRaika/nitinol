@@ -18,7 +18,7 @@
 mod delivery;
 use delivery::{
     delivery_id, delivery_persistence, in_memory_system, partition_count, spawn_host, DeliverySaga,
-    RecordingCheckpointStore, RecordingEventStore, TEST_POLL_INTERVAL,
+    RecordingEventStore, RecordingOffsetStore, TEST_POLL_INTERVAL,
 };
 
 use std::sync::Arc;
@@ -42,11 +42,11 @@ async fn the_configured_interval_is_the_interval_between_queries() {
     let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
 
     // When
-    let _host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingCheckpointStore>>::new(
-        &delivery_persistence(&journal, &checkpoints),
+    let _host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingOffsetStore>>::new(
+        &delivery_persistence(&journal, &offsets),
     )
     .with_delivery_id(delivery_id())
     .with_partitions(partition_count(1))
@@ -77,10 +77,10 @@ async fn a_shorter_interval_polls_more_often_in_the_same_window() {
     let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
     tokio::time::sleep(WINDOW).await;
 
     // Then

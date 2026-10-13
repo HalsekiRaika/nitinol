@@ -54,7 +54,7 @@ async fn main() {
     // tenants of the one journal it supplies, each under its own key — which is
     // what lets every spawn below resolve the same store.
     //
-    // `InMemoryStore` also supplies a delivery-checkpoint slot, which is the
+    // `InMemoryStore` also supplies a saga-offset slot, which is the
     // second thing a delivery host needs: a store with no such slot makes
     // `deliver` below a compile error rather than a host that cannot record
     // where it got to.

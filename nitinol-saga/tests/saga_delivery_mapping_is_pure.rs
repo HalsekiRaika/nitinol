@@ -15,7 +15,7 @@
 //! Every test in this file is a plain `#[test]`: no process system, no store,
 //! no `.await`. That is the whole point of the contract — a mapping taking a
 //! receiver, a system handle or an `async` signature could not be called from
-//! here at all, and the delivery knowledge (polling, cursor, checkpoint,
+//! here at all, and the delivery knowledge (polling, cursor, offset,
 //! stalling) stays with the framework rather than reaching the user's mapping.
 
 #[path = "common/delivery.rs"]

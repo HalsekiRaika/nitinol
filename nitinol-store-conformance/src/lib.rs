@@ -7,8 +7,8 @@
 //! `LOAD-1` what a query naming more than one condition means.
 //! [`SnapshotStore`](nitinol_persistence::store::SnapshotStore) states
 //! `SNAP-1` … `SNAP-4` and
-//! [`CheckpointStore`](nitinol_persistence::store::CheckpointStore) states
-//! `CKP-1` … `CKP-6`.  Prose binds a backend only as far as someone reads it,
+//! [`OffsetStore`](nitinol_persistence::store::OffsetStore) states
+//! `OFS-1` … `OFS-6`.  Prose binds a backend only as far as someone reads it,
 //! so this crate turns those clauses into a suite you can run against yours —
 //! the store contracts' counterpart to what `nitinol-conformance` is for the
 //! interpreter contract, and to what Akka's persistence TCK is for a plugin
@@ -20,12 +20,12 @@
 //! |---|---|
 //! | `EventStore` (`OCC-1` … `OCC-5`, `LOAD-1`) | [`verify`], [`verify_deterministic`], [`verify_under_concurrency`] |
 //! | `SnapshotStore` (`SNAP-1` … `SNAP-4`) | [`snapshot::verify`] |
-//! | `CheckpointStore` (`CKP-1` … `CKP-6`) | [`checkpoint::verify`], [`checkpoint::verify_deterministic`], [`checkpoint::verify_under_concurrency`] |
+//! | `OffsetStore` (`OFS-1` … `OFS-6`) | [`offset::verify`], [`offset::verify_deterministic`], [`offset::verify_under_concurrency`] |
 //! | `Store` (`PRV-1` … `PRV-5`) | [`provider::verify`] and one entry point per slot |
 //!
 //! The store contracts are independent: a backend implementing one of the
 //! traits runs that contract's entry points and owes the others nothing.  Two
-//! clauses of the checkpoint contract are deliberately not fixed here — the
+//! clauses of the offset contract are deliberately not fixed here — the
 //! trait's documentation says which, and why, next to each.
 //!
 //! The [`provider`] module is the layer above them: it judges the supplier that
@@ -39,7 +39,7 @@
 //! this crate is one a backend keeps on its own: what it stored, what it
 //! answered, what it refused.  A contract that only holds for a store
 //! *together with* the machinery driving it — that a projection's result and
-//! the checkpoint covering it are settled in one transaction, and that a
+//! the offset covering it are settled in one transaction, and that a
 //! conflict takes back both — is not stated here and is not run here.  Those
 //! are fixed by `providers/nitinol-sqlx/tests/exactly_once_projection.rs` and
 //! `nitinol-eventsource/tests/tx_wiring.rs`, against a provider and a projector
@@ -95,7 +95,7 @@
 //!
 //! [`verify`] is both, in that order.
 //!
-//! The [`checkpoint`] module keeps the same division for the same reason.  The
+//! The [`offset`] module keeps the same division for the same reason.  The
 //! [`snapshot`] module has one entry point and no concurrency half, because the
 //! snapshot contract has no clause that needs one; the module documentation
 //! says why.
@@ -105,7 +105,7 @@
 //! Two things a provider owes the suite, beyond implementing the under-test
 //! trait of the contract it is running — [`StoreUnderTest`],
 //! [`snapshot::SnapshotStoreUnderTest`] or
-//! [`checkpoint::CheckpointStoreUnderTest`]:
+//! [`offset::OffsetStoreUnderTest`]:
 //!
 //! **`bring_up` must hand back a store holding nothing.** Every clause asks for
 //! its own, and a clause reading another's leftovers is judging something other
@@ -122,7 +122,7 @@
 //! provider built on another, so whichever runtime you await these entry points
 //! on stays yours to choose, and [`Executor`] is how the suite borrows it.
 
-pub mod checkpoint;
+pub mod offset;
 pub mod provider;
 pub mod snapshot;
 

@@ -28,7 +28,7 @@
 mod delivery;
 use delivery::{
     append_decided, append_noted, in_memory_system, operations_of, scope_of, settle, spawn_host,
-    wait_until_operations, wait_until_stored, DeliverySaga, Ledger, RecordingCheckpointStore,
+    wait_until_operations, wait_until_stored, DeliverySaga, Ledger, RecordingOffsetStore,
     SilentSaga,
 };
 
@@ -43,13 +43,13 @@ async fn a_persisted_decision_reaches_the_target_aggregate() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-reaches-target");
 
     // When
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target);
@@ -62,7 +62,7 @@ async fn a_persisted_decision_reaches_the_target_aggregate() {
 
     assert_eq!(
         wait_until_stored(
-            &checkpoints,
+            &offsets,
             &scope_of(0),
             position,
             "the delivered decision's position must be recorded"
@@ -79,17 +79,17 @@ async fn a_decision_that_maps_to_nothing_delivers_nothing_and_still_advances() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-maps-to-nothing");
 
     // When
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
-    let _host = spawn_host::<SilentSaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<SilentSaga>(&system, &journal, &offsets, 1).await;
 
     // Then
     let stored = wait_until_stored(
-        &checkpoints,
+        &offsets,
         &scope_of(0),
         position,
         "a record owing nothing must not hold the cursor",
@@ -111,7 +111,7 @@ async fn progress_moves_past_rows_the_subscription_leaves_out() {
     // decisions, which is the normal shape of a saga's own stream.
     let (system, _aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-with-gaps");
 
@@ -121,14 +121,14 @@ async fn progress_moves_past_rows_the_subscription_leaves_out() {
     append_noted(&journal, &saga_id, 4).await;
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target);
     wait_until_operations(&ledger, 1, "the one decision must be delivered").await;
     settle().await;
 
-    let stored = checkpoints
+    let stored = offsets
         .stored(&scope_of(0))
         .expect("the host must have recorded progress");
     assert_eq!(

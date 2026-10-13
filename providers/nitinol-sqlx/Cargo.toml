@@ -36,8 +36,8 @@ time = { version = "0.3", optional = true }
 [dev-dependencies]
 nitinol-store-conformance = { path = "../../nitinol-store-conformance" }
 # The ExactlyOnce acceptance criteria are about a projector running against this
-# provider's checkpoint store, so judging them needs the interpreter that drives
-# `begin → project → checkpoint save → commit` and the runtime it spawns in.
+# provider's offset store, so judging them needs the interpreter that drives
+# `begin → project → offset save → commit` and the runtime it spawns in.
 # Both are dev-dependencies only: a provider that depended on the interpreter
 # for its own compilation would invert the layering this workspace keeps.
 nitinol-eventsource = { path = "../../nitinol-eventsource" }
@@ -49,7 +49,7 @@ nitinol-runtime = { path = "../../nitinol-runtime" }
 linkme = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
-# `sync` and `time` are what the checkpoint clauses need: a rendezvous that
+# `sync` and `time` are what the offset clauses need: a rendezvous that
 # puts two writers on one row at the same moment, and a deadline on every wait
 # so a rule that never released a lock fails the run instead of hanging it.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

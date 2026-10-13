@@ -1,10 +1,10 @@
-use nitinol_persistence::provider::{DeliveryCheckpointSlot, ProjectionCheckpointSlot, Store};
+use nitinol_persistence::provider::{ProjectionOffsetSlot, SagaOffsetSlot, Store};
 use nitinol_persistence::EventRegistryError;
 use sqlx::PgPool;
 
-use crate::postgres::{PostgresCheckpointStore, PostgresEventStore};
+use crate::postgres::{PostgresEventStore, PostgresOffsetStore};
 
-/// This backend as one [`Store`]: the journal and both checkpoint slots, and
+/// This backend as one [`Store`]: the journal and both offset slots, and
 /// no snapshot store.
 ///
 /// There is no Postgres [`SnapshotStore`] in this crate, so the snapshot slot
@@ -16,15 +16,16 @@ use crate::postgres::{PostgresCheckpointStore, PostgresEventStore};
 ///
 /// # One table, two slots
 ///
-/// Both checkpoint slots answer with **one** store over one table, which is
-/// this backend's deployment: what keeps a projection's position apart from a
-/// delivery host's progress there is the key each consumer renders, not a table
-/// each. The slots are still independent — neither answers for what the other
-/// filed — which is the contract the conformance suite runs.
+/// Both offset slots answer with **one** store over one table, which is
+/// this backend's deployment: what keeps a projection's position apart from
+/// the framework's own saga attachments' progress there is the key each
+/// consumer renders, not a table each. The slots are still independent —
+/// neither answers for what the other filed — which is the contract the
+/// conformance suite runs.
 ///
 /// # One pool, one region
 ///
-/// The journal and the checkpoints share the pool because they share the
+/// The journal and the offsets share the pool because they share the
 /// database, and one migration step creates both tables. Sharing a pool is an
 /// implementation of identity rather than the contract: what makes two handles
 /// one world is that they reach the same rows, which is `PRV-2`. Cloning this
@@ -34,7 +35,7 @@ use crate::postgres::{PostgresCheckpointStore, PostgresEventStore};
 #[derive(Clone)]
 pub struct PostgresStore {
     events: PostgresEventStore,
-    checkpoints: PostgresCheckpointStore,
+    offsets: PostgresOffsetStore,
 }
 
 impl PostgresStore {
@@ -47,7 +48,7 @@ impl PostgresStore {
     pub fn new(pool: PgPool) -> Result<Self, EventRegistryError> {
         Ok(Self {
             events: PostgresEventStore::new(pool.clone())?,
-            checkpoints: PostgresCheckpointStore::new(pool),
+            offsets: PostgresOffsetStore::new(pool),
         })
     }
 }
@@ -60,18 +61,18 @@ impl Store for PostgresStore {
     }
 }
 
-impl ProjectionCheckpointSlot for PostgresStore {
-    type ProjectionCheckpoints = PostgresCheckpointStore;
+impl ProjectionOffsetSlot for PostgresStore {
+    type ProjectionOffsets = PostgresOffsetStore;
 
-    fn projection_checkpoints(&self) -> PostgresCheckpointStore {
-        self.checkpoints.clone()
+    fn projection_offsets(&self) -> PostgresOffsetStore {
+        self.offsets.clone()
     }
 }
 
-impl DeliveryCheckpointSlot for PostgresStore {
-    type DeliveryCheckpoints = PostgresCheckpointStore;
+impl SagaOffsetSlot for PostgresStore {
+    type SagaOffsets = PostgresOffsetStore;
 
-    fn delivery_checkpoints(&self) -> PostgresCheckpointStore {
-        self.checkpoints.clone()
+    fn saga_offsets(&self) -> PostgresOffsetStore {
+        self.offsets.clone()
     }
 }

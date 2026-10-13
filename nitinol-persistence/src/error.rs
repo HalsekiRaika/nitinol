@@ -33,7 +33,7 @@ pub enum SnapshotError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CheckpointError {
+pub enum OffsetError {
     #[error("backend failure: {0}")]
     Backend(Box<dyn std::error::Error + Send + Sync>),
 }

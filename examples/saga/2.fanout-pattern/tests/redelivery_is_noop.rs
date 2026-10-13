@@ -7,7 +7,7 @@
 //! streams — the idempotence lives in the payslips, not in a short-circuit
 //! inside the saga, and not in bookkeeping the host keeps per command.
 //!
-//! Delivery is at-least-once because a host's checkpoint moves only after the
+//! Delivery is at-least-once because a host's offset moves only after the
 //! deliveries a record implied have landed, and the two writes are to two stores.
 //! A repeat is not only a crash's doing, though, and the clause below uses the
 //! other documented way of producing one: a *second host over the same journal*,
@@ -44,7 +44,7 @@ use std::time::Duration;
 
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
 use nitinol_persistence::{AggregateId, AppendingEvent};
 use nitinol_saga::SagaDeliveryId;
 
@@ -84,7 +84,7 @@ async fn one_fact_event_records_the_approval_and_fans_out_to_thirty_two_payslips
     let world = spawn_world(
         &run_id,
         Arc::clone(&store),
-        InMemoryCheckpointStore::default(),
+        InMemoryOffsetStore::default(),
         &SagaDeliveryId::new("payslip-delivery"),
     )
     .await;
@@ -188,7 +188,7 @@ async fn one_fact_event_records_the_approval_and_fans_out_to_thirty_two_payslips
 /// identifier of its own, starts from nothing and therefore reads the decision
 /// the first host already finished with.  It re-derives all 32 commands from it
 /// and carries them again — which is precisely what a host resuming from a
-/// checkpoint a crash left behind does, with none of a crash's non-determinism.
+/// offset a crash left behind does, with none of a crash's non-determinism.
 ///
 /// The payslip processes stay resident across it, so the repeats are absorbed in
 /// their plain form — no aggregate replay involved.
@@ -202,15 +202,9 @@ async fn commands_carried_a_second_time_write_no_second_payslip() {
 
     let first_host = SagaDeliveryId::new("payslip-delivery");
     let second_host = SagaDeliveryId::new("payslip-delivery-again");
-    let checkpoints = InMemoryCheckpointStore::default();
+    let offsets = InMemoryOffsetStore::default();
 
-    let world = spawn_world(
-        &run_id,
-        Arc::clone(&store),
-        checkpoints.clone(),
-        &first_host,
-    )
-    .await;
+    let world = spawn_world(&run_id, Arc::clone(&store), offsets.clone(), &first_host).await;
 
     world
         .payroll_run
@@ -228,7 +222,7 @@ async fn commands_carried_a_second_time_write_no_second_payslip() {
     // left to do, and anything the payslip streams gain is the second host's.
     let decision = decision_position(&store, saga_key.as_str()).await;
     wait_for_delivery_through(
-        &checkpoints,
+        &offsets,
         &delivery_scope(&first_host),
         decision,
         FANOUT_TIMEOUT,
@@ -242,7 +236,7 @@ async fn commands_carried_a_second_time_write_no_second_payslip() {
     // host with nothing left to read: it starts from the beginning of the journal
     // and finds the decision the first host finished with.
     assert_eq!(
-        delivered_through(&checkpoints, &delivery_scope(&second_host)).await,
+        delivered_through(&offsets, &delivery_scope(&second_host)).await,
         None,
         "a host named for the first time must have no progress recorded, so what it \
          reads is the whole journal — the decision included"
@@ -253,7 +247,7 @@ async fn commands_carried_a_second_time_write_no_second_payslip() {
     // The second host recording the same position is the observable point: it has
     // carried all 32 commands over again and had every one of them answered.
     wait_for_delivery_through(
-        &checkpoints,
+        &offsets,
         &delivery_scope(&second_host),
         decision,
         FANOUT_TIMEOUT,
@@ -328,7 +322,7 @@ async fn duplicate_genesis_append_conflicts_and_preserves_the_first_write() {
     let world = spawn_world(
         &run_id,
         Arc::clone(&store),
-        InMemoryCheckpointStore::default(),
+        InMemoryOffsetStore::default(),
         &SagaDeliveryId::new("payslip-delivery"),
     )
     .await;

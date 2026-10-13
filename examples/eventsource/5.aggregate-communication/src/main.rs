@@ -18,7 +18,7 @@
 //! Deciding and delivering are deliberately not the same step.  A saga's
 //! decision is durable the moment it is journalled, whatever the state of the
 //! target; and a delivery that fails is retried by the host, which holds its
-//! checkpoint rather than passing the command over — so nothing the saga
+//! offset rather than passing the command over — so nothing the saga
 //! decided is silently never carried out.
 //!
 //! # Migrating from `Effect::Side`
@@ -31,9 +31,9 @@
 //! |---|---|
 //! | `Ok(Effect::Side(Box::new(TellTargetEffect { target, .. })))` | `SagaEffect::persist(RelayRequested { .. })` in `Saga::handle`, and `Saga::dispatch` saying what that decision implies |
 //! | the command carries the target proxy | the decision carries the target's stream key, so a host that never met the deciding incarnation can still address it |
-//! | the dispatch is lost if the process dies between append and send | the decision is a row on the saga's own stream, and a host resumes from its checkpoint and delivers it again |
+//! | the dispatch is lost if the process dies between append and send | the decision is a row on the saga's own stream, and a host resumes from its offset and delivers it again |
 //! | a duplicate activation performs it twice, undetected | delivery is at-least-once by construction, and the receiver recognises a repeat by the operation id the decision carried |
-//! | nobody learns that the send failed | a failed delivery holds the host's checkpoint, is retried, and is reported through `tracing` |
+//! | nobody learns that the send failed | a failed delivery holds the host's offset, is retried, and is reported through `tracing` |
 //!
 //! The behaviour is not merely relocated: `Effect::Side` was "send and pray",
 //! and a saga plus a delivery host is the durable version of the same intent.
@@ -76,7 +76,7 @@ async fn main() {
 
     // `EventStore` is stream-keyed, so both counters and the saga's own journal
     // are tenants of the one journal the provider supplies, each under its own
-    // key.  `InMemoryStore` also supplies a delivery-checkpoint slot, which is
+    // key.  `InMemoryStore` also supplies a saga-offset slot, which is
     // the second store a delivery host needs — one that supplied none would
     // make the `deliver` call below a compile error rather than a host unable
     // to record where it got to.

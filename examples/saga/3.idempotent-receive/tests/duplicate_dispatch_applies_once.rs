@@ -15,7 +15,7 @@ use common::{
 
 use std::sync::Arc;
 
-use nitinol_persistence::store::InMemoryCheckpointStore;
+use nitinol_persistence::store::InMemoryOffsetStore;
 use nitinol_persistence::AggregateId;
 
 use saga_idempotent_receive::order::PlaceOrder;
@@ -77,7 +77,7 @@ async fn a_repeated_reserve_is_accepted_and_appends_nothing() {
 /// Then it carries the same operation again and changes nothing on the stock
 /// item's stream.
 ///
-/// The first host writes its progress through a checkpoint store that refuses
+/// The first host writes its progress through an offset store that refuses
 /// every save, which is the durable state a host that died mid-record leaves
 /// behind: the command reached its target, and nothing says so.  A second host
 /// over the same journal and the same delivery id therefore reads no recorded
@@ -89,7 +89,7 @@ async fn a_repeated_reserve_is_accepted_and_appends_nothing() {
 /// Both hosts deliver through the one system, so the stock item's process stays
 /// resident and the repeat is absorbed in its plain form, with no aggregate
 /// replay involved.  The second host recording progress is the barrier the
-/// assertions rest on: a host moves its checkpoint past a record only once every
+/// assertions rest on: a host moves its offset past a record only once every
 /// delivery that record implied has been answered.
 #[tokio::test]
 async fn a_redelivered_decision_writes_no_second_reservation() {
@@ -99,13 +99,13 @@ async fn a_redelivered_decision_writes_no_second_reservation() {
     let saga_key = ReservationSaga::instance_id(order_id.as_str());
 
     // Where a host's progress would be kept.  The first one cannot reach it.
-    let checkpoints = Arc::new(InMemoryCheckpointStore::default());
+    let offsets = Arc::new(InMemoryOffsetStore::default());
 
     let world = spawn_world(&order_id, Arc::clone(&store)).await;
     let _interrupted_host = spawn_delivery_host(
         &world.system,
         &store,
-        &UnrecordedProgressStore::over(&checkpoints),
+        &UnrecordedProgressStore::over(&offsets),
     )
     .await;
 
@@ -147,7 +147,7 @@ async fn a_redelivered_decision_writes_no_second_reservation() {
     );
 
     assert_eq!(
-        recorded_progress(&checkpoints).await,
+        recorded_progress(&offsets).await,
         None,
         "the interrupted host must leave no progress recorded: that is what has the \
          next one carry the same deliveries again"
@@ -155,13 +155,13 @@ async fn a_redelivered_decision_writes_no_second_reservation() {
 
     let position = decision_position(&store, saga_key.as_str()).await;
 
-    // The second host — same journal, same delivery id, and a checkpoint store
+    // The second host — same journal, same delivery id, and an offset store
     // that works. It resumes from what was recorded for that id, which is
     // nothing, so the decision is read and delivered a second time.
-    let _resumed_host = spawn_delivery_host(&world.system, &store, &checkpoints).await;
+    let _resumed_host = spawn_delivery_host(&world.system, &store, &offsets).await;
 
     wait_for_progress(
-        &checkpoints,
+        &offsets,
         position,
         "the resumed host must deliver the decision again and record it",
     )
@@ -186,7 +186,7 @@ async fn a_redelivered_decision_writes_no_second_reservation() {
         saga_stream.len(),
         DECISION_BLOCK_LEN,
         "delivery leaves the saga's own stream alone; how far a host got lives in \
-         its checkpoint (journal holds {:?})",
+         its offset (journal holds {:?})",
         saga_stream
             .iter()
             .map(|event| event.event_type.to_string())

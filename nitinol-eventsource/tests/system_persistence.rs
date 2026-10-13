@@ -19,7 +19,7 @@
 //!     And what is saved through either is in the supplier's snapshot slot
 //!
 //!   Scenario: the projector resolves two slots at once
-//!     Given a system built on a store that supplies projection checkpoints
+//!     Given a system built on a store that supplies projection offsets
 //!     When a projector wired from the system catches up
 //!     Then it read the store's journal
 //!     And it recorded its position in the store's projection slot
@@ -54,18 +54,16 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
-    ProjectionContext, Projector, ProjectorProps, SnapshotPersistor,
+    ProjectionContext, ProjectionId, Projector, ProjectorProps, SnapshotPersistor,
 };
 use nitinol_persistence::provider::{
-    CustomStore, PersistenceProvider, ProjectionCheckpointSlot, SnapshotSlot,
+    CustomStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot,
 };
 use nitinol_persistence::store::{
-    CheckpointStore, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
-    InMemorySnapshotStore, InMemoryStore, SnapshotStore,
+    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore, InMemoryStore,
+    OffsetScope, OffsetStore, SnapshotStore,
 };
-use nitinol_persistence::{
-    AggregateId, EventType, Family, LoadQuery, PersistedSnapshot, ProjectionId, TypeName,
-};
+use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, PersistedSnapshot, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // Fixtures
@@ -190,17 +188,17 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 }
 
 /// Wait until `store` holds a position for `projection`, then answer it.
-async fn wait_for_checkpoint(
-    store: &dyn CheckpointStore<Tx = ()>,
+async fn wait_for_offset(
+    store: &dyn OffsetStore<Tx = ()>,
     projection: &ProjectionId,
     label: &str,
 ) -> u64 {
     tokio::time::timeout(PROBE_TIMEOUT, async {
         loop {
             if let Some(held) = store
-                .load(projection)
+                .load(&OffsetScope::from(projection))
                 .await
-                .expect("loading a checkpoint of an in-memory store succeeds")
+                .expect("loading an offset of an in-memory store succeeds")
             {
                 return held;
             }
@@ -450,21 +448,21 @@ async fn a_persistor_spawned_from_the_supplier_reaches_the_same_snapshot_store()
     );
 }
 
-// The projection-checkpoint slot
+// The projection-offset slot
 
 /// The projector the system wires must follow the supplier's event store and
 /// record its position in the supplier's projection slot.
 #[tokio::test]
 async fn the_systems_projector_follows_the_suppliers_event_store_and_projection_slot() {
-    // Given: a system over a store supplying events and projection checkpoints,
+    // Given: a system over a store supplying events and projection offsets,
     // with an aggregate that has already decided twice
     let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let projection_checkpoints = Arc::new(InMemoryCheckpointStore::default());
+    let projection_offsets = Arc::new(InMemoryOffsetStore::default());
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(Arc::clone(&events))
-                .projection_checkpoints(Arc::clone(&projection_checkpoints))
+                .projection_offsets(Arc::clone(&projection_offsets))
                 .build(),
         ))
         .build();
@@ -501,8 +499,8 @@ async fn the_systems_projector_follows_the_suppliers_event_store_and_projection_
     );
 
     // And: it recorded into the supplier's projection slot
-    let held = wait_for_checkpoint(
-        &*projection_checkpoints,
+    let held = wait_for_offset(
+        &*projection_offsets,
         &projection,
         "the projector must record into the supplier's projection slot",
     )
@@ -549,8 +547,8 @@ async fn projector_props_resolves_both_slots_from_the_supplier() {
 
     // Then
     wait_for_count(&count, &notify, 1).await;
-    let held = wait_for_checkpoint(
-        &store.projection_checkpoints(),
+    let held = wait_for_offset(
+        &store.projection_offsets(),
         &projection,
         "props built from the supplier must record into its projection slot",
     )

@@ -6,7 +6,7 @@
 //! the payslips it can reach, hits the first one it cannot, and holds: it stops
 //! advancing, retries the same decision, and records no progress.  That is the
 //! durable state a process that dies mid-fan-out leaves behind — some payslips
-//! issued, the rest missing, and a checkpoint still standing below the decision
+//! issued, the rest missing, and an offset still standing below the decision
 //! that owes them.  Refusing by name is what lets one store back the whole
 //! incarnation: the payroll run's own stream and the saga's own journal keep
 //! working, so the decision that drives the fan-out is recorded exactly as in a
@@ -14,7 +14,7 @@
 //!
 //! The second incarnation starts fresh — new `ProcessSystem`, new payslip
 //! processes, an unwrapped store — over the same durable state *and the same
-//! delivery checkpoint*.  What completes the fan-out is that checkpoint: it never
+//! delivery offset*.  What completes the fan-out is that offset: it never
 //! moved past the decision, so the new host reads the decision again,
 //! `FanOutSaga::dispatch` re-derives all 32 commands from it, and the host
 //! carries the 24 that never landed together with the 8 that did.  The 8 absorb
@@ -32,7 +32,7 @@
 //!
 //! A `SagaDeliveryProxy` has no `stop`: its partitions are processes of the
 //! system they were spawned on, and an operator reaches them to move a
-//! checkpoint, not to shut one down.  So the first incarnation's host is still
+//! offset, not to shut one down.  So the first incarnation's host is still
 //! running while the second works, held on the ninth payslip — and it stays held,
 //! because the store it writes through refuses that append for good.  The 24
 //! payslips the assertions below find could therefore have been written by
@@ -51,7 +51,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaDeliveryId;
 
@@ -84,11 +84,11 @@ async fn a_restarted_delivery_host_completes_the_payslips_an_interrupted_fanout_
     // which is what makes the second one a continuation of the first one's state.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    // One delivery checkpoint slot, handed to both incarnations under one
+    // One saga-offset slot, handed to both incarnations under one
     // identifier: the second host is *the same host restarted*, so it resumes
     // from the progress the first one recorded — which, as the clauses below
     // fix, is none.
-    let checkpoints = InMemoryCheckpointStore::default();
+    let offsets = InMemoryOffsetStore::default();
     let delivery_id = SagaDeliveryId::new("payslip-delivery");
     let scope = delivery_scope(&delivery_id);
 
@@ -110,7 +110,7 @@ async fn a_restarted_delivery_host_completes_the_payslips_an_interrupted_fanout_
     let first_run = spawn_world(
         &run_id,
         Arc::clone(&unreachable) as Arc<dyn EventStore>,
-        checkpoints.clone(),
+        offsets.clone(),
         &delivery_id,
     )
     .await;
@@ -173,7 +173,7 @@ async fn a_restarted_delivery_host_completes_the_payslips_an_interrupted_fanout_
          prefix issued, the rest absent"
     );
     assert_eq!(
-        delivered_through(&checkpoints, &scope).await,
+        delivered_through(&offsets, &scope).await,
         None,
         "the interrupted host must have recorded no progress at all: a record's \
          position is written only once every delivery it implied has landed, and \
@@ -195,22 +195,16 @@ async fn a_restarted_delivery_host_completes_the_payslips_an_interrupted_fanout_
         .expect("stopping the manager must succeed");
 
     // Run 2 — the same host, restarted over the same durable state and the same
-    // checkpoint, with the store unwrapped.
+    // offset, with the store unwrapped.
 
     // Bound for the rest of the test: this handle owns the second incarnation's
     // `ProcessSystem`, and the assertions below observe the state it produces.
-    let _second_run = spawn_world(
-        &run_id,
-        Arc::clone(&store),
-        checkpoints.clone(),
-        &delivery_id,
-    )
-    .await;
+    let _second_run = spawn_world(&run_id, Arc::clone(&store), offsets.clone(), &delivery_id).await;
 
     wait_for_issued(&store, &payslips, EMPLOYEE_COUNT, FANOUT_TIMEOUT).await;
 
     assert_eq!(
-        wait_for_delivery_through(&checkpoints, &scope, decision, FANOUT_TIMEOUT).await,
+        wait_for_delivery_through(&offsets, &scope, decision, FANOUT_TIMEOUT).await,
         decision,
         "the restarted host must now record the decision's position, which is what \
          says every one of the {EMPLOYEE_COUNT} deliveries it implied has landed"

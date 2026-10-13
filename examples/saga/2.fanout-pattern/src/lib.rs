@@ -43,7 +43,7 @@
 //! * The saga's own stream holds **two rows** for one fan-out: the decision, and
 //!   the consumed position of the fact it was derived from, committed by the one
 //!   append.  Nothing per-child.  Nothing about delivery.
-//! * The delivery host's only state is a **checkpoint**: the position of the last
+//! * The delivery host's only state is a **offset**: the position of the last
 //!   record whose deliveries all landed.  It is recorded *after* the deliveries,
 //!   never before.
 //! * Each payslip's own stream says whether that payslip exists.
@@ -56,13 +56,13 @@
 //!
 //! # Why a crash cannot lose part of the fan-out
 //!
-//! The decision is durable before anything is delivered, and the checkpoint
+//! The decision is durable before anything is delivered, and the offset
 //! moves only after a record's deliveries have landed.  Those two orderings are
 //! the whole argument:
 //!
 //! * A crash before the decision lands leaves the fact unconsumed, so the
 //!   subscription redelivers it and the fan-out is decided again from scratch.
-//! * A crash after the decision lands leaves a checkpoint still standing below
+//! * A crash after the decision lands leaves an offset still standing below
 //!   it.  A restarted host reads the decision again, re-derives all 32 commands
 //!   from it, and carries the remaining ones — together with some it already
 //!   carried, which the payslips absorb with a write-free acceptance.
@@ -72,22 +72,22 @@
 //! half of.  The commands are re-derived from the decision on every read.
 //!
 //! The same orderings are why delivery is at-least-once with no mode to choose:
-//! moving the checkpoint first would lose a delivery to the same crash instead
-//! of repeating one, and making the receiver's write and the checkpoint one
+//! moving the offset first would lose a delivery to the same crash instead
+//! of repeating one, and making the receiver's write and the offset one
 //! transaction would need an atomic write across two stores.
 //! [`nitinol_saga::SagaDeliveryProps`] is where that is written down in full.
 //!
 //! # A refused delivery is held, not skipped
 //!
 //! A command the host cannot get carried out stops the host: it leaves its
-//! checkpoint where it is, retries the same record, and reports through
+//! offset where it is, retries the same record, and reports through
 //! `tracing`.  It does **not** move on to the rest of the fan-out.  That is
 //! deliberate — a command silently dropped because its target refused it is a
 //! decision the saga made and nobody carried out, with nothing left to say so —
 //! and it is directly observable here: a fan-out whose ninth payslip cannot be
 //! written stops at the ninth, rather than issuing the other 23 and leaving a
 //! gap nobody will ever notice.
-//! [`SagaDeliveryProxy::advance_checkpoint`](nitinol_saga::SagaDeliveryProxy::advance_checkpoint)
+//! [`SagaDeliveryProxy::advance_offset`](nitinol_saga::SagaDeliveryProxy::advance_offset)
 //! is the way past such a hold, and it is deliberately a person's to take.
 //!
 //! # One store, many streams
@@ -100,8 +100,8 @@
 //! every wiring point takes it from there: the run aggregate, the payslips, the
 //! saga journal, the manager's subscription, and the delivery host's input.
 //!
-//! The host needs one slot beyond the journal: somewhere to keep its checkpoint.
-//! That is the provider's *delivery-checkpoint* slot, and
+//! The host needs one slot beyond the journal: somewhere to keep its offset.
+//! That is the provider's *saga-offset* slot, and
 //! [`nitinol_saga::SagaDeliveryExt`] — the trait that supplies
 //! `system.deliver::<FanOutSaga>()` — exists only on a system whose store holds
 //! one.  A deployment that forgot to name a store for its hosts'
@@ -193,14 +193,14 @@
 //! * `tests/redelivery_is_noop.rs` — one approval reaches the run's stream as
 //!   one record, becomes one decision of two rows on the saga's own stream, and
 //!   fans out to 32 payslips; a second delivery host reading the same decision
-//!   from a checkpoint of its own carries all 32 commands again and leaves every
+//!   from an offset of its own carries all 32 commands again and leaves every
 //!   payslip stream byte-identical, without the saga's stream growing by a row;
 //!   an issue replayed all the way down to the store conflicts on the genesis
 //!   sequence while leaving the first write intact; and two runs covering one
 //!   employee address separate payslip streams.
 //! * `tests/crash_replay_completes_fanout.rs` — a fan-out whose host cannot
-//!   reach the last 24 payslips stops at the first of them with its checkpoint
-//!   unmoved, and a second host reading that same checkpoint completes all 32
+//!   reach the last 24 payslips stops at the first of them with its offset
+//!   unmoved, and a second host reading that same offset completes all 32
 //!   without rewriting the 8 that already existed.
 
 pub mod codec;

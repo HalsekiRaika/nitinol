@@ -1,10 +1,10 @@
-use crate::provider::{DeliveryCheckpointSlot, ProjectionCheckpointSlot, SnapshotSlot, Store};
-use crate::store::in_memory::{InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore};
+use crate::provider::{ProjectionOffsetSlot, SagaOffsetSlot, SnapshotSlot, Store};
+use crate::store::in_memory::{InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore};
 
 /// The in-memory reference [`Store`]: every slot, over the reference
 /// implementations.
 ///
-/// The two checkpoint slots are handles of their own, so a position filed under
+/// The two offset slots are handles of their own, so a position filed under
 /// one consumer's key through one slot is not what the other answers with. That
 /// is the stricter half of `PRV-4` and the one a deployment gets by default;
 /// the single-table shape — both slots named with one handle — is a
@@ -23,8 +23,8 @@ use crate::store::in_memory::{InMemoryCheckpointStore, InMemoryEventStore, InMem
 pub struct InMemoryStore {
     events: InMemoryEventStore,
     snapshots: InMemorySnapshotStore,
-    projection_checkpoints: InMemoryCheckpointStore,
-    delivery_checkpoints: InMemoryCheckpointStore,
+    projection_offsets: InMemoryOffsetStore,
+    saga_offsets: InMemoryOffsetStore,
 }
 
 impl Store for InMemoryStore {
@@ -43,18 +43,18 @@ impl SnapshotSlot for InMemoryStore {
     }
 }
 
-impl ProjectionCheckpointSlot for InMemoryStore {
-    type ProjectionCheckpoints = InMemoryCheckpointStore;
+impl ProjectionOffsetSlot for InMemoryStore {
+    type ProjectionOffsets = InMemoryOffsetStore;
 
-    fn projection_checkpoints(&self) -> InMemoryCheckpointStore {
-        self.projection_checkpoints.clone()
+    fn projection_offsets(&self) -> InMemoryOffsetStore {
+        self.projection_offsets.clone()
     }
 }
 
-impl DeliveryCheckpointSlot for InMemoryStore {
-    type DeliveryCheckpoints = InMemoryCheckpointStore;
+impl SagaOffsetSlot for InMemoryStore {
+    type SagaOffsets = InMemoryOffsetStore;
 
-    fn delivery_checkpoints(&self) -> InMemoryCheckpointStore {
-        self.delivery_checkpoints.clone()
+    fn saga_offsets(&self) -> InMemoryOffsetStore {
+        self.saga_offsets.clone()
     }
 }

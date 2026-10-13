@@ -14,8 +14,8 @@
 use std::borrow::Borrow;
 
 use nitinol_eventsource::system::{EventSourceSystem, Hosted};
-use nitinol_persistence::provider::{DeliveryCheckpointSlot, Store};
-use nitinol_persistence::store::CheckpointStore;
+use nitinol_persistence::provider::{SagaOffsetSlot, Store};
+use nitinol_persistence::store::OffsetStore;
 
 use crate::components::SagaComponents;
 use crate::delivery::SagaDeliveryProps;
@@ -163,17 +163,17 @@ impl<St: Store> SagaSystemExt for EventSourceSystem<St> {
 /// Wiring a delivery host from an [`EventSourceSystem`].
 ///
 /// A host needs two slots — the journal the saga's decisions are on, and the
-/// delivery-checkpoint slot its progress is recorded in — and this resolves
+/// saga-offset slot its progress is recorded in — and this resolves
 /// both from the provider the system was built with.
 ///
 /// It is a trait of its own rather than part of [`SagaSystemExt`] because the
-/// delivery slot is one a provider need not supply: a deployment that wires no
+/// saga slot is one a provider need not supply: a deployment that wires no
 /// delivery host owes no store for one, and one that does is told so while the
 /// wiring is compiled.
 pub trait SagaDeliveryExt {
-    /// The backend's own checkpoint store, as the provider's delivery slot is
+    /// The backend's own offset store, as the provider's saga slot is
     /// configured with it.
-    type DeliveryCheckpoints: CheckpointStore + 'static;
+    type SagaOffsets: OffsetStore + 'static;
 
     /// Deliver what the saga `S` decided, through a host over this system.
     ///
@@ -182,7 +182,7 @@ pub trait SagaDeliveryExt {
     ///
     /// # Typestate
     ///
-    /// This exists only where the provider supplies delivery checkpoints.
+    /// This exists only where the provider supplies saga offsets.
     /// A provider that supplies none is refused here rather than when the host
     /// first tries to record where it got to:
     ///
@@ -232,7 +232,7 @@ pub trait SagaDeliveryExt {
     /// # }
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// // no `delivery_checkpoints` — this store has no delivery slot
+    /// // no `saga_offsets` — this store has no saga slot
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
@@ -240,13 +240,13 @@ pub trait SagaDeliveryExt {
     /// system.deliver::<ReservationSaga>();
     /// # }
     /// ```
-    fn deliver<S: Saga>(&self) -> SagaDeliveryProps<S, Self::DeliveryCheckpoints, Hosted>;
+    fn deliver<S: Saga>(&self) -> SagaDeliveryProps<S, Self::SagaOffsets, Hosted>;
 }
 
-impl<St: DeliveryCheckpointSlot> SagaDeliveryExt for EventSourceSystem<St> {
-    type DeliveryCheckpoints = St::DeliveryCheckpoints;
+impl<St: SagaOffsetSlot> SagaDeliveryExt for EventSourceSystem<St> {
+    type SagaOffsets = St::SagaOffsets;
 
-    fn deliver<S: Saga>(&self) -> SagaDeliveryProps<S, Self::DeliveryCheckpoints, Hosted> {
+    fn deliver<S: Saga>(&self) -> SagaDeliveryProps<S, Self::SagaOffsets, Hosted> {
         SagaDeliveryProps::new(self.persistence()).hosted(self.erase_store())
     }
 }

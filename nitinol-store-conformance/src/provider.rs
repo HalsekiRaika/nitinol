@@ -18,7 +18,7 @@
 //! written through one handle and read through a second — and it puts the
 //! store the slot answers with through that store's own contract, so a store
 //! handing out a conforming handle is what a green run means.
-//! [`verify_checkpoint_independence`] is `PRV-4`, which belongs to neither slot
+//! [`verify_offset_independence`] is `PRV-4`, which belongs to neither slot
 //! alone.
 //!
 //! # Why the clone path is a clause rather than a bound
@@ -46,22 +46,22 @@ use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
 use jiff::Timestamp;
 use nitinol_persistence::provider::{
-    DeliveryCheckpointSlot, PersistenceProvider, ProjectionCheckpointSlot, SnapshotSlot, Store,
+    PersistenceProvider, ProjectionOffsetSlot, SagaOffsetSlot, SnapshotSlot, Store,
 };
-use nitinol_persistence::store::{CheckpointScope, CheckpointStore, EventStore, SnapshotStore};
-use nitinol_persistence::{AggregateId, LoadQuery, PersistedSnapshot, ProjectionId};
+use nitinol_persistence::store::{EventStore, OffsetScope, OffsetStore, SnapshotStore};
+use nitinol_persistence::{AggregateId, LoadQuery, PersistedSnapshot};
 
-use crate::checkpoint::fixture::framework_owned;
-use crate::checkpoint::CheckpointStoreUnderTest;
 use crate::fixture::fact;
+use crate::offset::fixture::framework_owned;
+use crate::offset::OffsetStoreUnderTest;
 use crate::snapshot::SnapshotStoreUnderTest;
 use crate::under_test::{Executor, StoreUnderTest};
 
 /// The assembly a run of the `PRV` clauses is about.
 ///
-/// The store is an associated type rather than a `dyn` handle: the checkpoint
+/// The store is an associated type rather than a `dyn` handle: the offset
 /// slots answer with the backend's own store type, and what a transaction is is
-/// the one thing a checkpoint backend decides for itself.
+/// the one thing an offset backend decides for itself.
 ///
 /// Every clause asks for its own store, so no clause can be carried by what
 /// another one left behind, and an assembly decides for itself what a store
@@ -81,7 +81,7 @@ pub trait ProviderUnderTest: Send + Sync {
 /// Put a store through every clause of every slot.
 ///
 /// This is the entry point for an assembly that holds the journal, the snapshot
-/// slot and both checkpoint slots. One that holds fewer runs the slot entry
+/// slot and both offset slots. One that holds fewer runs the slot entry
 /// points it has.
 ///
 /// The per-slot clauses run before `PRV-4`, so a store that splits a slot's
@@ -90,14 +90,14 @@ pub trait ProviderUnderTest: Send + Sync {
 pub async fn verify<U, X>(provider: &U, executor: &X)
 where
     U: ProviderUnderTest,
-    U::Store: SnapshotSlot + ProjectionCheckpointSlot + DeliveryCheckpointSlot,
+    U::Store: SnapshotSlot + ProjectionOffsetSlot + SagaOffsetSlot,
     X: Executor,
 {
     verify_event_store(provider, executor).await;
     verify_snapshot_store(provider).await;
-    verify_projection_checkpoints(provider, executor).await;
-    verify_delivery_checkpoints(provider, executor).await;
-    verify_checkpoint_independence(provider).await;
+    verify_projection_offsets(provider, executor).await;
+    verify_saga_offsets(provider, executor).await;
+    verify_offset_independence(provider).await;
 }
 
 /// The journal slot: `PRV-1` for it, then the whole event-store contract
@@ -125,12 +125,12 @@ where
     crate::snapshot::verify(&SnapshotStoreSlot(provider)).await;
 }
 
-/// The projection-checkpoint slot: `PRV-1` for it, then the whole checkpoint
+/// The projection-offset slot: `PRV-1` for it, then the whole offset
 /// contract against the store it answers with.
-pub async fn verify_projection_checkpoints<U, X>(provider: &U, executor: &X)
+pub async fn verify_projection_offsets<U, X>(provider: &U, executor: &X)
 where
     U: ProviderUnderTest,
-    U::Store: ProjectionCheckpointSlot,
+    U::Store: ProjectionOffsetSlot,
     X: Executor,
 {
     const CLAUSE: &str = "PRV-1";
@@ -139,22 +139,22 @@ where
     let supplier = PersistenceProvider::new(store.clone());
     let through_a_clone = PersistenceProvider::new(store.clone());
 
-    let first = supplier.projection_checkpoints();
-    let second = supplier.projection_checkpoints();
-    let consumer = ProjectionId::new("prv.clauses.projection-slot.taken-twice");
+    let first = supplier.projection_offsets();
+    let second = supplier.projection_offsets();
+    let consumer = OffsetScope::new("prv.clauses.projection-slot.taken-twice");
 
     saved(CLAUSE, &first, &consumer, 11).await;
     assert_eq!(
         held(CLAUSE, &second, &consumer).await,
         Some(11),
-        "{CLAUSE} is broken: a projection-checkpoint slot taken twice from one store has to reach \
+        "{CLAUSE} is broken: a projection-offset slot taken twice from one store has to reach \
          one set of records, and the position saved through the first handle is not the one the \
          second answers with; a projector that re-resolved its handle would resume from nothing \
          and apply the whole journal again"
     );
 
-    let across_the_clone = through_a_clone.projection_checkpoints();
-    let cloned_consumer = ProjectionId::new("prv.clauses.projection-slot.across-a-clone");
+    let across_the_clone = through_a_clone.projection_offsets();
+    let cloned_consumer = OffsetScope::new("prv.clauses.projection-slot.across-a-clone");
     saved(CLAUSE, &first, &cloned_consumer, 19).await;
     assert_eq!(
         held(CLAUSE, &across_the_clone, &cloned_consumer).await,
@@ -165,15 +165,15 @@ where
          nothing reported"
     );
 
-    crate::checkpoint::verify(&ProjectionSlotStore(provider), executor).await;
+    crate::offset::verify(&ProjectionSlotStore(provider), executor).await;
 }
 
-/// The delivery-checkpoint slot: `PRV-1` for it, then the whole checkpoint
+/// The saga-offset slot: `PRV-1` for it, then the whole offset
 /// contract against the store it answers with.
-pub async fn verify_delivery_checkpoints<U, X>(provider: &U, executor: &X)
+pub async fn verify_saga_offsets<U, X>(provider: &U, executor: &X)
 where
     U: ProviderUnderTest,
-    U::Store: DeliveryCheckpointSlot,
+    U::Store: SagaOffsetSlot,
     X: Executor,
 {
     const CLAUSE: &str = "PRV-1";
@@ -182,35 +182,35 @@ where
     let supplier = PersistenceProvider::new(store.clone());
     let through_a_clone = PersistenceProvider::new(store.clone());
 
-    let first = supplier.delivery_checkpoints();
-    let second = supplier.delivery_checkpoints();
-    let consumer = framework_owned("prv.clauses.delivery-slot.taken-twice");
+    let first = supplier.saga_offsets();
+    let second = supplier.saga_offsets();
+    let consumer = framework_owned("prv.clauses.saga-slot.taken-twice", 0);
 
     saved(CLAUSE, &first, &consumer, 13).await;
     assert_eq!(
         held(CLAUSE, &second, &consumer).await,
         Some(13),
-        "{CLAUSE} is broken: a delivery-checkpoint slot taken twice from one store has to reach \
+        "{CLAUSE} is broken: a saga-offset slot taken twice from one store has to reach \
          one set of records, and the progress recorded through the first handle is not what the \
          second answers with; a host that re-resolved its handle would deliver its whole journal \
          again"
     );
 
-    let across_the_clone = through_a_clone.delivery_checkpoints();
-    let cloned_consumer = framework_owned("prv.clauses.delivery-slot.across-a-clone");
+    let across_the_clone = through_a_clone.saga_offsets();
+    let cloned_consumer = framework_owned("prv.clauses.saga-slot.across-a-clone", 0);
     saved(CLAUSE, &first, &cloned_consumer, 23).await;
     assert_eq!(
         held(CLAUSE, &across_the_clone, &cloned_consumer).await,
         Some(23),
-        "{CLAUSE} is broken: the delivery slot of a clone of the store handle answers with nothing \
+        "{CLAUSE} is broken: the saga slot of a clone of the store handle answers with nothing \
          the original was written with, so a host wired from the clone would deliver its whole \
          journal again"
     );
 
-    crate::checkpoint::verify(&DeliverySlotStore(provider), executor).await;
+    crate::offset::verify(&SagaSlotStore(provider), executor).await;
 }
 
-/// `PRV-4`. The two checkpoint slots are told apart: each answers for what was
+/// `PRV-4`. The two offset slots are told apart: each answers for what was
 /// filed through it, and a write through one leaves the other's answer where it
 /// was.
 ///
@@ -218,28 +218,28 @@ where
 /// Naming both with one handle is allowed and is how a single-table backend is
 /// deployed, so what is judged here is that each consumer's own key is answered
 /// — not that one slot cannot see the other's rows.
-pub async fn verify_checkpoint_independence<U>(provider: &U)
+pub async fn verify_offset_independence<U>(provider: &U)
 where
     U: ProviderUnderTest,
-    U::Store: ProjectionCheckpointSlot + DeliveryCheckpointSlot,
+    U::Store: ProjectionOffsetSlot + SagaOffsetSlot,
 {
     const CLAUSE: &str = "PRV-4";
 
     let supplier = PersistenceProvider::new(provider.bring_up().await);
-    let projections = supplier.projection_checkpoints();
-    let deliveries = supplier.delivery_checkpoints();
+    let projections = supplier.projection_offsets();
+    let deliveries = supplier.saga_offsets();
 
-    // The keys the two kinds of consumer really render: a projection verbatim,
-    // a framework-owned consumer inside the reserved namespace.
-    let projection = ProjectionId::new("prv.clauses.independence.projection");
-    let delivery = framework_owned("prv.clauses.independence.delivery");
+    // The keys the two kinds of consumer really render: a user-named scope
+    // verbatim, a framework-owned one inside the reserved namespace.
+    let projection = OffsetScope::new("prv.clauses.independence.projection");
+    let delivery = framework_owned("prv.clauses.independence.delivery", 0);
 
     saved(CLAUSE, &projections, &projection, 17).await;
     assert_eq!(
         held(CLAUSE, &deliveries, &delivery).await,
         None,
         "{CLAUSE} is broken: the only position saved was a projection's, under a projection's own \
-         key, and the delivery slot answers with one; a delivery host would resume from where a \
+         key, and the saga slot answers with one; a delivery host would resume from where a \
          projection had got to"
     );
 
@@ -253,7 +253,7 @@ where
     assert_eq!(
         held(CLAUSE, &deliveries, &delivery).await,
         Some(23),
-        "{CLAUSE} is broken: the delivery slot does not answer with the progress recorded through \
+        "{CLAUSE} is broken: the saga slot does not answer with the progress recorded through \
          it"
     );
 }
@@ -442,16 +442,11 @@ async fn loaded_snapshot(
         })
 }
 
-/// A checkpoint save a clause requires to be taken.
+/// An offset save a clause requires to be taken.
 ///
 /// Every save the suite makes is a strict move forward under a key no other
 /// writer in the clause uses, which is what a correct consumer makes.
-async fn saved<Cs: CheckpointStore>(
-    clause: &str,
-    store: &Arc<Cs>,
-    scope: &dyn CheckpointScope,
-    sequence: u64,
-) {
+async fn saved<Cs: OffsetStore>(clause: &str, store: &Arc<Cs>, scope: &OffsetScope, sequence: u64) {
     store
         .save(scope, sequence, None)
         .await
@@ -460,22 +455,18 @@ async fn saved<Cs: CheckpointStore>(
                 "{clause} is broken: saving the position {sequence} under {:?}, which no other \
                  writer saves under and which the slot has not been carried as far as, reported \
                  {failure}",
-                scope.checkpoint_key()
+                scope.as_str()
             )
         });
 }
 
-/// What a checkpoint slot answers with for `scope`.
-async fn held<Cs: CheckpointStore>(
-    clause: &str,
-    store: &Arc<Cs>,
-    scope: &dyn CheckpointScope,
-) -> Option<u64> {
+/// What an offset slot answers with for `scope`.
+async fn held<Cs: OffsetStore>(clause: &str, store: &Arc<Cs>, scope: &OffsetScope) -> Option<u64> {
     store.load(scope).await.unwrap_or_else(|failure| {
         panic!(
             "{clause} is broken: loading the position filed under {:?} reported {failure}, and a \
              consumer cannot start without being told where it had got to",
-            scope.checkpoint_key()
+            scope.as_str()
         )
     })
 }
@@ -508,38 +499,36 @@ where
     }
 }
 
-/// The projection-checkpoint slot, as a store the checkpoint contract can be
+/// The projection-offset slot, as a store the offset contract can be
 /// run against.
 struct ProjectionSlotStore<'u, U>(&'u U);
 
-impl<U> CheckpointStoreUnderTest for ProjectionSlotStore<'_, U>
+impl<U> OffsetStoreUnderTest for ProjectionSlotStore<'_, U>
 where
     U: ProviderUnderTest,
-    U::Store: ProjectionCheckpointSlot,
+    U::Store: ProjectionOffsetSlot,
 {
-    type Store = <U::Store as ProjectionCheckpointSlot>::ProjectionCheckpoints;
-
-    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
-        Box::pin(async move {
-            PersistenceProvider::new(self.0.bring_up().await).projection_checkpoints()
-        })
-    }
-}
-
-/// The delivery-checkpoint slot, as a store the checkpoint contract can be run
-/// against.
-struct DeliverySlotStore<'u, U>(&'u U);
-
-impl<U> CheckpointStoreUnderTest for DeliverySlotStore<'_, U>
-where
-    U: ProviderUnderTest,
-    U::Store: DeliveryCheckpointSlot,
-{
-    type Store = <U::Store as DeliveryCheckpointSlot>::DeliveryCheckpoints;
+    type Store = <U::Store as ProjectionOffsetSlot>::ProjectionOffsets;
 
     fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
         Box::pin(
-            async move { PersistenceProvider::new(self.0.bring_up().await).delivery_checkpoints() },
+            async move { PersistenceProvider::new(self.0.bring_up().await).projection_offsets() },
         )
+    }
+}
+
+/// The saga-offset slot, as a store the offset contract can be run
+/// against.
+struct SagaSlotStore<'u, U>(&'u U);
+
+impl<U> OffsetStoreUnderTest for SagaSlotStore<'_, U>
+where
+    U: ProviderUnderTest,
+    U::Store: SagaOffsetSlot,
+{
+    type Store = <U::Store as SagaOffsetSlot>::SagaOffsets;
+
+    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
+        Box::pin(async move { PersistenceProvider::new(self.0.bring_up().await).saga_offsets() })
     }
 }

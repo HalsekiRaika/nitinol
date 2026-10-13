@@ -23,7 +23,7 @@
 mod delivery;
 use delivery::{
     append_decided, in_memory_system, operations_of, scope_of, settle, spawn_host, stream_rows,
-    wait_until_operations, wait_until_stored, Ledger, RecordingCheckpointStore, SelectiveSaga,
+    wait_until_operations, wait_until_stored, Ledger, RecordingOffsetStore, SelectiveSaga,
     REFUSED_SUFFIX,
 };
 
@@ -56,7 +56,7 @@ async fn a_refusal_in_one_partition_leaves_the_other_delivering() {
     // Given
     let (system, aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
 
     let held_target = format!("stall-target{REFUSED_SUFFIX}");
     let live_target = AggregateId::new("ledger-stall-local");
@@ -79,7 +79,7 @@ async fn a_refusal_in_one_partition_leaves_the_other_delivering() {
     .await;
 
     // When
-    let _host = spawn_host::<SelectiveSaga>(&system, &journal, &checkpoints, 2).await;
+    let _host = spawn_host::<SelectiveSaga>(&system, &journal, &offsets, 2).await;
 
     // Then: the partition that can deliver does.
     let ledger = system.aggregate_proxy::<Ledger>(live_target);
@@ -94,7 +94,7 @@ async fn a_refusal_in_one_partition_leaves_the_other_delivering() {
     );
     assert_eq!(
         wait_until_stored(
-            &checkpoints,
+            &offsets,
             &scope_of(1),
             live_position,
             "the progressing partition must record its own progress"
@@ -110,7 +110,7 @@ async fn a_refusal_in_one_partition_leaves_the_other_delivering() {
 
     // And: the held partition is still held, on its own recorded position.
     assert!(
-        checkpoints
+        offsets
             .stored(&scope_of(0))
             .is_none_or(|position| position < held_position),
         "the refused partition must not record progress past the record it \

@@ -51,7 +51,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
-    EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemoryStore,
+    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore,
 };
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -428,11 +428,11 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let saga_persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&saga_store))
-            .delivery_checkpoints(InMemoryCheckpointStore::default())
+            .saga_offsets(InMemoryOffsetStore::default())
             .build(),
     );
     let _delivery_host =
-        SagaDeliveryProps::<ReservationSaga, InMemoryCheckpointStore>::new(&saga_persistence)
+        SagaDeliveryProps::<ReservationSaga, InMemoryOffsetStore>::new(&saga_persistence)
             .with_poll_interval(PROBE_INTERVAL)
             .spawn(&system)
             .await;

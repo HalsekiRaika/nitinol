@@ -27,7 +27,7 @@ mod delivery;
 use delivery::{
     append_decided, append_row, in_memory_system, operations_of, scope_of, settle, spawn_host,
     stream_rows, wait_until_operations, wait_until_stored, DeliverySaga, Ledger, Recorded,
-    RecordingCheckpointStore,
+    RecordingOffsetStore,
 };
 
 use std::sync::Arc;
@@ -41,16 +41,16 @@ async fn a_host_resumes_above_the_recorded_position() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-resumes");
 
     let first = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
     let second = append_decided(&journal, &saga_id, 2, target.as_str(), "op-2").await;
-    checkpoints.put(&scope_of(0), first);
+    offsets.put(&scope_of(0), first);
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target);
@@ -62,7 +62,7 @@ async fn a_host_resumes_above_the_recorded_position() {
     );
     assert_eq!(
         wait_until_stored(
-            &checkpoints,
+            &offsets,
             &scope_of(0),
             second,
             "progress must move to the newly delivered decision"
@@ -86,7 +86,7 @@ async fn a_lost_position_redelivers_without_doubling_the_effect() {
     // the receiver has the operation, the host has no position.
     let (system, aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-lost-position");
 
@@ -103,13 +103,13 @@ async fn a_lost_position_redelivers_without_doubling_the_effect() {
     append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
     let second = append_decided(&journal, &saga_id, 2, target.as_str(), "op-2").await;
     assert_eq!(
-        checkpoints.stored(&scope_of(0)),
+        offsets.stored(&scope_of(0)),
         None,
         "the position the crash lost was never recorded"
     );
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target.clone());
@@ -126,7 +126,7 @@ async fn a_lost_position_redelivers_without_doubling_the_effect() {
     );
     assert_eq!(
         wait_until_stored(
-            &checkpoints,
+            &offsets,
             &scope_of(0),
             second,
             "progress must reach the last decision"

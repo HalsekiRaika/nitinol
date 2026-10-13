@@ -1,8 +1,8 @@
 //! Rebuilding a projection does not reach the delivery progress beside it.
 //!
 //! ```gherkin
-//!   Scenario: a projection rebuilt over a store that shares one checkpoint handle
-//!     Given a store whose two checkpoint slots were named with one handle
+//!   Scenario: a projection rebuilt over a store that shares one offset handle
+//!     Given a store whose two offset slots were named with one handle
 //!     And a projection position and a delivery position recorded in it
 //!     When the projection slot is named with a handle of its own and the
 //!         projector is started again
@@ -17,10 +17,10 @@
 //! be here.
 //!
 //! What "rebuilt" means is the slot, not a store operation. There is no delete
-//! on a checkpoint store and none is added: a projection is rebuilt by naming
+//! on an offset store and none is added: a projection is rebuilt by naming
 //! the store's projection slot with a handle that holds nothing, which is what
 //! has the projector resume from no position and apply everything again. The
-//! delivery slot is named with the handle it already had, so the two halves of
+//! saga slot is named with the handle it already had, so the two halves of
 //! the change are visible side by side — one slot replaced, the other left
 //! alone.
 //!
@@ -33,8 +33,8 @@
 mod delivery;
 use delivery::{
     append_decided, delivery_id, operations_of, partition_count, scope_of, settle, stream_rows,
-    wait_until_operations, wait_until_stored, Decided, DeliverySaga, Ledger,
-    RecordingCheckpointStore, TEST_POLL_INTERVAL,
+    wait_until_operations, wait_until_stored, Decided, DeliverySaga, Ledger, RecordingOffsetStore,
+    TEST_POLL_INTERVAL,
 };
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -45,10 +45,10 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{ProjectionContext, Projector};
+use nitinol_eventsource::{ProjectionContext, ProjectionId, Projector};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, ProjectionId};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, OffsetScope};
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDeliveryExt, SagaId};
 
@@ -112,11 +112,12 @@ const DECISIONS: usize = 2;
 
 #[tokio::test]
 async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_was() {
-    // Given: one event store, and one checkpoint handle named into both
-    // checkpoint slots of the store.
+    // Given: one event store, and one offset handle named into both
+    // offset slots of the store.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let shared_checkpoints = RecordingCheckpointStore::new();
-    let projection = ProjectionId::new("projection-rebuild-read-model");
+    let shared_offsets = RecordingOffsetStore::new();
+    let projection_id = ProjectionId::new("projection-rebuild-read-model");
+    let projection = OffsetScope::from(&projection_id);
     let saga_id = SagaId::new("instance-projection-rebuild");
     let target = AggregateId::new("ledger-projection-rebuild");
 
@@ -127,7 +128,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(Arc::clone(&store))
-                .checkpoints(Arc::clone(&shared_checkpoints))
+                .offsets(Arc::clone(&shared_offsets))
                 .build(),
         ))
         .build();
@@ -137,7 +138,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
     let applied_for_producer = Arc::clone(&first_applied);
     let notify_for_producer = Arc::clone(&first_notify);
     let _first_projector = first_system
-        .projector_props(projection.clone(), move || CountingProjection {
+        .projector_props(projection_id.clone(), move || CountingProjection {
             applied: Arc::clone(&applied_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
@@ -164,7 +165,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
     )
     .await;
     wait_until_stored(
-        &shared_checkpoints,
+        &shared_offsets,
         &projection,
         last_decision,
         "the projection must record its position",
@@ -172,7 +173,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
     .await;
     assert_eq!(
         wait_until_stored(
-            &shared_checkpoints,
+            &shared_offsets,
             &scope_of(0),
             last_decision,
             "the delivery host must record its position",
@@ -190,15 +191,15 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
     );
 
     // When: the projection slot is named with a handle holding nothing and the
-    // delivery slot keeps the one it had, and both consumers are started again
+    // saga slot keeps the one it had, and both consumers are started again
     // over the same event store.
-    let rebuilt_checkpoints = RecordingCheckpointStore::new();
+    let rebuilt_offsets = RecordingOffsetStore::new();
     let rebuilt_system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(Arc::clone(&store))
-                .projection_checkpoints(Arc::clone(&rebuilt_checkpoints))
-                .delivery_checkpoints(Arc::clone(&shared_checkpoints))
+                .projection_offsets(Arc::clone(&rebuilt_offsets))
+                .saga_offsets(Arc::clone(&shared_offsets))
                 .build(),
         ))
         .build();
@@ -208,7 +209,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
     let applied_for_producer = Arc::clone(&rebuilt_applied);
     let notify_for_producer = Arc::clone(&rebuilt_notify);
     let _rebuilt_projector = rebuilt_system
-        .projector_props(projection.clone(), move || CountingProjection {
+        .projector_props(projection_id.clone(), move || CountingProjection {
             applied: Arc::clone(&applied_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
@@ -240,20 +241,20 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
          projector resume from no position, which is what a rebuild is"
     );
     assert!(
-        rebuilt_checkpoints
+        rebuilt_offsets
             .stored(&projection)
             .is_some_and(|held| held >= last_decision),
         "and the rebuilt projection records into the slot it was named with, \
          which holds {:?}",
-        rebuilt_checkpoints.stored(&projection)
+        rebuilt_offsets.stored(&projection)
     );
 
     // And: the delivery position in the shared store is where it was.
     settle().await;
     assert_eq!(
-        shared_checkpoints.stored(&scope_of(0)),
+        shared_offsets.stored(&scope_of(0)),
         Some(last_decision),
-        "rebuilding the projection slot does not reach the delivery slot: the \
+        "rebuilding the projection slot does not reach the saga slot: the \
          delivery position has to be the one recorded before the rebuild, even \
          though both slots were named with one handle"
     );

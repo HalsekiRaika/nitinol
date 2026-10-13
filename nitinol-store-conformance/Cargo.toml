@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Executable conformance suites for the contracts any nitinol EventStore, SnapshotStore and CheckpointStore owes"
+description = "Executable conformance suites for the contracts any nitinol EventStore, SnapshotStore and OffsetStore owes"
 
 # The point of this crate is what it may *not* depend on: an async runtime.  A
 # kit that reached for one would be out of reach of every provider built on

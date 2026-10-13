@@ -2,32 +2,32 @@
 //! it.
 //!
 //! ```gherkin
-//! Feature: CheckpointStore (Postgres) and ExactlyOnce projection
+//! Feature: OffsetStore (Postgres) and ExactlyOnce projection
 //!
 //!   Scenario: an incremental read model under redelivery
 //!     Given a projector wired for ExactlyOnce with a TxProvider, and an
 //!           incremental read model
 //!     When the same event is redelivered
 //!     Then the read model is applied to once and no more
-//!     And the checkpoint moved in the same transaction as the read-model
+//!     And the offset moved in the same transaction as the read-model
 //!         update
 //!
 //!   Scenario: a rollback on a failure partway through
 //!     Given a projector wired for ExactlyOnce with a TxProvider
-//!     When project, or the checkpoint save, fails
+//!     When project, or the offset save, fails
 //!     Then the transaction is rolled back
-//!     And the checkpoint does not move, and the event is not treated as
+//!     And the offset does not move, and the event is not treated as
 //!         handled
 //!
 //!   Scenario: concurrent projectors kept from applying twice (the defence)
 //!     Given two independent ProcessSystems over one projection_id and one
-//!           database, both holding the same stale checkpoint
+//!           database, both holding the same stale offset
 //!     When both try to apply the same event
 //!     Then the read model is updated once and no more
 //!     And the one that lost is rolled back as an error that can be observed
 //!
-//!   Scenario: two starting where no checkpoint has been written yet
-//!     Given a projection_id with no checkpoint record, and two projectors
+//!   Scenario: two starting where no offset has been written yet
+//!     Given a projection_id with no offset record, and two projectors
 //!           doing their first work at the same time
 //!     Then the read model is updated once and no more, and the one that lost
 //!          is rolled back as an error that can be observed
@@ -59,16 +59,18 @@ use bytes::Bytes;
 use fixture::{committed, typed};
 use linkme::distributed_slice;
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::{Event, ProjectionContext, Projector, ProjectorProps, TxProvider};
-use nitinol_persistence::error::CheckpointError;
+use nitinol_eventsource::{
+    Event, ProjectionContext, ProjectionId, Projector, ProjectorProps, TxProvider,
+};
+use nitinol_persistence::error::OffsetError;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{CheckpointScope, CheckpointStore, EventStore};
+use nitinol_persistence::store::{EventStore, OffsetScope, OffsetStore};
 use nitinol_persistence::{
-    AggregateId, EventRegistryEntry, EventType, Family, ProjectionId, TypeName, EVENT_REGISTRY,
+    AggregateId, EventRegistryEntry, EventType, Family, TypeName, EVENT_REGISTRY,
 };
 use nitinol_runtime::process::{Process, ProcessProxy};
 use nitinol_runtime::ProcessSystem;
-use nitinol_sqlx::{CheckpointConflict, PostgresCheckpointStore, PostgresEventStore};
+use nitinol_sqlx::{OffsetConflict, PostgresEventStore, PostgresOffsetStore};
 use sqlx::{PgPool, PgTransaction};
 use tokio::sync::Barrier;
 
@@ -88,7 +90,7 @@ const RENDEZVOUS_DEADLINE: Duration = Duration::from_secs(30);
 // The event a projection counts.
 
 const INCREMENTED: EventType =
-    EventType::new(Family::new("sqlx.checkpoint"), TypeName::new("Incremented"));
+    EventType::new(Family::new("sqlx.offset"), TypeName::new("Incremented"));
 
 /// What makes `INCREMENTED` restorable: a store resolves what its binary
 /// linked, so an event type a clause appends has to be declared to the
@@ -124,7 +126,7 @@ impl Codec<Incremented> for NoPayload {
 
 // The user's half of an ExactlyOnce wiring.
 
-/// The `TxProvider` a user writes to put this provider's checkpoint store
+/// The `TxProvider` a user writes to put this provider's offset store
 /// under an `ExactlyOnce` projector.
 ///
 /// `nitinol-sqlx` defines none, and the clauses here are what keeps that
@@ -132,7 +134,7 @@ impl Codec<Incremented> for NoPayload {
 /// and `rollback`, and a provider that wrapped them would have to depend on
 /// the interpreter crate that declares `TxProvider` — the wrong way round for
 /// a provider. Nothing is left to get wrong silently:
-/// `ProjectorProps::with_tx_provider` requires the checkpoint store's `Tx` to
+/// `ProjectorProps::with_tx_provider` requires the offset store's `Tx` to
 /// be this one's, so a pairing that would not share a transaction does not
 /// compile.
 struct PoolTransactions {
@@ -168,9 +170,9 @@ enum ProjectionFailed {
     /// read model inside the framework's transaction and then fails.
     #[error("intentional failure, so that a clause can watch the rollback")]
     Intentional,
-    /// ExactlyOnce delivery owes `project` the transaction the checkpoint save
+    /// ExactlyOnce delivery owes `project` the transaction the offset save
     /// will ride. Without it the read-model update would land on a connection
-    /// of its own, and "the checkpoint and the read model move in one
+    /// of its own, and "the offset and the read model move in one
     /// transaction" would be a claim nothing held up.
     #[error("ExactlyOnce delivery must hand project() the transaction to write in")]
     NoTransaction,
@@ -200,7 +202,7 @@ impl Projector<Incremented, PgTransaction<'static>> for CountingProjector {
         // that is not coming. The wait is *before* the read-model update so
         // that neither projector is already holding that row when the other
         // arrives — behind the update they would serialise there rather than
-        // race for the checkpoint.
+        // race for the offset.
         if let Some(rendezvous) = self.rendezvous.take() {
             tokio::time::timeout(RENDEZVOUS_DEADLINE, rendezvous.wait())
                 .await
@@ -219,37 +221,37 @@ impl Projector<Incremented, PgTransaction<'static>> for CountingProjector {
     }
 }
 
-/// `PostgresCheckpointStore`, with the refusals it answered kept where a clause
+/// `PostgresOffsetStore`, with the refusals it answered kept where a clause
 /// can read them.
 ///
 /// A refused save is answered by the framework — it rolls the transaction back
 /// and redelivers — and the error goes no further than a log line. A clause
 /// about the losing projector needs the error itself, so the store that
 /// projector is given keeps one, and keeps it by the name a caller would use:
-/// a conflict is counted only where [`CheckpointConflict`] is reachable
+/// a conflict is counted only where [`OffsetConflict`] is reachable
 /// through it.
-struct ObservedCheckpoints {
-    inner: PostgresCheckpointStore,
+struct ObservedOffsets {
+    inner: PostgresOffsetStore,
     conflicts: Arc<AtomicUsize>,
 }
 
 #[async_trait]
-impl CheckpointStore for ObservedCheckpoints {
+impl OffsetStore for ObservedOffsets {
     type Tx = PgTransaction<'static>;
 
-    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
+    async fn load(&self, scope: &OffsetScope) -> Result<Option<u64>, OffsetError> {
         self.inner.load(scope).await
     }
 
     async fn save(
         &self,
-        scope: &dyn CheckpointScope,
+        scope: &OffsetScope,
         sequence: u64,
         tx: Option<&mut Self::Tx>,
-    ) -> Result<(), CheckpointError> {
+    ) -> Result<(), OffsetError> {
         let outcome = self.inner.save(scope, sequence, tx).await;
-        if let Err(CheckpointError::Backend(ref cause)) = outcome {
-            if cause.downcast_ref::<CheckpointConflict>().is_some() {
+        if let Err(OffsetError::Backend(ref cause)) = outcome {
+            if cause.downcast_ref::<OffsetConflict>().is_some() {
                 self.conflicts.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -257,9 +259,9 @@ impl CheckpointStore for ObservedCheckpoints {
     }
 }
 
-fn observed(pool: PgPool, conflicts: &Arc<AtomicUsize>) -> Arc<ObservedCheckpoints> {
-    Arc::new(ObservedCheckpoints {
-        inner: PostgresCheckpointStore::new(pool),
+fn observed(pool: PgPool, conflicts: &Arc<AtomicUsize>) -> Arc<ObservedOffsets> {
+    Arc::new(ObservedOffsets {
+        inner: PostgresOffsetStore::new(pool),
         conflicts: Arc::clone(conflicts),
     })
 }
@@ -295,27 +297,28 @@ async fn applied(pool: &PgPool) -> i64 {
         .expect("the read model this clause created must answer")
 }
 
-async fn checkpoint(store: &PostgresCheckpointStore, projection_id: &ProjectionId) -> Option<u64> {
+async fn offset(store: &PostgresOffsetStore, projection_id: &ProjectionId) -> Option<u64> {
+    let scope = OffsetScope::from(projection_id);
     store
-        .load(projection_id)
+        .load(&scope)
         .await
         .expect("a load against a database this run reached must answer")
 }
 
-/// Wait until the read model and the checkpoint are both where `what` says, or
+/// Wait until the read model and the offset are both where `what` says, or
 /// fail rather than hang.
 async fn until_settled(
     what: &str,
     pool: &PgPool,
-    checkpoints: &PostgresCheckpointStore,
+    offsets: &PostgresOffsetStore,
     projection_id: &ProjectionId,
     applied_count: i64,
-    checkpoint_at: Option<u64>,
+    offset_at: Option<u64>,
 ) {
     let reached = async {
         loop {
             if applied(pool).await == applied_count
-                && checkpoint(checkpoints, projection_id).await == checkpoint_at
+                && offset(offsets, projection_id).await == offset_at
             {
                 return;
             }
@@ -373,10 +376,10 @@ async fn stopped<P: Process>(system: &ProcessSystem, proxy: &ProcessProxy<P>) {
 
 /// Acceptance: "an incremental read model under redelivery".
 ///
-/// A projector restarted on the same `projection_id` is handed the checkpoint
+/// A projector restarted on the same `projection_id` is handed the offset
 /// the first one left, so the event it already applied is not delivered to it
 /// again. What makes that a claim about *this* store rather than about the
-/// framework is that the checkpoint crossed a database: the second projector
+/// framework is that the offset crossed a database: the second projector
 /// is a different process with no memory of the first.
 ///
 /// A second event, appended after the restart, is what makes the reading
@@ -398,7 +401,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
         PostgresEventStore::new(pool.clone())
             .expect("the event types this test binary linked claim distinct canonical paths"),
     );
-    let checkpoints = PostgresCheckpointStore::new(pool.clone());
+    let offsets = PostgresOffsetStore::new(pool.clone());
 
     committed(&events, stream.as_str(), vec![typed(1, INCREMENTED, b"")]).await;
 
@@ -407,7 +410,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&events))
-            .projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
+            .projection_offsets(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
             .build(),
     );
     let first = ProjectorProps::new(projection_id.clone(), &persistence, {
@@ -426,9 +429,9 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     .await;
 
     until_settled(
-        "the first projector has applied the event and saved its checkpoint",
+        "the first projector has applied the event and saved its offset",
         &pool,
-        &checkpoints,
+        &offsets,
         &projection_id,
         1,
         Some(1),
@@ -442,7 +445,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&events))
-            .projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
+            .projection_offsets(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
             .build(),
     );
     let second = ProjectorProps::new(projection_id.clone(), &persistence, {
@@ -463,9 +466,9 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     committed(&events, stream.as_str(), vec![typed(2, INCREMENTED, b"")]).await;
 
     until_settled(
-        "the second projector has applied the new event and saved its checkpoint",
+        "the second projector has applied the new event and saved its offset",
         &pool,
-        &checkpoints,
+        &offsets,
         &projection_id,
         2,
         Some(2),
@@ -482,7 +485,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     assert_eq!(
         second_attempts.load(Ordering::SeqCst),
         1,
-        "the second projector was handed one event it had not seen, and the checkpoint the first \
+        "the second projector was handed one event it had not seen, and the offset the first \
          one left is what keeps the other from reaching it at all"
     );
 }
@@ -490,12 +493,12 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
 /// Acceptance: "a rollback on a failure partway through", where `project` is
 /// what fails.
 ///
-/// The read-model update and the checkpoint move together or not at all, so a
+/// The read-model update and the offset move together or not at all, so a
 /// `project` that wrote the read model and then failed must leave both where
 /// they were — and must leave the event unprocessed, which the run that
 /// follows, after the failure is switched off, is what shows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_project_that_fails_leaves_the_read_model_and_the_checkpoint_where_they_were() {
+async fn a_project_that_fails_leaves_the_read_model_and_the_offset_where_they_were() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };
@@ -510,7 +513,7 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_checkpoint_where_the
         PostgresEventStore::new(pool.clone())
             .expect("the event types this test binary linked claim distinct canonical paths"),
     );
-    let checkpoints = PostgresCheckpointStore::new(pool.clone());
+    let offsets = PostgresOffsetStore::new(pool.clone());
 
     committed(&events, stream.as_str(), vec![typed(1, INCREMENTED, b"")]).await;
 
@@ -519,7 +522,7 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_checkpoint_where_the
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&events))
-            .projection_checkpoints(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
+            .projection_offsets(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
             .build(),
     );
     let projector = ProjectorProps::new(projection_id.clone(), &persistence, {
@@ -554,18 +557,18 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_checkpoint_where_the
          the rollback must have taken that write with it"
     );
     assert_eq!(
-        checkpoint(&checkpoints, &projection_id).await,
+        offset(&offsets, &projection_id).await,
         None,
-        "an event that was not applied leaves the projection's checkpoint where it was"
+        "an event that was not applied leaves the projection's offset where it was"
     );
 
     // When: the failure is switched off, the held event is applied.
     fail.store(false, Ordering::SeqCst);
 
     until_settled(
-        "the redelivered event has been applied and the checkpoint saved",
+        "the redelivered event has been applied and the offset saved",
         &pool,
-        &checkpoints,
+        &offsets,
         &projection_id,
         1,
         Some(1),
@@ -580,16 +583,16 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_checkpoint_where_the
     );
 }
 
-/// Acceptance: "a rollback on a failure partway through", where the checkpoint
+/// Acceptance: "a rollback on a failure partway through", where the offset
 /// save is what fails.
 ///
-/// The checkpoint is carried past the event while the projector is already
+/// The offset is carried past the event while the projector is already
 /// running, which is what another consumer of the same projection would do.
 /// The projector's own save is then behind it, the store refuses it, and the
 /// read-model update it had already made inside that transaction must go with
 /// the rollback.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_refused_checkpoint_save_rolls_the_read_model_update_back() {
+async fn a_refused_offset_save_rolls_the_read_model_update_back() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };
@@ -604,7 +607,7 @@ async fn a_refused_checkpoint_save_rolls_the_read_model_update_back() {
         PostgresEventStore::new(pool.clone())
             .expect("the event types this test binary linked claim distinct canonical paths"),
     );
-    let checkpoints = PostgresCheckpointStore::new(pool.clone());
+    let offsets = PostgresOffsetStore::new(pool.clone());
 
     let conflicts = Arc::new(AtomicUsize::new(0));
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -612,7 +615,7 @@ async fn a_refused_checkpoint_save_rolls_the_read_model_update_back() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&events))
-            .projection_checkpoints(observed(pool.clone(), &conflicts))
+            .projection_offsets(observed(pool.clone(), &conflicts))
             .build(),
     );
     let projector = ProjectorProps::new(projection_id.clone(), &persistence, {
@@ -630,18 +633,18 @@ async fn a_refused_checkpoint_save_rolls_the_read_model_update_back() {
     .spawn(&system)
     .await;
 
-    // `spawn` has already read the checkpoint this projector will carry, so
+    // `spawn` has already read the offset this projector will carry, so
     // what is saved now is behind its back — the state a second consumer of the
     // same projection would leave, and the one this defence exists for.
-    checkpoints
-        .save(&projection_id, 5, None)
+    offsets
+        .save(&OffsetScope::from(&projection_id), 5, None)
         .await
-        .expect("the first save for a projection carries its checkpoint forward");
+        .expect("the first save for a projection carries its offset forward");
 
     committed(&events, stream.as_str(), vec![typed(1, INCREMENTED, b"")]).await;
 
     until_counted(
-        "the projector's checkpoint save has been refused as a conflict",
+        "the projector's offset save has been refused as a conflict",
         &[&conflicts],
         1,
     )
@@ -651,25 +654,25 @@ async fn a_refused_checkpoint_save_rolls_the_read_model_update_back() {
     assert_eq!(
         applied(&pool).await,
         0,
-        "the read-model update rode the transaction the refused checkpoint save rolled back, so \
+        "the read-model update rode the transaction the refused offset save rolled back, so \
          nothing of it may have committed"
     );
     assert_eq!(
-        checkpoint(&checkpoints, &projection_id).await,
+        offset(&offsets, &projection_id).await,
         Some(5),
-        "a refused save leaves the checkpoint where the other writer put it"
+        "a refused save leaves the offset where the other writer put it"
     );
 }
 
 /// Acceptance: "concurrent projectors kept from applying twice (the defence)".
 ///
 /// Two `ProcessSystem`s, two pools, one database, one `projection_id`, and both
-/// projectors holding the same checkpoint the moment they reach the same event.
+/// projectors holding the same offset the moment they reach the same event.
 /// The rendezvous inside `project` is what puts them there together — without
 /// it the first would be finished before the second began, which is the
 /// sequential case this clause is not about.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
+async fn two_projectors_holding_one_offset_apply_the_event_once() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };
@@ -680,7 +683,7 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
 
     let projection_id = ProjectionId::new("sqlx.exactly-once.two.carried");
     let stream = AggregateId::new("sqlx.exactly-once.two.carried.stream");
-    let checkpoints = PostgresCheckpointStore::new(one_pool.clone());
+    let offsets = PostgresOffsetStore::new(one_pool.clone());
 
     let one_events: Arc<dyn EventStore> = Arc::new(
         PostgresEventStore::new(one_pool.clone())
@@ -697,12 +700,12 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
         vec![typed(1, INCREMENTED, b""), typed(2, INCREMENTED, b"")],
     )
     .await;
-    // The checkpoint both projectors start from: already past the first event,
+    // The offset both projectors start from: already past the first event,
     // so the one they contest is the second.
-    checkpoints
-        .save(&projection_id, 1, None)
+    offsets
+        .save(&OffsetScope::from(&projection_id), 1, None)
         .await
-        .expect("the first save for a projection carries its checkpoint forward");
+        .expect("the first save for a projection carries its offset forward");
 
     let rendezvous = Arc::new(Barrier::new(2));
     let never_fail = Arc::new(AtomicBool::new(false));
@@ -713,7 +716,7 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&one_events))
-            .projection_checkpoints(observed(one_pool.clone(), &one_conflicts))
+            .projection_offsets(observed(one_pool.clone(), &one_conflicts))
             .build(),
     );
     let one = ProjectorProps::new(projection_id.clone(), &persistence, {
@@ -737,7 +740,7 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&other_events))
-            .projection_checkpoints(observed(other_pool.clone(), &other_conflicts))
+            .projection_offsets(observed(other_pool.clone(), &other_conflicts))
             .build(),
     );
     let other = ProjectorProps::new(projection_id.clone(), &persistence, {
@@ -758,9 +761,9 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
     .await;
 
     until_settled(
-        "the contested event has been applied and the checkpoint carried forward",
+        "the contested event has been applied and the offset carried forward",
         &one_pool,
-        &checkpoints,
+        &offsets,
         &projection_id,
         1,
         Some(2),
@@ -783,9 +786,9 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
          double application this defence exists to stop"
     );
     assert_eq!(
-        checkpoint(&checkpoints, &projection_id).await,
+        offset(&offsets, &projection_id).await,
         Some(2),
-        "the winner's save is the one the projection's checkpoint carries"
+        "the winner's save is the one the projection's offset carries"
     );
     let (one_conflicts, other_conflicts) = (
         one_conflicts.load(Ordering::SeqCst),
@@ -799,9 +802,9 @@ async fn two_projectors_holding_one_checkpoint_apply_the_event_once() {
     );
 }
 
-/// Acceptance: "two starting where no checkpoint has been written yet".
+/// Acceptance: "two starting where no offset has been written yet".
 ///
-/// The same defence where the projection has no checkpoint row yet: the two
+/// The same defence where the projection has no offset row yet: the two
 /// projectors are racing to write the first one rather than to carry an
 /// existing one forward, and a rule that only guarded the second would let both
 /// through here.
@@ -817,7 +820,7 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
 
     let projection_id = ProjectionId::new("sqlx.exactly-once.two.first");
     let stream = AggregateId::new("sqlx.exactly-once.two.first.stream");
-    let checkpoints = PostgresCheckpointStore::new(one_pool.clone());
+    let offsets = PostgresOffsetStore::new(one_pool.clone());
 
     let one_events: Arc<dyn EventStore> = Arc::new(
         PostgresEventStore::new(one_pool.clone())
@@ -844,7 +847,7 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&one_events))
-            .projection_checkpoints(observed(one_pool.clone(), &one_conflicts))
+            .projection_offsets(observed(one_pool.clone(), &one_conflicts))
             .build(),
     );
     let one = ProjectorProps::new(projection_id.clone(), &persistence, {
@@ -868,7 +871,7 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&other_events))
-            .projection_checkpoints(observed(other_pool.clone(), &other_conflicts))
+            .projection_offsets(observed(other_pool.clone(), &other_conflicts))
             .build(),
     );
     let other = ProjectorProps::new(projection_id.clone(), &persistence, {
@@ -889,9 +892,9 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     .await;
 
     until_settled(
-        "the contested event has been applied and the projection's first checkpoint saved",
+        "the contested event has been applied and the projection's first offset saved",
         &one_pool,
-        &checkpoints,
+        &offsets,
         &projection_id,
         1,
         Some(1),
@@ -910,13 +913,13 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     assert_eq!(
         applied(&one_pool).await,
         1,
-        "both projectors started a projection that had no checkpoint at all, and a counter that \
+        "both projectors started a projection that had no offset at all, and a counter that \
          reached 2 is the double application this defence exists to stop"
     );
     assert_eq!(
-        checkpoint(&checkpoints, &projection_id).await,
+        offset(&offsets, &projection_id).await,
         Some(1),
-        "the winner's save is the projection's first checkpoint"
+        "the winner's save is the projection's first offset"
     );
     let (one_conflicts, other_conflicts) = (
         one_conflicts.load(Ordering::SeqCst),

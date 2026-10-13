@@ -37,7 +37,7 @@
 //! transient failure is retried with a growing pause; a permanent refusal is
 //! held and said out loud. Passing over a delivery is a judgement about the
 //! business, so it is an operator's to make through
-//! [`SagaDeliveryProxy::advance_checkpoint`] — and a hold is confined to one
+//! [`SagaDeliveryProxy::advance_offset`] — and a hold is confined to one
 //! partition so that it stops as little as possible while they decide.
 
 mod dispatch;
@@ -51,7 +51,7 @@ mod proxy;
 
 pub use self::dispatch::SagaDelivery;
 pub use self::error::SagaDeliveryError;
-pub use self::id::{SagaDeliveryId, SagaDeliveryScope};
+pub use self::id::SagaDeliveryId;
 pub use self::partition::partition_of;
 pub use self::props::SagaDeliveryProps;
 pub use self::proxy::SagaDeliveryProxy;

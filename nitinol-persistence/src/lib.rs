@@ -6,8 +6,8 @@
 //! |---|---|
 //! | [`store::EventStore`] | Append and load domain events |
 //! | [`store::SnapshotStore`] | Save and load aggregate snapshots |
-//! | [`store::CheckpointStore`] | Track the progress of an event consumer |
-//! | [`store::CheckpointScope`] | The key a consumer's progress is filed under |
+//! | [`store::OffsetStore`] | Track the progress of an event consumer |
+//! | [`store::OffsetScope`] | The key a consumer's progress is filed under |
 //! | [`store::DeliveryMode`] | Delivery guarantee: `AtMostOnce` / `AtLeastOnce` / `ExactlyOnce` |
 //! | [`provider::Store`] | Hold the stores above, as one cloneable handle per deployment |
 //! | [`provider::CustomStore`] | Assemble a store by naming one handle per slot |
@@ -21,7 +21,7 @@
 //!
 //! Production backends (Postgres, SQLite, DynamoDB, etc.) are intentionally
 //! out of scope for this crate.  Implement [`store::EventStore`],
-//! [`store::SnapshotStore`], and [`store::CheckpointStore`] against your
+//! [`store::SnapshotStore`], and [`store::OffsetStore`] against your
 //! preferred storage engine, then either implement [`provider::Store`] over
 //! them or name your handles in a [`provider::CustomStore`] — and hand the
 //! result to [`provider::PersistenceProvider::new`], which is what every
@@ -31,9 +31,9 @@
 //! reproduce, stated as labelled clauses on the trait itself:
 //! [`store::EventStore`] carries `OCC-1` … `OCC-5` and `LOAD-1`,
 //! [`store::SnapshotStore`] carries `SNAP-1` … `SNAP-4`, and
-//! [`store::CheckpointStore`] carries `CKP-1` … `CKP-6`.  One OCC clause is
+//! [`store::OffsetStore`] carries `OFS-1` … `OFS-6`.  One OCC clause is
 //! broken silently by the most obvious way to number events in a relational
-//! store, and one `CKP` clause by the most obvious way to read a missing row.
+//! store, and one `OFS` clause by the most obvious way to read a missing row.
 //! [`provider::Store`] carries `PRV-1` … `PRV-5` for the layer above them —
 //! what distribution, identity and slot independence mean, and what a single
 //! supplier is explicitly not.
@@ -42,7 +42,7 @@
 //!
 //! What the clauses fix is each store on its own.  A contract that holds only
 //! for a store *together with* the machinery driving it — that a projection's
-//! result and the checkpoint covering it settle in one transaction — is fixed
+//! result and the offset covering it settle in one transaction — is fixed
 //! against a supplier and a projector at once instead; each trait's
 //! documentation names where.
 //!
@@ -120,7 +120,7 @@ pub mod __private {
 pub use event::{AppendingEvent, LoadedEvent};
 pub use event_registry::{EventRegistry, EventRegistryEntry, EventRegistryError, EVENT_REGISTRY};
 pub use event_type::{EventType, Family, ParsedEventType, TypeName};
-pub use id::{AggregateId, ProjectionId};
+pub use id::AggregateId;
 pub use materialized_path::{MaterializedPath, MaterializedPathParseError};
 pub use query::{AppendOutcome, LoadQuery};
 pub use reserved::{is_within_reserved_namespace, reject_reserved_id, RESERVED_NAMESPACE};

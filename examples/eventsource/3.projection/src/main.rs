@@ -20,9 +20,10 @@ use std::time::Duration;
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::ProjectionId;
 use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::InMemoryStore;
-use nitinol_persistence::{AggregateId, ProjectionId};
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
 use eventsource_projection::counter::{Counter, Increment, Incremented};
@@ -43,7 +44,7 @@ async fn main() {
 
     let ps = ProcessSystem::new().await;
 
-    // The one supplier the journal and the projection checkpoints come from.
+    // The one supplier the journal and the projection offsets come from.
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();

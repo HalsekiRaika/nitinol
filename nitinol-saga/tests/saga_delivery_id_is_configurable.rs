@@ -25,22 +25,22 @@
 mod delivery;
 use delivery::{
     append_decided, delivery_persistence, in_memory_system, partition_count, wait_until_stored,
-    Decided, DeliverySaga, RecordingCheckpointStore, TEST_POLL_INTERVAL,
+    Decided, DeliverySaga, RecordingOffsetStore, TEST_POLL_INTERVAL,
 };
 
 use std::sync::Arc;
 
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{CheckpointScope, EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::AggregateId;
-use nitinol_saga::{SagaDeliveryId, SagaDeliveryProps, SagaDeliveryScope, SagaId};
+use nitinol_saga::{SagaDeliveryId, SagaDeliveryProps, SagaId};
 
 #[tokio::test]
 async fn the_wired_identifier_is_the_one_progress_is_filed_under() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-explicit-id");
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
@@ -48,8 +48,8 @@ async fn the_wired_identifier_is_the_one_progress_is_filed_under() {
     let named = SagaDeliveryId::new("orders-delivery");
 
     // When
-    let host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingCheckpointStore>>::new(
-        &delivery_persistence(&journal, &checkpoints),
+    let host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingOffsetStore>>::new(
+        &delivery_persistence(&journal, &offsets),
     )
     .with_delivery_id(named.clone())
     .with_partitions(partition_count(1))
@@ -64,10 +64,10 @@ async fn the_wired_identifier_is_the_one_progress_is_filed_under() {
         "the host carries the identifier it was wired with"
     );
 
-    let scope = SagaDeliveryScope::new(&named, 0);
+    let scope = named.offset_scope(0);
     assert_eq!(
         wait_until_stored(
-            &checkpoints,
+            &offsets,
             &scope,
             position,
             "progress must be filed under the wired identifier"
@@ -76,8 +76,8 @@ async fn the_wired_identifier_is_the_one_progress_is_filed_under() {
         position,
     );
     assert_eq!(
-        checkpoints.keys(),
-        vec![scope.checkpoint_key().to_owned()],
+        offsets.keys(),
+        vec![scope.as_str().to_owned()],
         "and under nothing else: a derived identifier mixed in beside it would \
          leave the host reading a key the wiring never named"
     );
@@ -88,14 +88,14 @@ async fn an_unwired_identifier_is_derived_from_the_declared_event_type() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-default-id");
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingCheckpointStore>>::new(
-        &delivery_persistence(&journal, &checkpoints),
+    let host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingOffsetStore>>::new(
+        &delivery_persistence(&journal, &offsets),
     )
     .with_partitions(partition_count(1))
     .with_poll_interval(TEST_POLL_INTERVAL)
@@ -112,10 +112,10 @@ async fn an_unwired_identifier_is_derived_from_the_declared_event_type() {
          toolchain could change under a persisted key"
     );
 
-    let scope = SagaDeliveryScope::new(host.delivery_id(), 0);
+    let scope = host.delivery_id().offset_scope(0);
     assert_eq!(
         wait_until_stored(
-            &checkpoints,
+            &offsets,
             &scope,
             position,
             "progress must be filed under the derived identifier"

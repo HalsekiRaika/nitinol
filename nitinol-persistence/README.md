@@ -1,7 +1,7 @@
 # nitinol-persistence
 
 Storage abstractions consumed by `nitinol-eventsource`: `EventStore`,
-`SnapshotStore`, `CheckpointStore`, and `DeliveryMode`. Includes an in-memory
+`SnapshotStore`, `OffsetStore`, and `DeliveryMode`. Includes an in-memory
 reference implementation for tests and examples; production backends are
 intended to live as third-party crates.
 

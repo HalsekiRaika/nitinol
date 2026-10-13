@@ -2,13 +2,13 @@
 //! run the concurrent clauses on.
 //!
 //! One of these per store contract the kit states. [`ReferenceStore`],
-//! [`ReferenceSnapshotStore`] and [`ReferenceCheckpointStore`] bring up the
-//! in-memory implementation the `OCC`, `SNAP` and `CKP` clauses are
+//! [`ReferenceSnapshotStore`] and [`ReferenceOffsetStore`] bring up the
+//! in-memory implementation the `OCC`, `SNAP` and `OFS` clauses are
 //! respectively written against, and [`TokioExecutor`] is the runtime the
 //! concurrent clauses are lent. Together they are the whole of the wiring a
 //! provider writes.
 //!
-//! [`FaultyStore`], [`FaultySnapshotStore`] and [`FaultyCheckpointStore`] are
+//! [`FaultyStore`], [`FaultySnapshotStore`] and [`FaultyOffsetStore`] are
 //! the kit's own self-check: each brings up a store that breaks exactly the one
 //! clause its fault names, so the clauses can be shown to catch a backend that
 //! breaks the contract instead of merely passing against one that keeps it.
@@ -17,7 +17,7 @@
 //! which a supplier is assembled, rather than a single slot — brought up for
 //! the `PRV` clauses. [`FaultyProvider`],
 //! [`ProviderWithCloneThatSplitsTheWorld`] and
-//! [`ProviderWithCollidingCheckpointSlots`] are its self-check, each breaking
+//! [`ProviderWithCollidingOffsetSlots`] are its self-check, each breaking
 //! exactly the one clause it names.
 //!
 //! The doubles live in this crate rather than in the kit's `src/` for two
@@ -36,17 +36,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use futures_core::future::BoxFuture;
 use futures_util::stream;
-use nitinol_persistence::error::{AppendError, CheckpointError, LoadError, SnapshotError};
+use nitinol_persistence::error::{AppendError, LoadError, OffsetError, SnapshotError};
 use nitinol_persistence::provider::{CustomStore, Store, Unprovided};
 use nitinol_persistence::store::{
-    CheckpointScope, CheckpointStore, EventStore, EventStream, InMemoryCheckpointStore,
-    InMemoryEventStore, InMemorySnapshotStore, InMemoryStore, SnapshotStore,
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore,
+    InMemoryStore, OffsetScope, OffsetStore, SnapshotStore,
 };
 use nitinol_persistence::{
     is_within_reserved_namespace, AggregateId, AppendOutcome, AppendingEvent, LoadQuery,
     LoadedEvent, PersistedSnapshot,
 };
-use nitinol_store_conformance::checkpoint::CheckpointStoreUnderTest;
+use nitinol_store_conformance::offset::OffsetStoreUnderTest;
 use nitinol_store_conformance::provider::ProviderUnderTest;
 use nitinol_store_conformance::snapshot::SnapshotStoreUnderTest;
 use nitinol_store_conformance::{Executor, StoreUnderTest};
@@ -94,7 +94,7 @@ pub enum Fault {
     /// This is what a counter handed out before the commit it belongs to — a
     /// plain auto-increment column, assigned outside the transaction — does
     /// under two concurrent writers, and it is the OCC-5 violation: a
-    /// checkpoint reader that has passed `N` never asks for anything at or
+    /// offset reader that has passed `N` never asks for anything at or
     /// below `N` again, so the late event is lost without an error anywhere.
     DelayFirstAppendVisibility,
     /// A batch of two or more events is served one event short to the first
@@ -473,35 +473,35 @@ impl SnapshotStoreUnderTest for FaultySnapshotStore {
     }
 }
 
-/// The reference implementation the `CKP` clauses are written against.
+/// The reference implementation the `OFS` clauses are written against.
 ///
 /// The associated store type is the concrete one rather than a `dyn` handle:
-/// `CheckpointStore::Tx` is an associated type, and a transaction is the one
-/// thing a checkpoint store's own backend decides.
-pub struct ReferenceCheckpointStore;
+/// `OffsetStore::Tx` is an associated type, and a transaction is the one
+/// thing an offset store's own backend decides.
+pub struct ReferenceOffsetStore;
 
-impl CheckpointStoreUnderTest for ReferenceCheckpointStore {
-    type Store = InMemoryCheckpointStore;
+impl OffsetStoreUnderTest for ReferenceOffsetStore {
+    type Store = InMemoryOffsetStore;
 
     fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
-        Box::pin(async { Arc::new(InMemoryCheckpointStore::default()) })
+        Box::pin(async { Arc::new(InMemoryOffsetStore::default()) })
     }
 }
 
-/// The way a [`SkewedCheckpointStore`] departs from what a checkpoint store
+/// The way a [`SkewedOffsetStore`] departs from what an offset store
 /// owes.
 #[derive(Debug, Clone, Copy)]
-pub enum CheckpointFault {
+pub enum OffsetFault {
     /// A scope nothing has saved for reads as a position of zero rather than as
     /// no position at all.
     ///
-    /// CKP-1: the one answer that cannot be told from a consumer that really
+    /// OFS-1: the one answer that cannot be told from a consumer that really
     /// did stop at zero, which is why the clause asks for `None`.
     ReadTheUnsavedScopeAsZero,
     /// Only the sequence immediately after the stored one is taken; a save that
     /// skips numbers is refused.
     ///
-    /// CKP-3: a consumer following a store-wide order moves over records it has
+    /// OFS-3: a consumer following a store-wide order moves over records it has
     /// no handler for, so the position it saves is not the one before it plus
     /// one. A store that required the next number would refuse every one of
     /// them.
@@ -509,13 +509,13 @@ pub enum CheckpointFault {
     /// One slot for every scope: a position saved under one key is read back
     /// under every other.
     ///
-    /// CKP-5: each consumer would resume from wherever another one had got to —
+    /// OFS-5: each consumer would resume from wherever another one had got to —
     /// a lookup that forgot the key it was given.
     OneSlotForEveryScope,
     /// A key inside the framework's reserved namespace is refused rather than
     /// stored like any other.
     ///
-    /// CKP-5: the rendered key is the whole of what a store is told, and a
+    /// OFS-5: the rendered key is the whole of what a store is told, and a
     /// framework-owned consumer renders inside that namespace on purpose. A
     /// store that read the namespace as something to validate would keep the
     /// framework's own consumers from recording anything.
@@ -525,15 +525,15 @@ pub enum CheckpointFault {
 /// Where a store with one slot for everything keeps the only position it has.
 const THE_ONLY_ROW: &str = "the one row this store has";
 
-/// A checkpoint store that keeps the contract except for the clause its fault
+/// An offset store that keeps the contract except for the clause its fault
 /// names.
-pub struct SkewedCheckpointStore {
-    fault: CheckpointFault,
+pub struct SkewedOffsetStore {
+    fault: OffsetFault,
     positions: Mutex<HashMap<String, u64>>,
 }
 
-impl SkewedCheckpointStore {
-    fn injecting(fault: CheckpointFault) -> Self {
+impl SkewedOffsetStore {
+    fn injecting(fault: OffsetFault) -> Self {
         Self {
             fault,
             positions: Mutex::new(HashMap::new()),
@@ -543,49 +543,48 @@ impl SkewedCheckpointStore {
     fn lock(&self) -> MutexGuard<'_, HashMap<String, u64>> {
         self.positions
             .lock()
-            .expect("the skewed checkpoint store's state lock was poisoned by a panicking holder")
+            .expect("the skewed offset store's state lock was poisoned by a panicking holder")
     }
 
     /// The key this store files a position under.
     ///
     /// Everything but the one-slot fault files the key the scope rendered, which
     /// is the whole of what the contract says a store is told.
-    fn key_of(&self, scope: &dyn CheckpointScope) -> String {
+    fn key_of(&self, scope: &OffsetScope) -> String {
         match self.fault {
-            CheckpointFault::OneSlotForEveryScope => THE_ONLY_ROW.to_owned(),
-            _ => scope.checkpoint_key().to_owned(),
+            OffsetFault::OneSlotForEveryScope => THE_ONLY_ROW.to_owned(),
+            _ => scope.as_str().to_owned(),
         }
     }
 }
 
 #[async_trait]
-impl CheckpointStore for SkewedCheckpointStore {
+impl OffsetStore for SkewedOffsetStore {
     type Tx = ();
 
-    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
+    async fn load(&self, scope: &OffsetScope) -> Result<Option<u64>, OffsetError> {
         let key = self.key_of(scope);
         let saved = self.lock().get(&key).copied();
 
         match self.fault {
-            CheckpointFault::ReadTheUnsavedScopeAsZero => Ok(Some(saved.unwrap_or(0))),
+            OffsetFault::ReadTheUnsavedScopeAsZero => Ok(Some(saved.unwrap_or(0))),
             _ => Ok(saved),
         }
     }
 
     async fn save(
         &self,
-        scope: &dyn CheckpointScope,
+        scope: &OffsetScope,
         sequence: u64,
         _tx: Option<&mut Self::Tx>,
-    ) -> Result<(), CheckpointError> {
+    ) -> Result<(), OffsetError> {
         if matches!(
             self.fault,
-            CheckpointFault::RefuseAKeyInsideTheReservedNamespace
-        ) && is_within_reserved_namespace(scope.checkpoint_key())
+            OffsetFault::RefuseAKeyInsideTheReservedNamespace
+        ) && is_within_reserved_namespace(scope.as_str())
         {
-            return Err(CheckpointError::Backend(
-                "this store refuses a checkpoint key inside the framework's reserved namespace"
-                    .into(),
+            return Err(OffsetError::Backend(
+                "this store refuses an offset key inside the framework's reserved namespace".into(),
             ));
         }
 
@@ -594,11 +593,11 @@ impl CheckpointStore for SkewedCheckpointStore {
 
         if matches!(
             self.fault,
-            CheckpointFault::TakeOnlyTheSequenceAfterTheStoredOne
+            OffsetFault::TakeOnlyTheSequenceAfterTheStoredOne
         ) {
             if let Some(held) = positions.get(&key).copied() {
                 if sequence != held + 1 {
-                    return Err(CheckpointError::Backend(
+                    return Err(OffsetError::Backend(
                         format!(
                             "this store takes only the sequence after {held}, and was handed \
                              {sequence}"
@@ -614,33 +613,33 @@ impl CheckpointStore for SkewedCheckpointStore {
     }
 }
 
-/// A checkpoint store under test that brings up a backend breaking exactly the
+/// An offset store under test that brings up a backend breaking exactly the
 /// one clause `fault` names.
-pub struct FaultyCheckpointStore {
-    fault: CheckpointFault,
+pub struct FaultyOffsetStore {
+    fault: OffsetFault,
 }
 
-impl FaultyCheckpointStore {
-    pub fn injecting(fault: CheckpointFault) -> Self {
+impl FaultyOffsetStore {
+    pub fn injecting(fault: OffsetFault) -> Self {
         Self { fault }
     }
 }
 
-impl CheckpointStoreUnderTest for FaultyCheckpointStore {
-    type Store = SkewedCheckpointStore;
+impl OffsetStoreUnderTest for FaultyOffsetStore {
+    type Store = SkewedOffsetStore;
 
     fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
         let fault = self.fault;
-        Box::pin(async move { Arc::new(SkewedCheckpointStore::injecting(fault)) })
+        Box::pin(async move { Arc::new(SkewedOffsetStore::injecting(fault)) })
     }
 }
 
 /// The reference store the `PRV` clauses are written against.
 ///
 /// [`InMemoryStore`] is the assembly the framework ships: an in-memory store
-/// for every slot, with a handle of its own for each checkpoint slot. The
+/// for every slot, with a handle of its own for each offset slot. The
 /// single-table shape — both slots named with one handle — is what
-/// [`ProviderWithCollidingCheckpointSlots`] is assembled in, so the
+/// [`ProviderWithCollidingOffsetSlots`] is assembled in, so the
 /// independence clause is read against both.
 pub struct ReferenceProvider;
 
@@ -721,16 +720,12 @@ impl ProviderUnderTest for ProviderWithCloneThatSplitsTheWorld {
     }
 }
 
-/// What [`ProviderWithCollidingCheckpointSlots`] brings up: both checkpoint
+/// What [`ProviderWithCollidingOffsetSlots`] brings up: both offset
 /// slots named with a store that keeps one position for every key.
-pub type CollidingCheckpoints = CustomStore<
-    InMemoryEventStore,
-    Unprovided,
-    Arc<SkewedCheckpointStore>,
-    Arc<SkewedCheckpointStore>,
->;
+pub type CollidingOffsets =
+    CustomStore<InMemoryEventStore, Unprovided, Arc<SkewedOffsetStore>, Arc<SkewedOffsetStore>>;
 
-/// A store whose two checkpoint slots reach a store with one slot for every
+/// A store whose two offset slots reach a store with one slot for every
 /// scope.
 ///
 /// PRV-4: naming both slots with one handle is allowed, and what makes it
@@ -738,17 +733,17 @@ pub type CollidingCheckpoints = CustomStore<
 /// forgot the key it was given has a delivery host resume from a projection's
 /// position, so the slots of an assembly over one are not independent however
 /// they were named.
-pub struct ProviderWithCollidingCheckpointSlots;
+pub struct ProviderWithCollidingOffsetSlots;
 
-impl ProviderUnderTest for ProviderWithCollidingCheckpointSlots {
-    type Store = CollidingCheckpoints;
+impl ProviderUnderTest for ProviderWithCollidingOffsetSlots {
+    type Store = CollidingOffsets;
 
     fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
         Box::pin(async {
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
-                .checkpoints(Arc::new(SkewedCheckpointStore::injecting(
-                    CheckpointFault::OneSlotForEveryScope,
+                .offsets(Arc::new(SkewedOffsetStore::injecting(
+                    OffsetFault::OneSlotForEveryScope,
                 )))
                 .build()
         })

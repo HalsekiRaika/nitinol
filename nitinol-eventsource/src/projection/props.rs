@@ -1,10 +1,11 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use crate::projection::ProjectionId;
 use nitinol_contract::Event;
-use nitinol_persistence::provider::{PersistenceProvider, ProjectionCheckpointSlot};
-use nitinol_persistence::store::{CheckpointStore, DeliveryMode, EventStore};
-use nitinol_persistence::{AggregateId, ProjectionId};
+use nitinol_persistence::provider::{PersistenceProvider, ProjectionOffsetSlot};
+use nitinol_persistence::store::{DeliveryMode, EventStore, OffsetScope, OffsetStore};
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{ProcessSystem, Props, SupervisionStrategy};
 
@@ -29,7 +30,7 @@ pub struct OriginSet(pub(crate) CatchupOrigin);
 pub struct ProjectorProps<P, Cs, Tx = (), E = EventUnset, O = OriginUnset, H = Unhosted> {
     projection_id: ProjectionId,
     store: Arc<dyn EventStore>,
-    checkpoint_store: Arc<Cs>,
+    offset_store: Arc<Cs>,
     delivery_mode: DeliveryMode,
     catchup_origin: O,
     tx_provider: Option<Arc<dyn ErasedTxProvider<Tx> + Send + Sync>>,
@@ -42,24 +43,24 @@ pub struct ProjectorProps<P, Cs, Tx = (), E = EventUnset, O = OriginUnset, H = U
 impl<P, Cs> ProjectorProps<P, Cs, (), EventUnset, OriginUnset, Unhosted>
 where
     P: Send + Sync + 'static,
-    Cs: CheckpointStore + Send + Sync + 'static,
+    Cs: OffsetStore + Send + Sync + 'static,
 {
     /// Wiring for the projection `projection_id`, over the two slots
     /// `persistence` distributes.
     ///
     /// Both are resolved from the supplier: the journal the projection follows,
-    /// and the projection-checkpoint slot its position is recorded in. A store
-    /// holding no projection checkpoints is refused here rather than at the
+    /// and the projection-offset slot its position is recorded in. A store
+    /// holding no projection offsets is refused here rather than at the
     /// first save:
     ///
     /// ```compile_fail
     /// # use nitinol_eventsource::ProjectorProps;
-    /// # use nitinol_persistence::ProjectionId;
+    /// # use nitinol_eventsource::ProjectionId;
     /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
     /// # use nitinol_persistence::store::InMemoryEventStore;
     /// # struct ReadModel;
     /// # fn wiring() {
-    /// // no `projection_checkpoints` — this store has no projection slot
+    /// // no `projection_offsets` — this store has no projection slot
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let persistence = PersistenceProvider::new(store);
     /// ProjectorProps::new(ProjectionId::new("read-model"), &persistence, || ReadModel);
@@ -71,12 +72,12 @@ where
         producer: impl Fn() -> P + Send + Sync + 'static,
     ) -> Self
     where
-        St: ProjectionCheckpointSlot<ProjectionCheckpoints = Cs>,
+        St: ProjectionOffsetSlot<ProjectionOffsets = Cs>,
     {
         Self {
             projection_id,
             store: persistence.event_store(),
-            checkpoint_store: persistence.projection_checkpoints(),
+            offset_store: persistence.projection_offsets(),
             delivery_mode: DeliveryMode::AtLeastOnce,
             catchup_origin: OriginUnset,
             tx_provider: None,
@@ -91,7 +92,7 @@ where
 impl<P, Cs, O, H> ProjectorProps<P, Cs, (), EventUnset, O, H>
 where
     P: Send + Sync + 'static,
-    Cs: CheckpointStore + Send + Sync + 'static,
+    Cs: OffsetStore + Send + Sync + 'static,
 {
     /// Set a transaction provider and automatically configure ExactlyOnce delivery.
     ///
@@ -105,12 +106,12 @@ where
     ) -> ProjectorProps<P, Cs, TP::Tx, EventUnset, O, H>
     where
         TP: TxProvider,
-        Cs: CheckpointStore<Tx = TP::Tx>,
+        Cs: OffsetStore<Tx = TP::Tx>,
     {
         ProjectorProps {
             projection_id: self.projection_id,
             store: self.store,
-            checkpoint_store: self.checkpoint_store,
+            offset_store: self.offset_store,
             // ExactlyOnce is the only delivery mode that makes sense with a TxProvider.
             delivery_mode: DeliveryMode::ExactlyOnce,
             catchup_origin: self.catchup_origin,
@@ -126,7 +127,7 @@ where
 impl<P, Cs, Tx, OldE, O, H> ProjectorProps<P, Cs, Tx, OldE, O, H>
 where
     P: Send + Sync + 'static,
-    Cs: CheckpointStore + Send + Sync + 'static,
+    Cs: OffsetStore + Send + Sync + 'static,
     Tx: Send + 'static,
 {
     /// Subscribe this projection to the event type `E`.
@@ -148,7 +149,7 @@ where
         ProjectorProps {
             projection_id: self.projection_id,
             store: self.store,
-            checkpoint_store: self.checkpoint_store,
+            offset_store: self.offset_store,
             delivery_mode: self.delivery_mode,
             catchup_origin: self.catchup_origin,
             tx_provider: self.tx_provider,
@@ -163,7 +164,7 @@ where
 impl<P, Cs, OldE, O, H> ProjectorProps<P, Cs, (), OldE, O, H>
 where
     P: Send + Sync + 'static,
-    Cs: CheckpointStore + Send + Sync + 'static,
+    Cs: OffsetStore + Send + Sync + 'static,
 {
     /// Override the delivery mode when no `TxProvider` is configured.
     ///
@@ -181,7 +182,7 @@ where
 impl<P, Cs, Tx, E, H> ProjectorProps<P, Cs, Tx, E, OriginUnset, H>
 where
     P: Send + Sync + 'static,
-    Cs: CheckpointStore + Send + Sync + 'static,
+    Cs: OffsetStore + Send + Sync + 'static,
     Tx: Send + 'static,
 {
     pub fn catchup_from_aggregate(
@@ -191,7 +192,7 @@ where
         ProjectorProps {
             projection_id: self.projection_id,
             store: self.store,
-            checkpoint_store: self.checkpoint_store,
+            offset_store: self.offset_store,
             delivery_mode: self.delivery_mode,
             catchup_origin: OriginSet(CatchupOrigin::Aggregate(agg_id)),
             tx_provider: self.tx_provider,
@@ -206,7 +207,7 @@ where
         ProjectorProps {
             projection_id: self.projection_id,
             store: self.store,
-            checkpoint_store: self.checkpoint_store,
+            offset_store: self.offset_store,
             delivery_mode: self.delivery_mode,
             catchup_origin: OriginSet(CatchupOrigin::Global),
             tx_provider: self.tx_provider,
@@ -221,7 +222,7 @@ where
 impl<P, Cs, Tx, H> ProjectorProps<P, Cs, Tx, EventSet, OriginSet, H>
 where
     P: Send + Sync + 'static,
-    Cs: CheckpointStore<Tx = Tx> + Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
     Tx: Send + 'static,
 {
     /// The runtime declaration this projector runs under, and the position it
@@ -234,24 +235,28 @@ where
         let catchup_origin = self.catchup_origin.0;
         let projection_id = self.projection_id;
         let store = self.store;
-        let checkpoint_store = self.checkpoint_store;
+        let offset_store = self.offset_store;
         let delivery_mode = self.delivery_mode;
         let handlers = self.handlers;
         let producer = self.producer;
         let tx_provider = self.tx_provider;
 
-        let checkpoint = checkpoint_store
-            .load(&projection_id)
+        // Built once here: the key this projector's position is filed under is
+        // the same for the load below and for every save it makes afterwards.
+        let offset_scope = OffsetScope::from(&projection_id);
+
+        let offset = offset_store
+            .load(&offset_scope)
             .await
-            .expect("checkpoint load must succeed before projector spawn")
+            .expect("offset load must succeed before projector spawn")
             .unwrap_or(0);
 
         let cursor = match &catchup_origin {
             CatchupOrigin::Aggregate(agg_id) => SequenceCursor::Stream {
                 key: agg_id.as_str().to_owned(),
-                after: checkpoint,
+                after: offset,
             },
-            CatchupOrigin::Global => SequenceCursor::Global { after: checkpoint },
+            CatchupOrigin::Global => SequenceCursor::Global { after: offset },
         };
 
         let upstream_config =
@@ -263,12 +268,13 @@ where
         Props::new(move || ProjectorProcess {
             projector: producer(),
             projection_id: projection_id.clone(),
-            checkpoint_store: Arc::clone(&checkpoint_store),
+            offset_scope: offset_scope.clone(),
+            offset_store: Arc::clone(&offset_store),
             delivery_mode,
             catchup_origin: catchup_origin.clone(),
             handlers: handlers.clone(),
             tx_provider: tx_provider.clone(),
-            checkpoint_sequence: checkpoint,
+            offset_sequence: offset,
             upstream_config: upstream_config_for_props.clone(),
             upstream_cursor: cursor_for_props.clone(),
         })
@@ -279,7 +285,7 @@ where
         // never be polled again — the projection would be dead rather than
         // waiting.  `Restart` is no better here: it rebuilds the projector from
         // `producer()`, discarding the state a stateful projector accumulated
-        // and the checkpoint it was restored with.
+        // and the offset it was restored with.
         .with_supervision_strategy(SupervisionStrategy::Resume)
     }
 }
@@ -287,7 +293,7 @@ where
 impl<P, Cs, Tx> ProjectorProps<P, Cs, Tx, EventSet, OriginSet, Unhosted>
 where
     P: Send + Sync + 'static,
-    Cs: CheckpointStore<Tx = Tx> + Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
     Tx: Send + 'static,
 {
     /// Spawn the projector process on `system`.
@@ -300,7 +306,7 @@ where
     ///
     /// ```compile_fail
     /// # use nitinol_eventsource::ProjectorProps;
-    /// # use nitinol_persistence::ProjectionId;
+    /// # use nitinol_eventsource::ProjectionId;
     /// # use nitinol_persistence::provider::PersistenceProvider;
     /// # use nitinol_persistence::store::InMemoryStore;
     /// # use nitinol_runtime::ProcessSystem;
@@ -323,7 +329,8 @@ where
     /// # use async_trait::async_trait;
     /// # use nitinol_eventsource::{Event, Projector, ProjectorProps, ProjectionContext};
     /// # use nitinol_eventsource::codec::Codec;
-    /// # use nitinol_persistence::{EventType, Family, ProjectionId, TypeName};
+    /// # use nitinol_eventsource::ProjectionId;
+    /// # use nitinol_persistence::{EventType, Family, TypeName};
     /// # use nitinol_persistence::provider::PersistenceProvider;
     /// # use nitinol_persistence::store::InMemoryStore;
     /// # use nitinol_runtime::ProcessSystem;
@@ -365,7 +372,7 @@ where
 impl<P, Cs, Tx> ProjectorProps<P, Cs, Tx, EventSet, OriginSet, Hosted>
 where
     P: Send + Sync + 'static,
-    Cs: CheckpointStore<Tx = Tx> + Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
     Tx: Send + 'static,
 {
     /// Spawn the projector process on the system these props came from.
@@ -387,7 +394,7 @@ impl<P, Cs, Tx, E, O> ProjectorProps<P, Cs, Tx, E, O, Unhosted> {
         ProjectorProps {
             projection_id: self.projection_id,
             store: self.store,
-            checkpoint_store: self.checkpoint_store,
+            offset_store: self.offset_store,
             delivery_mode: self.delivery_mode,
             catchup_origin: self.catchup_origin,
             tx_provider: self.tx_provider,

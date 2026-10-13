@@ -13,11 +13,11 @@
 //!
 //! Delivery is at-least-once, and the reason is stated once on
 //! [`nitinol_saga::SagaDeliveryProps`]: the host carries a record's deliveries
-//! first and moves its checkpoint past that record only once every one of them
-//! has landed, so a host that died in between resumes from the checkpoint it
+//! first and moves its offset past that record only once every one of them
+//! has landed, so a host that died in between resumes from the offset it
 //! last recorded and carries the same deliveries again.  Nothing closes that
 //! window — exactly-once would need the receiver's write and the host's
-//! checkpoint in one transaction across two stores — and the framework attaches
+//! offset in one transaction across two stores — and the framework attaches
 //! no metadata and no causation envelope to what it hands over.  So recognising
 //! a repeat is the receiver's job, using the domain's own operation id, and this
 //! crate is that receiving half: what a domain does so that two deliveries of

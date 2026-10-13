@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
@@ -57,7 +57,7 @@ async fn main() {
     // tenants of the one journal it supplies; the manager's subscription below
     // is what narrows it back down to the run's stream.
     //
-    // The delivery-checkpoint slot is the second thing the supplier owes: it is
+    // The saga-offset slot is the second thing the supplier owes: it is
     // where the host records how far it has finished, and naming it is what
     // makes `deliver` below exist at all.  A store without it is a compile
     // error at the wiring rather than a failure at the first save.
@@ -66,7 +66,7 @@ async fn main() {
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(store)
-                .delivery_checkpoints(InMemoryCheckpointStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
         .build();

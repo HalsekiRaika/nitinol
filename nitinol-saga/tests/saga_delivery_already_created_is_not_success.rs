@@ -28,8 +28,8 @@
 mod delivery;
 use delivery::{
     append_decided, append_row, in_memory_system, operations_of, scope_of, settle, spawn_host,
-    stream_rows, wait_until_loads, DeliverySaga, Ledger, Recorded, RecordingCheckpointStore,
-    RecordingEventStore,
+    stream_rows, wait_until_loads, DeliverySaga, Ledger, Recorded, RecordingEventStore,
+    RecordingOffsetStore,
 };
 
 use std::sync::Arc;
@@ -68,25 +68,25 @@ async fn a_collision_with_an_existing_target_is_not_treated_as_delivered() {
 
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
     wait_until_loads(&recording, 4, "the host must keep polling while held").await;
     settle().await;
 
     // Then
     assert!(
-        checkpoints
+        offsets
             .stored(&scope_of(0))
             .is_none_or(|held| held < position),
         "the delivery was not carried out, so the record it came from must not \
          be recorded as finished with"
     );
     assert!(
-        !checkpoints
+        !offsets
             .save_calls()
             .iter()
             .any(|(_, sequence)| *sequence >= position),

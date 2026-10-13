@@ -2,20 +2,20 @@
 //!
 //! ```gherkin
 //!   Scenario: a delivery host over a store with no projector wired
-//!     Given a store supplying an event store and delivery checkpoints only
+//!     Given a store supplying an event store and saga offsets only
 //!     When a delivery host is the only thing wired on it
 //!     Then it delivers every decision in the journal
-//!     And it records its progress in the store's delivery slot
+//!     And it records its progress in the store's saga slot
 //!
 //!   Scenario: the host recovers the progress it recorded
-//!     Given a store whose delivery slot already holds a position
+//!     Given a store whose saga slot already holds a position
 //!     When a second incarnation wires a host over the same durable state
 //!     Then its first query resumes above the recorded position
 //!     And nothing the first incarnation delivered is delivered again
 //! ```
 //!
 //! The configuration is the subject: the assembly names the event store and the
-//! delivery slot, and the projection and snapshot slots are left unprovided. A
+//! saga slot, and the projection and snapshot slots are left unprovided. A
 //! delivery host that needed a projection slot — or a snapshot one — could not
 //! be wired on this store at all, so what the first clause fixes is that a
 //! deployment with no projector in it is a deployment the supplier can express.
@@ -49,8 +49,7 @@ mod delivery;
 use delivery::{
     append_decided, delivery_id, delivery_persistence, operations_of, partition_count, scope_of,
     settle, stream_rows, wait_until_operations, wait_until_stored, DeliverySaga, Ledger,
-    RecordingCheckpointStore, RecordingEventStore, PROBE_INTERVAL, PROBE_TIMEOUT,
-    TEST_POLL_INTERVAL,
+    RecordingEventStore, RecordingOffsetStore, PROBE_INTERVAL, PROBE_TIMEOUT, TEST_POLL_INTERVAL,
 };
 
 use std::sync::Arc;
@@ -97,14 +96,14 @@ async fn wait_until_journal_polls(
 
 #[tokio::test]
 async fn a_store_without_a_projection_slot_still_wires_a_delivery_host() {
-    // Given: a store that supplies the event store and the delivery slot, and
+    // Given: a store that supplies the event store and the saga slot, and
     // neither a projection slot nor a snapshot one.
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
 
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(delivery_persistence(&journal, &checkpoints))
+        .with_persistence(delivery_persistence(&journal, &offsets))
         .build();
 
     let saga_id = SagaId::new("instance-delivery-only");
@@ -114,7 +113,7 @@ async fn a_store_without_a_projection_slot_still_wires_a_delivery_host() {
     let second = append_decided(&journal, &saga_id, 2, target.as_str(), "op-2").await;
 
     // When: the host is wired from the system alone — neither the journal, the
-    // checkpoint slot, nor the process system is named here.
+    // offset slot, nor the process system is named here.
     let _host = system
         .deliver::<DeliverySaga>()
         .with_delivery_id(delivery_id())
@@ -133,15 +132,15 @@ async fn a_store_without_a_projection_slot_still_wires_a_delivery_host() {
     );
     assert_eq!(
         wait_until_stored(
-            &checkpoints,
+            &offsets,
             &scope_of(0),
             second,
             "progress must reach the last decision"
         )
         .await,
         second,
-        "and it records its progress in the store's delivery slot, which is the \
-         only checkpoint slot this store has"
+        "and it records its progress in the store's saga slot, which is the \
+         only offset slot this store has"
     );
 }
 
@@ -150,11 +149,11 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
     // Given: the durable state both incarnations share, and one incarnation
     // that has delivered a decision and recorded the position behind it.
     let durable: Arc<InMemoryEventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
 
     let first_journal: Arc<dyn EventStore> = Arc::clone(&durable) as Arc<dyn EventStore>;
     let first_system = EventSourceSystem::builder(ProcessSystem::new().await)
-        .with_persistence(delivery_persistence(&first_journal, &checkpoints))
+        .with_persistence(delivery_persistence(&first_journal, &offsets))
         .build();
 
     let saga_id = SagaId::new("instance-delivery-restart");
@@ -175,7 +174,7 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
     );
     assert_eq!(
         wait_until_stored(
-            &checkpoints,
+            &offsets,
             &scope_of(0),
             delivered,
             "the first incarnation must record where it got to"
@@ -185,11 +184,11 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
     );
 
     // When: a second incarnation is wired over the same durable state, through
-    // a handle of its own, and over the same delivery slot.
+    // a handle of its own, and over the same saga slot.
     let recording = RecordingEventStore::new(Arc::clone(&durable) as Arc<dyn EventStore>);
     let second_journal: Arc<dyn EventStore> = Arc::clone(&recording) as Arc<dyn EventStore>;
     let second_system = EventSourceSystem::builder(ProcessSystem::new().await)
-        .with_persistence(delivery_persistence(&second_journal, &checkpoints))
+        .with_persistence(delivery_persistence(&second_journal, &offsets))
         .build();
     let _second_host = second_system
         .deliver::<DeliverySaga>()
@@ -211,7 +210,7 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
         positions
             .iter()
             .all(|position| *position == Some(delivered + 1)),
-        "a host recovering from the store's delivery slot resumes above the \
+        "a host recovering from the store's saga slot resumes above the \
          position that slot holds; positions asked for were {positions:?}"
     );
 

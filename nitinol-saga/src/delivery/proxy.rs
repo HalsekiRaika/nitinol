@@ -4,15 +4,15 @@ use std::marker::PhantomData;
 
 use futures_core::future::BoxFuture;
 
-use nitinol_persistence::store::CheckpointStore;
+use nitinol_persistence::store::OffsetStore;
 use nitinol_runtime::process::ProcessProxy;
 
 use crate::delivery::error::SagaDeliveryError;
 use crate::delivery::id::SagaDeliveryId;
-use crate::delivery::process::{AdvanceCheckpoint, SagaDeliveryPartition};
+use crate::delivery::process::{AdvanceOffset, SagaDeliveryPartition};
 use crate::saga::Saga;
 
-/// One partition, reachable without naming the checkpoint store it was wired
+/// One partition, reachable without naming the offset store it was wired
 /// with.
 ///
 /// A handle names a running partition of this host, and which store that
@@ -25,11 +25,11 @@ pub(crate) trait PartitionHandle: Send + Sync {
 impl<S, Cs> PartitionHandle for ProcessProxy<SagaDeliveryPartition<S, Cs>>
 where
     S: Saga,
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
     fn advance(&self, partition: usize, to: u64) -> BoxFuture<'_, Result<(), SagaDeliveryError>> {
         Box::pin(async move {
-            match self.ask(AdvanceCheckpoint { to }).await {
+            match self.ask(AdvanceOffset { to }).await {
                 Ok(()) => Ok(()),
                 Err(nitinol_runtime::error::AskError::Handler(refusal)) => Err(refusal),
                 Err(_undelivered) => Err(SagaDeliveryError::Unreachable { partition }),
@@ -97,11 +97,7 @@ impl<S: Saga> SagaDeliveryProxy<S> {
     ///
     /// A move that is not strictly forward, and a move to a partition this host
     /// does not have. A refusal changes nothing — see [`SagaDeliveryError`].
-    pub async fn advance_checkpoint(
-        &self,
-        partition: usize,
-        to: u64,
-    ) -> Result<(), SagaDeliveryError> {
+    pub async fn advance_offset(&self, partition: usize, to: u64) -> Result<(), SagaDeliveryError> {
         let Some(handle) = self.partitions.get(partition) else {
             return Err(SagaDeliveryError::NoSuchPartition {
                 partition,

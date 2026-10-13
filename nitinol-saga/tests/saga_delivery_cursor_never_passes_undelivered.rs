@@ -23,7 +23,7 @@
 mod delivery;
 use delivery::{
     append_decided, in_memory_system, operations_of, scope_of, settle, spawn_host,
-    wait_until_operations, PartlyRefusedSaga, RecordingCheckpointStore, REFUSED_SUFFIX,
+    wait_until_operations, PartlyRefusedSaga, RecordingOffsetStore, REFUSED_SUFFIX,
 };
 
 use std::sync::Arc;
@@ -37,7 +37,7 @@ async fn a_partly_delivered_record_is_not_progress() {
     // Given
     let (system, aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-partly-delivered");
 
@@ -45,7 +45,7 @@ async fn a_partly_delivered_record_is_not_progress() {
     append_decided(&journal, &saga_id, 2, target.as_str(), "op-2").await;
 
     // When
-    let _host = spawn_host::<PartlyRefusedSaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<PartlyRefusedSaga>(&system, &journal, &offsets, 1).await;
 
     // Then: the delivery that can land, lands.
     let ledger = system.aggregate_proxy::<delivery::Ledger>(target.clone());
@@ -58,20 +58,20 @@ async fn a_partly_delivered_record_is_not_progress() {
 
     // And: the record it came from is not finished with.
     assert!(
-        checkpoints
+        offsets
             .stored(&scope_of(0))
             .is_none_or(|position| position < held),
         "one of the record's deliveries is still owed, so its position must not \
          be recorded as progress"
     );
     assert!(
-        !checkpoints
+        !offsets
             .save_calls()
             .iter()
             .any(|(_, sequence)| *sequence >= held),
         "the host must not offer the store a position at or past the record it \
          has not finished: {:?}",
-        checkpoints.save_calls()
+        offsets.save_calls()
     );
 
     // And: nothing behind it is delivered.

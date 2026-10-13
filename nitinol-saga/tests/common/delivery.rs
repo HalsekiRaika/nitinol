@@ -24,10 +24,10 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{Aggregate, AggregateProxy, Decider, Decision, Event, Query};
-use nitinol_persistence::error::{AppendError, CheckpointError, LoadError};
+use nitinol_persistence::error::{AppendError, LoadError, OffsetError};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
 use nitinol_persistence::store::{
-    CheckpointScope, CheckpointStore, EventStore, EventStream, InMemoryEventStore,
+    EventStore, EventStream, InMemoryEventStore, OffsetScope, OffsetStore,
 };
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -35,7 +35,7 @@ use nitinol_persistence::{
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
     Saga, SagaContext, SagaDelivery, SagaDeliveryId, SagaDeliveryProps, SagaDeliveryProxy,
-    SagaDeliveryScope, SagaEffect, SagaId, SagaSubscribe,
+    SagaEffect, SagaId, SagaSubscribe,
 };
 
 /// How long a probe waits for work the host performs on its own poll loop.
@@ -413,10 +413,10 @@ pub fn delivery_id() -> SagaDeliveryId {
     SagaDeliveryId::new(TEST_DELIVERY_ID)
 }
 
-/// The checkpoint scope of partition `partition` of the host spawned by
+/// The offset scope of partition `partition` of the host spawned by
 /// [`spawn_host`].
-pub fn scope_of(partition: usize) -> SagaDeliveryScope {
-    SagaDeliveryScope::new(&delivery_id(), partition)
+pub fn scope_of(partition: usize) -> OffsetScope {
+    delivery_id().offset_scope(partition)
 }
 
 pub fn partition_count(n: usize) -> NonZeroUsize {
@@ -424,7 +424,7 @@ pub fn partition_count(n: usize) -> NonZeroUsize {
 }
 
 /// The store a delivery host is wired from here: `journal` as the store the
-/// saga's decisions are on, `checkpoints` as the slot the host records in, and
+/// saga's decisions are on, `offsets` as the slot the host records in, and
 /// no other slot named.
 ///
 /// A host needs exactly those two, so a store with nothing else on it is what
@@ -434,7 +434,7 @@ pub fn partition_count(n: usize) -> NonZeroUsize {
 /// Both handles are reached through an `Arc`, which is how a store that is not
 /// a cloneable value of its own is named in an assembly.
 pub type DeliveryStore =
-    CustomStore<Arc<dyn EventStore>, Unprovided, Unprovided, Arc<RecordingCheckpointStore>>;
+    CustomStore<Arc<dyn EventStore>, Unprovided, Unprovided, Arc<RecordingOffsetStore>>;
 
 /// The supplier the delivery fixtures wire a host from.
 pub type DeliveryPersistence = PersistenceProvider<DeliveryStore>;
@@ -449,33 +449,30 @@ pub type DeliverySystem = EventSourceSystem<CustomStore<Arc<dyn EventStore>>>;
 
 pub fn delivery_persistence(
     journal: &Arc<dyn EventStore>,
-    checkpoints: &Arc<RecordingCheckpointStore>,
+    offsets: &Arc<RecordingOffsetStore>,
 ) -> DeliveryPersistence {
     PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(journal))
-            .delivery_checkpoints(Arc::clone(checkpoints))
+            .saga_offsets(Arc::clone(offsets))
             .build(),
     )
 }
 
 /// Start a delivery host for `S` over `journal`, recording progress in
-/// `checkpoints`, with `partitions` partitions.
+/// `offsets`, with `partitions` partitions.
 pub async fn spawn_host<S: Saga>(
     system: &DeliverySystem,
     journal: &Arc<dyn EventStore>,
-    checkpoints: &Arc<RecordingCheckpointStore>,
+    offsets: &Arc<RecordingOffsetStore>,
     partitions: usize,
 ) -> SagaDeliveryProxy<S> {
-    SagaDeliveryProps::<S, Arc<RecordingCheckpointStore>>::new(&delivery_persistence(
-        journal,
-        checkpoints,
-    ))
-    .with_delivery_id(delivery_id())
-    .with_partitions(partition_count(partitions))
-    .with_poll_interval(TEST_POLL_INTERVAL)
-    .spawn(system)
-    .await
+    SagaDeliveryProps::<S, Arc<RecordingOffsetStore>>::new(&delivery_persistence(journal, offsets))
+        .with_delivery_id(delivery_id())
+        .with_partitions(partition_count(partitions))
+        .with_poll_interval(TEST_POLL_INTERVAL)
+        .spawn(system)
+        .await
 }
 
 /// A system over a store whose journal is a fresh in-memory store, and that
@@ -691,24 +688,31 @@ impl EventStore for RecordingEventStore {
     }
 }
 
-/// A [`CheckpointStore`] keyed by the rendered scope key, which is the whole of
+/// A [`OffsetStore`] keyed by the rendered scope key, which is the whole of
 /// what a scope hands a store.
 ///
 /// Saves only ever move a key forward, so the reference implementation and a
 /// forward-only backend answer a correct host identically; a save that would
 /// move a key backwards is recorded as refused rather than applied.
-pub struct RecordingCheckpointStore {
+pub struct RecordingOffsetStore {
     state: Mutex<HashMap<String, u64>>,
     saves: Mutex<Vec<(String, u64)>>,
+    /// Every save this store answered with an error, in call order.
+    ///
+    /// Kept apart from `saves` so a test can wait until a refusal has actually
+    /// reached the host, rather than inferring one from a position that is not
+    /// there yet — which a slow first tick would read the same way.
+    refusals: Mutex<Vec<(String, u64)>>,
     /// Number of save calls still to be answered with a failure.
     save_failures: AtomicUsize,
 }
 
-impl RecordingCheckpointStore {
+impl RecordingOffsetStore {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(HashMap::new()),
             saves: Mutex::new(Vec::new()),
+            refusals: Mutex::new(Vec::new()),
             save_failures: AtomicUsize::new(0),
         })
     }
@@ -720,27 +724,33 @@ impl RecordingCheckpointStore {
 
     /// The position stored for `scope`, as an operator or a second consumer
     /// would read it.
-    pub fn stored(&self, scope: &dyn CheckpointScope) -> Option<u64> {
+    pub fn stored(&self, scope: &OffsetScope) -> Option<u64> {
         self.state
             .lock()
             .expect(FIXTURE_LOCK)
-            .get(scope.checkpoint_key())
+            .get(scope.as_str())
             .copied()
     }
 
     /// Write `sequence` for `scope` without going through the host, so a test
     /// can present a stored position the host did not put there.
-    pub fn put(&self, scope: &dyn CheckpointScope, sequence: u64) {
+    pub fn put(&self, scope: &OffsetScope, sequence: u64) {
         self.state
             .lock()
             .expect(FIXTURE_LOCK)
-            .insert(scope.checkpoint_key().to_owned(), sequence);
+            .insert(scope.as_str().to_owned(), sequence);
     }
 
     /// Every save the store was asked for, as `(key, sequence)` in call order,
     /// including the ones it answered with a failure.
     pub fn save_calls(&self) -> Vec<(String, u64)> {
         self.saves.lock().expect(FIXTURE_LOCK).clone()
+    }
+
+    /// Every save the store answered with an error, as `(key, sequence)` in
+    /// call order.
+    pub fn refused_saves(&self) -> Vec<(String, u64)> {
+        self.refusals.lock().expect(FIXTURE_LOCK).clone()
     }
 
     /// Every key this store holds a position for.
@@ -758,38 +768,47 @@ impl RecordingCheckpointStore {
 }
 
 #[async_trait]
-impl CheckpointStore for RecordingCheckpointStore {
+impl OffsetStore for RecordingOffsetStore {
     type Tx = ();
 
-    async fn load(&self, scope: &dyn CheckpointScope) -> Result<Option<u64>, CheckpointError> {
+    async fn load(&self, scope: &OffsetScope) -> Result<Option<u64>, OffsetError> {
         Ok(self.stored(scope))
     }
 
     async fn save(
         &self,
-        scope: &dyn CheckpointScope,
+        scope: &OffsetScope,
         sequence: u64,
         _tx: Option<&mut Self::Tx>,
-    ) -> Result<(), CheckpointError> {
-        let key = scope.checkpoint_key().to_owned();
+    ) -> Result<(), OffsetError> {
+        let key = scope.as_str().to_owned();
         self.saves
             .lock()
             .expect(FIXTURE_LOCK)
             .push((key.clone(), sequence));
         if take_one(&self.save_failures) {
-            return Err(CheckpointError::Backend(Box::new(std::io::Error::other(
-                "the fixture checkpoint store refuses this save",
-            ))));
+            return Err(self.refuse(key, sequence, "the fixture offset store refuses this save"));
         }
         let mut state = self.state.lock().expect(FIXTURE_LOCK);
         let held = state.get(&key).copied().unwrap_or(0);
         if sequence <= held {
-            return Err(CheckpointError::Backend(Box::new(std::io::Error::other(
-                "a checkpoint key only moves forward",
-            ))));
+            // Released first so the two fixture locks are never held at once.
+            drop(state);
+            return Err(self.refuse(key, sequence, "an offset key only moves forward"));
         }
         state.insert(key, sequence);
         Ok(())
+    }
+}
+
+impl RecordingOffsetStore {
+    /// Record that this save was refused, and answer the refusal.
+    fn refuse(&self, key: String, sequence: u64, reason: &'static str) -> OffsetError {
+        self.refusals
+            .lock()
+            .expect(FIXTURE_LOCK)
+            .push((key, sequence));
+        OffsetError::Backend(Box::new(std::io::Error::other(reason)))
     }
 }
 
@@ -803,16 +822,44 @@ fn take_one(budget: &AtomicUsize) -> bool {
         .is_ok()
 }
 
+/// Wait until the store has answered at least `want` saves with a refusal,
+/// then answer every refusal it has made. Panics with `label` when the deadline
+/// passes.
+///
+/// What a test needs before it can judge what a host does *after* a refusal:
+/// the refusal has to have reached the host, and a store told to refuse has not
+/// refused anything until it has been asked.
+pub async fn wait_until_refused(
+    offsets: &Arc<RecordingOffsetStore>,
+    want: usize,
+    label: &str,
+) -> Vec<(String, u64)> {
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        let refusals = offsets.refused_saves();
+        if refusals.len() >= want {
+            return refusals;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "{label}: the store refused {} saves, wanted at least {want}",
+                refusals.len()
+            );
+        }
+        tokio::time::sleep(PROBE_INTERVAL).await;
+    }
+}
+
 /// Wait until `scope` holds at least `want`, then answer what it holds.
 pub async fn wait_until_stored(
-    checkpoints: &Arc<RecordingCheckpointStore>,
-    scope: &dyn CheckpointScope,
+    offsets: &Arc<RecordingOffsetStore>,
+    scope: &OffsetScope,
     want: u64,
     label: &str,
 ) -> u64 {
     let deadline = Instant::now() + PROBE_TIMEOUT;
     loop {
-        if let Some(held) = checkpoints.stored(scope) {
+        if let Some(held) = offsets.stored(scope) {
             if held >= want {
                 return held;
             }
@@ -820,8 +867,8 @@ pub async fn wait_until_stored(
         if Instant::now() >= deadline {
             panic!(
                 "{label}: {} holds {:?}, wanted at least {want}",
-                scope.checkpoint_key(),
-                checkpoints.stored(scope)
+                scope.as_str(),
+                offsets.stored(scope)
             );
         }
         tokio::time::sleep(PROBE_INTERVAL).await;

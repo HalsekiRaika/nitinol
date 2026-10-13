@@ -25,15 +25,14 @@ use tokio::sync::Notify;
 use nitinol_eventsource::SnapshotPersistor;
 use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
-    ProjectionContext, Projector, ProjectorProps, Query, Snapshotable,
+    ProjectionContext, ProjectionId, Projector, ProjectorProps, Query, Snapshotable,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
-    EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemorySnapshotStore,
+    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore,
 };
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, LoadQuery, PersistedSnapshot, ProjectionId,
-    TypeName,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, PersistedSnapshot, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 
@@ -350,11 +349,11 @@ async fn projector_props_decode_through_the_codec_each_event_names() {
     // Given
     let ps = ProcessSystem::new().await;
     let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store))
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let system = EventSourceSystem::builder(ps)

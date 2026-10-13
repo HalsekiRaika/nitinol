@@ -32,8 +32,8 @@ use futures_core::future::BoxFuture;
 use linkme::distributed_slice;
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{EventRegistryEntry, EventType, Family, TypeName, EVENT_REGISTRY};
-use nitinol_sqlx::{PostgresCheckpointStore, PostgresEventStore};
-use nitinol_store_conformance::checkpoint::CheckpointStoreUnderTest;
+use nitinol_sqlx::{PostgresEventStore, PostgresOffsetStore};
+use nitinol_store_conformance::offset::OffsetStoreUnderTest;
 use nitinol_store_conformance::{Executor, StoreUnderTest};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, Executor as _, PgPool};
@@ -154,7 +154,7 @@ impl PostgresBackend {
     ///
     /// `bring_up_store` answers with an `EventStore` and nothing else, which is
     /// the whole of what a clause about the journal needs. A clause about
-    /// checkpoints needs the journal, the checkpoint table and a read model of
+    /// offsets needs the journal, the offset table and a read model of
     /// its own to be the *same* database — otherwise the transaction it is
     /// about does not span them — so what it is handed is the schema rather
     /// than one store over it.
@@ -255,19 +255,19 @@ impl StoreUnderTest for PostgresBackend {
     }
 }
 
-impl CheckpointStoreUnderTest for PostgresBackend {
+impl OffsetStoreUnderTest for PostgresBackend {
     /// The concrete store rather than a `dyn` handle: this provider's
-    /// `CheckpointStore::Tx` is a `sqlx` transaction, and that association is
+    /// `OffsetStore::Tx` is a `sqlx` transaction, and that association is
     /// what the suite hands back to a caller.
-    type Store = PostgresCheckpointStore;
+    type Store = PostgresOffsetStore;
 
-    /// A schema of its own, migrated, over a pool of its own: the checkpoint
+    /// A schema of its own, migrated, over a pool of its own: the offset
     /// table is keyed by the rendered scope alone, so two clauses sharing one
     /// schema would have each reading the other's rows.
     fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
         Box::pin(async move {
             let schema = self.migrated_schema().await;
-            Arc::new(PostgresCheckpointStore::new(schema.pool()))
+            Arc::new(PostgresOffsetStore::new(schema.pool()))
         })
     }
 }

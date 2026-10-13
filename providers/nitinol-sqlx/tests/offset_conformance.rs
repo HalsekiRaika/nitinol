@@ -1,9 +1,9 @@
-//! The checkpoint contract, run against the Postgres provider.
+//! The offset contract, run against the Postgres provider.
 //!
 //! ```gherkin
-//! Scenario: the provider keeps every checkpoint clause
+//! Scenario: the provider keeps every offset clause
 //!   Given a Postgres this run has reached
-//!   When the conformance suite's CKP verification is run against it
+//!   When the conformance suite's OFS verification is run against it
 //!   Then every clause holds
 //!
 //! Scenario: partitions recording at the same time do not disturb each other
@@ -12,17 +12,17 @@
 //!   Then every key holds the last position its own writer saved
 //! ```
 //!
-//! What this fixes and what `checkpoint_store.rs` fixes are different things.
+//! What this fixes and what `offset_store.rs` fixes are different things.
 //! The clauses here are the ones *every* backend owes, so they are the suite's
 //! and are not restated: a backend that has not been through it has not been
-//! shown to keep the contract. The rule this provider adds on top — a checkpoint
+//! shown to keep the contract. The rule this provider adds on top — an offset
 //! moves forward or not at all, and a save that would not carry it forward is
 //! refused as a conflict a caller can name — is this backend's own and is fixed
 //! next to it, because the contract leaves a non-forward save to the backend and
 //! the reference implementation answers it the other way.
 //!
 //! Nor is a green run here evidence about a projection: whether a read-model
-//! update and the checkpoint covering it are settled together is a contract of
+//! update and the offset covering it are settled together is a contract of
 //! this store *and* the projector driving it, and `exactly_once_projection.rs`
 //! is where that is fixed.
 //!
@@ -33,7 +33,7 @@
 mod harness;
 
 use harness::TokioExecutor;
-use nitinol_store_conformance::checkpoint;
+use nitinol_store_conformance::offset;
 
 /// Every clause — the deterministic ones and the concurrent one.
 ///
@@ -41,12 +41,12 @@ use nitinol_store_conformance::checkpoint;
 /// sequential test wearing a spawn: on a single-threaded executor the writers
 /// would only ever run where the suite yielded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_postgres_checkpoint_store_conforms_to_every_checkpoint_clause() {
+async fn the_postgres_offset_store_conforms_to_every_offset_clause() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };
 
-    checkpoint::verify(&backend, &TokioExecutor).await;
+    offset::verify(&backend, &TokioExecutor).await;
 }
 
 /// The concurrent clause on its own, against a store of its own.
@@ -61,5 +61,5 @@ async fn concurrent_writers_under_keys_of_their_own_do_not_disturb_each_other() 
         return;
     };
 
-    checkpoint::verify_under_concurrency(&backend, &TokioExecutor).await;
+    offset::verify_under_concurrency(&backend, &TokioExecutor).await;
 }

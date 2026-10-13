@@ -23,7 +23,7 @@ mod dyn_store;
 
 use std::sync::Arc;
 
-use crate::store::{CheckpointStore, EventStore, SnapshotStore};
+use crate::store::{EventStore, OffsetStore, SnapshotStore};
 
 pub use self::custom_store::{CustomStore, CustomStoreBuilder, EventStoreUnset, Unprovided};
 pub use self::dyn_store::DynStore;
@@ -80,7 +80,7 @@ pub use self::dyn_store::DynStore;
 /// two schemas is two regions, and two pools over one schema is one region.
 ///
 /// A store assembling handles over a backend therefore owes the region rather
-/// than the plumbing — one checkpoint handle named into both slots, or two
+/// than the plumbing — one offset handle named into both slots, or two
 /// pools onto one schema, are both conforming, and one pool onto two schemas is
 /// not. PRV-1 is how the region is observed: a record written through one
 /// handle and read through another.
@@ -102,35 +102,42 @@ pub use self::dyn_store::DynStore;
 /// Fixed by the `compile_fail` doctests on [`CustomStoreBuilder`] and on the
 /// wiring entry points in `nitinol-eventsource` and `nitinol-saga`.
 ///
-/// # PRV-4: a projection's position and a delivery host's progress are two slots
+/// # PRV-4: the user's read side and the framework's read side are two slots
 ///
-/// [`ProjectionCheckpointSlot`] and [`DeliveryCheckpointSlot`] are configured,
+/// [`ProjectionOffsetSlot`] and [`SagaOffsetSlot`] are configured,
 /// initialised and recovered independently: writing or reinitialising one
 /// leaves the other's answer where it was.
 ///
+/// What the two slots are for is a deployment choice rather than a kind of
+/// consumer. A projection's offset belongs beside the read model it is building,
+/// which is the database an operator chose for *their* read side; the offsets of
+/// the framework's own attachments belong beside the journal, which is the
+/// framework's. Two slots is how an operator can put each where it belongs, and
+/// `PRV-3` is why neither is filled from the other.
+///
 /// Naming both with one handle is allowed and is how a single-table backend is
 /// deployed. What keeps the two apart there is the key each consumer renders —
-/// a projection verbatim, a framework-owned consumer inside the
-/// [reserved namespace](crate::reserved) — which is the checkpoint contract's
-/// `CKP-5`. What this clause adds is that the store does not fold the two slots
+/// a user-named scope verbatim, a framework-owned one inside the
+/// [reserved namespace](crate::reserved) — which is the offset contract's
+/// `OFS-5`. What this clause adds is that the store does not fold the two slots
 /// into one answer, so replacing the handle one slot is named with does not
 /// reach the other.
 ///
-/// Fixed by the suite's `verify_checkpoint_independence`, and by
+/// Fixed by the suite's `verify_offset_independence`, and by
 /// `nitinol-saga/tests/persistence_projection_rebuild_leaves_delivery_progress.rs`
 /// for the rebuild a running deployment performs.
 ///
 /// # PRV-5: a supplier is not a transaction
 ///
 /// One store is not one atomic unit. There is no transaction spanning the
-/// journal, the snapshots and the checkpoints, and none spanning the two
-/// checkpoint slots: a write taken by one slot stands whether or not the next
+/// journal, the snapshots and the offsets, and none spanning the two
+/// offset slots: a write taken by one slot stands whether or not the next
 /// one is taken.
 ///
 /// The atomic units are stated elsewhere and are the only ones there are.
 /// [`EventStore::append`](crate::store::EventStore::append) decides a stream's
-/// own `OCC-3`, and a projection's result settling together with the checkpoint
-/// covering it is [`CheckpointStore`]'s `CKP-6` driven by a projector's
+/// own `OCC-3`, and a projection's result settling together with the offset
+/// covering it is [`OffsetStore`]'s `OFS-6` driven by a projector's
 /// transaction provider. Neither becomes wider because one store hands out both
 /// resources.
 ///
@@ -164,39 +171,45 @@ pub trait SnapshotSlot: Store {
 /// applied.
 ///
 /// The handle is an associated type rather than a `dyn` one because
-/// [`CheckpointStore::Tx`] is an associated type of its own: a projector
-/// settling its read-model update and its checkpoint in one transaction needs
+/// [`OffsetStore::Tx`] is an associated type of its own: a projector
+/// settling its read-model update and its offset in one transaction needs
 /// the backend's transaction type to be visible, which erasing the store would
 /// take away.
-pub trait ProjectionCheckpointSlot: Store {
-    /// The backend's own checkpoint store, as the projection slot is named with
+pub trait ProjectionOffsetSlot: Store {
+    /// The backend's own offset store, as the projection slot is named with
     /// it.
-    type ProjectionCheckpoints: CheckpointStore + Clone + 'static;
+    type ProjectionOffsets: OffsetStore + Clone + 'static;
 
     /// Where a projection's applied position is kept.
-    fn projection_checkpoints(&self) -> Self::ProjectionCheckpoints;
+    fn projection_offsets(&self) -> Self::ProjectionOffsets;
 }
 
-/// A store that also holds somewhere to keep how far a delivery host has got.
+/// A store that also holds somewhere to keep how far the framework's own saga
+/// attachments have got.
+///
+/// This is the slot for **every** attachment a saga runs with, not the delivery
+/// host's alone: the host records what it has delivered here, and so do the
+/// manager and the deadline index as they are written. What they have in common
+/// is that the framework owns them, so their offsets belong wherever an operator
+/// put the journal — which is the axis `PRV-4` states.
 ///
 /// A distinct associated type name from
-/// [`ProjectionCheckpointSlot::ProjectionCheckpoints`] so that a store
+/// [`ProjectionOffsetSlot::ProjectionOffsets`] so that a store
 /// supplying both slots can be named in a `where` clause without the two
 /// projections of it becoming ambiguous.
-pub trait DeliveryCheckpointSlot: Store {
-    /// The backend's own checkpoint store, as the delivery slot is named with
-    /// it.
-    type DeliveryCheckpoints: CheckpointStore + Clone + 'static;
+pub trait SagaOffsetSlot: Store {
+    /// The backend's own offset store, as the saga slot is named with it.
+    type SagaOffsets: OffsetStore + Clone + 'static;
 
-    /// Where a delivery host's progress is kept.
-    fn delivery_checkpoints(&self) -> Self::DeliveryCheckpoints;
+    /// Where the framework's saga attachments keep their progress.
+    fn saga_offsets(&self) -> Self::SagaOffsets;
 }
 
 /// The supplier every event-sourced deployment has one of.
 ///
 /// It distributes what the [`Store`] it was constructed over answers with, in
 /// the shape the framework's wiring takes: the journal and the snapshot store
-/// behind the `dyn` handles the wiring is written against, and each checkpoint
+/// behind the `dyn` handles the wiring is written against, and each offset
 /// slot as the backend's own type so a transaction stays visible.
 ///
 /// What it does not do is decide anything. The identity of a slot, and whether
@@ -235,16 +248,16 @@ impl<S: SnapshotSlot> PersistenceProvider<S> {
     }
 }
 
-impl<S: ProjectionCheckpointSlot> PersistenceProvider<S> {
+impl<S: ProjectionOffsetSlot> PersistenceProvider<S> {
     /// Where a projection's applied position is kept.
-    pub fn projection_checkpoints(&self) -> Arc<S::ProjectionCheckpoints> {
-        Arc::new(self.store.projection_checkpoints())
+    pub fn projection_offsets(&self) -> Arc<S::ProjectionOffsets> {
+        Arc::new(self.store.projection_offsets())
     }
 }
 
-impl<S: DeliveryCheckpointSlot> PersistenceProvider<S> {
-    /// Where a delivery host's progress is kept.
-    pub fn delivery_checkpoints(&self) -> Arc<S::DeliveryCheckpoints> {
-        Arc::new(self.store.delivery_checkpoints())
+impl<S: SagaOffsetSlot> PersistenceProvider<S> {
+    /// Where the framework's saga attachments keep their progress.
+    pub fn saga_offsets(&self) -> Arc<S::SagaOffsets> {
+        Arc::new(self.store.saga_offsets())
     }
 }

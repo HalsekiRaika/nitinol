@@ -12,7 +12,7 @@
 //! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
 //! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
 //! | `full`         | All of the above |
-//! | `postgres`     | `sqlx` — Postgres backend (`PostgresEventStore`, `PostgresCheckpointStore`) |
+//! | `postgres`     | `sqlx` — Postgres backend (`PostgresEventStore`, `PostgresOffsetStore`) |
 //!
 //! # Example
 //!
@@ -107,8 +107,8 @@ pub mod eventsource {
         SequenceCursor,
     };
     pub use nitinol_eventsource::{
-        EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, Projector,
-        ProjectorProps, TxProvider,
+        EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext,
+        ProjectionId, Projector, ProjectorProps, TxProvider,
     };
     pub use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
 }

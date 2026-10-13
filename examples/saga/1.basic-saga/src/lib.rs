@@ -22,16 +22,16 @@
 //! # What that buys, and what it costs
 //!
 //! The host is a pull consumer with one piece of state: how far it has
-//! finished, recorded as a checkpoint.  It delivers a decision's commands
-//! first and moves the checkpoint past the decision only once all of them have
-//! landed, so a host that dies in between resumes from the checkpoint and
+//! finished, recorded as an offset.  It delivers a decision's commands
+//! first and moves the offset past the decision only once all of them have
+//! landed, so a host that dies in between resumes from the offset and
 //! carries the same commands again.  That window is the whole of why delivery
 //! is **at-least-once**, and why the decision event carries an operation id the
 //! receiver recognises a repeat by — see
 //! [`inventory::Inventory`]'s `Decider<Reserve>`.
 //!
 //! The other half of the bargain: a delivery the receiver refuses is not passed
-//! over.  The host holds — it stops advancing its checkpoint and retries the
+//! over.  The host holds — it stops advancing its offset and retries the
 //! same record — rather than silently dropping a command the saga decided and
 //! nobody carried out.
 //!

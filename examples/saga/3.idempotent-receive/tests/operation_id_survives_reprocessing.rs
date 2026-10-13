@@ -16,7 +16,7 @@ use common::{
 
 use std::sync::Arc;
 
-use nitinol_persistence::store::InMemoryCheckpointStore;
+use nitinol_persistence::store::InMemoryOffsetStore;
 use nitinol_persistence::AggregateId;
 
 use saga_idempotent_receive::order::{OrderPlaced, PlaceOrder};
@@ -91,7 +91,7 @@ async fn a_decision_reprocessed_by_a_new_host_converges_on_one_reservation() {
 
     // Where a host's progress would be kept. The first incarnation cannot reach
     // it; the second reads it directly and finds nothing.
-    let checkpoints = Arc::new(InMemoryCheckpointStore::default());
+    let offsets = Arc::new(InMemoryOffsetStore::default());
 
     // Incarnation 1 — the reservation is applied, and the host's progress is
     // never recorded, so the operation stays owed as far as any later host can
@@ -101,7 +101,7 @@ async fn a_decision_reprocessed_by_a_new_host_converges_on_one_reservation() {
     let _interrupted_host = spawn_delivery_host(
         &first.system,
         &store,
-        &UnrecordedProgressStore::over(&checkpoints),
+        &UnrecordedProgressStore::over(&offsets),
     )
     .await;
 
@@ -141,7 +141,7 @@ async fn a_decision_reprocessed_by_a_new_host_converges_on_one_reservation() {
             .collect::<Vec<String>>()
     );
     assert_eq!(
-        recorded_progress(&checkpoints).await,
+        recorded_progress(&offsets).await,
         None,
         "the interrupted incarnation must leave no progress recorded"
     );
@@ -161,10 +161,10 @@ async fn a_decision_reprocessed_by_a_new_host_converges_on_one_reservation() {
     // wrote and carries it again. Bound for the rest of the test: this handle
     // owns the system the assertions observe.
     let second = spawn_world(&order_id, Arc::clone(&store)).await;
-    let _resumed_host = spawn_delivery_host(&second.system, &store, &checkpoints).await;
+    let _resumed_host = spawn_delivery_host(&second.system, &store, &offsets).await;
 
     wait_for_progress(
-        &checkpoints,
+        &offsets,
         position,
         "the new host must re-derive the command from the decision and record it",
     )

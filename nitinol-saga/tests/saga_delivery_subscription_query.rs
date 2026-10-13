@@ -21,7 +21,7 @@
 mod delivery;
 use delivery::{
     append_decided, in_memory_system, scope_of, spawn_host, wait_until_loads, wait_until_stored,
-    Decided, DeliverySaga, RecordingCheckpointStore, RecordingEventStore,
+    Decided, DeliverySaga, RecordingEventStore, RecordingOffsetStore,
 };
 
 use std::sync::Arc;
@@ -37,14 +37,14 @@ async fn every_query_names_the_event_type_and_the_position() {
     let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-subscription-query");
 
     append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
     let queries = wait_until_loads(&recording, 3, "the host must poll the store").await;
 
     // Then
@@ -82,16 +82,16 @@ async fn the_position_asked_for_follows_the_progress_recorded() {
     let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-query-follows-progress");
 
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
     wait_until_stored(
-        &checkpoints,
+        &offsets,
         &scope_of(0),
         position,
         "the decision must be delivered and its position recorded",

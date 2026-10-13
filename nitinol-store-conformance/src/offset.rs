@@ -1,10 +1,10 @@
-//! The contract every `CheckpointStore` owes, made executable for any backend.
+//! The contract every `OffsetStore` owes, made executable for any backend.
 //!
-//! [`CheckpointStore`] states it as clauses `CKP-1` … `CKP-6`; this module is
+//! [`OffsetStore`] states it as clauses `OFS-1` … `OFS-6`; this module is
 //! the ones a suite can fix as something to run. Two of them it deliberately
-//! does not fix — `CKP-4`, where the contract leaves two answers open, and
-//! `CKP-6`, which is about a transaction a kit cannot make — and
-//! [`CheckpointStore`] says so next to each.
+//! does not fix — `OFS-4`, where the contract leaves two answers open, and
+//! `OFS-6`, which is about a transaction a kit cannot make — and
+//! [`OffsetStore`] says so next to each.
 //!
 //! # Three entry points, and why they are not one
 //!
@@ -14,7 +14,7 @@
 //! scheduled. It asks for no executor, and nothing it does is concurrent.
 //!
 //! [`verify_under_concurrency`] runs the one clause that needs several writers
-//! recording at the same time — which is how a deployment reaches a checkpoint
+//! recording at the same time — which is how a deployment reaches an offset
 //! store, the partitions of a delivery host each keeping progress of their own.
 //! A pass there says a run of that shape found nothing, weaker evidence than
 //! the deterministic half gives, and kept separate so the two are never
@@ -25,7 +25,7 @@
 //! # What a green run here is not
 //!
 //! Evidence about anything but the store alone. Whether a projection's result
-//! and the checkpoint covering it are settled together is a contract of a
+//! and the offset covering it are settled together is a contract of a
 //! store *and* the machinery driving it; see the
 //! [crate documentation](crate) for where the combined contracts are fixed.
 
@@ -36,18 +36,18 @@ pub(crate) mod fixture;
 use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
-use nitinol_persistence::store::CheckpointStore;
+use nitinol_persistence::store::OffsetStore;
 
 pub use self::concurrency::verify_under_concurrency;
 pub use self::deterministic::verify_deterministic;
 
 use crate::under_test::Executor;
 
-/// The checkpoint backend a run of the `CKP` clauses is about.
+/// The offset backend a run of the `OFS` clauses is about.
 ///
 /// The store is an associated type rather than a `dyn` handle:
-/// [`CheckpointStore::Tx`] is an associated type of its own, and what a
-/// transaction is is the one thing a checkpoint backend decides for itself.
+/// [`OffsetStore::Tx`] is an associated type of its own, and what a
+/// transaction is is the one thing an offset backend decides for itself.
 ///
 /// Every clause asks for its own store, so no clause can be carried by what
 /// another one left behind, and a provider decides for itself what a store
@@ -56,20 +56,20 @@ use crate::under_test::Executor;
 ///
 /// `Send + Sync` so that the future a clause returns is itself `Send`: a
 /// provider running the suite as an integration test may want to spawn it.
-pub trait CheckpointStoreUnderTest: Send + Sync {
+pub trait OffsetStoreUnderTest: Send + Sync {
     /// The backend's own store type.
-    type Store: CheckpointStore + 'static;
+    type Store: OffsetStore + 'static;
 
     /// Hand the suite a store holding nothing.
     fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>>;
 }
 
-/// Put a checkpoint store through every clause the suite fixes.
+/// Put an offset store through every clause the suite fixes.
 ///
 /// The deterministic clauses run first, so a store that breaks one of them is
 /// reported on what it broke rather than on the concurrent writers that then
 /// could not record against it.
-pub async fn verify<S: CheckpointStoreUnderTest, E: Executor>(store: &S, executor: &E) {
+pub async fn verify<S: OffsetStoreUnderTest, E: Executor>(store: &S, executor: &E) {
     verify_deterministic(store).await;
     verify_under_concurrency(store, executor).await;
 }

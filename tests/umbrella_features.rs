@@ -19,13 +19,17 @@ async fn runtime_feature_exposes_process_system() {
 
 /// When the "persistence" feature is enabled, nitinol::persistence types must
 /// be accessible.
+///
+/// The stream key an aggregate is persisted under is the identifier this layer
+/// owns. A projection's identifier is not: it names a consumer
+/// `nitinol-eventsource` owns, and it is reached through that facade — see
+/// `eventsource_feature_exposes_the_projection_identifier`.
 #[cfg(feature = "persistence")]
 #[test]
 fn persistence_feature_exposes_id_types() {
-    use nitinol::persistence::{AggregateId, ProjectionId};
+    use nitinol::persistence::AggregateId;
 
     let _agg = AggregateId::new("test");
-    let _proj = ProjectionId::new("test");
 }
 
 // Feature: eventsource
@@ -75,6 +79,31 @@ fn eventsource_feature_exposes_aggregate_and_projection() {
     // Compile-time check: the types are in scope and bounds are satisfied.
     let _ = std::marker::PhantomData::<AggregateProps<DummyAggregate>>;
     let _ = std::marker::PhantomData::<ProjectorProps<(), ()>>;
+}
+
+/// When the "eventsource" feature is enabled, a projection's identifier must be
+/// reachable through the umbrella — from the facade root and from the
+/// `projection` module both.
+///
+/// The facade is an explicit re-export list rather than a glob, so the move
+/// from `nitinol-persistence` to `nitinol-eventsource` has to be followed here:
+/// an umbrella user whose `nitinol::persistence::ProjectionId` stopped
+/// resolving and who had nothing to reach instead could not name a projection
+/// at all.
+#[cfg(feature = "eventsource")]
+#[test]
+fn eventsource_feature_exposes_the_projection_identifier() {
+    use nitinol::eventsource::ProjectionId;
+
+    let through_the_root = ProjectionId::new("test");
+    let through_the_module: nitinol::eventsource::projection::ProjectionId =
+        through_the_root.clone();
+
+    assert_eq!(
+        through_the_module.as_str(),
+        through_the_root.as_str(),
+        "the facade root and the projection module must name one type"
+    );
 }
 
 // Feature: eventsource — SystemEvent system must NOT be exposed at umbrella root

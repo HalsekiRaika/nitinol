@@ -13,13 +13,13 @@
 //!   When a record is written through one handle and read through its clone
 //!   Then the two are observed as one region
 //!
-//! Scenario: the two checkpoint slots are told apart inside one table
-//!   Given a store whose checkpoint slots are one Postgres table
+//! Scenario: the two offset slots are told apart inside one table
+//!   Given a store whose offset slots are one Postgres table
 //!   When the slot-independence verification is run
 //!   Then neither slot answers for what the other holds
 //! ```
 //!
-//! This store supplies the journal and both checkpoint slots and **no snapshot
+//! This store supplies the journal and both offset slots and **no snapshot
 //! store**, so it runs the slot entry points it has and owes the snapshot one
 //! nothing — the same division the store contracts already keep, where a
 //! backend implementing one trait runs that contract and no other. The
@@ -30,7 +30,7 @@
 //! a clone of the store handle as well as across a repeated take, so the
 //! Postgres handle's own `Clone` is judged wherever a slot is.
 //!
-//! What the independence clause is about here is worth naming: both checkpoint
+//! What the independence clause is about here is worth naming: both offset
 //! slots are assembled over **one** store on **one** table, which is this
 //! backend's deployment and the harder half of the clause. The slots are
 //! independent because each consumer files under a key of its own, not because
@@ -50,10 +50,10 @@ use nitinol_sqlx::PostgresStore;
 use nitinol_store_conformance::provider::{self, ProviderUnderTest};
 
 /// A store holding nothing: a schema of its own, migrated, with the journal and
-/// the checkpoint table assembled over one pool onto it.
+/// the offset table assembled over one pool onto it.
 ///
 /// Every clause asks for its own, so a clause reading another's leftovers
-/// cannot happen — and because the two checkpoint slots of one store are the
+/// cannot happen — and because the two offset slots of one store are the
 /// same table, a shared schema would have each clause reading the positions the
 /// one before it left.
 impl ProviderUnderTest for PostgresBackend {
@@ -79,32 +79,32 @@ async fn the_postgres_stores_event_store_slot_conforms() {
     provider::verify_event_store(&backend, &TokioExecutor).await;
 }
 
-/// The projection-checkpoint slot.
+/// The projection-offset slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_postgres_stores_projection_checkpoint_slot_conforms() {
+async fn the_postgres_stores_projection_offset_slot_conforms() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };
 
-    provider::verify_projection_checkpoints(&backend, &TokioExecutor).await;
+    provider::verify_projection_offsets(&backend, &TokioExecutor).await;
 }
 
-/// The delivery-checkpoint slot.
+/// The saga-offset slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_postgres_stores_delivery_checkpoint_slot_conforms() {
+async fn the_postgres_stores_saga_offset_slot_conforms() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };
 
-    provider::verify_delivery_checkpoints(&backend, &TokioExecutor).await;
+    provider::verify_saga_offsets(&backend, &TokioExecutor).await;
 }
 
-/// The two checkpoint slots, told apart inside the one table they share.
+/// The two offset slots, told apart inside the one table they share.
 #[tokio::test]
-async fn the_postgres_stores_checkpoint_slots_are_independent() {
+async fn the_postgres_stores_offset_slots_are_independent() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };
 
-    provider::verify_checkpoint_independence(&backend).await;
+    provider::verify_offset_independence(&backend).await;
 }

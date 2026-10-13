@@ -13,7 +13,7 @@
 //! ```
 //!
 //! The second scenario is why the expected numbers below are written out as
-//! literals rather than derived. A checkpoint is per partition and persists, so
+//! literals rather than derived. An offset is per partition and persists, so
 //! an assignment that changed between two runs of the same deployment would
 //! have a partition resume from a position belonging to a different set of
 //! streams. A hash whose algorithm is only promised for the lifetime of one

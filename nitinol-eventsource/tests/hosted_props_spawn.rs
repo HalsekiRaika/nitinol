@@ -61,15 +61,15 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, AggregateProps, Decider, Decision, Event,
-    ProjectionContext, Projector, Query,
+    ProjectionContext, ProjectionId, Projector, Query,
 };
 use nitinol_persistence::provider::{
-    CustomStore, PersistenceProvider, ProjectionCheckpointSlot, Store,
+    CustomStore, PersistenceProvider, ProjectionOffsetSlot, Store,
 };
 use nitinol_persistence::store::{
-    CheckpointStore, EventStore, InMemoryCheckpointStore, InMemoryEventStore, InMemoryStore,
+    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, OffsetScope, OffsetStore,
 };
-use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, ProjectionId, TypeName};
+use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // Fixtures
@@ -196,16 +196,16 @@ async fn wait_until_applied(
 
 /// Wait until `store` holds a position for `consumer`, then answer it.
 async fn wait_until_recorded(
-    store: &dyn CheckpointStore<Tx = ()>,
+    store: &dyn OffsetStore<Tx = ()>,
     consumer: &ProjectionId,
     label: &str,
 ) -> u64 {
     tokio::time::timeout(PROBE_TIMEOUT, async {
         loop {
             if let Some(held) = store
-                .load(consumer)
+                .load(&OffsetScope::from(consumer))
                 .await
-                .expect("loading a checkpoint of an in-memory store succeeds")
+                .expect("loading an offset of an in-memory store succeeds")
             {
                 return held;
             }
@@ -356,7 +356,7 @@ async fn projector_props_from_a_system_spawn_without_a_process_system() {
 
     // And: it recorded into that store's projection slot
     let held = wait_until_recorded(
-        &store.projection_checkpoints(),
+        &store.projection_offsets(),
         &projection,
         "a hosted projector must record into the system's projection slot",
     )
@@ -404,12 +404,12 @@ async fn props_built_directly_start_on_the_process_system_they_are_given() {
 async fn hosted_props_work_over_an_assembled_store() {
     // Given
     let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = Arc::new(InMemoryCheckpointStore::default());
+    let offsets = Arc::new(InMemoryOffsetStore::default());
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(Arc::clone(&events))
-                .checkpoints(Arc::clone(&checkpoints))
+                .offsets(Arc::clone(&offsets))
                 .build(),
         ))
         .build();

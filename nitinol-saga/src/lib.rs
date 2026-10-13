@@ -88,7 +88,7 @@
 //!   [`Subscription::stream`] names a source's store, and
 //!   [`SagaManagerProps::new`] names a journal.
 //! - Where delivery progress is kept: [`deliver`](SagaDeliveryExt::deliver)
-//!   resolves the journal and the delivery-checkpoint slot from the same
+//!   resolves the journal and the saga-offset slot from the same
 //!   supplier, and exists only where that supplier's store holds the slot — so
 //!   a deployment with no store for a host's progress is told while the wiring
 //!   is compiled.
@@ -124,7 +124,7 @@
 //!   however permanently, so what a receiver refuses is held and said out loud
 //!   rather than lost. [`SagaDeliveryProps::with_partitions`] confines a hold
 //!   to the instances of one partition, each with its own progress, and
-//!   [`SagaDeliveryProxy::advance_checkpoint`] is the operator's way past one.
+//!   [`SagaDeliveryProxy::advance_offset`] is the operator's way past one.
 //!   Delivery is at-least-once with no mode to choose: a repeat is recognised
 //!   by the receiver, from the operation id the domain put on the command.
 //!   Where that guarantee comes from, what a hold means, and which failures are
@@ -249,7 +249,7 @@
 //!    with "already created" rather than with a second write, which is what
 //!    lets a creation-only fan-out need no compensation.  A creation command
 //!    does repeat even when the fact behind it is not handled twice: the host's
-//!    checkpoint moves after the deliveries it covers, so a crash in between
+//!    offset moves after the deliveries it covers, so a crash in between
 //!    carries them again.
 //!    Where a redelivered command reaches the store anyway, an
 //!    [`nitinol_persistence::error::AppendError::SequenceConflict`] on the
@@ -330,7 +330,7 @@ pub use self::components::{Deadline, DeadlineMessage, PendingDeadline, SagaCompo
 pub use self::context::SagaContext;
 pub use self::delivery::{
     partition_of, SagaDelivery, SagaDeliveryError, SagaDeliveryId, SagaDeliveryProps,
-    SagaDeliveryProxy, SagaDeliveryScope,
+    SagaDeliveryProxy,
 };
 pub use self::effect::{SagaEffect, ScheduleSpec};
 pub use self::id::SagaId;

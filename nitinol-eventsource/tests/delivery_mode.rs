@@ -1,19 +1,19 @@
 // Integration tests for DeliveryMode (AtMostOnce / AtLeastOnce / ExactlyOnce).
 //
-// Tests verify the checkpoint-save ordering relative to project() for each mode,
+// Tests verify the offset-save ordering relative to project() for each mode,
 // and the exact semantics when project() fails.
 //
 // AtMostOnce:
-//   checkpoint is saved BEFORE project(). If project() fails, the checkpoint
+//   offset is saved BEFORE project(). If project() fails, the offset
 //   is already advanced — the event will NOT be re-processed on restart.
 //
 // AtLeastOnce (default):
-//   checkpoint is saved AFTER a successful project(). If project() fails, the
-//   checkpoint is NOT advanced — the event WILL be re-processed on restart.
+//   offset is saved AFTER a successful project(). If project() fails, the
+//   offset is NOT advanced — the event WILL be re-processed on restart.
 //
 // ExactlyOnce:
-//   the framework does NOT save the checkpoint at all. The user is responsible
-//   for saving both the read-model update and the checkpoint inside project()
+//   the framework does NOT save the offset at all. The user is responsible
+//   for saving both the read-model update and the offset inside project()
 //   within the same transaction.
 //
 // Compile errors involving the projection module are expected until the
@@ -27,12 +27,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
+use nitinol_eventsource::{
+    codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps,
+};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
-    CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
+    DeliveryMode, EventStore, InMemoryEventStore, InMemoryOffsetStore, OffsetScope, OffsetStore,
 };
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // Fixtures: event type
@@ -128,18 +130,18 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
     .unwrap_or_else(|_| panic!("timed out waiting for {expected} project() calls"));
 }
 
-/// Poll the checkpoint store until it reaches the expected value or timeout.
-async fn wait_for_checkpoint(
-    store: &Arc<InMemoryCheckpointStore>,
+/// Poll the offset store until it reaches the expected value or timeout.
+async fn wait_for_offset(
+    store: &Arc<InMemoryOffsetStore>,
     projection_id: &ProjectionId,
     expected: Option<u64>,
 ) {
     tokio::time::timeout(Duration::from_millis(500), async {
         loop {
             let current = store
-                .load(projection_id)
+                .load(&OffsetScope::from(projection_id))
                 .await
-                .expect("checkpoint load must succeed");
+                .expect("offset load must succeed");
             if current == expected {
                 return;
             }
@@ -147,21 +149,21 @@ async fn wait_for_checkpoint(
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("timed out waiting for checkpoint to reach {:?}", expected));
+    .unwrap_or_else(|_| panic!("timed out waiting for offset to reach {:?}", expected));
 }
 
-// Test: AtMostOnce — checkpoint is advanced even when project() fails
+// Test: AtMostOnce — offset is advanced even when project() fails
 
-/// With AtMostOnce, the checkpoint is saved BEFORE calling project().
-/// If project() fails, the checkpoint has already advanced — the event is
+/// With AtMostOnce, the offset is saved BEFORE calling project().
+/// If project() fails, the offset has already advanced — the event is
 /// treated as "processed" (at most once delivery) even though it was not
 /// actually processed successfully.
 #[tokio::test]
-async fn at_most_once_checkpoint_advanced_even_when_project_fails() {
+async fn at_most_once_offset_advanced_even_when_project_fails() {
     // Given
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("dm-amo-agg");
     let projection_id = ProjectionId::new("dm-amo");
 
@@ -178,7 +180,7 @@ async fn at_most_once_checkpoint_advanced_even_when_project_fails() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -197,10 +199,10 @@ async fn at_most_once_checkpoint_advanced_even_when_project_fails() {
     // Wait for project() to be called
     wait_for_count(&count, &notify, 1).await;
 
-    // AtMostOnce saves the checkpoint BEFORE calling project(). When project() fires the
-    // Notify, the checkpoint is already saved.
-    // Then: checkpoint is at seq=1 despite project() failing
-    wait_for_checkpoint(&checkpoint_store, &projection_id, Some(1)).await;
+    // AtMostOnce saves the offset BEFORE calling project(). When project() fires the
+    // Notify, the offset is already saved.
+    // Then: offset is at seq=1 despite project() failing
+    wait_for_offset(&offset_store, &projection_id, Some(1)).await;
 
     assert_eq!(
         count.load(Ordering::SeqCst),
@@ -209,16 +211,16 @@ async fn at_most_once_checkpoint_advanced_even_when_project_fails() {
     );
 }
 
-// Test: AtMostOnce — checkpoint advances on success too
+// Test: AtMostOnce — offset advances on success too
 
-/// With AtMostOnce, a successful project() also results in the checkpoint
+/// With AtMostOnce, a successful project() also results in the offset
 /// being saved (it was saved before the call).
 #[tokio::test]
-async fn at_most_once_checkpoint_advanced_on_success() {
+async fn at_most_once_offset_advanced_on_success() {
     // Given
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("dm-amo-ok-agg");
     let projection_id = ProjectionId::new("dm-amo-ok");
 
@@ -237,7 +239,7 @@ async fn at_most_once_checkpoint_advanced_on_success() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -253,24 +255,24 @@ async fn at_most_once_checkpoint_advanced_on_success() {
     .spawn(&system)
     .await;
 
-    // Wait for all 3 project() calls, then for checkpoint to settle at 3
+    // Wait for all 3 project() calls, then for offset to settle at 3
     wait_for_count(&count, &notify, 3).await;
 
-    // Then: checkpoint reaches 3
-    wait_for_checkpoint(&checkpoint_store, &projection_id, Some(3)).await;
+    // Then: offset reaches 3
+    wait_for_offset(&offset_store, &projection_id, Some(3)).await;
 }
 
-// Test: AtLeastOnce — checkpoint NOT saved when project() fails
+// Test: AtLeastOnce — offset NOT saved when project() fails
 
-/// With AtLeastOnce (default), the checkpoint is saved AFTER a successful
-/// project(). When project() fails, the checkpoint is not updated — the
+/// With AtLeastOnce (default), the offset is saved AFTER a successful
+/// project(). When project() fails, the offset is not updated — the
 /// same event will be re-processed if the projector is restarted.
 #[tokio::test]
-async fn at_least_once_checkpoint_not_saved_when_project_fails() {
+async fn at_least_once_offset_not_saved_when_project_fails() {
     // Given
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("dm-alo-fail-agg");
     let projection_id = ProjectionId::new("dm-alo-fail");
 
@@ -287,7 +289,7 @@ async fn at_least_once_checkpoint_not_saved_when_project_fails() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -305,31 +307,31 @@ async fn at_least_once_checkpoint_not_saved_when_project_fails() {
 
     wait_for_count(&count, &notify, 1).await;
 
-    // Give the process time to attempt (and skip) checkpoint save after the failure
+    // Give the process time to attempt (and skip) offset save after the failure
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Then: checkpoint is still None — failure prevented the save
-    let checkpoint = checkpoint_store
-        .load(&projection_id)
+    // Then: offset is still None — failure prevented the save
+    let offset = offset_store
+        .load(&OffsetScope::from(&projection_id))
         .await
         .expect("load must succeed");
     assert_eq!(
-        checkpoint, None,
-        "AtLeastOnce must NOT save the checkpoint when project() fails"
+        offset, None,
+        "AtLeastOnce must NOT save the offset when project() fails"
     );
 }
 
-// Test: AtLeastOnce — checkpoint is saved after successful project()
+// Test: AtLeastOnce — offset is saved after successful project()
 
-/// With AtLeastOnce, a successful project() results in the checkpoint being
+/// With AtLeastOnce, a successful project() results in the offset being
 /// saved. This guarantees the event is not re-processed on the next startup
 /// (idempotency of the projection is assumed).
 #[tokio::test]
-async fn at_least_once_checkpoint_saved_after_successful_project() {
+async fn at_least_once_offset_saved_after_successful_project() {
     // Given
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("dm-alo-ok-agg");
     let projection_id = ProjectionId::new("dm-alo-ok");
 
@@ -348,7 +350,7 @@ async fn at_least_once_checkpoint_saved_after_successful_project() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -364,15 +366,15 @@ async fn at_least_once_checkpoint_saved_after_successful_project() {
     .spawn(&system)
     .await;
 
-    // Then: checkpoint eventually reaches 3 (after all 3 successful project() calls)
-    wait_for_checkpoint(&checkpoint_store, &projection_id, Some(3)).await;
+    // Then: offset eventually reaches 3 (after all 3 successful project() calls)
+    wait_for_offset(&offset_store, &projection_id, Some(3)).await;
 }
 
 // Test: AtLeastOnce — re-processing occurs after restart when project failed
 
 /// Verify the at-least-once guarantee end-to-end:
 /// 1. Projector fails on event at seq=2.
-/// 2. Checkpoint remains at seq=1 (seq=2 was not saved).
+/// 2. Offset remains at seq=1 (seq=2 was not saved).
 /// 3. On restart (re-spawn with same stores), event at seq=2 is re-processed.
 ///
 /// Uses multi_thread to allow the test task and the process task to run
@@ -382,7 +384,7 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     // Given
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("dm-alo-restart-agg");
     let projection_id = ProjectionId::new("dm-alo-restart");
 
@@ -401,13 +403,13 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
         let notify_c = Arc::clone(&notify);
         let projection_id_c = projection_id.clone();
         let event_store_c: Arc<dyn EventStore> = Arc::clone(&event_store) as Arc<dyn EventStore>;
-        let checkpoint_store_c = Arc::clone(&checkpoint_store);
+        let offset_store_c = Arc::clone(&offset_store);
         let agg_id_c = agg_id.clone();
 
         let persistence = PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(event_store_c)
-                .projection_checkpoints(checkpoint_store_c)
+                .projection_offsets(offset_store_c)
                 .build(),
         );
         ProjectorProps::new(projection_id_c, &persistence, move || {
@@ -436,7 +438,7 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
 
     // Stop the first projector and wait for it to fully deregister before
     // starting the second run; without this, both projectors can race on
-    // the checkpoint store.
+    // the offset store.
     let proxy_pid = proxy.pid();
     let _ = proxy.stop().await;
     {
@@ -453,15 +455,15 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
         }
     }
 
-    // Verify: checkpoint is at seq=1 (seq=2 was not saved due to failure)
-    let checkpoint_after_first_run = checkpoint_store
-        .load(&projection_id)
+    // Verify: offset is at seq=1 (seq=2 was not saved due to failure)
+    let offset_after_first_run = offset_store
+        .load(&OffsetScope::from(&projection_id))
         .await
         .expect("load must succeed");
     assert_eq!(
-        checkpoint_after_first_run,
+        offset_after_first_run,
         Some(1),
-        "after first run: checkpoint must be at seq=1 (seq=2 project failed)"
+        "after first run: offset must be at seq=1 (seq=2 project failed)"
     );
 
     // Second run: disable failure so seq=2 succeeds
@@ -475,7 +477,7 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy2 = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -491,27 +493,27 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     .spawn(&system)
     .await;
 
-    // seq=2 is re-processed (restart from checkpoint seq=1 → process seq=2)
+    // seq=2 is re-processed (restart from offset seq=1 → process seq=2)
     wait_for_count(&count, &notify, 1).await;
 
-    // Then: checkpoint now at seq=2
-    wait_for_checkpoint(&checkpoint_store, &projection_id, Some(2)).await;
+    // Then: offset now at seq=2
+    wait_for_offset(&offset_store, &projection_id, Some(2)).await;
 }
 
-// Test: ExactlyOnce — framework does NOT save checkpoint
+// Test: ExactlyOnce — framework does NOT save offset
 
-/// With ExactlyOnce, the framework never saves the checkpoint — even on
+/// With ExactlyOnce, the framework never saves the offset — even on
 /// successful project(). The user is expected to save both the read-model
-/// update and the checkpoint atomically inside project() via their own TX.
+/// update and the offset atomically inside project() via their own TX.
 ///
 /// This test verifies the negative: after a successful projection run with
-/// ExactlyOnce, the framework-managed checkpoint is still None.
+/// ExactlyOnce, the framework-managed offset is still None.
 #[tokio::test]
-async fn exactly_once_framework_does_not_save_checkpoint() {
+async fn exactly_once_framework_does_not_save_offset() {
     // Given
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("dm-eo-agg");
     let projection_id = ProjectionId::new("dm-eo");
 
@@ -524,11 +526,11 @@ async fn exactly_once_framework_does_not_save_checkpoint() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    // When: spawn with ExactlyOnce (framework skips checkpoint saving)
+    // When: spawn with ExactlyOnce (framework skips offset saving)
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -546,22 +548,22 @@ async fn exactly_once_framework_does_not_save_checkpoint() {
 
     wait_for_count(&count, &notify, 1).await;
 
-    // Give the process time to complete checkpoint-save (which it should NOT do)
+    // Give the process time to complete offset-save (which it should NOT do)
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Then: checkpoint is still None — framework does not save it for ExactlyOnce
-    let checkpoint = checkpoint_store
-        .load(&projection_id)
+    // Then: offset is still None — framework does not save it for ExactlyOnce
+    let offset = offset_store
+        .load(&OffsetScope::from(&projection_id))
         .await
         .expect("load must succeed");
     assert_eq!(
-        checkpoint, None,
-        "ExactlyOnce must NOT save the checkpoint; the user controls it inside project()"
+        offset, None,
+        "ExactlyOnce must NOT save the offset; the user controls it inside project()"
     );
 
     assert_eq!(
         count.load(Ordering::SeqCst),
         1,
-        "project() must still be called once; ExactlyOnce only skips the framework checkpoint save"
+        "project() must still be called once; ExactlyOnce only skips the framework offset save"
     );
 }

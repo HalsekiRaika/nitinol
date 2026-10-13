@@ -6,10 +6,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
+use nitinol_eventsource::{
+    codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps,
+};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Clone)]
@@ -178,7 +180,7 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 async fn projector_single_event_type_project_called_during_catchup() {
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("proj-single-agg");
 
     append_counted(&event_store, &agg_id, 1).await;
@@ -190,7 +192,7 @@ async fn projector_single_event_type_project_called_during_catchup() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(ProjectionId::new("proj-single"), &persistence, move || {
@@ -219,7 +221,7 @@ async fn projector_single_event_type_project_called_during_catchup() {
 async fn projector_context_provides_correct_projection_id() {
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("proj-ctx-id-agg");
     let projection_id = ProjectionId::new("my-projection");
 
@@ -234,7 +236,7 @@ async fn projector_context_provides_correct_projection_id() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -268,7 +270,7 @@ async fn projector_context_provides_correct_projection_id() {
 async fn projector_context_provides_current_sequence() {
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("proj-ctx-seq-agg");
 
     for seq in 1..=3 {
@@ -285,7 +287,7 @@ async fn projector_context_provides_current_sequence() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(ProjectionId::new("proj-ctx-seq"), &persistence, move || {
@@ -315,7 +317,7 @@ async fn projector_context_provides_current_sequence() {
 async fn projector_multiple_event_types_each_receives_correct_event() {
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("proj-multi-agg");
 
     append_counted(&event_store, &agg_id, 1).await;
@@ -330,7 +332,7 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(ProjectionId::new("proj-multi"), &persistence, move || {
@@ -367,7 +369,7 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
 async fn projector_live_event_is_projected_after_catchup() {
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("proj-live-agg");
     let projection_id = ProjectionId::new("proj-live");
 
@@ -379,7 +381,7 @@ async fn projector_live_event_is_projected_after_catchup() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id, &persistence, move || TrackingProjector {
@@ -421,7 +423,7 @@ async fn projector_live_event_is_projected_after_catchup() {
 async fn projector_dispatches_on_the_declaration_a_row_carries_and_not_its_descendants() {
     let system = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("proj-identity-dispatch-agg");
 
     event_store
@@ -446,7 +448,7 @@ async fn projector_dispatches_on_the_declaration_a_row_carries_and_not_its_desce
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(

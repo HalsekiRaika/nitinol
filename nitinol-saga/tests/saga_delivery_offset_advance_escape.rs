@@ -28,8 +28,8 @@
 mod delivery;
 use delivery::{
     append_decided, in_memory_system, operations_of, scope_of, settle, spawn_host, stream_rows,
-    wait_until_loads, wait_until_operations, wait_until_stored, Ledger, RecordingCheckpointStore,
-    RecordingEventStore, SelectiveSaga, REFUSED_SUFFIX,
+    wait_until_loads, wait_until_operations, wait_until_stored, Ledger, RecordingEventStore,
+    RecordingOffsetStore, SelectiveSaga, REFUSED_SUFFIX,
 };
 
 use std::sync::Arc;
@@ -44,7 +44,7 @@ async fn an_operator_moves_a_held_partition_past_the_hold() {
     let (system, aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
 
     let refused_target = format!("escape-target{REFUSED_SUFFIX}");
@@ -53,7 +53,7 @@ async fn an_operator_moves_a_held_partition_past_the_hold() {
     let held = append_decided(&journal, &saga_id, 1, &refused_target, "op-refused").await;
     let behind = append_decided(&journal, &saga_id, 2, live_target.as_str(), "op-behind").await;
 
-    let host = spawn_host::<SelectiveSaga>(&system, &journal, &checkpoints, 1).await;
+    let host = spawn_host::<SelectiveSaga>(&system, &journal, &offsets, 1).await;
     wait_until_loads(&recording, 3, "the host must reach the held record").await;
     settle().await;
 
@@ -63,13 +63,13 @@ async fn an_operator_moves_a_held_partition_past_the_hold() {
         "before the escape, the decision behind the hold is unreachable"
     );
     assert!(
-        checkpoints.stored(&scope_of(0)).is_none_or(|at| at < held),
+        offsets.stored(&scope_of(0)).is_none_or(|at| at < held),
         "before the escape, nothing is recorded as finished"
     );
 
     // When: the operator moves this partition past the held record, on the
     // host that is still running.
-    host.advance_checkpoint(0, held)
+    host.advance_offset(0, held)
         .await
         .expect("moving a held partition forward is the escape this exists for");
 
@@ -82,7 +82,7 @@ async fn an_operator_moves_a_held_partition_past_the_hold() {
     );
     assert_eq!(
         wait_until_stored(
-            &checkpoints,
+            &offsets,
             &scope_of(0),
             behind,
             "progress must move on from the new position"
@@ -104,14 +104,14 @@ async fn moving_a_partition_backwards_is_refused() {
     // Given: a partition that has finished a record.
     let (system, _aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-escape-backwards");
 
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
-    let host = spawn_host::<SelectiveSaga>(&system, &journal, &checkpoints, 1).await;
+    let host = spawn_host::<SelectiveSaga>(&system, &journal, &offsets, 1).await;
     wait_until_stored(
-        &checkpoints,
+        &offsets,
         &scope_of(0),
         position,
         "the decision must be delivered first",
@@ -120,16 +120,16 @@ async fn moving_a_partition_backwards_is_refused() {
 
     // When / Then
     assert!(
-        host.advance_checkpoint(0, position).await.is_err(),
+        host.advance_offset(0, position).await.is_err(),
         "the position is already there, so this moves nothing forward"
     );
     assert!(
-        host.advance_checkpoint(0, position - 1).await.is_err(),
+        host.advance_offset(0, position - 1).await.is_err(),
         "moving a partition backwards would re-deliver a stretch it has \
          finished, so it is refused rather than silently applied"
     );
     assert_eq!(
-        checkpoints.stored(&scope_of(0)),
+        offsets.stored(&scope_of(0)),
         Some(position),
         "a refused move changes nothing"
     );

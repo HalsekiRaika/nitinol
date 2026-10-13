@@ -108,8 +108,8 @@ pub use self::process::{SnapshotPersistor, SnapshotPersistorProxy};
 pub mod test_helpers;
 
 pub use self::projection::{
-    EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, Projector,
-    ProjectorProps, TxProvider,
+    EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, ProjectionId,
+    Projector, ProjectorProps, TxProvider,
 };
 
 pub use self::durable_stream::{

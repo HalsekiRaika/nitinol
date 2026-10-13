@@ -423,7 +423,7 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_polled() {
 
 // Compile-fail coverage
 //
-// Wiring a delivery host from a provider with no delivery-checkpoint slot must
+// Wiring a delivery host from a provider with no saga-offset slot must
 // be a COMPILE ERROR, and so must building a system with no provider at all. An
 // integration test cannot express a call that must not compile, so both are
 // verified via rustdoc compile_fail doctests on the entry points.

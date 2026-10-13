@@ -1,8 +1,8 @@
 mod append;
-mod checkpoint;
 mod failure;
 mod load;
 mod numbering;
+mod offset;
 mod store;
 mod timestamp;
 
@@ -16,13 +16,12 @@ use nitinol_persistence::{
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::PgPool;
 
-pub use self::checkpoint::{CheckpointConflict, PostgresCheckpointStore};
 pub use self::load::UnknownEventType;
+pub use self::offset::{OffsetConflict, PostgresOffsetStore};
 pub use self::store::PostgresStore;
 
-/// This crate's schema — the journal and the projection checkpoints — carried
-/// in the binary so a deployment applies the version of it the code was built
-/// against.
+/// This crate's schema — the journal and the offsets — carried in the binary
+/// so a deployment applies the version of it the code was built against.
 static MIGRATOR: Migrator = sqlx::migrate!();
 
 /// A [`EventStore`] over a Postgres journal.
@@ -62,9 +61,9 @@ impl PostgresEventStore {
     /// was built against.
     ///
     /// That schema is the crate's rather than this store's: the table
-    /// [`PostgresCheckpointStore`] keeps projection checkpoints in is created
-    /// here too, so a deployment running both has one migration step and not
-    /// two that could be applied apart.
+    /// [`PostgresOffsetStore`] keeps offsets in is created here too, so a
+    /// deployment running both has one migration step and not two that could
+    /// be applied apart.
     pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
         MIGRATOR.run(pool).await
     }

@@ -22,16 +22,16 @@
 //!     When a record is written through the supplier's handle
 //!     Then the handle the caller holds is where it landed
 //!
-//!   Scenario: two checkpoint slots over one handle are one data region
-//!     Given a store whose checkpoint slots were named with one handle
+//!   Scenario: two offset slots over one handle are one data region
+//!     Given a store whose offset slots were named with one handle
 //!     When a position is saved through the projection slot
-//!     Then the delivery slot answers with it
+//!     Then the saga slot answers with it
 //!
-//!   Scenario: two checkpoint slots named apart are two data regions
-//!     Given a store whose checkpoint slots were named with two handles
+//!   Scenario: two offset slots named apart are two data regions
+//!     Given a store whose offset slots were named with two handles
 //!     When a position is saved through the projection slot
-//!     Then the delivery slot holds no position
-//!     And a later save through the delivery slot leaves the projection slot's
+//!     Then the saga slot holds no position
+//!     And a later save through the saga slot leaves the projection slot's
 //!         answer where it was
 //! ```
 //!
@@ -47,11 +47,11 @@
 //! shared one global region would pass the clone clauses and fail the
 //! fresh-region clause.
 //!
-//! What the two checkpoint clauses fix is the *configuration*, not the key
+//! What the two offset clauses fix is the *configuration*, not the key
 //! rendering. Both save under one scope, so a store that shared its slots would
 //! fail the separation clause and one that split them would fail the sharing
 //! clause whatever keys the consumers render — the key half of this is the
-//! checkpoint contract's own, fixed by the suite.
+//! offset contract's own, fixed by the suite.
 
 use std::sync::Arc;
 
@@ -59,16 +59,15 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use jiff::Timestamp;
 use nitinol_persistence::provider::{
-    CustomStore, DeliveryCheckpointSlot, DynStore, PersistenceProvider, ProjectionCheckpointSlot,
-    SnapshotSlot, Store,
+    CustomStore, DynStore, PersistenceProvider, ProjectionOffsetSlot, SagaOffsetSlot, SnapshotSlot,
+    Store,
 };
 use nitinol_persistence::store::{
-    CheckpointStore, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
-    InMemorySnapshotStore, InMemoryStore, SnapshotStore,
+    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore, InMemoryStore,
+    OffsetScope, OffsetStore, SnapshotStore,
 };
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, LoadQuery, PersistedSnapshot, ProjectionId,
-    TypeName,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, PersistedSnapshot, TypeName,
 };
 
 /// The one event type these clauses append.
@@ -126,23 +125,19 @@ async fn snapshot_sequence(store: &dyn SnapshotStore, aggregate: &AggregateId) -
 }
 
 /// The position `store` holds for `consumer`, if any.
-async fn position(store: &dyn CheckpointStore<Tx = ()>, consumer: &ProjectionId) -> Option<u64> {
+async fn position(store: &dyn OffsetStore<Tx = ()>, consumer: &OffsetScope) -> Option<u64> {
     store
         .load(consumer)
         .await
-        .expect("loading from a reference checkpoint store succeeds")
+        .expect("loading from a reference offset store succeeds")
 }
 
 /// Save `sequence` for `consumer` through `store`.
-async fn save_position(
-    store: &dyn CheckpointStore<Tx = ()>,
-    consumer: &ProjectionId,
-    sequence: u64,
-) {
+async fn save_position(store: &dyn OffsetStore<Tx = ()>, consumer: &OffsetScope, sequence: u64) {
     store
         .save(consumer, sequence, None)
         .await
-        .expect("saving through a reference checkpoint store succeeds");
+        .expect("saving through a reference offset store succeeds");
 }
 
 // Distribution: a slot taken twice from one supplier
@@ -193,14 +188,14 @@ async fn a_snapshot_store_taken_twice_is_one_store() {
     );
 }
 
-/// The projection-checkpoint slot.
+/// The projection-offset slot.
 #[tokio::test]
-async fn the_projection_checkpoint_slot_taken_twice_is_one_store() {
+async fn the_projection_offset_slot_taken_twice_is_one_store() {
     // Given
     let provider = PersistenceProvider::new(InMemoryStore::default());
-    let first = provider.projection_checkpoints();
-    let second = provider.projection_checkpoints();
-    let projection = ProjectionId::new("provider.projection.taken-twice");
+    let first = provider.projection_offsets();
+    let second = provider.projection_offsets();
+    let projection = OffsetScope::new("provider.projection.taken-twice");
 
     // When
     save_position(&*first, &projection, 11).await;
@@ -209,20 +204,20 @@ async fn the_projection_checkpoint_slot_taken_twice_is_one_store() {
     assert_eq!(
         position(&*second, &projection).await,
         Some(11),
-        "a projection-checkpoint slot taken twice from one supplier is one \
+        "a projection-offset slot taken twice from one supplier is one \
          store: a projector that re-resolved its handle would otherwise resume \
          from nothing and replay from the beginning"
     );
 }
 
-/// The delivery-checkpoint slot.
+/// The saga-offset slot.
 #[tokio::test]
-async fn the_delivery_checkpoint_slot_taken_twice_is_one_store() {
+async fn the_saga_offset_slot_taken_twice_is_one_store() {
     // Given
     let provider = PersistenceProvider::new(InMemoryStore::default());
-    let first = provider.delivery_checkpoints();
-    let second = provider.delivery_checkpoints();
-    let consumer = ProjectionId::new("provider.delivery.taken-twice");
+    let first = provider.saga_offsets();
+    let second = provider.saga_offsets();
+    let consumer = OffsetScope::new("provider.delivery.taken-twice");
 
     // When
     save_position(&*first, &consumer, 13).await;
@@ -231,7 +226,7 @@ async fn the_delivery_checkpoint_slot_taken_twice_is_one_store() {
     assert_eq!(
         position(&*second, &consumer).await,
         Some(13),
-        "a delivery-checkpoint slot taken twice from one supplier is one store"
+        "a saga-offset slot taken twice from one supplier is one store"
     );
 }
 
@@ -247,7 +242,7 @@ async fn a_clone_of_the_supplier_distributes_the_same_slots() {
     let handed_on = provider.clone();
     let stream = AggregateId::new("provider.clone.stream");
     let aggregate = AggregateId::new("provider.clone.aggregate");
-    let consumer = ProjectionId::new("provider.clone.consumer");
+    let consumer = OffsetScope::new("provider.clone.consumer");
 
     // When: every write goes through the original
     append_through(&*provider.event_store(), &stream, b"through-the-original").await;
@@ -256,8 +251,8 @@ async fn a_clone_of_the_supplier_distributes_the_same_slots() {
         .save(a_snapshot(&aggregate, 3, b"state-at-3"))
         .await
         .expect("saving through the original supplier succeeds");
-    save_position(&*provider.projection_checkpoints(), &consumer, 5).await;
-    save_position(&*provider.delivery_checkpoints(), &consumer, 9).await;
+    save_position(&*provider.projection_offsets(), &consumer, 5).await;
+    save_position(&*provider.saga_offsets(), &consumer, 9).await;
 
     // Then: every read through the clone answers with it
     assert_eq!(
@@ -272,15 +267,15 @@ async fn a_clone_of_the_supplier_distributes_the_same_slots() {
          distributes"
     );
     assert_eq!(
-        position(&*handed_on.projection_checkpoints(), &consumer).await,
+        position(&*handed_on.projection_offsets(), &consumer).await,
         Some(5),
         "a supplier's clone distributes the projection slot the original \
          distributes"
     );
     assert_eq!(
-        position(&*handed_on.delivery_checkpoints(), &consumer).await,
+        position(&*handed_on.saga_offsets(), &consumer).await,
         Some(9),
-        "a supplier's clone distributes the delivery slot the original \
+        "a supplier's clone distributes the saga slot the original \
          distributes"
     );
 }
@@ -301,7 +296,7 @@ async fn a_clone_of_the_store_handle_reaches_every_slots_records() {
     let copy = store.clone();
     let stream = AggregateId::new("store.clone.stream");
     let aggregate = AggregateId::new("store.clone.aggregate");
-    let consumer = ProjectionId::new("store.clone.consumer");
+    let consumer = OffsetScope::new("store.clone.consumer");
 
     // When: every write goes through the handles the first store answers with
     append_through(&store.events(), &stream, b"through-the-first-handle").await;
@@ -310,8 +305,8 @@ async fn a_clone_of_the_store_handle_reaches_every_slots_records() {
         .save(a_snapshot(&aggregate, 4, b"state-at-4"))
         .await
         .expect("saving through the first store handle succeeds");
-    save_position(&store.projection_checkpoints(), &consumer, 6).await;
-    save_position(&store.delivery_checkpoints(), &consumer, 10).await;
+    save_position(&store.projection_offsets(), &consumer, 6).await;
+    save_position(&store.saga_offsets(), &consumer, 10).await;
 
     // Then: every read through the clone's handles answers with it
     assert_eq!(
@@ -326,14 +321,14 @@ async fn a_clone_of_the_store_handle_reaches_every_slots_records() {
         "a store handle's clone is the same snapshot store"
     );
     assert_eq!(
-        position(&copy.projection_checkpoints(), &consumer).await,
+        position(&copy.projection_offsets(), &consumer).await,
         Some(6),
         "a store handle's clone is the same projection slot"
     );
     assert_eq!(
-        position(&copy.delivery_checkpoints(), &consumer).await,
+        position(&copy.saga_offsets(), &consumer).await,
         Some(10),
-        "a store handle's clone is the same delivery slot"
+        "a store handle's clone is the same saga slot"
     );
 }
 
@@ -383,13 +378,13 @@ async fn a_clone_of_a_snapshot_store_handle_is_one_store() {
     );
 }
 
-/// The same, for the checkpoint store.
+/// The same, for the offset store.
 #[tokio::test]
-async fn a_clone_of_a_checkpoint_store_handle_is_one_store() {
+async fn a_clone_of_a_offset_store_handle_is_one_store() {
     // Given
-    let store = InMemoryCheckpointStore::default();
+    let store = InMemoryOffsetStore::default();
     let copy = store.clone();
-    let consumer = ProjectionId::new("checkpoint-store.clone.consumer");
+    let consumer = OffsetScope::new("offset-store.clone.consumer");
 
     // When
     save_position(&store, &consumer, 15).await;
@@ -398,7 +393,7 @@ async fn a_clone_of_a_checkpoint_store_handle_is_one_store() {
     assert_eq!(
         position(&copy, &consumer).await,
         Some(15),
-        "a checkpoint store handle's clone reaches the positions the original \
+        "an offset store handle's clone reaches the positions the original \
          holds"
     );
 }
@@ -434,7 +429,7 @@ async fn two_stores_constructed_apart_are_two_data_regions() {
 ///
 /// The handles named here are deliberately of three different types: the
 /// journal erased behind an `Arc`, the snapshot store as the backend's own
-/// value, and one checkpoint handle behind an `Arc`. A store that filled a slot
+/// value, and one offset handle behind an `Arc`. A store that filled a slot
 /// from anywhere but the handle it was named with would fail here while passing
 /// every distribution clause above.
 #[tokio::test]
@@ -442,19 +437,19 @@ async fn an_assembled_store_answers_for_each_handle_it_was_named_with() {
     // Given: handles the caller keeps hold of, and a store assembled over them
     let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let snapshots = InMemorySnapshotStore::default();
-    let checkpoints = Arc::new(InMemoryCheckpointStore::default());
+    let offsets = Arc::new(InMemoryOffsetStore::default());
     let provider = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&events))
             .snapshot(snapshots.clone())
-            .checkpoints(Arc::clone(&checkpoints))
+            .offsets(Arc::clone(&offsets))
             .build(),
     );
 
     let stream = AggregateId::new("custom.configured.stream");
     let aggregate = AggregateId::new("custom.configured.aggregate");
-    let projection = ProjectionId::new("custom.configured.projection");
-    let delivery = ProjectionId::new("custom.configured.delivery");
+    let projection = OffsetScope::new("custom.configured.projection");
+    let delivery = OffsetScope::new("custom.configured.delivery");
 
     // When: every write goes through the supplier's handles
     append_through(&*provider.event_store(), &stream, b"through-the-supplier").await;
@@ -463,8 +458,8 @@ async fn an_assembled_store_answers_for_each_handle_it_was_named_with() {
         .save(a_snapshot(&aggregate, 3, b"state-at-3"))
         .await
         .expect("saving through the supplier's handle succeeds");
-    save_position(&*provider.projection_checkpoints(), &projection, 5).await;
-    save_position(&*provider.delivery_checkpoints(), &delivery, 9).await;
+    save_position(&*provider.projection_offsets(), &projection, 5).await;
+    save_position(&*provider.saga_offsets(), &delivery, 9).await;
 
     // Then: every read goes to the handle the caller named
     assert_eq!(
@@ -479,15 +474,15 @@ async fn an_assembled_store_answers_for_each_handle_it_was_named_with() {
         "the snapshot slot answers for the handle the store was assembled from"
     );
     assert_eq!(
-        position(&*checkpoints, &projection).await,
+        position(&*offsets, &projection).await,
         Some(5),
-        "the projection-checkpoint slot answers for the handle the store was \
+        "the projection-offset slot answers for the handle the store was \
          assembled from"
     );
     assert_eq!(
-        position(&*checkpoints, &delivery).await,
+        position(&*offsets, &delivery).await,
         Some(9),
-        "the delivery-checkpoint slot answers for the handle the store was \
+        "the saga-offset slot answers for the handle the store was \
          assembled from"
     );
 }
@@ -505,12 +500,12 @@ async fn a_clone_of_an_assembled_store_reaches_the_records_of_its_handles() {
     let store = CustomStore::builder()
         .eventstore(Arc::clone(&events))
         .snapshot(InMemorySnapshotStore::default())
-        .checkpoints(Arc::new(InMemoryCheckpointStore::default()))
+        .offsets(Arc::new(InMemoryOffsetStore::default()))
         .build();
     let copy = store.clone();
     let stream = AggregateId::new("custom.clone.stream");
     let aggregate = AggregateId::new("custom.clone.aggregate");
-    let consumer = ProjectionId::new("custom.clone.consumer");
+    let consumer = OffsetScope::new("custom.clone.consumer");
 
     // When
     append_through(&store.events(), &stream, b"through-the-first-handle").await;
@@ -519,7 +514,7 @@ async fn a_clone_of_an_assembled_store_reaches_the_records_of_its_handles() {
         .save(a_snapshot(&aggregate, 12, b"state-at-12"))
         .await
         .expect("saving through the first store handle succeeds");
-    save_position(&store.projection_checkpoints(), &consumer, 14).await;
+    save_position(&store.projection_offsets(), &consumer, 14).await;
 
     // Then
     assert_eq!(
@@ -533,38 +528,38 @@ async fn a_clone_of_an_assembled_store_reaches_the_records_of_its_handles() {
         "an assembled store's clone names the snapshot handle it was built from"
     );
     assert_eq!(
-        position(&copy.projection_checkpoints(), &consumer).await,
+        position(&copy.projection_offsets(), &consumer).await,
         Some(14),
-        "an assembled store's clone names the checkpoint handle it was built \
+        "an assembled store's clone names the offset handle it was built \
          from"
     );
 }
 
-// The two checkpoint slots
+// The two offset slots
 
-/// Naming both checkpoint slots with one handle is allowed and means one data
+/// Naming both offset slots with one handle is allowed and means one data
 /// region: a position saved through one slot is answered through the other.
 ///
 /// That is the shape a single-table backend is deployed in, so a store that
 /// forced the slots apart would have no way to express it.
 #[tokio::test]
-async fn checkpoint_slots_named_with_one_handle_are_one_data_region() {
+async fn offset_slots_named_with_one_handle_are_one_data_region() {
     // Given
-    let shared = Arc::new(InMemoryCheckpointStore::default());
+    let shared = Arc::new(InMemoryOffsetStore::default());
     let provider = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(InMemoryEventStore::default())
-            .checkpoints(Arc::clone(&shared))
+            .offsets(Arc::clone(&shared))
             .build(),
     );
-    let consumer = ProjectionId::new("custom.shared-slots.consumer");
+    let consumer = OffsetScope::new("custom.shared-slots.consumer");
 
     // When
-    save_position(&*provider.projection_checkpoints(), &consumer, 21).await;
+    save_position(&*provider.projection_offsets(), &consumer, 21).await;
 
     // Then
     assert_eq!(
-        position(&*provider.delivery_checkpoints(), &consumer).await,
+        position(&*provider.saga_offsets(), &consumer).await,
         Some(21),
         "slots named with one handle reach one data region: sharing the \
          implementation is what a single-table deployment is, and the store has \
@@ -572,7 +567,7 @@ async fn checkpoint_slots_named_with_one_handle_are_one_data_region() {
     );
 }
 
-/// Naming the checkpoint slots with handles of their own means two data
+/// Naming the offset slots with handles of their own means two data
 /// regions: neither slot answers for what the other holds, and initialising one
 /// leaves the other's answer where it was.
 ///
@@ -580,37 +575,37 @@ async fn checkpoint_slots_named_with_one_handle_are_one_data_region() {
 /// it moving — the slot the projector reads is replaced, and the slot the
 /// delivery host reads is not.
 #[tokio::test]
-async fn checkpoint_slots_named_apart_are_separate_data_regions() {
+async fn offset_slots_named_apart_are_separate_data_regions() {
     // Given
-    let projection_slot = Arc::new(InMemoryCheckpointStore::default());
-    let delivery_slot = Arc::new(InMemoryCheckpointStore::default());
+    let projection_slot = Arc::new(InMemoryOffsetStore::default());
+    let delivery_slot = Arc::new(InMemoryOffsetStore::default());
     let provider = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(InMemoryEventStore::default())
-            .projection_checkpoints(Arc::clone(&projection_slot))
-            .delivery_checkpoints(Arc::clone(&delivery_slot))
+            .projection_offsets(Arc::clone(&projection_slot))
+            .saga_offsets(Arc::clone(&delivery_slot))
             .build(),
     );
-    let consumer = ProjectionId::new("custom.separate-slots.consumer");
+    let consumer = OffsetScope::new("custom.separate-slots.consumer");
 
     // When: only the projection slot is written
-    save_position(&*provider.projection_checkpoints(), &consumer, 31).await;
+    save_position(&*provider.projection_offsets(), &consumer, 31).await;
 
     // Then
     assert_eq!(
-        position(&*provider.delivery_checkpoints(), &consumer).await,
+        position(&*provider.saga_offsets(), &consumer).await,
         None,
         "a slot named with a handle of its own holds no position another slot \
          was written with; a store answering both slots from one handle would \
          have a delivery host resume from a projection's position"
     );
 
-    // And: writing the delivery slot afterwards leaves the projection slot's
+    // And: writing the saga slot afterwards leaves the projection slot's
     // answer where it was.
-    save_position(&*provider.delivery_checkpoints(), &consumer, 37).await;
+    save_position(&*provider.saga_offsets(), &consumer, 37).await;
 
     assert_eq!(
-        position(&*provider.projection_checkpoints(), &consumer).await,
+        position(&*provider.projection_offsets(), &consumer).await,
         Some(31),
         "a write to one slot does not change the other's answer, which is the \
          whole of what independent initialisation and recovery rests on"

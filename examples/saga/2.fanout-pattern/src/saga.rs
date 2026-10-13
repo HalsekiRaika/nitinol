@@ -11,9 +11,9 @@
 //!   what it answers.
 //!
 //! What that split buys is the crash story.  The decision is durable before
-//! anything is delivered, and the only progress the host keeps is a checkpoint
+//! anything is delivered, and the only progress the host keeps is an offset
 //! it moves *after* the deliveries a record implied have landed.  So a host that
-//! dies part-way through a fan-out resumes from a checkpoint still standing
+//! dies part-way through a fan-out resumes from an offset still standing
 //! below the decision, re-derives all 32 commands from it, and carries the
 //! remaining ones — plus the ones it already carried, which the payslips absorb.
 //! Nothing of the fan-out is durable state that could fall out of step with the

@@ -17,10 +17,10 @@
 //!   When the kit's snapshot verification is run
 //!   Then it fails, naming SNAP-3
 //!
-//! Scenario: a checkpoint store that cannot tell "never started" from "at zero"
+//! Scenario: an offset store that cannot tell "never started" from "at zero"
 //!   Given a store answering an unsaved scope with a position of zero
-//!   When the kit's deterministic checkpoint verification is run
-//!   Then it fails, naming CKP-1
+//!   When the kit's deterministic offset verification is run
+//!   Then it fails, naming OFS-1
 //!
 //! Scenario: a store that hands out a journal of its own per call
 //!   Given a store answering every journal request with a new store
@@ -32,7 +32,7 @@
 //!   When the kit's supplier verification is run
 //!   Then it fails, naming PRV-1
 //!
-//! Scenario: a store whose checkpoint slots cannot be told apart
+//! Scenario: a store whose offset slots cannot be told apart
 //!   Given a store with one position for every key in both slots
 //!   When the kit's slot-independence verification is run
 //!   Then it fails, naming PRV-4
@@ -49,7 +49,7 @@
 //! also why a probabilistic stress run is not on its own evidence that the kit
 //! would have caught anything.
 //!
-//! The snapshot and checkpoint faults below are constructed in the same sense:
+//! The snapshot and offset faults below are constructed in the same sense:
 //! each store answers the same way however a run is scheduled, so the clause
 //! that catches it does so every time.
 //!
@@ -59,17 +59,17 @@
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    CheckpointFault, Fault, FaultyCheckpointStore, FaultyProvider, FaultySnapshotStore,
-    FaultyStore, ProviderWithCloneThatSplitsTheWorld, ProviderWithCollidingCheckpointSlots,
-    SnapshotFault, TokioExecutor,
+    Fault, FaultyOffsetStore, FaultyProvider, FaultySnapshotStore, FaultyStore, OffsetFault,
+    ProviderWithCloneThatSplitsTheWorld, ProviderWithCollidingOffsetSlots, SnapshotFault,
+    TokioExecutor,
 };
 
 use nitinol_store_conformance::{
-    checkpoint, provider, snapshot, verify_deterministic, verify_under_concurrency,
+    offset, provider, snapshot, verify_deterministic, verify_under_concurrency,
 };
 
 /// A `global_sequence` handed out before the commit it belongs to becomes
-/// visible below a checkpoint the reader has already passed, so the event is
+/// visible below an offset the reader has already passed, so the event is
 /// never read and nothing reports it. The concurrency clause must name that
 /// silent loss OCC-5.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -150,10 +150,10 @@ async fn one_slot_for_every_aggregate_is_reported_as_a_snap_4_violation() {
 /// consumer that really did stop at zero, which is the distinction a consumer
 /// deciding where to resume from rests on.
 #[tokio::test]
-#[should_panic(expected = "CKP-1")]
-async fn reading_an_unsaved_scope_as_zero_is_reported_as_a_ckp_1_violation() {
-    checkpoint::verify_deterministic(&FaultyCheckpointStore::injecting(
-        CheckpointFault::ReadTheUnsavedScopeAsZero,
+#[should_panic(expected = "OFS-1")]
+async fn reading_an_unsaved_scope_as_zero_is_reported_as_a_ofs_1_violation() {
+    offset::verify_deterministic(&FaultyOffsetStore::injecting(
+        OffsetFault::ReadTheUnsavedScopeAsZero,
     ))
     .await;
 }
@@ -162,10 +162,10 @@ async fn reading_an_unsaved_scope_as_zero_is_reported_as_a_ckp_1_violation() {
 /// so the position it saves skips numbers. A store that took only the next one
 /// would refuse every save such a consumer makes.
 #[tokio::test]
-#[should_panic(expected = "CKP-3")]
-async fn refusing_a_position_that_skips_numbers_is_reported_as_a_ckp_3_violation() {
-    checkpoint::verify_deterministic(&FaultyCheckpointStore::injecting(
-        CheckpointFault::TakeOnlyTheSequenceAfterTheStoredOne,
+#[should_panic(expected = "OFS-3")]
+async fn refusing_a_position_that_skips_numbers_is_reported_as_a_ofs_3_violation() {
+    offset::verify_deterministic(&FaultyOffsetStore::injecting(
+        OffsetFault::TakeOnlyTheSequenceAfterTheStoredOne,
     ))
     .await;
 }
@@ -173,10 +173,10 @@ async fn refusing_a_position_that_skips_numbers_is_reported_as_a_ckp_3_violation
 /// A store with one slot for every scope has each consumer resume from wherever
 /// another one had got to.
 #[tokio::test]
-#[should_panic(expected = "CKP-5")]
-async fn one_slot_for_every_scope_is_reported_as_a_ckp_5_violation() {
-    checkpoint::verify_deterministic(&FaultyCheckpointStore::injecting(
-        CheckpointFault::OneSlotForEveryScope,
+#[should_panic(expected = "OFS-5")]
+async fn one_slot_for_every_scope_is_reported_as_a_ofs_5_violation() {
+    offset::verify_deterministic(&FaultyOffsetStore::injecting(
+        OffsetFault::OneSlotForEveryScope,
     ))
     .await;
 }
@@ -186,10 +186,10 @@ async fn one_slot_for_every_scope_is_reported_as_a_ckp_5_violation() {
 /// keeps its key from meeting a projection's. A store that read the namespace as
 /// something to validate would keep those consumers from recording anything.
 #[tokio::test]
-#[should_panic(expected = "CKP-5")]
-async fn refusing_a_reserved_namespace_key_is_reported_as_a_ckp_5_violation() {
-    checkpoint::verify_deterministic(&FaultyCheckpointStore::injecting(
-        CheckpointFault::RefuseAKeyInsideTheReservedNamespace,
+#[should_panic(expected = "OFS-5")]
+async fn refusing_a_reserved_namespace_key_is_reported_as_a_ofs_5_violation() {
+    offset::verify_deterministic(&FaultyOffsetStore::injecting(
+        OffsetFault::RefuseAKeyInsideTheReservedNamespace,
     ))
     .await;
 }
@@ -214,12 +214,12 @@ async fn a_clone_that_names_a_region_of_its_own_is_reported_as_a_prv_1_violation
     provider::verify_event_store(&ProviderWithCloneThatSplitsTheWorld, &TokioExecutor).await;
 }
 
-/// Naming both checkpoint slots with one handle is allowed, so the clause
+/// Naming both offset slots with one handle is allowed, so the clause
 /// cannot be about the store being shared. What it is about is the two
 /// consumers being told apart inside it — and a store with one position for
 /// every key tells them apart nowhere.
 #[tokio::test]
 #[should_panic(expected = "PRV-4")]
-async fn checkpoint_slots_that_cannot_be_told_apart_are_reported_as_a_prv_4_violation() {
-    provider::verify_checkpoint_independence(&ProviderWithCollidingCheckpointSlots).await;
+async fn offset_slots_that_cannot_be_told_apart_are_reported_as_a_prv_4_violation() {
+    provider::verify_offset_independence(&ProviderWithCollidingOffsetSlots).await;
 }

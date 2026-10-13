@@ -35,7 +35,7 @@
 //!      released one took, so while the released trait item exists both
 //!      candidates are applicable at the same autoref step — the ambiguity
 //!      (E0034) that fails the build. The store below supplies a delivery
-//!      checkpoint slot, which is what keeps the `saga_delivery_props`
+//!      offset slot, which is what keeps the `saga_delivery_props`
 //!      candidate applicable: a store with no slot would leave the released
 //!      method out of scope and the probe resolving while it still existed.
 //!    - For the *inherent* `subscribed_to` an inherent method wins method
@@ -231,7 +231,7 @@ fn manager_props() -> SagaManagerProps<ProbeSaga> {
 }
 
 /// A system over a store that supplies every slot, including the delivery
-/// checkpoint slot the withdrawn `saga_delivery_props` required.
+/// offset slot the withdrawn `saga_delivery_props` required.
 async fn system() -> EventSourceSystem<InMemoryStore> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
@@ -281,7 +281,7 @@ async fn the_withdrawn_system_entry_names_belong_to_downstream_definitions() {
 
 /// Given a blanket extension trait that claims the withdrawn
 /// `saga_delivery_props` name, When it is called on a system whose store
-/// supplies the delivery checkpoint slot, Then it resolves to the extension —
+/// supplies the saga-offset slot, Then it resolves to the extension —
 /// `deliver` is the delivery host's verb.
 #[tokio::test]
 async fn the_withdrawn_delivery_entry_name_belongs_to_downstream_definitions() {
@@ -292,7 +292,7 @@ async fn the_withdrawn_delivery_entry_name_belongs_to_downstream_definitions() {
         PROBE_LABEL,
         "`SagaDeliveryExt` must not name its entry point `saga_delivery_props` \
          any more: the delivery host is started by `deliver`, symmetric with \
-         `host`, and the typestate that refuses a provider with no checkpoint \
+         `host`, and the typestate that refuses a provider with no offset \
          slot moves with it"
     );
 }

@@ -17,7 +17,7 @@ const PRIME: u64 = 0x0000_0100_0000_01b3;
 ///
 /// # Why the hash is written out here
 ///
-/// The answer is part of a persisted key — a partition's checkpoint — so an
+/// The answer is part of a persisted key — a partition's offset — so an
 /// assignment that moved between two runs of one deployment would have a
 /// partition resume from a position belonging to a different set of streams.
 /// `std`'s default hasher promises nothing across builds or across processes:

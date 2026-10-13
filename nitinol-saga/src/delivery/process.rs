@@ -13,13 +13,13 @@ use futures_util::{FutureExt, StreamExt};
 use nitinol_eventsource::codec;
 use nitinol_eventsource::system::SystemHandle;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{CheckpointStore, EventStore};
+use nitinol_persistence::store::{EventStore, OffsetScope, OffsetStore};
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 use nitinol_runtime::error::HandlerError;
 use nitinol_runtime::process::{Driver, Process, ProcessContext, Receive};
 
 use crate::delivery::error::SagaDeliveryError;
-use crate::delivery::id::{SagaDeliveryId, SagaDeliveryScope};
+use crate::delivery::id::SagaDeliveryId;
 use crate::delivery::outcome::{Hold, HoldCause, RecordOutcome, TickOutcome};
 use crate::delivery::partition::partition_of;
 use crate::saga::Saga;
@@ -58,18 +58,18 @@ struct Position {
 /// write the running partition did not see would leave it reading from where it
 /// was, so the operation would appear to work and change nothing until the next
 /// restart.
-pub(crate) struct AdvanceCheckpoint {
+pub(crate) struct AdvanceOffset {
     pub(crate) to: u64,
 }
 
 /// One partition of a delivery host.
-pub struct SagaDeliveryPartition<S: Saga, Cs: CheckpointStore> {
+pub struct SagaDeliveryPartition<S: Saga, Cs: OffsetStore> {
     delivery_id: SagaDeliveryId,
     partition: usize,
     partitions: NonZeroUsize,
-    scope: SagaDeliveryScope,
+    scope: OffsetScope,
     journal: Arc<dyn EventStore>,
-    checkpoints: Arc<Cs>,
+    offsets: Arc<Cs>,
     system: SystemHandle,
     poll_interval: Duration,
     /// Absent until the recorded progress has been read.
@@ -89,24 +89,24 @@ pub struct SagaDeliveryPartition<S: Saga, Cs: CheckpointStore> {
 impl<S, Cs> SagaDeliveryPartition<S, Cs>
 where
     S: Saga,
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
     pub(crate) fn new(
         delivery_id: SagaDeliveryId,
         partition: usize,
         partitions: NonZeroUsize,
         journal: Arc<dyn EventStore>,
-        checkpoints: Arc<Cs>,
+        offsets: Arc<Cs>,
         system: SystemHandle,
         poll_interval: Duration,
     ) -> Self {
         Self {
-            scope: SagaDeliveryScope::new(&delivery_id, partition),
+            scope: delivery_id.offset_scope(partition),
             delivery_id,
             partition,
             partitions,
             journal,
-            checkpoints,
+            offsets,
             system,
             poll_interval,
             position: None,
@@ -211,7 +211,7 @@ where
         if let Some(position) = self.position {
             return Ok(position);
         }
-        match self.checkpoints.load(&self.scope).await {
+        match self.offsets.load(&self.scope).await {
             Ok(stored) => {
                 let at = stored.unwrap_or(0);
                 let position = Position {
@@ -235,11 +235,7 @@ where
         if position.cursor <= position.durable {
             return None;
         }
-        match self
-            .checkpoints
-            .save(&self.scope, position.cursor, None)
-            .await
-        {
+        match self.offsets.save(&self.scope, position.cursor, None).await {
             Ok(()) => {
                 position.durable = position.cursor;
                 None
@@ -298,14 +294,14 @@ where
 impl<S, Cs> Process for SagaDeliveryPartition<S, Cs>
 where
     S: Saga,
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
 }
 
-impl<S, Cs> Receive<AdvanceCheckpoint> for SagaDeliveryPartition<S, Cs>
+impl<S, Cs> Receive<AdvanceOffset> for SagaDeliveryPartition<S, Cs>
 where
     S: Saga,
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
     type Response = ();
     type Error = SagaDeliveryError;
@@ -316,7 +312,7 @@ where
     /// move the store refused changes nothing here either.
     async fn recv(
         &mut self,
-        msg: AdvanceCheckpoint,
+        msg: AdvanceOffset,
         _ctx: &mut ProcessContext<Self>,
     ) -> Result<(), SagaDeliveryError> {
         let partition = self.partition;
@@ -341,7 +337,7 @@ where
             });
         }
 
-        self.checkpoints
+        self.offsets
             .save(&self.scope, msg.to, None)
             .await
             .map_err(|failure| SagaDeliveryError::NotRecorded {
@@ -374,12 +370,12 @@ where
 /// Sleep first, then poll: a partition spawned over a journal it has already
 /// finished with does not read it before the wiring that started it has
 /// returned.
-pub struct PartitionDriver<S: Saga, Cs: CheckpointStore> {
+pub struct PartitionDriver<S: Saga, Cs: OffsetStore> {
     interval: Duration,
     _process: PhantomData<fn() -> (S, Cs)>,
 }
 
-impl<S: Saga, Cs: CheckpointStore> PartitionDriver<S, Cs> {
+impl<S: Saga, Cs: OffsetStore> PartitionDriver<S, Cs> {
     pub(crate) fn new(interval: Duration) -> Self {
         Self {
             interval,
@@ -391,7 +387,7 @@ impl<S: Saga, Cs: CheckpointStore> PartitionDriver<S, Cs> {
 impl<S, Cs> Driver<SagaDeliveryPartition<S, Cs>> for PartitionDriver<S, Cs>
 where
     S: Saga,
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
     type Event = ();
 

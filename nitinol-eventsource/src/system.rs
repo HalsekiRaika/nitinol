@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
+use crate::projection::ProjectionId;
 use nitinol_contract::Aggregate;
 use nitinol_persistence::provider::{
-    DynStore, PersistenceProvider, ProjectionCheckpointSlot, SnapshotSlot, Store,
+    DynStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
 };
-use nitinol_persistence::{AggregateId, ProjectionId};
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use tokio::sync::OnceCell;
 
@@ -151,7 +152,7 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
 /// |---|---|
 /// | the journal ([`Store`]) | [`spawn_aggregate`][Self::spawn_aggregate] / [`aggregate_props`][Self::aggregate_props] / [`aggregate_proxy`][Self::aggregate_proxy] |
 /// | a snapshot store ([`SnapshotSlot`]) | [`snapshot_persistor`][Self::snapshot_persistor] |
-/// | projection checkpoints ([`ProjectionCheckpointSlot`]) | [`projector_props`][Self::projector_props] |
+/// | projection offsets ([`ProjectionOffsetSlot`]) | [`projector_props`][Self::projector_props] |
 ///
 /// A slot the store does not hold is a **compile error** at the wiring that
 /// needs it, rather than a failure at the first save — which is the whole of
@@ -397,9 +398,9 @@ impl<St: SnapshotSlot> EventSourceSystem<St> {
     }
 }
 
-impl<St: ProjectionCheckpointSlot> EventSourceSystem<St> {
+impl<St: ProjectionOffsetSlot> EventSourceSystem<St> {
     /// Return a [`ProjectorProps`] over the journal and the projection
-    /// checkpoints the store holds, carrying this system as where it starts.
+    /// offsets the store holds, carrying this system as where it starts.
     ///
     /// Both slots are resolved here, so a projector built from a system follows
     /// the same journal its aggregates write to and records its position where
@@ -407,18 +408,18 @@ impl<St: ProjectionCheckpointSlot> EventSourceSystem<St> {
     ///
     /// # Typestate
     ///
-    /// This exists only where the store holds projection checkpoints:
+    /// This exists only where the store holds projection offsets:
     ///
     /// ```compile_fail
     /// # use nitinol_eventsource::system::EventSourceSystem;
     /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
     /// # use nitinol_persistence::store::InMemoryEventStore;
-    /// # use nitinol_persistence::ProjectionId;
+    /// # use nitinol_eventsource::ProjectionId;
     /// # use nitinol_runtime::ProcessSystem;
     /// # struct ReadModel;
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// // no `projection_checkpoints` — this store has no projection slot
+    /// // no `projection_offsets` — this store has no projection slot
     /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
@@ -432,7 +433,7 @@ impl<St: ProjectionCheckpointSlot> EventSourceSystem<St> {
         producer: impl Fn() -> Proj + Send + Sync + 'static,
     ) -> ProjectorProps<
         Proj,
-        St::ProjectionCheckpoints,
+        St::ProjectionOffsets,
         (),
         crate::projection::EventUnset,
         crate::projection::OriginUnset,

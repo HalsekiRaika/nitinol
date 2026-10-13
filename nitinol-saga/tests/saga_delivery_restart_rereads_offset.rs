@@ -23,7 +23,7 @@
 mod delivery;
 use delivery::{
     delivery_id, delivery_persistence, in_memory_system, partition_count, scope_of,
-    wait_until_loads, DeliverySaga, LoadFault, RecordingCheckpointStore, RecordingEventStore,
+    wait_until_loads, DeliverySaga, LoadFault, RecordingEventStore, RecordingOffsetStore,
 };
 
 use std::sync::Arc;
@@ -48,11 +48,11 @@ async fn a_restarted_partition_resumes_from_the_position_now_recorded() {
     let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     recording.fault_on(FAILING_CALL, LoadFault::Panic);
 
-    let _host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingCheckpointStore>>::new(
-        &delivery_persistence(&journal, &checkpoints),
+    let _host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingOffsetStore>>::new(
+        &delivery_persistence(&journal, &offsets),
     )
     .with_delivery_id(delivery_id())
     .with_partitions(partition_count(1))
@@ -63,7 +63,7 @@ async fn a_restarted_partition_resumes_from_the_position_now_recorded() {
     wait_until_loads(&recording, 1, "the partition must start polling").await;
 
     // And: the recorded position moves on while the partition is running.
-    checkpoints.put(&scope_of(0), MOVED_ON_TO);
+    offsets.put(&scope_of(0), MOVED_ON_TO);
 
     // When: the next-but-one load takes the partition down, and supervision
     // brings it back.

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use nitinol_eventsource::system::{EventSourceSystem, Hosted, SystemHandle, Unhosted};
 use nitinol_eventsource::Event;
-use nitinol_persistence::provider::{DeliveryCheckpointSlot, PersistenceProvider, Store};
-use nitinol_persistence::store::{CheckpointStore, EventStore};
+use nitinol_persistence::provider::{PersistenceProvider, SagaOffsetSlot, Store};
+use nitinol_persistence::store::{EventStore, OffsetStore};
 use nitinol_runtime::process::SupervisionStrategy;
 use nitinol_runtime::{IdleTimeout, Props};
 
@@ -45,34 +45,34 @@ const RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// This type is where the delivery guarantee is written down. Everything else
 /// in the crate that needs it links here rather than restating it.
 ///
-/// # Delivery is at-least-once, and the checkpoint is where that comes from
+/// # Delivery is at-least-once, and the offset is where that comes from
 ///
 /// A host is a pull consumer of the saga's own stream, and the only thing it
-/// keeps is how far it has finished: the checkpoint. Delivering and recording
+/// keeps is how far it has finished: the offset. Delivering and recording
 /// are two writes to two stores, and nothing makes them one — so the order is
 /// fixed and the window is the consequence. A record's deliveries are carried
-/// out first and the checkpoint moves past it only once every one of them has
-/// landed. A host that died in between resumes from the checkpoint it last
+/// out first and the offset moves past it only once every one of them has
+/// landed. A host that died in between resumes from the offset it last
 /// recorded and carries the same deliveries again.
 ///
 /// That window is the whole of why delivery is at-least-once, and it is why
-/// there is no mode to pick: at-most-once would mean moving the checkpoint
+/// there is no mode to pick: at-most-once would mean moving the offset
 /// before the command is sent, which loses a delivery to the same crash
 /// instead of repeating one; exactly-once would need the receiver's write and
-/// the checkpoint in one transaction across two stores, which nitinol does not
+/// the offset in one transaction across two stores, which nitinol does not
 /// offer and does not pretend to. Receivers are therefore written to recognise
 /// a repeat, from the operation id the domain put on the command — the saga
 /// author's own data, since the framework attaches no envelope of its own.
 ///
 /// A repeat is not only a crash's doing. Changing the partition count
-/// reassigns stream keys across checkpoints (below), and
-/// [`SagaDeliveryProxy::advance_checkpoint`](crate::SagaDeliveryProxy) is an
+/// reassigns stream keys across offsets (below), and
+/// [`SagaDeliveryProxy::advance_offset`](crate::SagaDeliveryProxy) is an
 /// operator moving one by hand.
 ///
 /// # Holding, and what it means
 ///
 /// A delivery the receiver did not carry out is not passed over. The partition
-/// holds: it stops advancing its checkpoint, retries the same record, and says
+/// holds: it stops advancing its offset, retries the same record, and says
 /// so through `tracing`. Nothing is skipped for failing, however permanently —
 /// a command silently dropped because its target refused it is a decision the
 /// saga made and nobody carried out, with nothing left to say so.
@@ -80,8 +80,8 @@ const RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// What a hold costs is the records behind it on the same partition: they wait.
 /// [`with_partitions`](Self::with_partitions) is how far that reaches — a hold
 /// is confined to the instances of one partition, each with its own
-/// checkpoint — and
-/// [`advance_checkpoint`](crate::SagaDeliveryProxy::advance_checkpoint) is the
+/// offset — and
+/// [`advance_offset`](crate::SagaDeliveryProxy::advance_offset) is the
 /// operator's way past one, which is a decision to abandon that delivery and is
 /// written down as such.
 ///
@@ -133,9 +133,9 @@ const RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// and taken from
 /// [`SagaDeliveryExt::deliver`](crate::SagaDeliveryExt::deliver) they are
 /// [`Hosted`] and `spawn` names nothing.
-pub struct SagaDeliveryProps<S: Saga, Cs: CheckpointStore, H = Unhosted> {
+pub struct SagaDeliveryProps<S: Saga, Cs: OffsetStore, H = Unhosted> {
     journal: Arc<dyn EventStore>,
-    checkpoints: Arc<Cs>,
+    offsets: Arc<Cs>,
     delivery_id: Option<SagaDeliveryId>,
     partitions: NonZeroUsize,
     poll_interval: Duration,
@@ -146,28 +146,28 @@ pub struct SagaDeliveryProps<S: Saga, Cs: CheckpointStore, H = Unhosted> {
 impl<S, Cs> SagaDeliveryProps<S, Cs, Unhosted>
 where
     S: Saga,
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
     /// Begin wiring a host over the two slots `persistence` distributes.
     ///
     /// The journal is the store the saga's own decisions were persisted to,
-    /// which is the host's whole input, and the delivery-checkpoint slot is
+    /// which is the host's whole input, and the saga-offset slot is
     /// where its progress is recorded. A provider may have configured that slot
     /// with the same store a projection records to: the keys cannot collide, so
     /// the table is shared — and replacing the store the projection slot is
     /// configured with still leaves this one alone.
     ///
-    /// A provider supplying no delivery slot is refused here rather than when
+    /// A provider supplying no saga slot is refused here rather than when
     /// the host first tries to record where it got to; the typestate doctest on
     /// [`SagaDeliveryExt::deliver`](crate::SagaDeliveryExt::deliver) fixes
     /// that, and a deployment with a system reaches this wiring through it.
     pub fn new<St>(persistence: &PersistenceProvider<St>) -> Self
     where
-        St: DeliveryCheckpointSlot<DeliveryCheckpoints = Cs>,
+        St: SagaOffsetSlot<SagaOffsets = Cs>,
     {
         Self {
             journal: persistence.event_store(),
-            checkpoints: persistence.delivery_checkpoints(),
+            offsets: persistence.saga_offsets(),
             delivery_id: None,
             partitions: DEFAULT_PARTITIONS,
             poll_interval: DEFAULT_POLL_INTERVAL,
@@ -181,7 +181,7 @@ where
     pub(crate) fn hosted(self, host: SystemHandle) -> SagaDeliveryProps<S, Cs, Hosted> {
         SagaDeliveryProps {
             journal: self.journal,
-            checkpoints: self.checkpoints,
+            offsets: self.offsets,
             delivery_id: self.delivery_id,
             partitions: self.partitions,
             poll_interval: self.poll_interval,
@@ -194,7 +194,7 @@ where
 impl<S, Cs, H> SagaDeliveryProps<S, Cs, H>
 where
     S: Saga,
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
     /// Name this host, so its recorded progress is filed under `id`.
     ///
@@ -250,7 +250,7 @@ where
         for partition in 0..self.partitions.get() {
             let delivery_id = delivery_id.clone();
             let journal = Arc::clone(&self.journal);
-            let checkpoints = Arc::clone(&self.checkpoints);
+            let offsets = Arc::clone(&self.offsets);
             let system_for_partition = host.clone();
             let partitions = self.partitions;
             let poll_interval = self.poll_interval;
@@ -265,7 +265,7 @@ where
                     partition,
                     partitions,
                     Arc::clone(&journal),
-                    Arc::clone(&checkpoints),
+                    Arc::clone(&offsets),
                     system_for_partition.clone(),
                     poll_interval,
                 )
@@ -292,7 +292,7 @@ where
 impl<S, Cs> SagaDeliveryProps<S, Cs, Unhosted>
 where
     S: Saga,
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
     /// Start the host, delivering through `system`, and answer the handle an
     /// operator reaches it through.
@@ -312,11 +312,11 @@ where
 impl<S, Cs> SagaDeliveryProps<S, Cs, Hosted>
 where
     S: Saga,
-    Cs: CheckpointStore + 'static,
+    Cs: OffsetStore + 'static,
 {
     /// Start the host on the system these props came from.
     ///
-    /// Nothing is named here: the journal, the delivery slot and the system
+    /// Nothing is named here: the journal, the saga slot and the system
     /// the deliveries are carried out on are all that system's.
     pub async fn spawn(self) -> SagaDeliveryProxy<S> {
         let host = self.host.system().clone();

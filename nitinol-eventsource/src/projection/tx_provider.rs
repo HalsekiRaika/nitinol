@@ -6,10 +6,10 @@ use async_trait::async_trait;
 /// [`crate::ProjectorProps::with_tx_provider`] fixes the delivery mode to
 /// `ExactlyOnce`. For each event the projector process calls [`begin`] to
 /// get a transaction, runs [`crate::Projector::project`] against that
-/// transaction, saves the checkpoint inside the same transaction, then calls
-/// [`commit`]. If [`begin`], `project` or the checkpoint save fails, the event
+/// transaction, saves the offset inside the same transaction, then calls
+/// [`commit`]. If [`begin`], `project` or the offset save fails, the event
 /// is left unapplied: any transaction that was started is handed to
-/// [`rollback`], the checkpoint is not advanced, and the subscription cursor
+/// [`rollback`], the offset is not advanced, and the subscription cursor
 /// stays put so the same event is redelivered on the next poll.
 ///
 /// # A failed `commit` is treated as uncommitted
@@ -21,7 +21,7 @@ use async_trait::async_trait;
 /// where the transaction may well have landed.  The framework cannot tell them
 /// apart, and there is nothing left to hand to [`rollback`].
 ///
-/// Both are treated as **not committed**: the checkpoint stays where it was and
+/// Both are treated as **not committed**: the offset stays where it was and
 /// the event is redelivered.  The alternative — assuming the commit landed —
 /// loses the event permanently whenever it did not.  The cost is that an
 /// `ExactlyOnce` projector degrades to at-least-once across an unknown commit:

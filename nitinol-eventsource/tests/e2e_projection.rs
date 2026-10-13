@@ -9,13 +9,13 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
-    ProjectionContext, Projector,
+    ProjectionContext, ProjectionId, Projector,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
-    CheckpointStore, DeliveryMode, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
+    DeliveryMode, EventStore, InMemoryEventStore, InMemoryOffsetStore, OffsetScope, OffsetStore,
 };
-use nitinol_persistence::{AggregateId, EventType, Family, ProjectionId, TypeName};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -100,17 +100,17 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
     .unwrap_or_else(|_| panic!("timed out waiting for {expected} project() calls"));
 }
 
-async fn wait_for_checkpoint(
-    store: &Arc<InMemoryCheckpointStore>,
+async fn wait_for_offset(
+    store: &Arc<InMemoryOffsetStore>,
     projection_id: &ProjectionId,
     expected: Option<u64>,
 ) {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let current = store
-                .load(projection_id)
+                .load(&OffsetScope::from(projection_id))
                 .await
-                .expect("checkpoint load must succeed");
+                .expect("offset load must succeed");
             if current == expected {
                 return;
             }
@@ -118,19 +118,19 @@ async fn wait_for_checkpoint(
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("timed out waiting for checkpoint to reach {:?}", expected));
+    .unwrap_or_else(|_| panic!("timed out waiting for offset to reach {:?}", expected));
 }
 
 #[tokio::test]
 async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
     let ps = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-                .projection_checkpoints(Arc::clone(&checkpoint_store))
+                .projection_offsets(Arc::clone(&offset_store))
                 .build(),
         ))
         .build();
@@ -168,12 +168,12 @@ async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
 async fn e2e_live_projection_sees_published_event_envelope() {
     let ps = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-                .projection_checkpoints(Arc::clone(&checkpoint_store))
+                .projection_offsets(Arc::clone(&offset_store))
                 .build(),
         ))
         .build();
@@ -208,15 +208,15 @@ async fn e2e_live_projection_sees_published_event_envelope() {
 }
 
 #[tokio::test]
-async fn e2e_at_most_once_delivery_advances_checkpoint_before_project() {
+async fn e2e_at_most_once_delivery_advances_offset_before_project() {
     let ps = ProcessSystem::new().await;
     let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-                .projection_checkpoints(Arc::clone(&checkpoint_store))
+                .projection_offsets(Arc::clone(&offset_store))
                 .build(),
         ))
         .build();
@@ -250,5 +250,5 @@ async fn e2e_at_most_once_delivery_advances_checkpoint_before_project() {
         "AtMostOnce: project() must be called for each of the 2 events"
     );
 
-    wait_for_checkpoint(&checkpoint_store, &projection_id, Some(2)).await;
+    wait_for_offset(&offset_store, &projection_id, Some(2)).await;
 }

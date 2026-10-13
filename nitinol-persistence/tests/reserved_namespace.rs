@@ -18,8 +18,8 @@ use nitinol_persistence::__private::{
     event_registry_from_entries, reserved_event_registry_entry, reserved_family,
 };
 use nitinol_persistence::{
-    is_within_reserved_namespace, AggregateId, EventRegistryEntry, EventType, Family, ProjectionId,
-    TypeName, RESERVED_NAMESPACE,
+    is_within_reserved_namespace, AggregateId, EventRegistryEntry, EventType, Family, TypeName,
+    RESERVED_NAMESPACE,
 };
 
 /// Names inside the reserved namespace, and names outside it that a naive
@@ -104,11 +104,11 @@ fn aggregate_id_refuses_a_name_inside_the_reserved_namespace() {
     let _ = AggregateId::new("nitinol.saga.orders");
 }
 
-#[test]
-#[should_panic(expected = "reserved namespace")]
-fn projection_id_refuses_a_name_inside_the_reserved_namespace() {
-    let _ = ProjectionId::new("nitinol.projection");
-}
+// The identifiers this crate owns are the ones below. Every constructor in the
+// framework routes its refusal through `reject_reserved_id`, so the ones living
+// in other crates are fixed beside their own definitions:
+// `nitinol-eventsource/tests/projection_id.rs` for a projection's identifier
+// and `nitinol-saga/tests/saga_id_reserved_namespace.rs` for a saga's.
 
 // …and only those
 
@@ -124,11 +124,6 @@ fn id_constructors_accept_every_name_outside_the_reserved_namespace() {
             AggregateId::new(*candidate).as_str(),
             *candidate,
             "AggregateId must accept {candidate:?} unchanged"
-        );
-        assert_eq!(
-            ProjectionId::new(*candidate).as_str(),
-            *candidate,
-            "ProjectionId must accept {candidate:?} unchanged"
         );
     }
 }

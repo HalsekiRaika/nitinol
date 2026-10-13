@@ -22,10 +22,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
+use nitinol_eventsource::{
+    codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps,
+};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // Minimal Ping fixture
@@ -84,14 +86,14 @@ impl Projector<PingEvent> for CountingProjector {
 fn _assert_sig_projector_props_new_accepts_arc_dyn_event_store(
     pid: ProjectionId,
     store: Arc<dyn EventStore>,
-    cs: Arc<InMemoryCheckpointStore>,
+    cs: Arc<InMemoryOffsetStore>,
 ) {
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(store)
-            .projection_checkpoints(cs)
+            .projection_offsets(cs)
             .build(),
     );
     let _ = ProjectorProps::new(pid, &persistence, move || CountingProjector {
@@ -110,7 +112,7 @@ async fn projector_catches_up_via_direct_arc_dyn_event_store() {
     // Given
     let system = ProcessSystem::new().await;
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let offset_store = Arc::new(InMemoryOffsetStore::default());
     let agg_id = AggregateId::new("projector-direct-store");
 
     // Pre-populate the store with 3 events
@@ -138,7 +140,7 @@ async fn projector_catches_up_via_direct_arc_dyn_event_store() {
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
             .eventstore(Arc::clone(&store))
-            .projection_checkpoints(Arc::clone(&checkpoint_store))
+            .projection_offsets(Arc::clone(&offset_store))
             .build(),
     );
     let _proxy = ProjectorProps::new(

@@ -12,9 +12,9 @@
 //!   When the kit's SNAP-1 … SNAP-4 verification is run
 //!   Then every clause holds
 //!
-//! Scenario: the reference checkpoint store conforms
-//!   Given InMemoryCheckpointStore
-//!   When the kit's CKP verification is run
+//! Scenario: the reference offset store conforms
+//!   Given InMemoryOffsetStore
+//!   When the kit's OFS verification is run
 //!   Then every clause holds
 //!
 //! Scenario: the reference persistence provider conforms
@@ -24,7 +24,7 @@
 //! ```
 //!
 //! The in-memory stores are the implementations the clauses on
-//! `EventStore::append`, `SnapshotStore` and `CheckpointStore` are written
+//! `EventStore::append`, `SnapshotStore` and `OffsetStore` are written
 //! against, so a clause that cannot pass here is a clause no backend could be
 //! asked to keep. The kit names the clause it found broken when it panics, so a
 //! failure reads as the label that was violated rather than as an assertion in
@@ -37,7 +37,7 @@
 //! What a green run here is not: evidence about anything but the contract of
 //! the store it was run against. A store put through these clauses has been
 //! shown to keep its own contract alone. Whether a projection's result and the
-//! checkpoint covering it are settled together is a contract of a store *and*
+//! offset covering it are settled together is a contract of a store *and*
 //! the machinery driving it, and it is fixed elsewhere — see the kit's crate
 //! documentation for where.
 //!
@@ -47,12 +47,11 @@
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    ReferenceCheckpointStore, ReferenceProvider, ReferenceSnapshotStore, ReferenceStore,
-    TokioExecutor,
+    ReferenceOffsetStore, ReferenceProvider, ReferenceSnapshotStore, ReferenceStore, TokioExecutor,
 };
 
 use nitinol_store_conformance::{
-    checkpoint, provider, snapshot, verify, verify_deterministic, verify_under_concurrency,
+    offset, provider, snapshot, verify, verify_deterministic, verify_under_concurrency,
 };
 
 /// Every clause — the deterministic ones and the concurrent one — must hold for
@@ -96,26 +95,26 @@ async fn the_in_memory_snapshot_store_conforms_to_every_snapshot_clause() {
     snapshot::verify(&ReferenceSnapshotStore).await;
 }
 
-/// Every `CKP` clause — the deterministic ones and the concurrent one — must
-/// hold for the reference checkpoint store.
+/// Every `OFS` clause — the deterministic ones and the concurrent one — must
+/// hold for the reference offset store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_in_memory_checkpoint_store_conforms_to_every_checkpoint_clause() {
-    checkpoint::verify(&ReferenceCheckpointStore, &TokioExecutor).await;
+async fn the_in_memory_offset_store_conforms_to_every_offset_clause() {
+    offset::verify(&ReferenceOffsetStore, &TokioExecutor).await;
 }
 
-/// The deterministic checkpoint clauses run on their own and ask for no
+/// The deterministic offset clauses run on their own and ask for no
 /// executor, the same division the OCC half keeps.
 #[tokio::test]
-async fn the_deterministic_checkpoint_clauses_run_without_an_executor() {
-    checkpoint::verify_deterministic(&ReferenceCheckpointStore).await;
+async fn the_deterministic_offset_clauses_run_without_an_executor() {
+    offset::verify_deterministic(&ReferenceOffsetStore).await;
 }
 
-/// The concurrent checkpoint clause runs on its own, so a provider can put a
+/// The concurrent offset clause runs on its own, so a provider can put a
 /// backend under it without re-running the deterministic ones — and so that a
 /// pass here is never mistaken for the deterministic evidence.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_checkpoint_concurrency_clause_runs_on_its_own() {
-    checkpoint::verify_under_concurrency(&ReferenceCheckpointStore, &TokioExecutor).await;
+async fn the_offset_concurrency_clause_runs_on_its_own() {
+    offset::verify_under_concurrency(&ReferenceOffsetStore, &TokioExecutor).await;
 }
 
 /// Every `PRV` clause must hold for the reference provider, slot by slot and
@@ -146,24 +145,24 @@ async fn the_snapshot_slot_runs_on_its_own_and_asks_for_no_executor() {
     provider::verify_snapshot_store(&ReferenceProvider).await;
 }
 
-/// The projection-checkpoint slot on its own.
+/// The projection-offset slot on its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_projection_checkpoint_slot_runs_on_its_own() {
-    provider::verify_projection_checkpoints(&ReferenceProvider, &TokioExecutor).await;
+async fn the_projection_offset_slot_runs_on_its_own() {
+    provider::verify_projection_offsets(&ReferenceProvider, &TokioExecutor).await;
 }
 
-/// The delivery-checkpoint slot on its own.
+/// The saga-offset slot on its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_delivery_checkpoint_slot_runs_on_its_own() {
-    provider::verify_delivery_checkpoints(&ReferenceProvider, &TokioExecutor).await;
+async fn the_saga_offset_slot_runs_on_its_own() {
+    provider::verify_saga_offsets(&ReferenceProvider, &TokioExecutor).await;
 }
 
-/// The independence of the two checkpoint slots on its own.
+/// The independence of the two offset slots on its own.
 ///
 /// It runs against a provider whose slots were configured with **one** store,
 /// which is the case the clause has to hold in: what keeps the two consumers
 /// apart there is the key each renders, not a store each.
 #[tokio::test]
-async fn the_checkpoint_slots_are_independent_even_when_configured_with_one_store() {
-    provider::verify_checkpoint_independence(&ReferenceProvider).await;
+async fn the_offset_slots_are_independent_even_when_configured_with_one_store() {
+    provider::verify_offset_independence(&ReferenceProvider).await;
 }

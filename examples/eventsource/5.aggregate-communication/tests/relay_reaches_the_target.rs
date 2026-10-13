@@ -80,7 +80,7 @@ async fn a_fact_of_one_aggregate_reaches_another_as_a_command() {
         .spawn()
         .await;
 
-    // The host over `RelaySaga`'s decisions.  Its journal and its checkpoint
+    // The host over `RelaySaga`'s decisions.  Its journal and its offset
     // slot both come from the provider the system was built with, so nothing is
     // named here but how eagerly it polls.
     let _delivery = system

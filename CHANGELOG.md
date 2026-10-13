@@ -566,6 +566,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (`nitinol-persistence`, `nitinol-eventsource`, `nitinol-saga`,
+  `nitinol-store-conformance`, `nitinol-sqlx`, `nitinol`): the store that keeps
+  an event consumer's progress is named for what it holds — an **offset** — and
+  its key is a concrete type rather than a trait.
+
+  What the store holds is a position in an order, which is what `offset` means
+  in this field. In event sourcing `checkpoint` is also the word for a saved
+  state, so a reader who took it that way would look for a snapshot. Nothing is
+  deprecated and no hidden compatible shim answers for an old name: a reference
+  to one is a compile error.
+
+  | was | is |
+  |---|---|
+  | `store::CheckpointStore` | `store::OffsetStore` |
+  | `store::CheckpointScope` (trait) | `store::OffsetScope` (struct) |
+  | `CheckpointScope::checkpoint_key` | `OffsetScope::as_str` |
+  | `error::CheckpointError` | `error::OffsetError` |
+  | `store::InMemoryCheckpointStore` | `store::InMemoryOffsetStore` |
+  | `store::checkpoint_store` (module) | `store::offset_store` |
+  | `provider::ProjectionCheckpointSlot` | `provider::ProjectionOffsetSlot` |
+  | `ProjectionCheckpointSlot::ProjectionCheckpoints` | `ProjectionOffsetSlot::ProjectionOffsets` |
+  | `ProjectionCheckpointSlot::projection_checkpoints` | `ProjectionOffsetSlot::projection_offsets` |
+  | `provider::DeliveryCheckpointSlot` | `provider::SagaOffsetSlot` |
+  | `DeliveryCheckpointSlot::DeliveryCheckpoints` | `SagaOffsetSlot::SagaOffsets` |
+  | `DeliveryCheckpointSlot::delivery_checkpoints` | `SagaOffsetSlot::saga_offsets` |
+  | `PersistenceProvider::projection_checkpoints` | `PersistenceProvider::projection_offsets` |
+  | `PersistenceProvider::delivery_checkpoints` | `PersistenceProvider::saga_offsets` |
+  | `CustomStoreBuilder::projection_checkpoints` | `CustomStoreBuilder::projection_offsets` |
+  | `CustomStoreBuilder::delivery_checkpoints` | `CustomStoreBuilder::saga_offsets` |
+  | `CustomStoreBuilder::checkpoints` | `CustomStoreBuilder::offsets` |
+  | `SagaDeliveryExt::DeliveryCheckpoints` | `SagaDeliveryExt::SagaOffsets` |
+  | `SagaDeliveryProxy::advance_checkpoint` | `SagaDeliveryProxy::advance_offset` |
+  | `nitinol_persistence::ProjectionId` | `nitinol_eventsource::ProjectionId` |
+  | `nitinol_sqlx::PostgresCheckpointStore` | `nitinol_sqlx::PostgresOffsetStore` |
+  | `nitinol_sqlx::CheckpointConflict` | `nitinol_sqlx::OffsetConflict` |
+  | clauses `CKP-1` … `CKP-6` | `OFS-1` … `OFS-6` |
+  | conformance `checkpoint` module | `offset` |
+  | `checkpoint::CheckpointStoreUnderTest` | `offset::OffsetStoreUnderTest` |
+  | `provider::verify_projection_checkpoints` | `provider::verify_projection_offsets` |
+  | `provider::verify_delivery_checkpoints` | `provider::verify_saga_offsets` |
+  | `provider::verify_checkpoint_independence` | `provider::verify_offset_independence` |
+  | table `nitinol_checkpoint (projection_id, sequence)` | `nitinol_offset (scope, sequence)` |
+
+  **The key is a concrete type.** `OffsetScope` owns the rendered key string and
+  derives `Debug` / `Clone` / `PartialEq` / `Eq` / `Hash`; `load` and `save`
+  take `&OffsetScope` rather than `&dyn CheckpointScope`. There are two ways to
+  one and no third: `OffsetScope::new(name)` is what a deployment names itself —
+  refused if the name is inside the reserved namespace, rendered verbatim
+  otherwise — and `OffsetScope::framework_owned(part, name, partition)` is what a
+  part of the framework names for one partition of one of its own consumers,
+  rendered inside the reserved namespace. That the two cannot collide, and that
+  the three elements render one key injectively whatever the name contains, is
+  argued once on `OffsetScope` and is what `OFS-5` now names as its obligation —
+  previously spread across each identifier type's own documentation. Consumers
+  build their scope once, when they start, and hold it; there is no
+  `AsRef<OffsetScope>`.
+
+  **`ProjectionId` moved.** It is `nitinol_eventsource::ProjectionId` and
+  `nitinol_eventsource::projection::ProjectionId`, beside the projector it
+  names, and is reached through `nitinol::eventsource::ProjectionId` from the
+  umbrella crate. It was in `nitinol-persistence` only because the offset
+  store's key type had to be. It still refuses the reserved namespace, through
+  `nitinol_persistence::reject_reserved_id` as `SagaId` does, and
+  `impl From<&ProjectionId> for OffsetScope` is the user-named constructor —
+  so a projection's key is still its identifier verbatim and every row written
+  under the old vocabulary is found under the same text.
+
+  **The two provider slots are a deployment choice, not a kind of consumer.**
+  `PRV-4` is restated on that axis: a projection's offset belongs beside the
+  read model it is building, which is the database an operator chose for *their*
+  read side, and the offsets of the framework's own attachments belong beside
+  the journal. `SagaOffsetSlot` is therefore the slot for **every** saga
+  attachment — the delivery host now, the manager and the deadline index as they
+  are written — rather than the delivery host's alone.
+
+  **`OFS-4` no longer describes its consumers.** A save that is not a move
+  forward is still the backend's to answer, refusing and taking both conforming,
+  and the suite still never makes one. What the clause now says such a save
+  *means* stops at "more than one writer holds that key": the steps each
+  consumer takes before and after are the consumer's. More than one writer is
+  something a clustered deployment reaches temporarily while the nodes' views of
+  the membership disagree, and it is a liveness event — more redelivery — rather
+  than corruption. Paired with it is the consumer's own obligation, stated for
+  the first time: **a refused save does not stop a consumer; it carries on and
+  saves again the next time it moves forward.** `nitinol-sqlx`'s `OffsetConflict`
+  is documented in the same terms.
+
+  **A `nitinol_checkpoint` table written before this change cannot be read.**
+  No migration tool is provided and `0002` is rewritten rather than altered.
+  Drop the old table, create the new one by migrating, and let each consumer
+  resume from the position it is configured with.
+
 - **BREAKING** (`nitinol-saga`, `nitinol`): the workspace is **0.5.0**, and a
   saga stream written by 0.4 or earlier cannot be read by it.
 
@@ -1125,6 +1217,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `type State = ...;` line; no other change is required.
 
 ### Removed
+
+- **BREAKING** (`nitinol-persistence`): the `store::CheckpointScope` trait is
+  withdrawn, with no replacement trait.
+
+  The key an offset is filed under is the concrete `store::OffsetScope`, which
+  owns the rendered string and is constructed one of two ways. A third-party
+  consumer that implemented the trait to render a key of its own now calls
+  `OffsetScope::new` with the name it was going to render; a framework-owned one
+  calls `OffsetScope::framework_owned`. With the trait goes
+  `CheckpointScope::checkpoint_key`, whose answer is `OffsetScope::as_str`, and
+  `impl CheckpointScope for ProjectionId`, whose job is
+  `impl From<&ProjectionId> for OffsetScope` in `nitinol-eventsource`.
+
+- **BREAKING** (`nitinol-saga`): `SagaDeliveryScope` is withdrawn.
+
+  It rendered a delivery partition's key and argued its own injectivity and
+  namespace separation, both of which `OffsetScope` now owns. A caller that
+  needs the key a partition records under — to seed a position, or to read one
+  as an operator would — calls `SagaDeliveryId::offset_scope(partition)`, which
+  asks `OffsetScope::framework_owned` for it. The rendered text has changed
+  (`nitinol.saga-delivery.{id}.{partition}`), which is of no consequence given
+  that the table it was written to cannot be read either.
+
+  `SagaDeliveryId` itself stays, constraint-free, and is still a distinct
+  newtype from `ProjectionId`.
 
 - **BREAKING** (`nitinol-saga`): outbox push delivery is withdrawn, with no
   replacement surface of its own.

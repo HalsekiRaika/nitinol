@@ -20,7 +20,7 @@ use crate::store::EventStore;
 /// # No slot is reachable through it
 ///
 /// There is deliberately no [`SnapshotSlot`](crate::provider::SnapshotSlot) or
-/// checkpoint-slot implementation here, and no accessor that could answer with
+/// offset-slot implementation here, and no accessor that could answer with
 /// one. A slot a deployment did not supply has to be refused while the wiring
 /// is compiled, and an erased handle that offered slots would be the one place
 /// where it could only be refused at the first save instead.

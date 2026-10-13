@@ -18,7 +18,7 @@
 mod delivery;
 use delivery::{
     append_decided, in_memory_system, scope_of, spawn_host, wait_until_operations,
-    wait_until_stored, DeliverySaga, Ledger, RecordingCheckpointStore,
+    wait_until_stored, DeliverySaga, Ledger, RecordingOffsetStore,
 };
 
 use std::sync::Arc;
@@ -32,7 +32,7 @@ async fn one_instance_is_delivered_in_persisted_order() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-order");
 
@@ -42,7 +42,7 @@ async fn one_instance_is_delivered_in_persisted_order() {
 
     // When: four partitions, so the instance occupies one of several.
     let partitions = 4usize;
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &checkpoints, partitions).await;
+    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, partitions).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target);
@@ -60,7 +60,7 @@ async fn one_instance_is_delivered_in_persisted_order() {
     let owner = partition_of(saga_id.as_str(), delivery::partition_count(partitions));
     assert_eq!(
         wait_until_stored(
-            &checkpoints,
+            &offsets,
             &scope_of(owner),
             3,
             "the owning partition must record progress past the last decision"

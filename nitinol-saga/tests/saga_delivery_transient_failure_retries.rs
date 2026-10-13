@@ -26,7 +26,7 @@
 mod delivery;
 use delivery::{
     append_decided, scope_of, spawn_host, wait_until_loads, AppendRefusingEventStore, DeliverySaga,
-    Ledger, RecordingCheckpointStore, RecordingEventStore, TEST_DELIVERY_ID, TEST_POLL_INTERVAL,
+    Ledger, RecordingEventStore, RecordingOffsetStore, TEST_DELIVERY_ID, TEST_POLL_INTERVAL,
 };
 
 use std::collections::BTreeMap;
@@ -200,12 +200,12 @@ async fn a_held_delivery_is_retried_with_a_growing_pause_and_is_diagnosable() {
 
     let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
     let journal: Arc<dyn EventStore> = recording.clone();
-    let checkpoints = RecordingCheckpointStore::new();
+    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let held = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &checkpoints, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
     let queries = wait_until_loads(&recording, 6, "the host must keep retrying the record").await;
 
     // Then: the record is asked for again, and again.
@@ -217,7 +217,7 @@ async fn a_held_delivery_is_retried_with_a_growing_pause_and_is_diagnosable() {
         );
     }
     assert!(
-        checkpoints.stored(&scope_of(0)).is_none_or(|at| at < held),
+        offsets.stored(&scope_of(0)).is_none_or(|at| at < held),
         "a delivery that was never recorded at the receiver cannot be progress"
     );
 

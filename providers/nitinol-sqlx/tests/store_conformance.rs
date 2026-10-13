@@ -6,9 +6,9 @@
 //!   When the conformance suite's OCC-1 … OCC-5 verification is run against it
 //!   Then every clause holds
 //!
-//! Scenario: a checkpoint reader misses nothing under concurrent appends
+//! Scenario: an offset reader misses nothing under concurrent appends
 //!   Given several connections appending to streams of their own at once
-//!   And a reader following the global order by checkpoint
+//!   And a reader following the global order by offset
 //!   When the appends have finished and the reader has caught up
 //!   Then the reader has observed every committed event exactly once
 //! ```
@@ -48,7 +48,7 @@ async fn the_postgres_store_conforms_to_every_occ_clause() {
 /// of: the writer succeeds, the reader raises nothing, and the event is read by
 /// nobody.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_checkpoint_reader_observes_every_committed_event_exactly_once() {
+async fn a_offset_reader_observes_every_committed_event_exactly_once() {
     let Some(backend) = harness::postgres_backend().await else {
         return;
     };

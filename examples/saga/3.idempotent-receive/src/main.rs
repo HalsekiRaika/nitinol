@@ -16,7 +16,7 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
@@ -64,7 +64,7 @@ async fn main() {
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(Arc::clone(&store))
-                .delivery_checkpoints(InMemoryCheckpointStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
         .build();
@@ -118,7 +118,7 @@ async fn main() {
     // The second delivery of the same operation.  The id is re-derived from the
     // order's own fact event, which is what makes this the same operation
     // arriving again rather than a new one that happens to look alike: a host
-    // resuming from a checkpoint that never moved re-reads the saga's decision
+    // resuming from an offset that never moved re-reads the saga's decision
     // and re-derives exactly this id, because the id is on that record.
     let reservation = ReservationSaga::reservation_id(&order_fact(&store, order_id.as_str()).await);
     system
