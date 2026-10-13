@@ -69,11 +69,14 @@ async fn a_fact_of_one_aggregate_reaches_another_as_a_command() {
     let proxy_b = system.spawn_aggregate::<Counter>(id_b.clone()).await;
 
     let target = id_b.clone();
+    // `host` is the one verb: it starts the saga's manager, and `RelaySaga`
+    // correlates every input to the same id, so the single relay instance is
+    // spawned the moment A's first fact is delivered.
     let _saga = system
-        .spawn_saga(RelaySaga::instance_id(), move |_components| RelaySaga {
+        .host::<RelaySaga>(move |_components| RelaySaga {
             target: target.clone(),
         })
-        .subscribed_to::<Incremented>(system.subscription(&id_a))
+        .observing::<Incremented>(system.subscription(&id_a))
         .spawn()
         .await;
 
@@ -81,7 +84,7 @@ async fn a_fact_of_one_aggregate_reaches_another_as_a_command() {
     // slot both come from the provider the system was built with, so nothing is
     // named here but how eagerly it polls.
     let _delivery = system
-        .saga_delivery_props::<RelaySaga>()
+        .deliver::<RelaySaga>()
         .with_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;

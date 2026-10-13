@@ -51,7 +51,9 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 // Domain types
 
@@ -222,9 +224,9 @@ struct Refusal {
     /// Kept alive only because dropping a proxy does not stop the process it
     /// addresses. The restart test therefore gives the second incarnation an
     /// upstream store of its own rather than trying to retire this one: the
-    /// store this incarnation polls never grows again, so it stays quiet and
-    /// the two never decide the same record onto one stream.
-    _proxy: nitinol_saga::SagaProxy<RefusingSaga>,
+    /// store this host polls never grows again, so it stays quiet and the two
+    /// never decide the same record onto one stream.
+    _proxy: nitinol_saga::SagaManagerProxy<RefusingSaga>,
     system: EventSourceSystem<InMemoryStore>,
     saga_store: Arc<dyn EventStore>,
     upstream: AggregateId,
@@ -253,17 +255,16 @@ async fn refuse_one_record(upstream_key: &str) -> Refusal {
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let proxy = SagaProps::<RefusingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| RefusingSaga {
-            handle_count: Arc::clone(&handle_count_for_producer),
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(system.process_system())
-    .await;
+    let proxy =
+        SagaManagerProps::<RefusingSaga>::new(Arc::clone(&saga_store), move |_components| {
+            RefusingSaga {
+                handle_count: Arc::clone(&handle_count_for_producer),
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+        .spawn(system.process_system())
+        .await;
 
     tokio::time::timeout(SETTLE, handled.notified())
         .await
@@ -411,15 +412,14 @@ async fn a_restart_does_not_hand_the_refused_input_back() {
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let _second = SagaProps::<AcceptingSaga>::new(
-        refusal.saga_id.clone(),
+    let _second = SagaManagerProps::<AcceptingSaga>::new(
         Arc::clone(&refusal.saga_store),
         move |_components| AcceptingSaga {
             handle_count: Arc::clone(&handle_count_for_producer),
             handled: Arc::clone(&handled_for_producer),
         },
     )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&restarted_upstream, &refusal.upstream))
+    .observing::<OrderPlaced>(Subscription::stream(&restarted_upstream, &refusal.upstream))
     .spawn(refusal.system.process_system())
     .await;
 

@@ -203,7 +203,7 @@ async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, &upstream_key))
+        .observing::<Ping>(Subscription::stream(&upstream_store, &upstream_key))
         .with_instance_passivation(PASSIVATE_AFTER)
         .spawn(system.process_system())
         .await;
@@ -281,7 +281,7 @@ async fn manager_outlives_a_system_default_idle_timeout_during_a_quiet_upstream(
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, &upstream_key))
+        .observing::<Ping>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 

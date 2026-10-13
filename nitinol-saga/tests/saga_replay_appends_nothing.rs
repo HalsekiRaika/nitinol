@@ -1,11 +1,11 @@
-//! Starting a saga up writes nothing. Replay is a fold and a reconnect.
+//! Starting a saga up writes nothing. Replay is a fold, never an append.
 //!
 //! ```gherkin
-//!   Scenario: starting a saga settles no delivery
+//!   Scenario: restoring an instance settles no delivery
 //!     Given a saga whose decisions and consumed facts are already persisted
-//!     When the saga restarts and replays
-//!     Then replay only folds and reconnects: no re-dispatch, no synthetic
-//!          marker appended, nothing written to a dead letter queue
+//!     When the host restores that instance and it replays
+//!     Then replay only folds what the stream already holds: no re-dispatch, no
+//!          synthetic marker appended, nothing written to a dead letter queue
 //! ```
 //!
 //! # What is observed
@@ -19,8 +19,10 @@
 //!
 //! The assertion is that **the first batch this incarnation appends is the one
 //! carrying its first live decision**. Waiting for `handle` first is what makes
-//! that deterministic rather than a timing guess: `handle` cannot run until
-//! `on_start` has replayed and subscribed, so any batch recorded before the
+//! that deterministic rather than a timing guess: the host spawns the instance
+//! on the first record its correlation claims, and `on_start` replays the
+//! instance's own stream before that record can reach its mailbox — so
+//! `handle` cannot run until replay is done, and any batch recorded before the
 //! decision batch was written by replay.
 //!
 //! Two facts the fold must restore are asserted alongside it, because a replay
@@ -56,7 +58,9 @@ use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 // Domain types
 
@@ -350,24 +354,24 @@ async fn a_restart_appends_nothing_before_its_first_live_decision() {
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let _proxy = SagaProps::<FoldingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| FoldingSaga {
-            reserved: Vec::new(),
-            handle_count: Arc::clone(&handle_count_for_producer),
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaManagerProps::<FoldingSaga>::new(Arc::clone(&saga_store), move |_components| {
+            FoldingSaga {
+                reserved: Vec::new(),
+                handle_count: Arc::clone(&handle_count_for_producer),
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+        .spawn(system.process_system())
+        .await;
 
-    // `handle` cannot run before `on_start` has replayed and subscribed, so
-    // reaching it fixes the point after which any recorded batch is live work.
+    // `handle` cannot run before `on_start` has replayed the instance's own
+    // stream, so reaching it fixes the point after which any recorded batch is
+    // live work.
     tokio::time::timeout(Duration::from_secs(5), handled.notified())
         .await
-        .expect("the restarted saga must replay, subscribe and handle the fresh record");
+        .expect("the restored instance must replay and handle the fresh record");
     wait_for_batches(&batches, 1).await;
 
     let recorded = snapshot(&batches);
@@ -375,9 +379,9 @@ async fn a_restart_appends_nothing_before_its_first_live_decision() {
         recorded.len(),
         1,
         "the first — and so far only — append of this incarnation must be the \
-         batch carrying its first live decision: replay folds and reconnects, \
-         so a batch before it could only be a re-dispatch, a synthetic marker \
-         or a dead letter; got {:?}",
+         batch carrying its first live decision: replay only folds, so a batch \
+         before it could only be a re-dispatch, a synthetic marker or a dead \
+         letter; got {:?}",
         describe(&recorded)
     );
 
@@ -462,18 +466,17 @@ async fn a_restart_with_nothing_fresh_upstream_appends_nothing_at_all() {
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let _proxy = SagaProps::<FoldingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| FoldingSaga {
-            reserved: Vec::new(),
-            handle_count: Arc::clone(&handle_count_for_producer),
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaManagerProps::<FoldingSaga>::new(Arc::clone(&saga_store), move |_components| {
+            FoldingSaga {
+                reserved: Vec::new(),
+                handle_count: Arc::clone(&handle_count_for_producer),
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+        .spawn(system.process_system())
+        .await;
 
     tokio::time::sleep(Duration::from_millis(750)).await;
 

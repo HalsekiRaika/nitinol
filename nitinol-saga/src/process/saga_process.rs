@@ -20,7 +20,7 @@ use crate::retry_policy::RetryPolicy;
 use crate::saga::Saga;
 use crate::scheduler::{self, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName};
-use crate::subscribe::{DeclaresDeadline, SagaSubscribe, SubscribedSource};
+use crate::subscribe::{DeclaresDeadline, SagaSubscribe, SourceBinding, SubscribedSource};
 
 /// One observed record, decoded as the variant of the saga's alphabet it
 /// belongs to, delivered by the `DirectPollerProcess` of the source that read
@@ -53,9 +53,6 @@ pub(crate) struct UpstreamMessage<A> {
 pub(crate) struct OwnedUpstream<A> {
     pub(crate) config: DurableSubscription<UpstreamMessage<A>>,
     pub(crate) cursor: SequenceCursor,
-    /// The declared source this subscription reads, so the cursor can be
-    /// resumed past what *this* source has consumed and no other.
-    pub(crate) source: PositionSource,
 }
 
 impl<A> Clone for OwnedUpstream<A> {
@@ -63,7 +60,6 @@ impl<A> Clone for OwnedUpstream<A> {
         Self {
             config: self.config.clone(),
             cursor: self.cursor.clone(),
-            source: self.source.clone(),
         }
     }
 }
@@ -71,57 +67,63 @@ impl<A> Clone for OwnedUpstream<A> {
 /// Build the subscription that turns each raw record of one declared source into
 /// the [`UpstreamMessage`] a saga understands.
 ///
-/// Owned here rather than at either spawn boundary so a standalone saga and a
-/// manager-fronted one classify the same record — wrong type, decodable,
-/// corrupt — identically.
+/// Owned here rather than at the spawn boundary so every declared source
+/// classifies a record — wrong type, decodable, corrupt — identically.
 pub(crate) fn source_subscription<A>(source: SubscribedSource<A>) -> OwnedUpstream<A>
 where
     A: Send + Sync + 'static,
 {
     let event_type = source.event_type();
     let position_source = PositionSource::of(event_type);
-    let (decode, store, cursor) = source.into_parts();
-    let of_source = position_source.clone();
-    OwnedUpstream {
-        config: DurableSubscription::new(store, move |loaded: LoadedEvent| {
-            // This source claims the rows of its own event type and no others,
-            // which is what lets several sources read one stream key without
-            // reading each other's records.
-            if loaded.event_type != event_type {
-                return None;
-            }
-            let aggregate_id = AggregateId::new(loaded.stream_key);
-            let sequence = loaded.sequence;
-            match decode(&loaded.payload) {
-                Ok(input) => Some(UpstreamMessage {
-                    aggregate_id,
-                    sequence,
-                    source: of_source.clone(),
-                    input,
-                }),
-                Err(e) => {
-                    // Reported and skipped, which is the whole of the handling:
-                    // answering `None` advances this source's cursor past the
-                    // record. A codec that refused these bytes once refuses them
-                    // every time, and with no typed input there is no instance
-                    // to attribute the failure to — so there is nothing a
-                    // retry or a held cursor could recover.
-                    // Nothing durable is written, so a restart re-reads the
-                    // record and repeats this report.
-                    tracing::error!(
-                        error = %e,
-                        event_type = %event_type,
-                        upstream_key = aggregate_id.as_str(),
-                        upstream_sequence = sequence,
-                        "saga could not decode an observed record; skipping it",
-                    );
-                    None
-                }
-            }
-        }),
+    let (decode, binding) = source.into_parts();
+    let SourceBinding {
+        upstream_store,
         cursor,
-        source: position_source,
-    }
+        poll_interval,
+    } = binding;
+    let config = DurableSubscription::new(upstream_store, move |loaded: LoadedEvent| {
+        // This source claims the rows of its own event type and no others,
+        // which is what lets several sources read one stream key without
+        // reading each other's records.
+        if loaded.event_type != event_type {
+            return None;
+        }
+        let aggregate_id = AggregateId::new(loaded.stream_key);
+        let sequence = loaded.sequence;
+        match decode(&loaded.payload) {
+            Ok(input) => Some(UpstreamMessage {
+                aggregate_id,
+                sequence,
+                source: position_source.clone(),
+                input,
+            }),
+            Err(e) => {
+                // Reported and skipped, which is the whole of the handling:
+                // answering `None` advances this source's cursor past the
+                // record. A codec that refused these bytes once refuses them
+                // every time, and with no typed input there is no instance
+                // to attribute the failure to — so there is nothing a
+                // retry or a held cursor could recover.
+                // Nothing durable is written, so a restart re-reads the
+                // record and repeats this report.
+                tracing::error!(
+                    error = %e,
+                    event_type = %event_type,
+                    upstream_key = aggregate_id.as_str(),
+                    upstream_sequence = sequence,
+                    "saga could not decode an observed record; skipping it",
+                );
+                None
+            }
+        }
+    });
+    // A binding that named no interval is left at the one `nitinol-eventsource`
+    // already polls at, rather than handed a value restated here.
+    let config = match poll_interval {
+        Some(interval) => config.with_poll_interval(interval),
+        None => config,
+    };
+    OwnedUpstream { config, cursor }
 }
 
 /// Whether this saga instance can still reach [`Saga::handle`].
@@ -151,14 +153,6 @@ pub struct SagaProcess<S: Saga> {
     pub(crate) consumed: ConsumedPositions,
     pub(crate) retry_policy: RetryPolicy,
     pub(crate) lifecycle: Lifecycle,
-    /// One subscription per declared source, each cascade-stopped with this
-    /// process.
-    ///
-    /// Empty on an instance a `SagaManagerProps` manager spawned: the manager
-    /// holds the subscriptions, so an instance that opened its own would decode
-    /// every observed record a second time.  [`Self::owns_its_subscriptions`] is
-    /// how that is read.
-    pub(crate) upstream: Vec<OwnedUpstream<S::Subscribe>>,
     /// The resident timer core, present exactly when this saga's alphabet
     /// declares a deadline — resolved at the spawn boundary, never handed in by
     /// the user.
@@ -199,28 +193,13 @@ impl<S: Saga> SagaProcess<S> {
             .map(|s| Timers::new(self.saga_id.clone(), s.clone()))
     }
 
-    /// Does this instance hold its own subscriptions, or does a manager observe
-    /// for it?
-    ///
-    /// The two differ in what a terminated instance may do with itself: one that
-    /// owns its subscriptions can decline to wire them and stop, because then
-    /// nothing can reach it; one a manager fronts keeps receiving whatever the
-    /// manager routes and has to stay resident to record it.
-    fn owns_its_subscriptions(&self) -> bool {
-        !self.upstream.is_empty()
-    }
-
     /// Re-register schedules that replay found still active (persisted
     /// `Scheduled` with no matching `Cancelled` / `Fired`), and make them the
     /// pending view this incarnation answers from.
     ///
     /// The remaining delay is recomputed from the persisted wall-clock anchor; a
     /// past deadline fires immediately.
-    async fn reregister_active_schedules(
-        &self,
-        active: Vec<ActiveSchedule>,
-        ctx: &mut ProcessContext<Self>,
-    ) {
+    async fn reregister_active_schedules(&self, active: Vec<ActiveSchedule>) {
         // A fresh incarnation knows nothing of what it set, so the journal is
         // the whole of the answer — which is why this replaces the view rather
         // than adding to it.
@@ -265,7 +244,6 @@ impl<S: Saga> SagaProcess<S> {
             };
             let dispatch = self.delivery.dispatch(
                 &self.saga_id,
-                ctx,
                 sched.name.clone(),
                 sched.message_type,
                 sched.message_codec,
@@ -378,8 +356,8 @@ impl<S: Saga> Process for SagaProcess<S> {
             }
         };
         // What earlier incarnations consumed is theirs to hand over: it decides
-        // both which redelivered records this one drops and where its
-        // subscription resumes.
+        // which of the records the manager routes here this one drops before
+        // `Saga::handle`.
         self.consumed = outcome.consumed;
 
         // A saga whose stream carries a durable `Ended` fact terminated in a
@@ -388,66 +366,44 @@ impl<S: Saga> Process for SagaProcess<S> {
         // run again, and anything still routed here is dropped.
         if outcome.ended {
             self.lifecycle = Lifecycle::Ended;
+            // Terminal, and still resident on purpose: the manager's shared
+            // subscription keeps delivering here, and it reads this instance's
+            // answer to decide whether that source's cursor may advance.
+            // Stopping would make every such arrival unanswerable and hold the
+            // shared cursor behind an instance that will never act again, so
+            // the instance accepts and drops each one until the manager
+            // passivates it.
             tracing::info!(
                 saga_id = self.saga_id.as_str(),
-                "saga already terminated (Ended fact present); skipping subscription"
+                "saga already terminated (Ended fact present); every routed record will be dropped"
             );
-            // Owning the subscription and declining to wire it means nothing
-            // can reach this process again, so the inert incarnation releases
-            // its resources by stopping.  Under a manager the shared
-            // subscription keeps delivering here, and the manager reads this
-            // instance's answer to decide whether that source's cursor may
-            // advance — so the instance stays resident to accept and drop each
-            // arrival until the manager passivates it.  Stopping instead would
-            // make every such arrival unanswerable and hold the shared cursor
-            // behind an instance that will never act again.
-            if self.owns_its_subscriptions() {
-                if let Err(e) = ctx.stop_self().await {
-                    tracing::warn!(error = %e, "terminated saga stop_self failed");
-                }
-            }
         } else {
             // Re-register timers that were still pending at the previous
             // incarnation's stop: unfired, uncancelled schedules found on the
             // saga's own stream.
-            self.reregister_active_schedules(outcome.active_schedules, ctx)
+            self.reregister_active_schedules(outcome.active_schedules)
                 .await;
-
-            // One poller per declared source, each resuming from its own
-            // position. Resuming past what the journal says *that source*
-            // consumed is what frees a restart from re-reading the whole
-            // upstream history; the configured position still holds as a floor.
-            // Keeping the positions per source is what stops one source's
-            // progress from skipping another's unread records.
-            for upstream in self.upstream.clone() {
-                let cursor = self.consumed.resume(upstream.cursor, &upstream.source);
-                upstream.config.spawn_child(ctx, cursor).await;
-            }
         }
     }
 
     async fn on_stop(&mut self, _ctx: &mut ProcessContext<Self>) {
         // Saga lifecycle teardown.  A deadline belongs to the saga instance
-        // rather than to this incarnation, so releasing one here is right only
-        // where the firing is addressed to this process: once it is stopped,
-        // such a firing has nowhere to land and the entry would sit in the
-        // resident scheduler for nothing.  An instance a manager fronts is
-        // addressed through that manager, which restores it — so its deadlines
-        // must stay armed across a passivation that may well be shorter than
-        // the deadline itself.
+        // rather than to this incarnation, and a firing is addressed to the
+        // manager that fronts it — which restores the instance before handing
+        // it over.  So a deadline must stay armed across a stop that may well
+        // be a passivation shorter than the deadline itself.
         //
-        // That exception holds only while the saga is still `Running`: once
+        // That holds only while the saga is still `Running`: once
         // `SagaEffect::End` has landed (or replay found the `Ended` fact from a
-        // previous incarnation), `lifecycle` is `Ended` and there is no
-        // future activation this deadline could still serve — restoring the
-        // instance to hand it a firing only wakes a saga whose deadline arm can
-        // never run again. So a terminal stop always releases, manager-fronted
-        // or not.
+        // previous incarnation), `lifecycle` is `Ended` and there is no future
+        // activation this deadline could still serve — restoring the instance
+        // to hand it a firing only wakes a saga whose deadline arm can never
+        // run again.  So a terminal stop releases and a passivation does not.
         //
         // Either way this is an in-memory release only — no `Cancelled` marker
         // is persisted, so a non-terminal later incarnation replays and
         // re-registers any still unfired schedule.
-        if self.delivery.restores_the_instance() && matches!(self.lifecycle, Lifecycle::Running) {
+        if matches!(self.lifecycle, Lifecycle::Running) {
             return;
         }
         if let Some(timers) = self.timers() {
@@ -586,9 +542,9 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
         // supervision, and a saga that stops here is exactly what must not
         // happen — staying alive is what lets the *next* input retry the
         // decision, including an `End` whose `Ended` fact did not land. Nothing
-        // durable claims the record either, so a restart re-reads it from
-        // upstream: the subscription resumes from the position the journal
-        // records for this source, which this failure left where it was.
+        // durable claims the record either, so a later host's sweep of this
+        // source re-opens it: the journal names no position for it, which this
+        // failure left exactly where it was.
         if matches!(
             interpreter::run_saga_effect(effect, &mut ictx).await,
             InterpretOutcome::AppendFailed

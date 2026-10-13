@@ -109,7 +109,7 @@ pub struct ReservationWorld {
 }
 
 /// Spawn a complete incarnation: a fresh `ProcessSystem`, the order aggregate,
-/// and the saga manager subscribed to the order's stream.
+/// and the saga manager observing the order's stream.
 ///
 /// No delivery host — the clauses that need one name its stores themselves,
 /// because which checkpoint store a host is wired with is the whole subject of
@@ -142,8 +142,8 @@ pub async fn spawn_manager(
     order_id: &AggregateId,
 ) -> SagaManagerProxy<ReservationSaga> {
     system
-        .saga_manager_props(|_| ReservationSaga)
-        .subscribed_to::<OrderPlaced>(system.subscription(order_id))
+        .host::<ReservationSaga>(|_| ReservationSaga)
+        .observing::<OrderPlaced>(system.subscription(order_id))
         .spawn()
         .await
 }

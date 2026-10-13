@@ -127,12 +127,12 @@ const RESTART_WITHIN: Duration = Duration::from_secs(60);
 ///
 /// # Where it starts
 ///
-/// `H` is the same typestate the other props carry: wired from a store through
-/// [`new`](Self::new) these are [`Unhosted`] and
+/// `H` is the same typestate the saga builder carries: wired from a store
+/// through [`new`](Self::new) these are [`Unhosted`] and
 /// [`spawn`](SagaDeliveryProps::spawn) names the system to deliver through,
 /// and taken from
-/// [`SagaDeliveryExt::saga_delivery_props`](crate::SagaDeliveryExt::saga_delivery_props)
-/// they are [`Hosted`] and `spawn` names nothing.
+/// [`SagaDeliveryExt::deliver`](crate::SagaDeliveryExt::deliver) they are
+/// [`Hosted`] and `spawn` names nothing.
 pub struct SagaDeliveryProps<S: Saga, Cs: CheckpointStore, H = Unhosted> {
     journal: Arc<dyn EventStore>,
     checkpoints: Arc<Cs>,
@@ -159,9 +159,8 @@ where
     ///
     /// A provider supplying no delivery slot is refused here rather than when
     /// the host first tries to record where it got to; the typestate doctest on
-    /// [`SagaDeliveryExt::saga_delivery_props`](crate::SagaDeliveryExt::saga_delivery_props)
-    /// fixes that, and a deployment with a system reaches this wiring through
-    /// it.
+    /// [`SagaDeliveryExt::deliver`](crate::SagaDeliveryExt::deliver) fixes
+    /// that, and a deployment with a system reaches this wiring through it.
     pub fn new<St>(persistence: &PersistenceProvider<St>) -> Self
     where
         St: DeliveryCheckpointSlot<DeliveryCheckpoints = Cs>,

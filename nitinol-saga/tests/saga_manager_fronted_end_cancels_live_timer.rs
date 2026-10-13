@@ -1,22 +1,22 @@
 //! A terminal `SagaEffect::End` must release a manager-fronted instance's live
 //! timer, not only a passivation.
 //!
-//! `ScheduleDelivery::ThroughTheManager` keeps a deadline armed across a
-//! passivation so the manager can restore the instance and hand it the
-//! firing later — that is what
-//! `saga_scheduler_fires_into_passivated_instance.rs` pins down.  The same
-//! `on_stop` branch must not also keep the deadline armed once the saga has
+//! A deadline belongs to the saga instance, not to the incarnation that armed
+//! it, so `on_stop` keeps it registered with the resident scheduler across a
+//! passivation — restoring the instance and handing it the firing later is
+//! what `saga_scheduler_fires_into_passivated_instance.rs` pins down.  The
+//! same `on_stop` must not also keep the deadline armed once the saga has
 //! durably ended: an ended saga drops whatever reaches it, so the firing
 //! could only be delivered to an instance the manager respawned to do
 //! nothing.
 //!
 //! What got this wrong is observable here: if `on_stop` released the timer
-//! only by delivery kind and not by whether the saga had ended, the deadline
-//! stays registered with the resident scheduler past `End`, elapses anyway,
-//! and the manager respawns the already-ended instance to deliver it — a
-//! second lifecycle, and a `fired` row on a stream whose saga had already
-//! said it was finished.  Correct behaviour cancels the timer when `End` runs,
-//! so neither ever happens.
+//! only by whether the stop was a passivation and not by whether the saga had
+//! ended, the deadline stays registered with the resident scheduler past
+//! `End`, elapses anyway, and the manager respawns the already-ended instance
+//! to deliver it — a second lifecycle, and a `fired` row on a stream whose
+//! saga had already said it was finished.  Correct behaviour cancels the
+//! timer when `End` runs, so neither ever happens.
 //!
 //! ```gherkin
 //!   Scenario: End cancels the live timer it was decided alongside
@@ -268,7 +268,7 @@ async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
                 deadline: components.deadline(),
             }
         })
-        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
+        .observing::<Ping>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
         .spawn(system.process_system())
         .await;
 

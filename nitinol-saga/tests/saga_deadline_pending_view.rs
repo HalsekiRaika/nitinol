@@ -42,7 +42,7 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{encode_schedule_scheduled, SCHEDULE_MARKER};
+use common::{encode_consumed_fact, encode_schedule_scheduled, CONSUMED_MARKER, SCHEDULE_MARKER};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -60,8 +60,8 @@ use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
 use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, PendingDeadline, Saga, SagaContext, SagaEffect, SagaId, SagaProps,
-    Subscription, TimerName,
+    Deadline, DeadlineMessage, PendingDeadline, Saga, SagaContext, SagaEffect, SagaId,
+    SagaManagerProps, Subscription, TimerName,
 };
 
 // Domain
@@ -348,24 +348,51 @@ async fn wait_for_fires(fires: &Fires, expected: usize) -> Vec<String> {
 
 async fn spawn_view_saga(
     ps: &ProcessSystem,
-    saga_id: &SagaId,
     saga_store: &Arc<dyn EventStore>,
     upstream_store: &Arc<dyn EventStore>,
     reports: &Reports,
     fires: &Fires,
-) -> nitinol_saga::SagaProxy<ViewSaga> {
+) -> nitinol_saga::SagaManagerProxy<ViewSaga> {
     let reports = Arc::clone(reports);
     let fires = Arc::clone(fires);
-    SagaProps::<ViewSaga>::new(saga_id.clone(), Arc::clone(saga_store), move |components| {
-        ViewSaga {
-            deadline: components.deadline(),
-            reports: Arc::clone(&reports),
-            fires: Arc::clone(&fires),
-        }
+    SagaManagerProps::<ViewSaga>::new(Arc::clone(saga_store), move |components| ViewSaga {
+        deadline: components.deadline(),
+        reports: Arc::clone(&reports),
+        fires: Arc::clone(&fires),
     })
-    .subscribed_to::<Probe>(Subscription::stream(upstream_store, UPSTREAM))
+    .observing::<Probe>(Subscription::stream(upstream_store, UPSTREAM))
     .spawn(ps)
     .await
+}
+
+/// Pair an upstream probe with a position already naming it, so its arrival
+/// wakes an instance without being reported.
+///
+/// A host spawns an instance when a record that instance's correlation claims
+/// arrives, so a test whose subject is what replay restored still needs one
+/// record to arrive.  Its position is already on the stream, so it is dropped
+/// before `Saga::handle` — which is what keeps the reports below counting only
+/// the probes the test asks about.
+async fn seed_an_inert_boot_probe(
+    saga_store: &Arc<dyn EventStore>,
+    saga_id: &SagaId,
+    saga_sequence: u64,
+    upstream_store: &Arc<dyn EventStore>,
+) {
+    saga_store
+        .append(
+            saga_id.as_str(),
+            vec![AppendingEvent {
+                sequence: saga_sequence,
+                event_type: CONSUMED_MARKER,
+                payload: encode_consumed_fact(UPSTREAM, 1, &Probe::EVENT_TYPE.to_string()),
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("seeding a consumed position must succeed");
+
+    append_probe(upstream_store, 1, None).await;
 }
 
 fn due(anchor_unix_millis: i64, after: Duration) -> jiff::Timestamp {
@@ -395,15 +422,7 @@ async fn replay_restores_the_pending_deadline_view_from_the_journal() {
 
     let reports: Reports = Arc::new(Mutex::new(Vec::new()));
     let fires: Fires = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_view_saga(
-        &ps,
-        &saga_id,
-        &saga_store,
-        &upstream_store,
-        &reports,
-        &fires,
-    )
-    .await;
+    let _proxy = spawn_view_saga(&ps, &saga_store, &upstream_store, &reports, &fires).await;
 
     let observed = wait_for_reports(&reports, 1).await;
 
@@ -435,19 +454,15 @@ async fn a_fired_deadline_leaves_the_pending_view() {
     )
     .await;
 
+    // One already-consumed probe, so the instance this host fronts exists and
+    // replays; it is dropped before `handle`, so the only report below is the
+    // one the test asks for.
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    seed_an_inert_boot_probe(&saga_store, &saga_id, 2, &upstream_store).await;
     let reports: Reports = Arc::new(Mutex::new(Vec::new()));
     let fires: Fires = Arc::new(Mutex::new(Vec::new()));
 
-    let _proxy = spawn_view_saga(
-        &ps,
-        &saga_id,
-        &saga_store,
-        &upstream_store,
-        &reports,
-        &fires,
-    )
-    .await;
+    let _proxy = spawn_view_saga(&ps, &saga_store, &upstream_store, &reports, &fires).await;
 
     // The firing is the barrier for the probe that follows it.
     assert_eq!(
@@ -456,7 +471,7 @@ async fn a_fired_deadline_leaves_the_pending_view() {
         "the re-armed deadline must fire before the view is probed"
     );
 
-    append_probe(&upstream_store, 1, None).await;
+    append_probe(&upstream_store, 2, None).await;
     let observed = wait_for_reports(&reports, 1).await;
 
     assert_eq!(
@@ -478,7 +493,6 @@ async fn an_append_that_never_landed_leaves_the_pending_view_empty() {
         inner: InMemoryEventStore::default(),
         failing: Arc::new(AtomicBool::new(true)),
     });
-    let saga_id = SagaId::new(SAGA_ID);
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     // The first probe sets a deadline whose fact cannot land; the second reads
@@ -487,15 +501,7 @@ async fn an_append_that_never_landed_leaves_the_pending_view_empty() {
 
     let reports: Reports = Arc::new(Mutex::new(Vec::new()));
     let fires: Fires = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_view_saga(
-        &ps,
-        &saga_id,
-        &saga_store,
-        &upstream_store,
-        &reports,
-        &fires,
-    )
-    .await;
+    let _proxy = spawn_view_saga(&ps, &saga_store, &upstream_store, &reports, &fires).await;
 
     wait_for_reports(&reports, 1).await;
     append_probe(&upstream_store, 2, None).await;

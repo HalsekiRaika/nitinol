@@ -1,16 +1,10 @@
 //! Saga props taken from a system carry where they start.
 //!
 //! ```gherkin
-//!   Scenario: a saga started from the system's own entry point
-//!     Given a saga spawn begun from a system
+//!   Scenario: a saga hosted through the system's own entry point
+//!     Given a saga hosted from a system
 //!     When the caller spawns it without naming a process system
-//!     Then the saga process is running on the system's process system
-//!     And its own events are on the store that system was built on
-//!
-//!   Scenario: a manager started from the system's own props
-//!     Given manager props taken from a system
-//!     When the caller spawns them without naming a process system
-//!     Then the manager process is running on the system's process system
+//!     Then the host process is running on the system's process system
 //!     And the instances it spawns journal onto the store that system was built
 //!         on
 //!
@@ -19,6 +13,10 @@
 //!     When the caller spawns them
 //!     Then the process system they are given is where they start
 //! ```
+//!
+//! There is one hosted entry point and so one hosted clause: `host` always
+//! starts a manager, and a saga whose `correlate` answers a single id is that
+//! manager with one instance rather than a second kind of spawn.
 //!
 //! Where a process is running is read from the system's own process registry:
 //! the identifier the proxy carries is looked up on the process system the
@@ -201,12 +199,13 @@ async fn wait_for_noted(
     }
 }
 
-// The system's own entry points
+// The system's own entry point
 
-/// A saga begun from a system spawns with no process system named, runs on that
-/// system's process system, and journals onto the store it was built on.
+/// A saga hosted from a system spawns with no process system named, runs on
+/// that system's process system, and has its instances journal onto the store
+/// it was built on.
 #[tokio::test]
-async fn a_saga_spawned_from_a_system_runs_on_that_system() {
+async fn a_saga_hosted_from_a_system_runs_on_that_system() {
     // Given
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
@@ -216,21 +215,21 @@ async fn a_saga_spawned_from_a_system_runs_on_that_system() {
     let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-hosted-props-order");
 
-    // When: nothing but the spawn builder is named here
-    let saga = system
-        .spawn_saga(saga_id.clone(), |_components| NotingSaga)
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
+    // When: nothing but the host builder is named here
+    let host = system
+        .host::<NotingSaga>(|_components| NotingSaga)
+        .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
         .spawn()
         .await;
 
     // Then: the process the proxy names is one this system is running
     assert!(
-        system.process_system().lookup(saga.pid()).await.is_some(),
-        "a saga spawned from a system runs on that system's process system, so \
+        system.process_system().lookup(host.pid()).await.is_some(),
+        "a saga hosted from a system runs on that system's process system, so \
          the system's own registry is where its process is found"
     );
 
-    // And: its own events are on the store the system was built on
+    // And: its instances' own events are on the store the system was built on
     append_order_placed(&upstream, &order_id, 1, "SKU-HOSTED").await;
     assert_eq!(
         wait_for_noted(
@@ -243,52 +242,6 @@ async fn a_saga_spawned_from_a_system_runs_on_that_system() {
         vec!["SKU-HOSTED".to_owned()],
         "the journal a hosted spawn resolves is the store the system was built \
          on, not one of its own"
-    );
-}
-
-/// Manager props taken from a system spawn with no process system named, run on
-/// that system's process system, and have their instances journal onto the
-/// store it was built on.
-#[tokio::test]
-async fn manager_props_from_a_system_spawn_without_a_process_system() {
-    // Given
-    let store = InMemoryStore::default();
-    let system = EventSourceSystem::builder(ProcessSystem::new().await)
-        .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
-    let saga_id = SagaId::new(SAGA_ID);
-    let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let order_id = AggregateId::new("saga-hosted-manager-order");
-
-    // When: nothing but the props is named here
-    let manager = system
-        .saga_manager_props(|_components| NotingSaga)
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
-        .spawn()
-        .await;
-
-    // Then
-    assert!(
-        system
-            .process_system()
-            .lookup(manager.pid())
-            .await
-            .is_some(),
-        "manager props taken from a system run on that system's process system"
-    );
-
-    append_order_placed(&upstream, &order_id, 1, "SKU-MANAGED").await;
-    assert_eq!(
-        wait_for_noted(
-            &store.events(),
-            &saga_id,
-            1,
-            "the manager's instance must journal what it observed"
-        )
-        .await,
-        vec!["SKU-MANAGED".to_owned()],
-        "an instance the manager spawns journals onto the store the system was \
-         built on"
     );
 }
 
@@ -313,7 +266,7 @@ async fn manager_props_built_directly_start_on_the_process_system_they_are_given
     // When
     let manager =
         SagaManagerProps::<NotingSaga>::new(Arc::clone(&journal), |_components| NotingSaga)
-            .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
+            .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
             .spawn(&ps)
             .await;
 

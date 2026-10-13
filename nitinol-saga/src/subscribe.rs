@@ -34,6 +34,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use nitinol_eventsource::error::CodecError;
 use nitinol_eventsource::{Event, SequenceCursor};
@@ -248,24 +249,21 @@ pub struct SubscriptionUnset;
 /// constructor.
 pub struct SubscriptionSet(#[doc(hidden)] pub SourceBinding);
 
-/// Where one declared source is read from, and from which position.
+/// Where one declared source is read from, from which position, and how often.
 ///
-/// Produced by the spawn builders out of a [`Subscription`](crate::Subscription)
-/// and handed to the slot the bound event type names.  It has no public
-/// constructor: a user can move one the builder handed out, and cannot invent
-/// one.
+/// Produced by
+/// [`Subscription::into_binding`](crate::Subscription) and handed to the slot
+/// the bound event type names.  It has no public constructor and no public
+/// field: a user can move one the builder handed out, and cannot invent one.
 pub struct SourceBinding {
-    upstream_store: Arc<dyn EventStore>,
-    cursor: SequenceCursor,
-}
-
-impl SourceBinding {
-    pub(crate) fn new(upstream_store: Arc<dyn EventStore>, cursor: SequenceCursor) -> Self {
-        Self {
-            upstream_store,
-            cursor,
-        }
-    }
+    pub(crate) upstream_store: Arc<dyn EventStore>,
+    pub(crate) cursor: SequenceCursor,
+    /// The cadence the binding named, where it named one.
+    ///
+    /// `None` leaves the interval `nitinol-eventsource` polls at, which is the
+    /// sole owner of that default — restating it here would be a second place
+    /// for it to be changed in.
+    pub(crate) poll_interval: Option<Duration>,
 }
 
 /// Move the slot of the declared source `E` from unbound to bound.
@@ -341,13 +339,9 @@ impl<A: 'static> SubscribedSource<A> {
     }
 
     /// Take the source apart into what the spawn boundary wires up: the decode
-    /// this source reads with, the store it reads from, and where it starts.
-    pub(crate) fn into_parts(self) -> (DecodeSource<A>, Arc<dyn EventStore>, SequenceCursor) {
-        (
-            self.decode,
-            self.binding.upstream_store,
-            self.binding.cursor,
-        )
+    /// this source reads with, and the binding that says where it reads from.
+    pub(crate) fn into_parts(self) -> (DecodeSource<A>, SourceBinding) {
+        (self.decode, self.binding)
     }
 }
 

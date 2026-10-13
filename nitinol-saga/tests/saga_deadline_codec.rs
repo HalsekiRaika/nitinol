@@ -37,7 +37,10 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{encode_schedule_scheduled, schedule_kind_of, ScheduleKind, SCHEDULE_MARKER};
+use common::{
+    encode_consumed_fact, encode_schedule_scheduled, schedule_kind_of, ScheduleKind,
+    CONSUMED_MARKER, SCHEDULE_MARKER,
+};
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -54,8 +57,8 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription,
-    TimerName,
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
+    Subscription, TimerName,
 };
 
 // Domain
@@ -280,22 +283,54 @@ async fn wait_for_fired(fired: &Arc<Mutex<Vec<Reminder>>>) -> Vec<Reminder> {
 
 async fn spawn_codec_saga(
     ps: &ProcessSystem,
-    saga_id: &SagaId,
     saga_store: &Arc<dyn EventStore>,
     upstream_store: &Arc<dyn EventStore>,
     upstream_key: &str,
     fired: &Arc<Mutex<Vec<Reminder>>>,
-) -> nitinol_saga::SagaProxy<CodecSaga> {
+) -> nitinol_saga::SagaManagerProxy<CodecSaga> {
     let fired = Arc::clone(fired);
-    SagaProps::<CodecSaga>::new(saga_id.clone(), Arc::clone(saga_store), move |components| {
-        CodecSaga {
-            deadline: components.deadline(),
-            fired: Arc::clone(&fired),
-        }
+    SagaManagerProps::<CodecSaga>::new(Arc::clone(saga_store), move |components| CodecSaga {
+        deadline: components.deadline(),
+        fired: Arc::clone(&fired),
     })
-    .subscribed_to::<Trigger>(Subscription::stream(upstream_store, upstream_key))
+    .observing::<Trigger>(Subscription::stream(upstream_store, upstream_key))
     .spawn(ps)
     .await
+}
+
+/// Pair an upstream record with a position already naming it, so its arrival
+/// wakes an instance without deciding anything.
+///
+/// A host spawns an instance when a record that instance's correlation claims
+/// arrives, so a test whose subject is replay alone still needs one record to
+/// arrive.  Its position is already on the stream, so it is dropped before
+/// `Saga::handle` and sets no deadline of its own.
+///
+/// The delay it would have set is far out of reach of any barrier below, and
+/// under the same `TimerName` as the seeded fact — so a record that *did*
+/// reach `handle` would supersede the deadline under test rather than quietly
+/// reproduce it.
+async fn seed_an_inert_boot_record(
+    saga_store: &Arc<dyn EventStore>,
+    saga_id: &SagaId,
+    saga_sequence: u64,
+    upstream_store: &Arc<dyn EventStore>,
+    upstream_key: &str,
+) {
+    saga_store
+        .append(
+            saga_id.as_str(),
+            vec![AppendingEvent {
+                sequence: saga_sequence,
+                event_type: CONSUMED_MARKER,
+                payload: encode_consumed_fact(upstream_key, 1, &Trigger::EVENT_TYPE.to_string()),
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("seeding a consumed position must succeed");
+
+    append_trigger(upstream_store, upstream_key, 600_000).await;
 }
 
 // Tests
@@ -317,7 +352,6 @@ async fn the_schedule_fact_carries_the_codec_the_message_type_names() {
 
     let _proxy = spawn_codec_saga(
         &ps,
-        &saga_id,
         &saga_store,
         &upstream_store,
         "deadline-codec-upstream-1",
@@ -381,16 +415,24 @@ async fn a_firing_is_read_back_through_the_codec_the_message_type_names() {
         .await
         .expect("seeding an unfired schedule fact must succeed");
 
-    // Empty upstream: replay of the schedule fact is the only way in.
+    // One already-consumed upstream record, so the instance exists at all;
+    // replay of the schedule fact is still the only way a deadline gets in.
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    seed_an_inert_boot_record(
+        &saga_store,
+        &saga_id,
+        2,
+        &upstream_store,
+        "deadline-codec-upstream-2-boot",
+    )
+    .await;
     let fired = Arc::new(Mutex::new(Vec::<Reminder>::new()));
 
     let _proxy = spawn_codec_saga(
         &ps,
-        &saga_id,
         &saga_store,
         &upstream_store,
-        "deadline-codec-upstream-2-empty",
+        "deadline-codec-upstream-2-boot",
         &fired,
     )
     .await;

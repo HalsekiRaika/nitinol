@@ -78,8 +78,8 @@ async fn main() {
     // are tenants of the one journal the provider supplies, each under its own
     // key.  `InMemoryStore` also supplies a delivery-checkpoint slot, which is
     // the second store a delivery host needs — one that supplied none would
-    // make the `saga_delivery_props` call below a compile error rather than a
-    // host unable to record where it got to.
+    // make the `deliver` call below a compile error rather than a host unable
+    // to record where it got to.
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
@@ -90,21 +90,25 @@ async fn main() {
     let proxy_a = system.spawn_aggregate::<Counter>(id_a.clone()).await;
     let proxy_b = system.spawn_aggregate::<Counter>(id_b.clone()).await;
 
-    // The producer is handed the capabilities the framework resolved for this
+    // `host` is the one verb a saga is started with.  `RelaySaga::correlate`
+    // answers the same id for every `Incremented`, so what runs is a manager
+    // with a single instance — which is why no `SagaId` is named here.
+    //
+    // The factory is handed the capabilities the framework resolved for this
     // saga; a relay needs none of them, so it ignores them.  It is called again
     // on a supervised restart, so what it captures must be re-acquirable — B's
     // `AggregateId` is, being the address the decision will carry rather than a
     // reference to a live activation.
     //
-    // One `subscribed_to` call per source the alphabet declares: A's stream,
-    // read as `Incremented`.  `spawn` exists only once every declared source has
+    // One `observing` call per source the alphabet declares: A's stream, read
+    // as `Incremented`.  `spawn` exists only once every declared source has
     // one.
     let target = id_b.clone();
     let _saga_proxy = system
-        .spawn_saga(RelaySaga::instance_id(), move |_components| RelaySaga {
+        .host::<RelaySaga>(move |_components| RelaySaga {
             target: target.clone(),
         })
-        .subscribed_to::<Incremented>(system.subscription(&id_a))
+        .observing::<Incremented>(system.subscription(&id_a))
         .spawn()
         .await;
 
@@ -115,7 +119,7 @@ async fn main() {
     // nothing of the host's.  Omit this spawn and the saga still decides, still
     // journals, and B is never touched.
     let _delivery = system
-        .saga_delivery_props::<RelaySaga>()
+        .deliver::<RelaySaga>()
         .with_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;

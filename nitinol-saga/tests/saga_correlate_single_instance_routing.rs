@@ -1,26 +1,29 @@
-//! Single-instance delivery is decided by [`Saga::correlate`].  (Contracts
-//! `CT-03`, `CT-02`, `CT-09`.)
+//! Which instance a record is delivered to is decided by [`Saga::correlate`],
+//! and by nothing at the wiring site.  (Contracts `CT-03`, `CT-02`, `CT-09`.)
 //!
-//! The runtime consults the saga *type* for every decoded upstream event and
-//! compares the answer with the spawned instance's own [`SagaId`]:
+//! The runtime consults the saga *type* for every decoded upstream record and
+//! routes by the answer:
 //!
-//! | `correlate(&event)`         | outcome                        |
-//! |-----------------------------|--------------------------------|
-//! | `None`                      | ignored                        |
-//! | `Some(id)`, `id != self`    | ignored                        |
-//! | `Some(id)`, `id == self`    | delivered to [`Saga::handle`]  |
+//! | `correlate(&event)` | outcome                                        |
+//! |---------------------|------------------------------------------------|
+//! | `None`              | nobody's work: ignored, nothing written        |
+//! | `Some(id)`          | delivered to [`Saga::handle`] on *that* id and |
+//! |                     | on no other instance                           |
 //!
-//! All three classes travel through **one** upstream stream in a single test so
-//! that an implementation satisfying only part of the table is identified:
-//! treating `None` as "mine" admits the `NONE-*` events, and dropping the
-//! self-comparison admits the `OTHER-*` events.
+//! Both classes travel through **one** upstream stream in a single test so that
+//! an implementation satisfying only part of the table is identified: treating
+//! `None` as some instance's work admits the `NONE-*` events, and routing by
+//! anything other than the answer sends a `MINE-*` event to the instance the
+//! `OTHER-*` events belong to, or the other way round.  The instance a record
+//! reached is read from the [`SagaContext`] `handle` was given, so a run that
+//! delivered the right count to the wrong instance is not mistaken for a pass.
 //!
-//! "Ignored" is a *silent* outcome — nothing at all is written for a declined
-//! record, pinned separately below so that an implementation which leaves a
-//! durable trace for every event it declines is rejected rather than passing on
-//! the delivery assertion alone.
+//! "Ignored" is a *silent* outcome — nothing at all is written for a record no
+//! instance claims, pinned separately below so that an implementation which
+//! leaves a durable trace for every record it passes over is rejected rather
+//! than passing on the delivery assertion alone.
 //!
-//! `CT-02`: every spawn here calls `subscribed_to::<OrderPlaced>` with one
+//! `CT-02`: every wiring here calls `observing::<OrderPlaced>` with one
 //! argument (a [`Subscription`]) — the upstream format is named by the declared
 //! source itself, not handed to the builder.  A builder that still takes a
 //! routing argument — positionally or as a trailing `Option` — fails to compile
@@ -48,11 +51,14 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 // Correlation rule — one definition point, shared by `correlate` and by the
-// spawn sites below.  The spawned instance is `OWN_SAGA_ID`; `FOREIGN_SAGA_ID`
-// is never spawned, so events correlating to it belong to nobody present.
+// assertions below.  Both ids name instances of the same saga type, built by
+// the same producer: what tells them apart is only which records `correlate`
+// sends where, which is the whole of the claim.
 
 const OWN_SAGA_ID: &str = "correlate-routing-own";
 const FOREIGN_SAGA_ID: &str = "correlate-routing-foreign";
@@ -89,7 +95,14 @@ enum Observed {
     Order(OrderPlaced),
 }
 
-/// Records every event that actually reaches `handle`.
+/// Records every event that actually reaches `handle`, and the instance it
+/// reached.
+///
+/// Both instances are built by the one producer the host was given, so they
+/// share this buffer: which of them a record was handed is read from the
+/// [`SagaContext`] rather than inferred from which buffer grew, and a run that
+/// delivered a `MINE-*` record to the foreign instance is therefore a failure
+/// rather than a pass on the count.
 struct CorrelationSaga {
     captured: Arc<Mutex<Vec<String>>>,
     notify: Arc<Notify>,
@@ -120,13 +133,13 @@ impl Saga for CorrelationSaga {
     async fn handle(
         &mut self,
         input: Self::Subscribe,
-        _ctx: &mut SagaContext,
+        ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         let Observed::Order(event) = input;
         self.captured
             .lock()
             .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
-            .push(event.sku.clone());
+            .push(format!("{}@{}", event.sku, ctx.saga_id().as_str()));
         self.notify.notify_one();
         Ok(SagaEffect::None)
     }
@@ -214,9 +227,9 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-/// Spawn the saga under test over `upstream_store`, subscribing to `agg_id`
-/// from the beginning.  No routing argument is passed — correlation lives on
-/// `CorrelationSaga`.
+/// Host the saga under test over `upstream_store`, observing `agg_id` from the
+/// beginning.  No routing argument is passed, and no instance is named —
+/// correlation lives on `CorrelationSaga`.
 async fn spawn_correlation_saga(
     system: &EventSourceSystem<InMemoryStore>,
     upstream_store: &Arc<dyn EventStore>,
@@ -228,28 +241,26 @@ async fn spawn_correlation_saga(
     let captured_for_producer = Arc::clone(captured);
     let notify_for_producer = Arc::clone(notify);
 
-    let _saga_proxy = SagaProps::<CorrelationSaga>::new(
-        SagaId::new(OWN_SAGA_ID),
-        saga_store,
-        move |_components| CorrelationSaga {
+    let _host_proxy =
+        SagaManagerProps::<CorrelationSaga>::new(saga_store, move |_components| CorrelationSaga {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(upstream_store, agg_id))
-    .spawn(system.process_system())
-    .await;
+        })
+        .observing::<OrderPlaced>(Subscription::stream(upstream_store, agg_id))
+        .spawn(system.process_system())
+        .await;
 }
 
 // Tests
 
-/// Given one upstream stream carrying events that correlate to nobody, to a
-/// different instance, and to this instance,
-/// when the saga subscribes to it,
-/// then only the events correlating to this instance's own `SagaId` reach
-/// `Saga::handle`, in upstream order.
+/// Given one upstream stream carrying events that correlate to nobody and to
+/// two different instances,
+/// when the host observes it,
+/// then each event reaches `Saga::handle` on exactly the instance its
+/// `correlate` answer names, in upstream order, and the ones that name nobody
+/// reach none.
 #[tokio::test]
-async fn only_events_correlating_to_this_saga_reach_handle() {
+async fn each_record_reaches_handle_on_the_instance_correlate_names() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
@@ -273,27 +284,32 @@ async fn only_events_correlating_to_this_saga_reach_handle() {
     )
     .await;
 
-    wait_for_count(&captured, &notify, 2).await;
-    // The stream ends with two declined events; give them time to be delivered
-    // and dropped so a run that wrongly accepts them is observed here.
+    wait_for_count(&captured, &notify, 4).await;
+    // The stream ends with a `NONE-*` event; give it time to be delivered and
+    // passed over so a run that wrongly hands it to an instance is observed
+    // here.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(
         captured_snapshot(&captured),
-        vec!["MINE-1".to_owned(), "MINE-2".to_owned()],
-        "`handle` must see exactly the events whose correlate result equals \
-         this instance's SagaId: `NONE-*` correlate to nobody and `OTHER-*` \
-         correlate to an instance that is not this one"
+        vec![
+            format!("OTHER-1@{FOREIGN_SAGA_ID}"),
+            format!("MINE-1@{OWN_SAGA_ID}"),
+            format!("MINE-2@{OWN_SAGA_ID}"),
+            format!("OTHER-2@{FOREIGN_SAGA_ID}"),
+        ],
+        "`handle` must run on the instance each record's correlate answer \
+         names, in upstream order, and on no other: `NONE-*` names nobody and \
+         must reach neither instance"
     );
 }
 
 /// Given the same stream,
-/// when the saga declines events by correlation,
-/// then declining is silent — nothing is written to the saga's own stream for
-/// the events it did not accept, not even a position claiming to have consumed
-/// them.
+/// when a record names no instance,
+/// then passing over it is silent — nothing is written to either instance's own
+/// stream for it, not even a position claiming to have consumed it.
 #[tokio::test]
-async fn correlation_mismatch_is_silent_and_writes_nothing() {
+async fn a_record_that_names_no_instance_is_silent_and_writes_nothing() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
@@ -317,36 +333,38 @@ async fn correlation_mismatch_is_silent_and_writes_nothing() {
     )
     .await;
 
-    // Reaching two accepted events proves the five declined ones were fetched
-    // and evaluated, so the assertion below is about work that happened.
-    wait_for_count(&captured, &notify, 2).await;
+    // Reaching all four claimed records proves the three unclaimed ones were
+    // fetched and evaluated, so the assertions below are about work that
+    // happened.
+    wait_for_count(&captured, &notify, 4).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let events = load_saga_events(&saga_store, &SagaId::new(OWN_SAGA_ID)).await;
-    let written: Vec<String> = events
-        .iter()
-        .map(|e| format!("{}@{}", e.event_type, e.sequence))
-        .collect();
+    for (instance, claimed) in [(OWN_SAGA_ID, vec![3, 5]), (FOREIGN_SAGA_ID, vec![2, 6])] {
+        let events = load_saga_events(&saga_store, &SagaId::new(instance)).await;
+        let written: Vec<String> = events
+            .iter()
+            .map(|e| format!("{}@{}", e.event_type, e.sequence))
+            .collect();
 
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| e.event_type == CONSUMED_MARKER)
-            .count(),
-        events.len(),
-        "the two accepted records decide nothing, so a position each is the \
-         whole of what this saga writes; got {written:?}"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter_map(readable_consumed_fact_of)
-            .map(|fact| fact.sequence)
-            .collect::<Vec<_>>(),
-        vec![3, 5],
-        "an event this saga does not correlate to is not its business — it \
-         belongs to somebody else, so no position is written for it.  Claiming \
-         one would have this saga vouch for records it never handled; got \
-         {written:?}"
-    );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.event_type == CONSUMED_MARKER)
+                .count(),
+            events.len(),
+            "the records `{instance}` was handed decide nothing, so a position \
+             each is the whole of what it writes; got {written:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(readable_consumed_fact_of)
+                .map(|fact| fact.sequence)
+                .collect::<Vec<_>>(),
+            claimed,
+            "a record naming no instance is nobody's business, so no instance \
+             writes a position for it — and a record naming the other instance \
+             is not `{instance}`'s to vouch for either; got {written:?}"
+        );
+    }
 }

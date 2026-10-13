@@ -36,8 +36,8 @@
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    encode_schedule_scheduled, CancelledMarkerPayload, ScheduleKind, ScheduleMarkerPayload,
-    SCHEDULE_MARKER,
+    encode_consumed_fact, encode_schedule_scheduled, CancelledMarkerPayload, ScheduleKind,
+    ScheduleMarkerPayload, CONSUMED_MARKER, SCHEDULE_MARKER,
 };
 
 use std::sync::{Arc, Mutex};
@@ -54,8 +54,8 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription,
-    TimerName,
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
+    Subscription, TimerName,
 };
 
 // Domain
@@ -230,6 +230,58 @@ fn scheduled_row(saga_id: &SagaId, name: &str, after: Duration) -> Bytes {
     )
 }
 
+/// Pair an upstream record with a position already naming it, so its arrival
+/// wakes an instance without deciding anything.
+///
+/// A host spawns an instance when a record that instance's correlation claims
+/// arrives, so a test whose subject is replay alone still needs one record to
+/// arrive.  Its position is already on the stream, so it is dropped before
+/// `Saga::handle` and decides nothing.
+///
+/// What it *would* decide is the discriminator: it cancels the very deadline
+/// the barrier below waits for, so a record that did reach `handle` could not
+/// be mistaken for one that did not.
+async fn seed_an_inert_boot_record(
+    saga_store: &Arc<dyn EventStore>,
+    saga_id: &SagaId,
+    saga_sequence: u64,
+    upstream_store: &Arc<dyn EventStore>,
+    upstream_key: &str,
+) {
+    saga_store
+        .append(
+            saga_id.as_str(),
+            vec![AppendingEvent {
+                sequence: saga_sequence,
+                event_type: CONSUMED_MARKER,
+                payload: encode_consumed_fact(upstream_key, 1, &Trigger::EVENT_TYPE.to_string()),
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("seeding a consumed position must succeed");
+
+    let payload = serde_json::to_vec(&Trigger {
+        name: BARRIER.to_owned(),
+        after_millis: 0,
+        cancel: true,
+    })
+    .map(Bytes::from)
+    .expect("encode Trigger must succeed");
+    upstream_store
+        .append(
+            upstream_key,
+            vec![AppendingEvent {
+                sequence: 1,
+                event_type: Trigger::EVENT_TYPE,
+                payload,
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("appending the boot record must succeed");
+}
+
 const BARRIER_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -286,26 +338,34 @@ async fn replay_does_not_rearm_a_cancelled_deadline() {
     )
     .await;
 
-    // Empty upstream: replay of the seeded facts is the only way a deadline can
-    // be armed in this incarnation.
+    // One already-consumed upstream record, so there is an instance at all;
+    // replay of the seeded facts is still the only way a deadline can be armed
+    // in this incarnation.
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    seed_an_inert_boot_record(
+        &saga_store,
+        &saga_id,
+        4,
+        &upstream_store,
+        "deadline-cancel-upstream-boot",
+    )
+    .await;
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let fired_for_producer = Arc::clone(&fired);
-    let _proxy = SagaProps::<CancellingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |components| CancellingSaga {
-            deadline: components.deadline(),
-            fired: Arc::clone(&fired_for_producer),
-        },
-    )
-    .subscribed_to::<Trigger>(Subscription::stream(
-        &upstream_store,
-        "deadline-cancel-upstream-empty",
-    ))
-    .spawn(&ps)
-    .await;
+    let _proxy =
+        SagaManagerProps::<CancellingSaga>::new(Arc::clone(&saga_store), move |components| {
+            CancellingSaga {
+                deadline: components.deadline(),
+                fired: Arc::clone(&fired_for_producer),
+            }
+        })
+        .observing::<Trigger>(Subscription::stream(
+            &upstream_store,
+            "deadline-cancel-upstream-boot",
+        ))
+        .spawn(&ps)
+        .await;
 
     let seen = wait_for_fired(&fired, BARRIER).await;
 

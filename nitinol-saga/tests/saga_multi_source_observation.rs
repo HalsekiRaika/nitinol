@@ -17,10 +17,20 @@
 //! - `Saga::Subscribe` is that enum; `Saga::correlate(&Self::Subscribe)` and
 //!   `Saga::handle(Self::Subscribe, ctx)` both take it, so a variant added to
 //!   the alphabet is a non-exhaustive `match` at both places.
-//! - `SagaProps::new(saga_id, store, producer)` where `producer` is
-//!   `Fn(SagaComponents<S>) -> S`, and `subscribed_to::<E>(Subscription)` binds one
-//!   declared source per call.
+//! - `SagaManagerProps::new(store, producer)` where `producer` is
+//!   `Fn(SagaComponents<S>) -> S`, and `observing::<E>(Subscription)` binds one
+//!   declared source per call.  `spawn(&ProcessSystem)` answers a
+//!   `SagaManagerProxy<S>`, the handle to the running host.
+//! - The instance a record belongs to is never named in the wiring: it is
+//!   whatever `Saga::correlate` answers for that record, and the host spawns it
+//!   on first claim.  A saga correlating every record to one id is therefore
+//!   written exactly as the two-instance one is.
 //! - `Saga::apply` is optional, so neither saga below declares it.
+//!
+//! The same builder reached from a system is `SagaSystemExt::host::<S>(producer)`
+//! — one entry point, differing only in where the store comes from and in its
+//! `spawn()` taking no argument; it is exercised in
+//! `saga_manager_degenerate_single_instance.rs`.
 //!
 //! If a name differs in the implementation, only the wiring lines need to be
 //! reconciled — the asserted behaviour is the requirement.
@@ -55,7 +65,7 @@ use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, Subscription};
 
 // Domain — two upstream sources, written on two upstream streams.
 
@@ -324,17 +334,16 @@ async fn both_declared_sources_reach_the_same_instance_as_their_own_variant() {
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy = SagaProps::<TranslatingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| TranslatingSaga {
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_stream))
-    .subscribed_to::<StockReserved>(Subscription::stream(&upstream_store, &stock_stream))
-    .spawn(&ps)
-    .await;
+    let _proxy =
+        SagaManagerProps::<TranslatingSaga>::new(Arc::clone(&saga_store), move |_components| {
+            TranslatingSaga {
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_stream))
+        .observing::<StockReserved>(Subscription::stream(&upstream_store, &stock_stream))
+        .spawn(&ps)
+        .await;
 
     let seen = wait_for_handled(&handled, 2).await;
 
@@ -378,7 +387,7 @@ async fn both_declared_sources_reach_the_same_instance_as_their_own_variant() {
 }
 
 /// Given a saga with two declared sources on two upstream streams,
-/// When it is spawned,
+/// When the host is spawned,
 /// Then both streams are polled: each declared source carries a subscription of
 /// its own, and no single shared cursor could have read both stream keys.
 #[tokio::test]
@@ -399,17 +408,16 @@ async fn each_declared_source_is_polled_through_a_subscription_of_its_own() {
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy = SagaProps::<TranslatingSaga>::new(
-        saga_id_of(ORDER),
-        Arc::clone(&saga_store),
-        move |_components| TranslatingSaga {
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_stream))
-    .subscribed_to::<StockReserved>(Subscription::stream(&upstream_store, &stock_stream))
-    .spawn(&ps)
-    .await;
+    let _proxy =
+        SagaManagerProps::<TranslatingSaga>::new(Arc::clone(&saga_store), move |_components| {
+            TranslatingSaga {
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_stream))
+        .observing::<StockReserved>(Subscription::stream(&upstream_store, &stock_stream))
+        .spawn(&ps)
+        .await;
 
     // Both records having been handled is the barrier: whatever polling it took
     // to deliver them has already been recorded.

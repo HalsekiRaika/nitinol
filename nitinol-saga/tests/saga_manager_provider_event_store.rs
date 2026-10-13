@@ -1,11 +1,11 @@
 //! The saga manager entry point on a system, and which store it resolves.
 //!
-//! `system.saga_manager_props(producer)` returns a manager builder with
-//! everything the system already knows filled in: the store each instance
-//! journals onto, which is the journal the system's provider supplies.  The two
-//! formats are settled by the event types themselves — each names its codec —
-//! so only the subscription handed to `subscribed_to` stays in the caller's
-//! hands, which makes it where another upstream is named:
+//! `system.host::<S>(producer)` returns a manager builder with everything the
+//! system already knows filled in: the store each instance journals onto, which
+//! is the journal the system's provider supplies.  The two formats are settled
+//! by the event types themselves — each names its codec — so only the
+//! subscription handed to `observing` stays in the caller's hands, which makes
+//! it where another upstream is named:
 //! `Subscription::stream(&store, &key)` names one explicitly where
 //! `system.subscription(&key)` resolves the provider's.
 //!
@@ -208,11 +208,11 @@ async fn wait_for_instance_persisted(store: &Arc<dyn EventStore>, saga_id: &Saga
 
 // The provider's journal: both directions of the manager
 
-/// `system.saga_manager_props(producer).subscribed_to(system.subscription(&key))`
-/// must resolve both stores from the system's provider: the upstream it polls
-/// and the journal each correlated instance writes to.
+/// `system.host::<S>(producer).observing(system.subscription(&key))` must
+/// resolve both stores from the system's provider: the upstream it polls and
+/// the journal each correlated instance writes to.
 #[tokio::test]
-async fn manager_props_uses_the_providers_event_store_for_upstream_and_journal() {
+async fn the_host_uses_the_providers_event_store_for_upstream_and_journal() {
     // Given: one provider, whose journal holds the upstream stream
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -233,11 +233,11 @@ async fn manager_props_uses_the_providers_event_store_for_upstream_and_journal()
 
     // When: neither store is named at the call site
     let _manager_proxy = system
-        .saga_manager_props(move |_components| FanoutSaga {
+        .host::<FanoutSaga>(move |_components| FanoutSaga {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(system.subscription(&upstream_key))
+        .observing::<OrderPlaced>(system.subscription(&upstream_key))
         .spawn()
         .await;
 
@@ -293,11 +293,11 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls()
 
     // When
     let _manager_proxy = system
-        .saga_manager_props(move |_components| FanoutSaga {
+        .host::<FanoutSaga>(move |_components| FanoutSaga {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&named_store, &upstream_key))
+        .observing::<OrderPlaced>(Subscription::stream(&named_store, &upstream_key))
         .spawn()
         .await;
 

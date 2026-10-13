@@ -25,14 +25,14 @@
 //! The second scenario is a compile error, and this workspace has no
 //! compile-fail harness (`trybuild`) for integration tests: a binary cannot
 //! assert that another program fails to build.  It is pinned instead by the
-//! `compile_fail` doctests on `SagaSpawn::spawn`, alongside the ones for
-//! binding nothing at all, binding one source twice, and binding a source the
-//! alphabet never declared.
-//! See: nitinol-saga/src/system_ext.rs
+//! `compile_fail` doctests on the hosted `SagaManagerProps::spawn` — the one
+//! `host` hands back — alongside the ones for binding nothing at all, binding
+//! one source twice, and binding a source the alphabet never declared.
+//! See: nitinol-saga/src/process/manager_props.rs
 //!
 //! ## API contract assumed by this file
 //!
-//! - `subscribed_to::<E>(Subscription)` moves one declared source's binding
+//! - `observing::<E>(Subscription)` moves one declared source's binding
 //!   slot, and `spawn` exists only once every external source's slot is filled.
 //! - A `#[subscribe(deadline)]` variant is allotted no slot.
 //!
@@ -56,7 +56,8 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription,
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
+    Subscription,
 };
 
 // Domain — three external sources and one deadline.
@@ -256,19 +257,18 @@ async fn binding_every_external_source_is_enough_even_with_a_deadline_declared()
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy = SagaProps::<ThreeSourceSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(&saga_store),
-        move |components| ThreeSourceSaga {
-            deadline: components.deadline(),
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .subscribed_to::<Placed>(Subscription::stream(&upstream_store, &placed_stream))
-    .subscribed_to::<Reserved>(Subscription::stream(&upstream_store, &reserved_stream))
-    .subscribed_to::<Shipped>(Subscription::stream(&upstream_store, &shipped_stream))
-    .spawn(&ps)
-    .await;
+    let _proxy =
+        SagaManagerProps::<ThreeSourceSaga>::new(Arc::clone(&saga_store), move |components| {
+            ThreeSourceSaga {
+                deadline: components.deadline(),
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<Placed>(Subscription::stream(&upstream_store, &placed_stream))
+        .observing::<Reserved>(Subscription::stream(&upstream_store, &reserved_stream))
+        .observing::<Shipped>(Subscription::stream(&upstream_store, &shipped_stream))
+        .spawn(&ps)
+        .await;
 
     let mut seen = wait_for_handled(&handled, 3).await;
     seen.sort();

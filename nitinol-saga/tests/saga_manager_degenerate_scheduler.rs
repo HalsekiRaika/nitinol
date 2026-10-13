@@ -1,17 +1,15 @@
-//! The degenerate single-instance manager has its own time, like a standalone
-//! saga does.
+//! The degenerate single-instance saga has its own time.
 //!
-//! `saga_manager_degenerate_single_instance.rs` pins the persist/tell/outbox
-//! parity between a manager whose `Saga::correlate` is constant and a
-//! standalone `SagaProps`, but does not exercise a deadline — so a
-//! manager-spawned instance whose schedule markers persist without ever
+//! `saga_manager_degenerate_single_instance.rs` pins what a saga whose
+//! `Saga::correlate` is constant writes and where, but does not exercise a
+//! deadline — so an instance whose schedule markers persist without ever
 //! registering a timer would still pass it.  This file is the deadline
 //! counterpart, mirroring
 //! `saga_deadline_scheduler.rs::a_deadline_fires_into_the_deadline_arm_of_handle`
-//! but spawned through `SagaManagerProps` instead of `SagaProps`.
+//! on a store-bound `SagaManagerProps` rather than on a hosted one.
 //!
-//! There is no scheduler to wire on either builder: a saga whose alphabet
-//! declares a `#[subscribe(deadline)]` variant has the system's resident
+//! There is no scheduler to wire anywhere: a saga whose alphabet declares a
+//! `#[subscribe(deadline)]` variant has the system's resident
 //! `SchedulerProcess` resolved for it at spawn, and the manager hands that same
 //! core to every instance it spawns.  What this file observes is that the
 //! handing-over actually happens — that the degenerate instance's deadline is
@@ -193,9 +191,9 @@ async fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
 /// when the resulting instance sets that deadline,
 /// then the resident scheduler the manager resolved must actually fire the
 /// timer and deliver the typed payload to the deadline arm of `handle` — the
-/// same outcome the standalone builder gives.  Without handing the resolved
-/// core through to the manager's spawned instances, the schedule marker would
-/// persist but no timer would ever fire.
+/// same outcome a saga correlating to many instances gets.  Without handing
+/// the resolved core through to the manager's spawned instances, the schedule
+/// marker would persist but no timer would ever fire.
 #[tokio::test]
 async fn manager_fires_the_degenerate_instances_timer() {
     let ps = ProcessSystem::new().await;
@@ -222,7 +220,7 @@ async fn manager_fires_the_degenerate_instances_timer() {
             deadline: components.deadline(),
             fired: Arc::clone(&fired_producer),
         })
-        .subscribed_to::<Trigger>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
+        .observing::<Trigger>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
         .spawn(system.process_system())
         .await;
 

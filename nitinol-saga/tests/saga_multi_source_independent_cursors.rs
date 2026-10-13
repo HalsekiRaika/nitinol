@@ -2,11 +2,11 @@
 //! holds another back.
 //!
 //! ```gherkin
-//!   Scenario: one source resumes where it left off, the other from its floor
+//!   Scenario: one source's position never speaks for another
 //!     Given a saga that consumed source A up to seq 3 and nothing of source B
-//!     When a fresh incarnation subscribes to both sources again
-//!     Then source A delivers only what it has not consumed
-//!     And source B delivers from its own configured floor
+//!     When a fresh host observes both sources again
+//!     Then source A reaches handle with only what it has not consumed
+//!     And source B reaches handle from its own configured floor
 //!
 //!   Scenario: a stalled source does not hold the other back
 //!     Given a saga whose source A never yields a record
@@ -17,17 +17,17 @@
 //! ## API contract assumed by this file
 //!
 //! - `#[derive(SagaSubscribe)]`, `Saga::Subscribe`, and
-//!   `subscribed_to::<E>(Subscription)` once per declared source — see
+//!   `observing::<E>(Subscription)` once per declared source — see
 //!   `saga_multi_source_observation.rs` for the full assumed surface.
 //!
 //! ## Why these are two separate claims
 //!
-//! "Per-source cursor" is about *where* a source resumes; "no head-of-line
-//! blocking" is about *whether* a source makes progress while another does not.
-//! A single shared cursor breaks the first silently — one source's position
-//! covers the other's records — and the second loudly: nothing is delivered at
-//! all while one stream stalls.  They fail separately, so they are asserted
-//! separately.
+//! "Per-source position" is about *which* records a source still owes an
+//! instance; "no head-of-line blocking" is about *whether* a source makes
+//! progress while another does not.  A single shared position breaks the first
+//! silently — one source's position covers the other's records — and a single
+//! shared poller breaks the second loudly: nothing is delivered at all while
+//! one stream stalls.  They fail separately, so they are asserted separately.
 //!
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_multi_source_independent_cursors`.
@@ -52,7 +52,7 @@ use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, Subscription};
 
 // Domain
 
@@ -296,17 +296,15 @@ async fn spawn_two_source_saga(
     alpha_stream: &AggregateId,
     beta_stream: &AggregateId,
     handled: &Handled,
-) -> nitinol_saga::SagaProxy<TwoSourceSaga> {
+) -> nitinol_saga::SagaManagerProxy<TwoSourceSaga> {
     let handled = Arc::clone(handled);
-    SagaProps::<TwoSourceSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(saga_store),
-        move |_components| TwoSourceSaga {
+    SagaManagerProps::<TwoSourceSaga>::new(Arc::clone(saga_store), move |_components| {
+        TwoSourceSaga {
             handled: Arc::clone(&handled),
-        },
-    )
-    .subscribed_to::<Alpha>(Subscription::stream(upstream_store, alpha_stream))
-    .subscribed_to::<Beta>(Subscription::stream(upstream_store, beta_stream))
+        }
+    })
+    .observing::<Alpha>(Subscription::stream(upstream_store, alpha_stream))
+    .observing::<Beta>(Subscription::stream(upstream_store, beta_stream))
     .spawn(ps)
     .await
 }
@@ -314,11 +312,11 @@ async fn spawn_two_source_saga(
 // Tests
 
 /// Given a saga that consumed every record of source A and none of source B,
-/// When a fresh incarnation subscribes to both sources from their floors again,
-/// Then A delivers nothing it already consumed while B delivers from its floor:
+/// When a fresh host observes both sources from their floors again,
+/// Then nothing A already consumed reaches `handle` while B's floor records do:
 /// one position per source, and neither speaks for the other.
 #[tokio::test]
-async fn each_source_resumes_from_its_own_consumed_position() {
+async fn each_source_is_owed_only_what_its_own_position_leaves() {
     let ps = ProcessSystem::new().await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -397,10 +395,10 @@ async fn each_source_resumes_from_its_own_consumed_position() {
                 sequence: 1
             },
         ],
-        "source A must resume past the position it recorded for itself, and \
-         source B must start at its own floor — a single shared position would \
-         either re-deliver A's first three records or cover B's first; saw \
-         {second_seen:?}"
+        "source A must owe this instance nothing it recorded a position for, \
+         and source B must owe it everything from its own floor — a single \
+         shared position would either re-decide A's first three records or \
+         cover B's first; saw {second_seen:?}"
     );
 }
 

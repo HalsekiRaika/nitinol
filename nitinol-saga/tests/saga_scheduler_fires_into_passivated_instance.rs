@@ -302,7 +302,7 @@ async fn scheduler_firing_activates_a_passivated_instance() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
+        .observing::<Ping>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
         .with_instance_passivation(PASSIVATE_AFTER)
         .spawn(system.process_system())
         .await;

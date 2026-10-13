@@ -82,8 +82,8 @@ pub(crate) enum InterpretOutcome {
     /// — raising it would stop the saga through handler-failure supervision,
     /// which is exactly what must not happen here.  No cursor is held open for
     /// this: the live upstream cursor advances regardless, and recovery comes
-    /// instead from what never became durable — a restart's subscription
-    /// resumes from the position the journal records for that source.
+    /// instead from what never became durable — nothing on the journal claims
+    /// the record, so a later host's sweep of that source re-opens it.
     ///
     /// A deadline firing recovers the same way, through the row that settles
     /// *it*: no `fired` marker is written for this outcome, so the schedule fact
@@ -391,7 +391,6 @@ async fn persist_batch<S: Saga>(
         for reg in registrations {
             let dispatch = ictx.delivery.dispatch(
                 &ictx.saga_id,
-                ictx.process_ctx,
                 reg.name.clone(),
                 reg.message_type,
                 reg.message_codec,

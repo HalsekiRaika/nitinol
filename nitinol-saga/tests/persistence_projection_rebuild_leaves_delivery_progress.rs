@@ -147,7 +147,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         .await;
 
     let _first_host = first_system
-        .saga_delivery_props::<DeliverySaga>()
+        .deliver::<DeliverySaga>()
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
         .with_poll_interval(TEST_POLL_INTERVAL)
@@ -218,7 +218,7 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         .await;
 
     let _rebuilt_host = rebuilt_system
-        .saga_delivery_props::<DeliverySaga>()
+        .deliver::<DeliverySaga>()
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
         .with_poll_interval(TEST_POLL_INTERVAL)

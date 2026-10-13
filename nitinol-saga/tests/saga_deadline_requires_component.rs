@@ -39,8 +39,8 @@
 //!
 //! - `#[derive(SagaSubscribe)]` accepts a `#[subscribe(deadline)]` variant
 //!   whether or not the saga holds a `Deadline<M>`.
-//! - `SagaProps::new(id, store, Fn(SagaComponents<S>) -> S)` calls the producer
-//!   with the components; a producer is free to ignore them.
+//! - `SagaManagerProps::new(store, Fn(SagaComponents<S>) -> S)` calls the
+//!   producer with the components; a producer is free to ignore them.
 //!
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_deadline_requires_component`.
@@ -63,7 +63,7 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription,
+    DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, Subscription,
 };
 use serde::{Deserialize, Serialize};
 
@@ -214,16 +214,15 @@ async fn a_saga_declaring_a_deadline_without_the_component_runs_normally() {
 
     let handled_for_producer = Arc::clone(&handled);
     // The whole of the producer: the components are offered and declined.
-    let _proxy = SagaProps::<ComponentlessSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(&saga_store),
-        move |_components| ComponentlessSaga {
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .subscribed_to::<Nudge>(Subscription::stream(&upstream_store, UPSTREAM))
-    .spawn(&ps)
-    .await;
+    let _proxy =
+        SagaManagerProps::<ComponentlessSaga>::new(Arc::clone(&saga_store), move |_components| {
+            ComponentlessSaga {
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<Nudge>(Subscription::stream(&upstream_store, UPSTREAM))
+        .spawn(&ps)
+        .await;
 
     // Upstream seq 2 is the barrier: the poller delivers ascending and asks one
     // record at a time, so once it has been handled the incarnation is settled.

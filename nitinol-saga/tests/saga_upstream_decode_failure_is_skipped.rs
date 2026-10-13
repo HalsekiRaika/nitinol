@@ -2,18 +2,27 @@
 //! That is the whole of it — there is no other behaviour to configure.
 //!
 //! ```gherkin
-//!   Scenario: a corrupt record is skipped, standalone
+//!   Scenario: the shared cursor advances past a record that cannot be decoded
 //!     Given an upstream stream whose first record cannot be decoded
-//!     When the saga runs
-//!     Then the next record is handled — the cursor advanced past the corrupt one
+//!     When the host observes that source
+//!     Then the record sitting behind the corrupt one is handled
 //!     And nothing durable is written for the corrupt one
 //!
-//!   Scenario: a corrupt record is skipped, under a manager
-//!     Given the same stream behind a saga manager
-//!     When the manager runs
-//!     Then the instance handles the next record
-//!     And nothing durable is written for the corrupt one on that instance's stream
+//!   Scenario: a record that cannot be decoded is attributed to no instance
+//!     Given the same upstream stream
+//!     When the host observes that source
+//!     Then the record behind the corrupt one reaches the instance `correlate`
+//!       names
+//!     And that instance's own stream carries nothing for the corrupt one
 //! ```
+//!
+//! Two runs, two claims.  There is one wiring, and the two things it could get
+//! wrong live in different places: the cursor the host holds for a source, and
+//! the routing that decides which instance a record belongs to.  A record with
+//! no typed event has no owner to be routed to, so the cursor must move anyway
+//! *and* no instance's stream may gain a row for it — and each clause is read
+//! off a run of its own, so a failure says which of the two broke rather than
+//! only that one did.
 //!
 //! ## Why skipping, and why only skipping
 //!
@@ -40,9 +49,9 @@
 //!
 //! ## API contract assumed by this file
 //!
-//! - `#[derive(SagaSubscribe)]`, `Saga::Subscribe`,
-//!   `subscribed_to::<E>(Subscription)` on both `SagaProps` and
-//!   `SagaManagerProps`, and `Fn(SagaComponents<S>) -> S` producers — see
+//! - `#[derive(SagaSubscribe)]`, `Saga::Subscribe`, `Saga::correlate`,
+//!   `SagaManagerProps::new(store, Fn(SagaComponents<S>) -> S)` and
+//!   `observing::<E>(Subscription)` — see
 //!   `saga_multi_source_observation.rs`.
 //!
 //! Run with:
@@ -68,9 +77,7 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaProps, Subscription,
-};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, Subscription};
 
 // Domain
 
@@ -283,9 +290,10 @@ fn position_of_the_readable_record(upstream: &AggregateId) -> ConsumedFactPayloa
 // Tests
 
 /// Given an upstream stream whose first record cannot be decoded,
-/// When a standalone saga runs over it,
-/// Then the next record is handled — so the cursor advanced past the corrupt
-/// one — and the corrupt record leaves nothing durable behind at all.
+/// When a host observes that source,
+/// Then the record behind the corrupt one is handled — so the shared cursor
+/// advanced past the corrupt one — and the corrupt record leaves nothing
+/// durable behind at all.
 #[tokio::test]
 async fn a_corrupt_upstream_record_is_skipped_and_writes_nothing() {
     let ps = ProcessSystem::new().await;
@@ -299,16 +307,15 @@ async fn a_corrupt_upstream_record_is_skipped_and_writes_nothing() {
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy = SagaProps::<SkippingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| SkippingSaga {
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(&ps)
-    .await;
+    let _proxy =
+        SagaManagerProps::<SkippingSaga>::new(Arc::clone(&saga_store), move |_components| {
+            SkippingSaga {
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+        .spawn(&ps)
+        .await;
 
     let observed = wait_for_handled(&handled, 1).await;
     let events = load_saga_events(&saga_store, &saga_id).await;
@@ -341,18 +348,18 @@ async fn a_corrupt_upstream_record_is_skipped_and_writes_nothing() {
     );
 }
 
-/// Given the same upstream stream behind a saga manager,
-/// When the manager runs,
-/// Then the correlated instance handles the next record, and the corrupt one
-/// leaves nothing on that instance's stream either.
+/// Given the same upstream stream,
+/// When a host observes that source,
+/// Then the record behind the corrupt one reaches the instance `correlate`
+/// names, and the corrupt one leaves nothing on that instance's stream.
 ///
-/// Probed separately because the manager is the one place that decides *which*
+/// Probed separately because routing is the one place that decides *which*
 /// instance an upstream record belongs to, and it decides that from the typed
-/// event a corrupt record does not have.  A manager that invented an owner for
-/// it would write a row on some instance's stream, and that instance would then
+/// event a corrupt record does not have.  A host that invented an owner for it
+/// would write a row on some instance's stream, and that instance would then
 /// carry a record it never consumed.
 #[tokio::test]
-async fn a_corrupt_upstream_record_is_skipped_under_a_manager_too() {
+async fn a_corrupt_upstream_record_is_attributed_to_no_instance() {
     let ps = ProcessSystem::new().await;
 
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -370,7 +377,7 @@ async fn a_corrupt_upstream_record_is_skipped_under_a_manager_too() {
                 handled: Arc::clone(&handled_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
         .spawn(&ps)
         .await;
 

@@ -1056,6 +1056,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance — resident or routed — it could be attributed to; it is reported
   through `tracing` and skipped, and its source's cursor advances past it.
 
+- **BREAKING** (`nitinol-saga`): a saga is started by one verb, `host`, and a
+  declared source is bound by one verb, `observing`.
+
+  `SagaSystemExt::host::<S>(factory)` hands back the manager builder, and
+  `SagaDeliveryExt::deliver::<S>()` its delivery-host counterpart. The two read
+  as the pair they are: one starts the saga, the other starts the host that
+  carries out what it decided. Binding a declared source is
+  `SagaManagerProps::observing::<E>(Subscription)` on both the hosted builder
+  and the store-bound one, so a wiring site says the same word wherever its
+  journal comes from.
+
+  There is one verb because there is one thing left to say. Everything the two
+  former entry points differed in has been withdrawn over this release — the
+  scheduler, the codec stage, the crash-restart factory, the enqueue policy,
+  the dead-letter subscriber, the decode-failure route — and what remains at a
+  wiring site is the binding of each declared source and the instances'
+  passivation, which is one builder's worth. With nothing left to configure
+  differently, a second entry point would only have been a second way to say
+  the same thing.
+
+  `host` always starts a manager. A saga whose `Saga::correlate` always answers
+  the same `SagaId` is that manager with a single instance — the degenerate
+  case rather than a separate mechanism — so that is how a process with one
+  instance is now run, with no `SagaId` named at the wiring and no difference
+  in what the instance does: same replay, same effect interpretation, same
+  append ordering, same deadlines. What a deployment *can* still say about an
+  instance is how long it stays resident, which is residency rather than
+  behaviour.
+
+  Migrating: `system.spawn_saga(id, producer).subscribed_to::<E>(sub)` becomes
+  `system.host::<S>(producer).observing::<E>(sub)` and the `SagaId` is deleted
+  (`correlate` already answers it); `system.saga_manager_props(producer)`
+  becomes `system.host::<S>(producer)`;
+  `system.saga_delivery_props::<S>()` becomes `system.deliver::<S>()`;
+  `SagaProps::new(id, store, producer)` becomes
+  `SagaManagerProps::new(store, producer)`; every `subscribed_to` becomes
+  `observing`. A handle is a `SagaManagerProxy<S>` rather than a
+  `SagaProxy<S>`, and carries the same `pid` and `stop`.
+
+  One consequence is worth naming on its own, because it is a behaviour change
+  and not a rename: a source's cursor is the manager's, so it starts where its
+  `Subscription` said rather than being carried forward to what the saga's own
+  stream records as consumed. That sweep from the configured position is what
+  activates the instances that are not resident, and it costs no second
+  decision — each instance still drops the records its own stream names as
+  consumed, before `Saga::handle`. A restart therefore re-reads upstream
+  history a standalone saga's own cursor used to skip. `Subscription::with_after`
+  is still a floor and is still honoured exactly.
+
+- (`nitinol-saga`): `Subscription::with_poll_interval(Duration)` names how
+  often one declared source is asked.
+
+  The observing side's counterpart of `SagaDeliveryProps::with_poll_interval`,
+  and a deployment's choice for the same reason: a pull consumer trades latency
+  for load on the store, and which way a deployment wants that is not something
+  the framework can know. It is named per source rather than per saga, because
+  the sources of one saga are observed independently and need not be read at
+  one cadence — a quiet stream polled rarely beside a busy one polled often.
+
+  A source that names no interval keeps the cadence `nitinol-eventsource`
+  already polls at, which stays the sole owner of that default: naming nothing
+  is not a way of naming something.
+
 - **BREAKING** (`nitinol-saga`): removed the `Saga::State` associated type. It
   was never read by the crate — a saga's state is the implementor itself, which
   `Saga::apply` mutates through `&mut self`. Implementors delete their
@@ -1373,6 +1436,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nitinol_eventsource::Snapshotable`. Implementors that overrode either method
   delete their overrides; callers of `SagaSnapshot` have no replacement until
   that extension trait lands.
+
+- **BREAKING** (`nitinol-saga`): the standalone saga spawn path is withdrawn,
+  and with it the second entry point into the manager.
+
+  Gone: `SagaSystemExt::spawn_saga`, `SagaSystemExt::saga_manager_props`,
+  `SagaDeliveryExt::saga_delivery_props`, `SagaSpawn`, `SagaProps`, `SagaProxy`
+  and `SagaManagerProps::subscribed_to`. What replaces every one of them is
+  named in the `host` / `observing` / `deliver` entry under *Changed*, which
+  also carries the call-by-call migration.
+
+  A standalone spawn was a mechanism for something that was never a second
+  kind of saga. "One resident instance" is what a `Saga::correlate` answering a
+  single id already means, so the builder, the typestate carrier and the handle
+  that served it were a parallel path to a result the manager reaches anyway —
+  and the binding typestate was written out three times to keep them in step.
+  There is one of each now, and the semantics that mattered are kept where they
+  belong: the degenerate case is documented on `SagaManagerProps`, and the
+  compile errors that pin binding completeness (a declared source left unbound,
+  a partial binding, a double binding, an undeclared source) moved onto
+  `host`'s own `spawn`.
+
+  `nitinol-saga` keeps `SagaManagerProps::new(store, producer)` as the explicit
+  form for a deployment whose instances journal into a destination of their
+  own. `SagaProcess` itself is untouched as the manager's child.
+
+  One crate-private consequence, listed because it withdraws a route rather
+  than a name: `ScheduleDelivery::ToTheInstance` is gone with the builder that
+  was the only thing to produce it. A deadline firing has one route — addressed
+  to the manager with the instance's `SagaId` — and that is the route that
+  restores a passivated instance before handing the firing over, which the
+  withdrawn one could not do.
 
 ### Fixed
 

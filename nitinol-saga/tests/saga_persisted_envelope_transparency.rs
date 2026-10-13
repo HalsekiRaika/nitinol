@@ -46,7 +46,9 @@ use nitinol_persistence::{
     LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Triggered;
@@ -169,15 +171,15 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
     let applied_for_saga = Arc::clone(&applied);
     let persisted_for_saga = Arc::clone(&persisted);
 
-    let _saga_proxy =
-        SagaProps::<EnvelopeSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
+    let _host_proxy =
+        SagaManagerProps::<EnvelopeSaga>::new(Arc::clone(&store), move |_components| {
             EnvelopeSaga {
                 applied: Arc::clone(&applied_for_saga),
                 persisted: Arc::clone(&persisted_for_saga),
                 note: "persisted-by-handle".to_owned(),
             }
         })
-        .subscribed_to::<Triggered>(Subscription::stream(&store, &upstream_id))
+        .observing::<Triggered>(Subscription::stream(&store, &upstream_id))
         .spawn(system.process_system())
         .await;
 
@@ -251,11 +253,19 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
     );
 }
 
-/// The upstream stream [`EnvelopeSaga`] is wired to in the replay test. It
-/// holds nothing, so replay of the seeded rows is the only thing that can reach
-/// `Saga::apply` — and it is also the stream the seeded consumed fact names, so
-/// the fact is one a real incarnation could have written.
+/// The upstream stream [`EnvelopeSaga`] is wired to in the replay test.
+///
+/// It is the stream the seeded consumed fact names, so the fact is one a real
+/// incarnation could have written — and the one record it does hold sits below
+/// that position, which is what makes the record inert: a host spawns an
+/// instance when a record its correlation claims arrives, and this one wakes
+/// the instance and is then dropped before `Saga::handle`.  Replay of the
+/// seeded rows therefore stays the only thing that can reach `Saga::apply`.
 const UNUSED_UPSTREAM: &str = "no-such-upstream";
+
+/// The upstream sequence the inert boot record sits at, below the position the
+/// seeded consumed fact holds for this source.
+const BOOT_SEQUENCE: u64 = 7;
 
 /// Given a saga stream holding one domain event and one framework record,
 /// When a fresh incarnation replays it,
@@ -293,7 +303,11 @@ async fn replay_applies_domain_event_and_never_applies_a_framework_record() {
     let framework_record = AppendingEvent {
         sequence: 2,
         event_type: CONSUMED_MARKER,
-        payload: encode_consumed_fact(UNUSED_UPSTREAM, 7, &Triggered::EVENT_TYPE.to_string()),
+        payload: encode_consumed_fact(
+            UNUSED_UPSTREAM,
+            BOOT_SEQUENCE,
+            &Triggered::EVENT_TYPE.to_string(),
+        ),
         occurred_at: jiff::Timestamp::now(),
     };
 
@@ -307,17 +321,34 @@ async fn replay_applies_domain_event_and_never_applies_a_framework_record() {
     let applied_for_saga = Arc::clone(&applied);
     let persisted_for_saga = Arc::clone(&persisted);
 
+    // The record that wakes the instance, at a position the seeded fact already
+    // names: it reaches no `handle`, so what it adds is the instance's
+    // existence and nothing else.
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    upstream_store
+        .append(
+            UNUSED_UPSTREAM,
+            vec![AppendingEvent {
+                sequence: BOOT_SEQUENCE,
+                event_type: Triggered::EVENT_TYPE,
+                payload: serde_json::to_vec(&Triggered)
+                    .map(Into::into)
+                    .expect("encode Triggered must succeed"),
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("appending the boot record must succeed");
 
-    let _saga_proxy =
-        SagaProps::<EnvelopeSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
+    let _host_proxy =
+        SagaManagerProps::<EnvelopeSaga>::new(Arc::clone(&store), move |_components| {
             EnvelopeSaga {
                 applied: Arc::clone(&applied_for_saga),
                 persisted: Arc::clone(&persisted_for_saga),
                 note: "unused-on-replay".to_owned(),
             }
         })
-        .subscribed_to::<Triggered>(Subscription::stream(&upstream_store, UNUSED_UPSTREAM))
+        .observing::<Triggered>(Subscription::stream(&upstream_store, UNUSED_UPSTREAM))
         .spawn(system.process_system())
         .await;
 

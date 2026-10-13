@@ -22,12 +22,10 @@
 //!
 //! ## API contract assumed by this file
 //!
-//! Every entry point takes `producer: impl Fn(SagaComponents<S>) -> S`:
+//! Both entry points take `producer: impl Fn(SagaComponents<S>) -> S`:
 //!
-//! 1. `SagaSystemExt::spawn_saga(saga_id, producer)`
-//! 2. `SagaProps::new(saga_id, store, producer)`
-//! 3. `SagaManagerProps::new(store, producer)` and
-//!    `SagaSystemExt::saga_manager_props(producer)`
+//! 1. `SagaSystemExt::host::<S>(producer)`
+//! 2. `SagaManagerProps::new(store, producer)`
 //!
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_producer_takes_components`.
@@ -51,7 +49,7 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaProps, SagaSystemExt, Subscription,
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSystemExt, Subscription,
 };
 
 // Domain
@@ -123,10 +121,8 @@ impl Saga for TrivialSaga {
 
 /// Each entry point gets its own upstream stream key, which is also the saga id
 /// `correlate` names, so the observations below cannot be confused.
-const THROUGH_SYSTEM_EXT: &str = "producer-system-ext";
-const THROUGH_PROPS: &str = "producer-props";
 const THROUGH_MANAGER_PROPS: &str = "producer-manager-props";
-const THROUGH_SYSTEM_MANAGER_PROPS: &str = "producer-system-manager-props";
+const THROUGH_HOST: &str = "producer-host";
 
 async fn append_ping(store: &Arc<dyn EventStore>, at: &str) {
     store
@@ -177,9 +173,9 @@ async fn wait_for_all(expected: &[&str]) -> Vec<String> {
 /// When it is spawned through every entry point with `|_| Saga::default()`,
 /// Then each spawn runs and handles its own record.
 ///
-/// One test, because the claim is about all four entry points sharing one
-/// producer shape; splitting it would put the same `static` registry under
-/// concurrent tests.
+/// One test, because the claim is about both entry points sharing one producer
+/// shape; splitting it would put the same `static` registry under concurrent
+/// tests.
 // `|_| TrivialSaga::default()` spelled out *is* what this file pins — a saga
 // needing no capability pays nothing for the components argument. Clippy's
 // shorter form for a unit struct would stop pinning it.
@@ -190,8 +186,18 @@ async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
     let own_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
-    // Entry point 1 — `SagaSystemExt` on a system, journalling onto the store
-    // the provider supplies.
+    // Entry point 1 — `SagaManagerProps`, built on a store of its own.
+    append_ping(&upstream_store, THROUGH_MANAGER_PROPS).await;
+    let _through_manager_props =
+        SagaManagerProps::<TrivialSaga>::new(Arc::clone(&own_store), |_components| {
+            TrivialSaga::default()
+        })
+        .observing::<Ping>(Subscription::stream(&upstream_store, THROUGH_MANAGER_PROPS))
+        .spawn(&ps)
+        .await;
+
+    // Entry point 2 — `host` on a system, journalling onto the store the
+    // provider supplies.
     let provider_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps.clone())
         .with_persistence(PersistenceProvider::new(
@@ -200,50 +206,15 @@ async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
                 .build(),
         ))
         .build();
-    append_ping(&provider_store, THROUGH_SYSTEM_EXT).await;
-    append_ping(&provider_store, THROUGH_SYSTEM_MANAGER_PROPS).await;
+    append_ping(&provider_store, THROUGH_HOST).await;
 
-    let _through_system_ext = system
-        .spawn_saga(SagaId::new(THROUGH_SYSTEM_EXT), |_components| {
-            TrivialSaga::default()
-        })
-        .subscribed_to::<Ping>(system.subscription(THROUGH_SYSTEM_EXT))
+    let _through_host = system
+        .host::<TrivialSaga>(|_components| TrivialSaga::default())
+        .observing::<Ping>(system.subscription(THROUGH_HOST))
         .spawn()
         .await;
 
-    // Entry point 2 — `SagaProps` directly.
-    append_ping(&upstream_store, THROUGH_PROPS).await;
-    let _through_props = SagaProps::<TrivialSaga>::new(
-        SagaId::new(THROUGH_PROPS),
-        Arc::clone(&own_store),
-        |_components| TrivialSaga::default(),
-    )
-    .subscribed_to::<Ping>(Subscription::stream(&upstream_store, THROUGH_PROPS))
-    .spawn(&ps)
-    .await;
-
-    // Entry points 3 — `SagaManagerProps`, built directly and from the system.
-    append_ping(&upstream_store, THROUGH_MANAGER_PROPS).await;
-    let _through_manager_props =
-        SagaManagerProps::<TrivialSaga>::new(Arc::clone(&own_store), |_components| {
-            TrivialSaga::default()
-        })
-        .subscribed_to::<Ping>(Subscription::stream(&upstream_store, THROUGH_MANAGER_PROPS))
-        .spawn(&ps)
-        .await;
-
-    let _through_system_manager_props = system
-        .saga_manager_props(|_components| TrivialSaga::default())
-        .subscribed_to::<Ping>(system.subscription(THROUGH_SYSTEM_MANAGER_PROPS))
-        .spawn()
-        .await;
-
-    let expected = [
-        THROUGH_MANAGER_PROPS,
-        THROUGH_PROPS,
-        THROUGH_SYSTEM_EXT,
-        THROUGH_SYSTEM_MANAGER_PROPS,
-    ];
+    let expected = [THROUGH_HOST, THROUGH_MANAGER_PROPS];
     let seen = wait_for_all(&expected).await;
 
     assert_eq!(

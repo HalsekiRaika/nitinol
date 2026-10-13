@@ -1,24 +1,22 @@
 //! A saga reaching the system that hosts it.
 //!
 //! ```gherkin
-//!   Scenario: a saga spawned from a system is handed that system
-//!     Given a saga spawned through a system's own entry point
-//!     When its producer asks the components for the hosting system
+//!   Scenario: an instance the host spawns is handed the hosting system
+//!     Given a saga hosted through a system's own entry point
+//!     When an instance it spawns asks the components for the hosting system
 //!     Then it is handed one
 //!     And telling an aggregate through it reaches the activation the host
 //!         resolves, on the store the host was built on
 //!
-//!   Scenario: a manager's instance is handed the hosting system too
-//!     Given a saga manager wired from a system
-//!     When an instance it spawns asks the components for the hosting system
-//!     Then it is handed one
-//!     And its deliveries land on the store the host was built on
-//!
 //!   Scenario: a saga built from props directly has no host
-//!     Given a saga spawned from props built on a store rather than a system
+//!     Given a saga hosted from props built on a store rather than a system
 //!     When its producer asks the components for the hosting system
 //!     Then it is handed none
 //! ```
+//!
+//! There is one hosted entry point and so one hosted clause.  The host builds
+//! every instance from the one producer it was given, so there is no second
+//! path a host handle could reach and no correlated instance it could miss.
 //!
 //! The producer is called with the capabilities the framework resolved, so this
 //! is where a saga that needs a reference to tell gets one — rather than from a
@@ -56,8 +54,8 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaComponents, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, SagaSystemExt,
-    Subscription,
+    Saga, SagaComponents, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe,
+    SagaSystemExt, Subscription,
 };
 
 // Fixtures
@@ -285,10 +283,10 @@ async fn wait_for_handled(report: &Arc<Report>, want: usize, label: &str) {
 
 // The system's own entry point
 
-/// A saga spawned from a system is handed that system, and what it tells
-/// through it reaches the host's activation on the host's store.
+/// An instance a saga hosted from a system spawns is handed that system, and
+/// what it tells through it reaches the host's activation on the host's store.
 #[tokio::test]
-async fn a_saga_spawned_from_a_system_reaches_that_systems_resources() {
+async fn an_instance_the_host_spawns_reaches_the_hosting_systems_resources() {
     // Given: a system over a store this clause holds, with the target already
     // resolved and written to from outside
     let store = InMemoryStore::default();
@@ -309,22 +307,22 @@ async fn a_saga_spawned_from_a_system_reaches_that_systems_resources() {
     let order_id = AggregateId::new("saga-components-host-order");
     let report = Arc::new(Report::default());
 
-    // When: the saga is spawned through the system, with no system captured
+    // When: the saga is hosted through the system, with no system captured
     // outside the producer
-    let _saga = system
-        .spawn_saga(SagaId::new(SAGA_ID), producer(&report))
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
+    let _host = system
+        .host::<HostedSaga>(producer(&report))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
         .spawn()
         .await;
 
     append_order_placed(&upstream, &order_id, 1, "from-the-saga").await;
-    wait_for_handled(&report, 1, "the saga must observe the order").await;
+    wait_for_handled(&report, 1, "the host's instance must observe the order").await;
 
     // Then: the components answered with a host
     assert!(
         report.host_present.load(Ordering::SeqCst),
-        "a saga spawned from a system is handed that system, so its producer \
-         does not need a clone prepared outside the spawn"
+        "an instance hosted from a system is handed that system, so its \
+         producer does not need a clone prepared outside the spawn"
     );
 
     // And: the third dispatch settles that the host resolves through the
@@ -355,50 +353,9 @@ async fn a_saga_spawned_from_a_system_reaches_that_systems_resources() {
     );
 }
 
-/// An instance a manager wired from a system spawns is handed the same host.
-///
-/// The manager builds every instance from the one producer it was given, so a
-/// host reaching only the standalone spawn would leave every correlated
-/// instance without one.
-#[tokio::test]
-async fn an_instance_a_manager_spawns_reaches_the_hosting_systems_resources() {
-    // Given
-    let store = InMemoryStore::default();
-    let system = EventSourceSystem::builder(ProcessSystem::new().await)
-        .with_persistence(PersistenceProvider::new(store.clone()))
-        .build();
-    let target = AggregateId::new(TARGET);
-
-    let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let order_id = AggregateId::new("saga-components-host-manager-order");
-    let report = Arc::new(Report::default());
-
-    // When
-    let _manager = system
-        .saga_manager_props(producer(&report))
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
-        .spawn()
-        .await;
-
-    append_order_placed(&upstream, &order_id, 1, "through-the-manager").await;
-    wait_for_handled(&report, 1, "the manager's instance must observe the order").await;
-
-    // Then
-    assert!(
-        report.host_present.load(Ordering::SeqCst),
-        "an instance a manager wired from a system spawns is handed that system"
-    );
-    assert_eq!(
-        recorded_skus(&store.events(), &target).await,
-        vec!["through-the-manager".to_owned()],
-        "and what it tells through the host lands on the store the hosting \
-         system was built on"
-    );
-}
-
 // The entry point built directly
 
-/// A saga spawned from props built on a store has no host, and says so.
+/// A saga hosted from props built on a store has no host, and says so.
 ///
 /// This path needs no system to run on, so there is nothing truthful to answer
 /// with. The handled count beside it is what makes the absence a statement
@@ -413,17 +370,13 @@ async fn a_saga_built_from_props_directly_is_handed_no_host() {
     let report = Arc::new(Report::default());
 
     // When
-    let _saga = SagaProps::<HostedSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(&journal),
-        producer(&report),
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
-    .spawn(&ps)
-    .await;
+    let _saga = SagaManagerProps::<HostedSaga>::new(Arc::clone(&journal), producer(&report))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
+        .spawn(&ps)
+        .await;
 
     append_order_placed(&upstream, &order_id, 1, "without-a-host").await;
-    wait_for_handled(&report, 1, "the saga must observe the order").await;
+    wait_for_handled(&report, 1, "the instance must observe the order").await;
 
     // Then
     assert!(

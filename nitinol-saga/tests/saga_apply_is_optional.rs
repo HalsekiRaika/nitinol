@@ -24,8 +24,8 @@
 //! ## API contract assumed by this file
 //!
 //! - `#[derive(SagaSubscribe)]`, `Saga::Subscribe`, `Saga::correlate`,
-//!   `Saga::handle`, `SagaProps::new(id, store, Fn(SagaComponents<S>) -> S)`,
-//!   `subscribed_to::<E>(Subscription)` — see
+//!   `Saga::handle`, `SagaManagerProps::new(store, Fn(SagaComponents<S>) -> S)`,
+//!   `observing::<E>(Subscription)` — see
 //!   `saga_multi_source_observation.rs` for the full assumed surface.
 //!
 //! Run with: `cargo test -p nitinol-saga --test saga_apply_is_optional`.
@@ -49,7 +49,7 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, Subscription};
 
 // Domain
 
@@ -197,16 +197,15 @@ async fn a_saga_without_apply_still_journals_its_decisions() {
     let handled = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy = SagaProps::<StatelessSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| StatelessSaga {
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .subscribed_to::<Requested>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(&ps)
-    .await;
+    let _proxy =
+        SagaManagerProps::<StatelessSaga>::new(Arc::clone(&saga_store), move |_components| {
+            StatelessSaga {
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<Requested>(Subscription::stream(&upstream_store, &upstream))
+        .spawn(&ps)
+        .await;
 
     let decisions = wait_for_decisions(&saga_store, &saga_id, 2).await;
 
@@ -244,14 +243,12 @@ async fn replay_over_a_saga_without_apply_adds_no_second_decision() {
 
     let handled_for_first = Arc::clone(&handled);
     let saga_store_for_first = Arc::clone(&saga_store);
-    let first = SagaProps::<StatelessSaga>::new(
-        saga_id.clone(),
-        saga_store_for_first,
-        move |_components| StatelessSaga {
+    let first = SagaManagerProps::<StatelessSaga>::new(saga_store_for_first, move |_components| {
+        StatelessSaga {
             handled: Arc::clone(&handled_for_first),
-        },
-    )
-    .subscribed_to::<Requested>(Subscription::stream(&upstream_store, &upstream))
+        }
+    })
+    .observing::<Requested>(Subscription::stream(&upstream_store, &upstream))
     .spawn(&ps)
     .await;
 
@@ -260,16 +257,15 @@ async fn replay_over_a_saga_without_apply_adds_no_second_decision() {
     drop(first);
 
     let handled_for_second = Arc::clone(&handled);
-    let _second = SagaProps::<StatelessSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| StatelessSaga {
-            handled: Arc::clone(&handled_for_second),
-        },
-    )
-    .subscribed_to::<Requested>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(&ps)
-    .await;
+    let _second =
+        SagaManagerProps::<StatelessSaga>::new(Arc::clone(&saga_store), move |_components| {
+            StatelessSaga {
+                handled: Arc::clone(&handled_for_second),
+            }
+        })
+        .observing::<Requested>(Subscription::stream(&upstream_store, &upstream))
+        .spawn(&ps)
+        .await;
 
     // Upstream seq 2 is the barrier: the poller delivers ascending and asks one
     // record at a time, so once seq 2 has been decided, seq 1's fate is settled.

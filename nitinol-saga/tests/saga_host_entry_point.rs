@@ -1,4 +1,4 @@
-//! Spawning a saga through the extension trait on `EventSourceSystem`.
+//! Hosting a saga through the extension trait on `EventSourceSystem`.
 //!
 //! The wiring under test is the one the caller no longer writes: both codecs
 //! are resolved from the event types themselves (`Event::Codec`), the
@@ -6,6 +6,15 @@
 //! subscription value.  Each test therefore observes the two codec directions
 //! (upstream record decoded into `Saga::handle`, the saga's own event encoded
 //! onto its stream) and the cursor position the subscription value carries.
+//!
+//! `host` is the one system-side verb, and it always starts a manager: the
+//! saga below answers the same `SagaId` for every input, so what runs is the
+//! degenerate single-instance case.  That `host` really is the whole of the
+//! resident-saga wiring is pinned in
+//! `saga_manager_degenerate_single_instance.rs`; here it is the entry point's
+//! own resolutions that are under test.
+//!
+//! Run with: `cargo test -p nitinol-saga --test saga_host_entry_point`.
 
 #[path = "common/helpers.rs"]
 mod common;
@@ -39,7 +48,7 @@ struct OrderPlaced {
 
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
-        EventType::new(Family::new("saga.system.ext"), TypeName::new("OrderPlaced"));
+        EventType::new(Family::new("saga.host.entry"), TypeName::new("OrderPlaced"));
     type Codec = JsonCodec;
 }
 
@@ -50,15 +59,15 @@ struct ReservationRequested {
 
 impl Event for ReservationRequested {
     const EVENT_TYPE: EventType = EventType::new(
-        Family::new("saga.system.ext"),
+        Family::new("saga.host.entry"),
         TypeName::new("ReservationRequested"),
     );
     type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`RecordingSaga`]: every order belongs to the single
-/// reservation process each test in this file spawns.
-const RECORDING_SAGA_ID: &str = "saga-system-ext-reservation";
+/// reservation process each test in this file hosts.
+const RECORDING_SAGA_ID: &str = "saga-host-entry-reservation";
 
 /// The whole alphabet this saga reacts to: one observed source, no deadline.
 #[derive(SagaSubscribe)]
@@ -187,7 +196,7 @@ async fn wait_for_persisted(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Ve
 }
 
 #[tokio::test]
-async fn spawn_saga_uses_the_codecs_its_events_name() {
+async fn host_uses_the_codecs_its_events_name() {
     let ps = ProcessSystem::new().await;
     let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
@@ -199,7 +208,7 @@ async fn spawn_saga_uses_the_codecs_its_events_name() {
         .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let order_id = AggregateId::new("saga-system-ext-order");
+    let order_id = AggregateId::new("saga-host-entry-order");
 
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
 
@@ -208,12 +217,12 @@ async fn spawn_saga_uses_the_codecs_its_events_name() {
     let handled_for_producer = Arc::clone(&handled);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy = system
-        .spawn_saga(saga_id.clone(), move |_components| RecordingSaga {
+    let _manager = system
+        .host::<RecordingSaga>(move |_components| RecordingSaga {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
         .spawn()
         .await;
 
@@ -243,7 +252,7 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
         .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let order_id = AggregateId::new("saga-system-ext-catchup-order");
+    let order_id = AggregateId::new("saga-host-entry-catchup-order");
     append_order_placed(&order_store, &order_id, 1, "BEFORE-1").await;
     append_order_placed(&order_store, &order_id, 2, "BEFORE-2").await;
 
@@ -252,14 +261,12 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
     let handled_for_producer = Arc::clone(&handled);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy = system
-        .spawn_saga(SagaId::new(RECORDING_SAGA_ID), move |_components| {
-            RecordingSaga {
-                handled: Arc::clone(&handled_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
+    let _manager = system
+        .host::<RecordingSaga>(move |_components| RecordingSaga {
+            handled: Arc::clone(&handled_for_producer),
+            notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
         .spawn()
         .await;
 
@@ -279,7 +286,7 @@ async fn stream_subscription_after_override_skips_records_up_to_that_position() 
         .build();
 
     let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let order_id = AggregateId::new("saga-system-ext-resume-order");
+    let order_id = AggregateId::new("saga-host-entry-resume-order");
     append_order_placed(&order_store, &order_id, 1, "SKIPPED").await;
     append_order_placed(&order_store, &order_id, 2, "DELIVERED").await;
 
@@ -288,14 +295,12 @@ async fn stream_subscription_after_override_skips_records_up_to_that_position() 
     let handled_for_producer = Arc::clone(&handled);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy = system
-        .spawn_saga(SagaId::new(RECORDING_SAGA_ID), move |_components| {
-            RecordingSaga {
-                handled: Arc::clone(&handled_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
+    let _manager = system
+        .host::<RecordingSaga>(move |_components| RecordingSaga {
+            handled: Arc::clone(&handled_for_producer),
+            notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_id).with_after(1))
+        .observing::<OrderPlaced>(Subscription::stream(&order_store, &order_id).with_after(1))
         .spawn()
         .await;
 

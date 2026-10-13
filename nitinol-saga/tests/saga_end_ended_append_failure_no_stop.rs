@@ -4,7 +4,9 @@
 //! The End interpreter writes the `Ended` marker before transitioning the
 //! saga to a stopped/draining state.  If the append fails without the fix
 //! the saga would stop anyway, leaving the stream without the restart guard.
-//! The next spawn would then see no `Ended` marker and revive the saga.
+//! The instance the host spawns for the next record of the same correlation id
+//! would then replay a stream carrying no `Ended` marker and go on deciding —
+//! a saga that believes it terminated, revived.
 //!
 //! With the fix, a failed `Ended` append returns without stopping — as
 //! `InterpretOutcome::AppendFailed`, which reports that an append this input
@@ -40,7 +42,9 @@ use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 // Domain types
 
@@ -171,7 +175,6 @@ async fn saga_stays_alive_when_ended_append_fails() {
     append_order(&upstream_store, &order_id, 2, "second").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(AlwaysFailOnAppendStore);
-    let saga_id = SagaId::new(ALWAYS_END_SAGA_ID);
 
     let handle_count = Arc::new(AtomicUsize::new(0));
     let handled = Arc::new(Notify::new());
@@ -179,17 +182,16 @@ async fn saga_stays_alive_when_ended_append_fails() {
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_clone = Arc::clone(&handled);
 
-    let _saga_proxy = SagaProps::<AlwaysEndSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| AlwaysEndSaga {
-            handle_count: Arc::clone(&handle_count_clone),
-            handled: Arc::clone(&handled_clone),
-        },
-    )
-    .subscribed_to::<OrderEvent>(Subscription::stream(&upstream_store, &order_id))
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy =
+        SagaManagerProps::<AlwaysEndSaga>::new(Arc::clone(&saga_store), move |_components| {
+            AlwaysEndSaga {
+                handle_count: Arc::clone(&handle_count_clone),
+                handled: Arc::clone(&handled_clone),
+            }
+        })
+        .observing::<OrderEvent>(Subscription::stream(&upstream_store, &order_id))
+        .spawn(system.process_system())
+        .await;
 
     // Wait for at least one handle call to confirm event delivery works.
     tokio::time::timeout(Duration::from_secs(3), handled.notified())

@@ -35,7 +35,7 @@
 //!   `saga_consumed_fact_declaration.rs::a_consumed_fact_naming_no_source_refuses_the_load`,
 //!   which is why nothing here seeds one.
 //! - `#[derive(SagaSubscribe)]`, `Saga::Subscribe`, and
-//!   `subscribed_to::<E>(Subscription)` — see
+//!   `observing::<E>(Subscription)` — see
 //!   `saga_multi_source_observation.rs` for the full assumed surface.
 //!
 //! Run with:
@@ -60,7 +60,7 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, Subscription};
 
 // The consumed-position record, mirrored from `proto/consumed.proto`.
 //
@@ -337,17 +337,15 @@ async fn spawn_shared(
     upstream_store: &Arc<dyn EventStore>,
     shared: &AggregateId,
     handled: &Handled,
-) -> nitinol_saga::SagaProxy<SharedStreamSaga> {
+) -> nitinol_saga::SagaManagerProxy<SharedStreamSaga> {
     let handled = Arc::clone(handled);
-    SagaProps::<SharedStreamSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(saga_store),
-        move |_components| SharedStreamSaga {
+    SagaManagerProps::<SharedStreamSaga>::new(Arc::clone(saga_store), move |_components| {
+        SharedStreamSaga {
             handled: Arc::clone(&handled),
-        },
-    )
-    .subscribed_to::<Alpha>(Subscription::stream(upstream_store, shared))
-    .subscribed_to::<Beta>(Subscription::stream(upstream_store, shared))
+        }
+    })
+    .observing::<Alpha>(Subscription::stream(upstream_store, shared))
+    .observing::<Beta>(Subscription::stream(upstream_store, shared))
     .spawn(ps)
     .await
 }

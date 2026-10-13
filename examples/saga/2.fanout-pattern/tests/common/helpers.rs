@@ -38,7 +38,7 @@ use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 ///
 /// Those two slots are exactly what a delivery host needs, and naming the second
 /// one is what makes
-/// [`SagaDeliveryExt::saga_delivery_props`](nitinol_saga::SagaDeliveryExt::saga_delivery_props)
+/// [`SagaDeliveryExt::deliver`](nitinol_saga::SagaDeliveryExt::deliver)
 /// exist on the system at all — a deployment that named no store for its hosts'
 /// progress would not compile.  The snapshot and projection slots are left
 /// unprovided rather than filled with stores nothing here reads.
@@ -113,8 +113,8 @@ pub struct FanOutWorld {
 }
 
 /// Spawn a complete incarnation: a fresh `ProcessSystem`, the payroll run
-/// aggregate, the saga manager subscribed to the run's stream, and a delivery
-/// host named `delivery_id`.
+/// aggregate, the saga manager observing the run's stream, and a delivery host
+/// named `delivery_id`.
 ///
 /// One store serves every wiring point — the run aggregate, the payslips, the
 /// saga's journal, the manager's subscription and the host's input.
@@ -166,7 +166,7 @@ pub async fn spawn_world(
 /// instance's own stream, committed by the append that carried the decision — so
 /// a second incarnation does not decide the fan-out twice.
 ///
-/// Subscribing by the run's stream key is also what keeps the manager pointed at
+/// Observing by the run's stream key is also what keeps the manager pointed at
 /// the run's own stream while the payslip streams and the saga's journal share
 /// the same store.
 ///
@@ -177,8 +177,8 @@ pub async fn spawn_manager(
     run_id: &AggregateId,
 ) -> SagaManagerProxy<FanOutSaga> {
     system
-        .saga_manager_props(|_components| FanOutSaga)
-        .subscribed_to::<PayrollRunApproved>(system.subscription(run_id))
+        .host::<FanOutSaga>(|_components| FanOutSaga)
+        .observing::<PayrollRunApproved>(system.subscription(run_id))
         .spawn()
         .await
 }
@@ -196,7 +196,7 @@ pub async fn spawn_delivery_host(
     delivery_id: &SagaDeliveryId,
 ) -> SagaDeliveryProxy<FanOutSaga> {
     system
-        .saga_delivery_props::<FanOutSaga>()
+        .deliver::<FanOutSaga>()
         .with_delivery_id(delivery_id.clone())
         .with_poll_interval(DELIVERY_POLL_INTERVAL)
         .spawn()

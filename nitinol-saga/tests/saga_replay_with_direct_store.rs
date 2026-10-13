@@ -16,7 +16,9 @@ use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct OrderPlaced {
@@ -64,7 +66,8 @@ impl Event for ReservationRequested {
 }
 
 /// Correlation rule of [`RecordingSaga`]: every `OrderPlaced` belongs to the
-/// one recording instance each test in this file spawns against its own store.
+/// one recording instance the host in each test derives from it, kept on the
+/// very store the aggregates in this file are journalled to.
 const RECORDING_SAGA_ID: &str = "direct-store-saga-1";
 
 /// The whole alphabet this saga reacts to: one observed source, no deadline.
@@ -172,13 +175,13 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     let done_for_producer = Arc::clone(&done);
 
     let _saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
+        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&store), move |_components| {
             RecordingSaga {
                 captured: Arc::clone(&captured_for_producer),
                 done: Arc::clone(&done_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -230,10 +233,10 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     assert_eq!(captured[0].as_str(), RECORDING_SAGA_ID);
 }
 
-/// Regression test: dropping all `SagaProxy` handles must NOT stop the
-/// upstream `DurableStream` subscription.  The subscription lifetime is owned by `SagaProcess` itself,
-/// so the process continues receiving and persisting events after every handle
-/// has been released.
+/// Regression test: dropping all `SagaManagerProxy` handles must NOT stop the
+/// upstream `DurableStream` subscription.  The subscription lifetime is owned
+/// by the host process itself, so it continues receiving, routing and
+/// persisting events after every handle has been released.
 #[tokio::test]
 async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let ps = ProcessSystem::new().await;
@@ -258,13 +261,13 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let done_for_producer = Arc::clone(&done);
 
     let saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
+        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&store), move |_components| {
             RecordingSaga {
                 captured: Arc::clone(&captured_for_producer),
                 done: Arc::clone(&done_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -291,8 +294,9 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     assert_eq!(
         persisted.len(),
         2,
-        "SagaProxy drop must not stop the upstream subscription; \
-         SagaProcess must continue persisting events after the handle is released"
+        "a `SagaManagerProxy` drop must not stop the upstream subscription; the \
+         host must continue persisting its instance's decisions after the \
+         handle is released"
     );
     // Each decision is committed with the position of the input it was decided
     // from, so the second one starts a sequence past its predecessor's pair.
@@ -323,13 +327,13 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let done_first = Arc::clone(&done);
 
     let saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
+        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&store), move |_components| {
             RecordingSaga {
                 captured: Arc::clone(&captured_first),
                 done: Arc::clone(&done_first),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -341,9 +345,10 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
         .expect("ask must succeed");
     wait_for_decisions(&store, &saga_id, 1, Duration::from_secs(3)).await;
 
-    // Explicitly stop the saga process so the upstream DurableStream poller is
-    // also torn down.  Dropping the proxy handle alone is not sufficient —
-    // the process is owned by the runtime, not by the handle.
+    // Explicitly stop the host so the upstream DurableStream poller and the
+    // instance behind it are both torn down.  Dropping the proxy handle alone
+    // is not sufficient — the process is owned by the runtime, not by the
+    // handle.
     saga_proxy.stop().await.expect("stop must succeed");
     drop(saga_proxy);
 
@@ -352,13 +357,13 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let done2_for_producer = Arc::clone(&done2);
 
     let _saga_proxy2 =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
+        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&store), move |_components| {
             RecordingSaga {
                 captured: Arc::clone(&captured2),
                 done: Arc::clone(&done2_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
         .await;
 

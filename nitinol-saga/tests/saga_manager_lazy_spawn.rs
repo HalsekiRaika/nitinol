@@ -230,7 +230,7 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 
@@ -278,7 +278,7 @@ async fn known_correlation_id_reuses_the_running_instance() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 

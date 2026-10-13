@@ -51,8 +51,8 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe,
-    Subscription, TimerName,
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
+    SagaSubscribe, Subscription, TimerName,
 };
 
 // Domain
@@ -828,15 +828,14 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
     let f = fixture("combine-schedule-order", "SKU-1").await;
 
     let handled = Arc::clone(&f.handled);
-    let _saga_proxy = SagaProps::<PersistCombineScheduleSaga>::new(
-        SagaId::new(PERSIST_COMBINE_SCHEDULE_SAGA_ID),
+    let _manager_proxy = SagaManagerProps::<PersistCombineScheduleSaga>::new(
         Arc::clone(&f.saga_store),
         move |components| PersistCombineScheduleSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
         },
     )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
+    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
     .spawn(&f.ps)
     .await;
 
@@ -860,15 +859,14 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
     let f = fixture("sequence-single-order", "SKU-SEQ").await;
 
     let handled = Arc::clone(&f.handled);
-    let _saga_proxy = SagaProps::<PersistSequencedWithScheduleSaga>::new(
-        SagaId::new(PERSIST_SEQUENCED_WITH_SCHEDULE_SAGA_ID),
+    let _manager_proxy = SagaManagerProps::<PersistSequencedWithScheduleSaga>::new(
         Arc::clone(&f.saga_store),
         move |components| PersistSequencedWithScheduleSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
         },
     )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
+    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
     .spawn(&f.ps)
     .await;
 
@@ -890,15 +888,14 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
     let f = fixture("sequence-empty-nested-order", "SKU-SEQ-EMPTY").await;
 
     let handled = Arc::clone(&f.handled);
-    let _saga_proxy = SagaProps::<PersistSequencedWithEmptyNestedSequenceSaga>::new(
-        SagaId::new(PERSIST_SEQUENCED_WITH_EMPTY_NESTED_SEQUENCE_SAGA_ID),
+    let _manager_proxy = SagaManagerProps::<PersistSequencedWithEmptyNestedSequenceSaga>::new(
         Arc::clone(&f.saga_store),
         move |components| PersistSequencedWithEmptyNestedSequenceSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
         },
     )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
+    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
     .spawn(&f.ps)
     .await;
 
@@ -923,15 +920,14 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
     let f = fixture("sequence-none-leaf-order", "SKU-SEQ-NONE").await;
 
     let handled = Arc::clone(&f.handled);
-    let _saga_proxy = SagaProps::<PersistSequencedWithNoneLeafSaga>::new(
-        SagaId::new(PERSIST_SEQUENCED_WITH_NONE_LEAF_SAGA_ID),
+    let _manager_proxy = SagaManagerProps::<PersistSequencedWithNoneLeafSaga>::new(
         Arc::clone(&f.saga_store),
         move |components| PersistSequencedWithNoneLeafSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
         },
     )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
+    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
     .spawn(&f.ps)
     .await;
 
@@ -954,15 +950,14 @@ async fn combined_schedules_keep_left_to_right_order_inside_the_single_batch() {
     let f = fixture("combine-order-order", "SKU-2").await;
 
     let handled = Arc::clone(&f.handled);
-    let _saga_proxy = SagaProps::<PersistCombineTwoSchedulesSaga>::new(
-        SagaId::new(PERSIST_COMBINE_TWO_SCHEDULES_SAGA_ID),
+    let _manager_proxy = SagaManagerProps::<PersistCombineTwoSchedulesSaga>::new(
         Arc::clone(&f.saga_store),
         move |components| PersistCombineTwoSchedulesSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
         },
     )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
+    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
     .spawn(&f.ps)
     .await;
 
@@ -1014,17 +1009,16 @@ async fn a_cancellation_is_a_hard_boundary_the_fold_does_not_cross() {
     let f = fixture("combine-cancel-order", "SKU-CANCEL").await;
 
     let handled = Arc::clone(&f.handled);
-    let _saga_proxy = SagaProps::<PersistCancelSaga>::new(
-        SagaId::new(PERSIST_CANCEL_SAGA_ID),
-        Arc::clone(&f.saga_store),
-        move |components| PersistCancelSaga {
-            deadline: components.deadline(),
-            handled: Arc::clone(&handled),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
-    .spawn(&f.ps)
-    .await;
+    let _manager_proxy =
+        SagaManagerProps::<PersistCancelSaga>::new(Arc::clone(&f.saga_store), move |components| {
+            PersistCancelSaga {
+                deadline: components.deadline(),
+                handled: Arc::clone(&handled),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
+        .spawn(&f.ps)
+        .await;
 
     // domain event + the `cancelled` fact + the consumed position.
     let recorded = f.observe(3).await;
@@ -1072,21 +1066,21 @@ async fn a_cancellation_is_a_hard_boundary_the_fold_does_not_cross() {
 /// When the upstream event is handled,
 /// Then the decision and the termination reach the store as **two** appends,
 /// and the consumed position rides the `Ended` fact's. `End` writes the durable
-/// lifecycle fact a later spawn reads to refuse reviving the saga, so it is a
-/// boundary of its own rather than a row folded into the preceding decision.
+/// lifecycle fact a later incarnation of the instance reads to refuse running
+/// `handle` ever again, so it is a boundary of its own rather than a row folded
+/// into the preceding decision.
 #[tokio::test]
 async fn end_is_a_hard_boundary_the_fold_does_not_cross() {
     let f = fixture("combine-end-order", "SKU-END").await;
 
     let handled = Arc::clone(&f.handled);
-    let _saga_proxy = SagaProps::<PersistThenEndSaga>::new(
-        SagaId::new(PERSIST_THEN_END_SAGA_ID),
+    let _manager_proxy = SagaManagerProps::<PersistThenEndSaga>::new(
         Arc::clone(&f.saga_store),
         move |_components| PersistThenEndSaga {
             handled: Arc::clone(&handled),
         },
     )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
+    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
     .spawn(&f.ps)
     .await;
 

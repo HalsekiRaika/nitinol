@@ -31,6 +31,9 @@
 //!
 //! - No `with_scheduler` anywhere — its absence is pinned in
 //!   `saga_with_scheduler_api_removed.rs`.
+//! - `SagaManagerProps::new(store, Fn(SagaComponents<S>) -> S)`,
+//!   `observing::<E>(Subscription)`, `spawn(&ProcessSystem)` — the whole of the
+//!   wiring these sagas get, and not one argument of it is a scheduler.
 //! - `SchedulerProcess` stays the type key
 //!   `ProcessSystem::spawn_resident::<SchedulerProcess>()` resolves.
 //! - `DeadlineMessage`, `SagaComponents::deadline`, `Deadline::set`, and
@@ -52,8 +55,8 @@ use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SchedulerProcess,
-    Subscription, TimerName,
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
+    SchedulerProcess, Subscription, TimerName,
 };
 
 // Domain
@@ -212,25 +215,26 @@ async fn wait_for_fired(fired: &Arc<Mutex<Vec<String>>>, expected: usize) -> Vec
     }
 }
 
-/// Spawn a deadline-declaring saga with nothing but its id, its store, its
-/// producer and its one subscription.  There is no scheduler argument to pass.
+/// Host a deadline-declaring saga with nothing but its store, its producer and
+/// its one observed source.  There is no scheduler argument to pass.
 async fn spawn_hosted(
     ps: &ProcessSystem,
     label: &str,
     upstream_store: &Arc<dyn EventStore>,
     upstream_key: &str,
     fired: &Arc<Mutex<Vec<String>>>,
-) -> nitinol_saga::SagaProxy<HostedSaga> {
-    let saga_id = SagaId::new(label);
+) -> nitinol_saga::SagaManagerProxy<HostedSaga> {
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let fired = Arc::clone(fired);
-    let id_for_producer = saga_id.clone();
-    SagaProps::<HostedSaga>::new(saga_id, saga_store, move |components| HostedSaga {
+    // The label is the correlation rule, so it is also the id of the one
+    // instance this host ever spawns.
+    let id_for_producer = SagaId::new(label);
+    SagaManagerProps::<HostedSaga>::new(saga_store, move |components| HostedSaga {
         deadline: components.deadline(),
         fired: Arc::clone(&fired),
         saga_id: id_for_producer.clone(),
     })
-    .subscribed_to::<Start>(Subscription::stream(upstream_store, upstream_key))
+    .observing::<Start>(Subscription::stream(upstream_store, upstream_key))
     .spawn(ps)
     .await
 }

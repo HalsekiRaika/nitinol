@@ -1,7 +1,10 @@
-//! The `End` variant is the single-responsibility termination
-//! marker.  Interpreting it must stop the saga process (`ctx.stop_self()`),
-//! which causes the subscriber to stop via the direct poller's subscriber
-//! watch, and in turn tears down the upstream subscription.
+//! The `End` variant is the single-responsibility termination marker.
+//! Interpreting it writes the durable `Ended` fact and stops the instance that
+//! decided it (`ctx.stop_self()`).  What makes the termination hold is the fact
+//! rather than the stop: the subscriptions belong to the host, so a later
+//! record for the same correlation id reaches a successor instance, which
+//! replays that fact, starts in the terminal lifecycle and drops the record —
+//! `Saga::handle` is never reached again.
 //!
 //! Also exercises the Sequence short-circuit invariant: effects placed after
 //! `End` inside a Sequence are not interpreted (the interpreter must break).
@@ -27,7 +30,9 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -158,17 +163,16 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_first_clone = Arc::clone(&handled_first);
 
-    let _saga_proxy = SagaProps::<PersistThenEndSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| PersistThenEndSaga {
-            handle_count: Arc::clone(&handle_count_clone),
-            handled_first: Arc::clone(&handled_first_clone),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-    .spawn(system.process_system())
-    .await;
+    let _saga_proxy =
+        SagaManagerProps::<PersistThenEndSaga>::new(Arc::clone(&saga_store), move |_components| {
+            PersistThenEndSaga {
+                handle_count: Arc::clone(&handle_count_clone),
+                handled_first: Arc::clone(&handled_first_clone),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .spawn(system.process_system())
+        .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled_first.notified())
         .await
@@ -192,9 +196,11 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
         user_events_after_first.len()
     );
 
-    // Now push a second upstream event.  If End correctly stopped the saga
-    // process and its DurableStream subscription, handle() will not run again
-    // and no further user events will be persisted.
+    // Now push a second upstream event.  The host's subscription keeps
+    // delivering, so this record is routed at the instance the correlation
+    // names regardless — and if End was interpreted correctly, what receives it
+    // starts from the durable `Ended` fact: handle() will not run again and no
+    // further user events will be persisted.
     append_order_placed(&upstream_store, &order_id, 2, "SECOND").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -203,7 +209,7 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
         .expect("handle_count mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         final_handle_count, 1,
-        "after End, the saga process must be stopped; \
+        "after End, the saga must be terminated for good; \
          Saga::handle must not be invoked for any subsequent upstream event"
     );
 

@@ -77,20 +77,17 @@ impl<S: Saga> SagaComponents<S> {
 
     /// The system hosting this saga, where one is.
     ///
-    /// `Some` for an incarnation the hosting machinery built from a system:
-    /// [`SagaSystemExt::spawn_saga`](crate::SagaSystemExt::spawn_saga),
-    /// [`SagaSystemExt::saga_manager_props`](crate::SagaSystemExt::saga_manager_props),
-    /// and every instance a manager wired that way spawns. The handle reaches
-    /// the host's process system, its aggregate registry and the journal its
-    /// supplier distributes — so a saga that has to tell an aggregate resolves
-    /// the reference from here rather than from a clone of the system captured
-    /// outside the spawn.
+    /// `Some` for every instance of a saga the hosting machinery started from
+    /// a system — [`SagaSystemExt::host`](crate::SagaSystemExt::host). The
+    /// handle reaches the host's process system, its aggregate registry and the
+    /// journal its supplier distributes — so a saga that has to tell an
+    /// aggregate resolves the reference from here rather than from a clone of
+    /// the system captured outside the spawn.
     ///
     /// `None` for an incarnation built from props the caller assembled on a
-    /// store — [`SagaProps::new`](crate::SagaProps::new) and
-    /// [`SagaManagerProps::new`](crate::SagaManagerProps::new). That path needs
-    /// no system to run on, so there is no system to answer with, and saying so
-    /// is what keeps the answer truthful.
+    /// store — [`SagaManagerProps::new`](crate::SagaManagerProps::new). That
+    /// path needs no system to run on, so there is no system to answer with,
+    /// and saying so is what keeps the answer truthful.
     pub fn system(&self) -> Option<&SystemHandle> {
         self.host.as_ref()
     }
@@ -124,7 +121,7 @@ impl<S: Saga> SagaComponents<S> {
     /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
     /// # use nitinol_persistence::{EventType, Family, TypeName};
     /// # use nitinol_saga::{
-    /// #     Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps,
+    /// #     Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
     /// # };
     /// # use std::sync::Arc;
     /// # struct DocCodec;
@@ -176,7 +173,7 @@ impl<S: Saga> SagaComponents<S> {
     /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     /// // `Observed`'s `Deadline` is `NoDeadline`, not `HasDeadline<Reminder>`,
     /// // so the `where` clause below has nothing to satisfy this call with.
-    /// SagaProps::<Undeclared>::new(SagaId::new("x"), store, |components| Undeclared {
+    /// SagaManagerProps::<Undeclared>::new(store, |components| Undeclared {
     ///     deadline: components.deadline(),
     /// });
     /// ```

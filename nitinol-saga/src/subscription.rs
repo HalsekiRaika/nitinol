@@ -2,19 +2,22 @@
 
 use std::borrow::Borrow;
 use std::sync::Arc;
+use std::time::Duration;
 
 use nitinol_eventsource::SequenceCursor;
 use nitinol_persistence::store::EventStore;
+
+use crate::subscribe::SourceBinding;
 
 /// Which records one declared source is fed: the store to poll and the position
 /// to start from, as one value.
 ///
 /// The two travel together — a position means nothing without the store it
-/// indexes into — so the spawn builders take them as a single argument rather
+/// indexes into — so the spawn builder takes them as a single argument rather
 /// than as a store plus a hand-built cursor.
 ///
 /// One of these is handed to
-/// [`subscribed_to`](crate::SagaProps::subscribed_to) per declared source, so a
+/// [`observing`](crate::SagaManagerProps::observing) per declared source, so a
 /// saga observing several sources names a store and a start position for each.
 /// Two sources may name the same stream key: each reads only the rows of its own
 /// event type, and each keeps its own cursor and its own consumed position.
@@ -25,6 +28,7 @@ pub struct Subscription {
     store: Arc<dyn EventStore>,
     source: Source,
     after: u64,
+    poll_interval: Option<Duration>,
 }
 
 /// Which records of the store the source reads: one stream, or all of them.
@@ -43,11 +47,11 @@ impl Subscription {
     /// `key` is the stream key the upstream events are appended under — an
     /// [`AggregateId`](nitinol_persistence::AggregateId) for an aggregate's
     /// stream, a [`SagaId`](crate::SagaId) for another saga's own stream.
-    /// Starting at the beginning means the saga catches up on everything already
-    /// written before it was spawned — everything it has not already consumed,
-    /// that is: a restarted saga resumes past the positions its own stream
-    /// records for this source, so "from the beginning" costs a re-read of the
-    /// upstream history only on a source nothing has been consumed from.
+    /// Starting at the beginning means the manager sweeps everything already
+    /// written before it was spawned, which is what activates the instances
+    /// that are not resident; each instance drops the records its own stream
+    /// names as consumed, so the sweep reaches [`Saga::handle`](crate::Saga::handle)
+    /// only with records that one has not decided from.
     /// [`with_after`](Self::with_after) names a position to start past instead.
     pub fn stream<K>(store: &Arc<dyn EventStore>, key: &K) -> Self
     where
@@ -59,6 +63,7 @@ impl Subscription {
                 key: key.borrow().to_owned(),
             },
             after: 0,
+            poll_interval: None,
         }
     }
 
@@ -82,21 +87,39 @@ impl Subscription {
             store: Arc::clone(store),
             source: Source::Global,
             after: 0,
+            poll_interval: None,
         }
     }
 
     /// Deliver only the records past sequence `after`, skipping the ones at or
     /// below it.
     ///
-    /// A floor, not a starting point: a source that has consumed further already
-    /// resumes from its own recorded position, and one that has consumed less
-    /// still never sees the records below this one.
+    /// A floor, not a starting point: a source bound this way never sees the
+    /// records at or below it, however little of the stream has been consumed.
     pub fn with_after(mut self, after: u64) -> Self {
         self.after = after;
         self
     }
 
-    pub(crate) fn into_parts(self) -> (Arc<dyn EventStore>, SequenceCursor) {
+    /// Ask this source's store no more often than every `interval`.
+    ///
+    /// The observing side's counterpart of
+    /// [`SagaDeliveryProps::with_poll_interval`](crate::SagaDeliveryProps::with_poll_interval),
+    /// and a deployment's choice for the same reason: a pull consumer trades
+    /// latency for load on the store, and which way a deployment wants that is
+    /// not something the framework can know.
+    ///
+    /// Named per source rather than per saga, because the sources of one saga
+    /// are observed independently and need not be read at one cadence — a
+    /// quiet stream polled rarely beside a busy one polled often. A source
+    /// that names no interval keeps the one `nitinol-eventsource` already
+    /// polls at.
+    pub fn with_poll_interval(mut self, interval: Duration) -> Self {
+        self.poll_interval = Some(interval);
+        self
+    }
+
+    pub(crate) fn into_binding(self) -> SourceBinding {
         let cursor = match self.source {
             Source::Stream { key } => SequenceCursor::Stream {
                 key,
@@ -104,6 +127,10 @@ impl Subscription {
             },
             Source::Global => SequenceCursor::Global { after: self.after },
         };
-        (self.store, cursor)
+        SourceBinding {
+            upstream_store: self.store,
+            cursor,
+            poll_interval: self.poll_interval,
+        }
     }
 }

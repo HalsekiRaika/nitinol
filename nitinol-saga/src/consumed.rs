@@ -47,7 +47,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use nitinol_eventsource::{SequenceCursor, SystemEvent, SystemEventDecodeError};
+use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
 use nitinol_persistence::store::EventStore;
 use nitinol_persistence::{
     is_within_reserved_namespace, reserved_event, AggregateId, AppendingEvent, EventType,
@@ -229,33 +229,6 @@ impl ConsumedPositions {
     /// when nothing of it has been.
     fn highest(&self, stream: &str, source: &PositionSource) -> Option<u64> {
         self.0.get(stream)?.get(source).copied()
-    }
-
-    /// Where a subscription over the declared source `source` configured with
-    /// `cursor` should resume.
-    ///
-    /// A stream subscription reads one source of one stream, so its position is
-    /// the one this saga holds for that pair — which is what frees a restart
-    /// from re-reading the whole upstream history.  The configured `after` is a
-    /// floor rather than a starting point: it says "do not deliver these", and
-    /// a consumed position is a second reason to skip, never a reason to start
-    /// delivering.
-    ///
-    /// A `Global` cursor is left exactly as configured: its dimension is a
-    /// store-wide ordering that a per-source sequence cannot be translated
-    /// into, and guessing one would skip records nobody consumed.  There,
-    /// de-duplication is the position's job rather than the cursor's.
-    pub(crate) fn resume(&self, cursor: SequenceCursor, source: &PositionSource) -> SequenceCursor {
-        match cursor {
-            SequenceCursor::Stream { key, after } => {
-                let consumed = self.highest(&key, source).unwrap_or(0);
-                SequenceCursor::Stream {
-                    after: after.max(consumed),
-                    key,
-                }
-            }
-            SequenceCursor::Global { after } => SequenceCursor::Global { after },
-        }
     }
 }
 
@@ -562,103 +535,6 @@ mod tests {
             !positions.covers("shared", &beta(), 2),
             "keyed by the stream alone, source A's progress would drop source \
              B's record at a lower sequence — input no incarnation ever consumed"
-        );
-    }
-
-    #[test]
-    fn a_stream_subscription_resumes_past_the_consumed_position() {
-        let mut positions = ConsumedPositions::default();
-        positions.record("order-stream", alpha(), 3);
-
-        let resumed = positions.resume(
-            SequenceCursor::Stream {
-                key: "order-stream".to_owned(),
-                after: 0,
-            },
-            &alpha(),
-        );
-
-        assert!(
-            matches!(resumed, SequenceCursor::Stream { ref key, after }
-                if key == "order-stream" && after == 3),
-            "the subscription must not ask upstream for a record it has already \
-             decided from; got {resumed:?}"
-        );
-    }
-
-    /// Two declared sources on one stream resume independently: one source's
-    /// progress must not move the other's subscription past records it never
-    /// consumed.
-    #[test]
-    fn each_declared_source_resumes_from_its_own_position() {
-        let mut positions = ConsumedPositions::default();
-        positions.record("shared", alpha(), 3);
-
-        let resumed = positions.resume(
-            SequenceCursor::Stream {
-                key: "shared".to_owned(),
-                after: 0,
-            },
-            &beta(),
-        );
-
-        assert!(
-            matches!(resumed, SequenceCursor::Stream { after, .. } if after == 0),
-            "source B has consumed nothing, so its subscription starts where it \
-             was configured; got {resumed:?}"
-        );
-    }
-
-    #[test]
-    fn the_configured_floor_survives_a_lower_consumed_position() {
-        let mut positions = ConsumedPositions::default();
-        positions.record("order-stream", alpha(), 1);
-
-        let resumed = positions.resume(
-            SequenceCursor::Stream {
-                key: "order-stream".to_owned(),
-                after: 3,
-            },
-            &alpha(),
-        );
-
-        assert!(
-            matches!(resumed, SequenceCursor::Stream { after, .. } if after == 3),
-            "`after` says \"do not deliver these\"; a lower consumed position is \
-             never a reason to start delivering them; got {resumed:?}"
-        );
-    }
-
-    #[test]
-    fn a_subscription_over_an_unconsumed_source_keeps_its_configured_position() {
-        let mut positions = ConsumedPositions::default();
-        positions.record("other-stream", alpha(), 9);
-
-        let resumed = positions.resume(
-            SequenceCursor::Stream {
-                key: "order-stream".to_owned(),
-                after: 2,
-            },
-            &alpha(),
-        );
-
-        assert!(
-            matches!(resumed, SequenceCursor::Stream { after, .. } if after == 2),
-            "another source's progress must not move this subscription; got {resumed:?}"
-        );
-    }
-
-    #[test]
-    fn a_global_subscription_keeps_its_configured_cursor() {
-        let mut positions = ConsumedPositions::default();
-        positions.record("order-stream", alpha(), 3);
-
-        let resumed = positions.resume(SequenceCursor::Global { after: 0 }, &alpha());
-
-        assert!(
-            matches!(resumed, SequenceCursor::Global { after } if after == 0),
-            "a per-source sequence cannot be translated into a global ordering, \
-             so guessing one would skip records nobody consumed; got {resumed:?}"
         );
     }
 }

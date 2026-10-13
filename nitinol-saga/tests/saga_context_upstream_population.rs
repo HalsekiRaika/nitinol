@@ -16,7 +16,9 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct OrderPlaced {
@@ -174,21 +176,18 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move |_components| {
-            CapturingSaga {
-                captured: Arc::clone(&captured_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
+    let _manager_proxy =
+        SagaManagerProps::<CapturingSaga>::new(saga_store, move |_components| CapturingSaga {
+            captured: Arc::clone(&captured_for_producer),
+            notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -218,21 +217,18 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
     append_order_placed(&upstream_store, &order_id, 3, "S-3").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move |_components| {
-            CapturingSaga {
-                captured: Arc::clone(&captured_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
+    let _manager_proxy =
+        SagaManagerProps::<CapturingSaga>::new(saga_store, move |_components| CapturingSaga {
+            captured: Arc::clone(&captured_for_producer),
+            notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -263,21 +259,18 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
     append_order_placed(&upstream_store, &order_id, 1, "NOW-1").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move |_components| {
-            CapturingSaga {
-                captured: Arc::clone(&captured_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
+    let _manager_proxy =
+        SagaManagerProps::<CapturingSaga>::new(saga_store, move |_components| CapturingSaga {
+            captured: Arc::clone(&captured_for_producer),
+            notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -320,14 +313,12 @@ async fn saga_context_existing_accessors_remain_saga_scoped() {
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move |_components| {
-            CapturingSaga {
-                captured: Arc::clone(&captured_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
+    let _manager_proxy =
+        SagaManagerProps::<CapturingSaga>::new(saga_store, move |_components| CapturingSaga {
+            captured: Arc::clone(&captured_for_producer),
+            notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 

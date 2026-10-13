@@ -58,7 +58,7 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaDelivery, SagaDeliveryProps, SagaEffect, SagaId, SagaProps,
+    Saga, SagaContext, SagaDelivery, SagaDeliveryProps, SagaEffect, SagaId, SagaManagerProps,
     SagaSubscribe, Subscription,
 };
 
@@ -410,19 +410,16 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let inventory_key_for_producer = inventory_id.as_str().to_owned();
     let captured_for_producer = Arc::clone(&captured);
 
-    let _saga_proxy = SagaProps::<ReservationSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| {
+    let _saga_proxy =
+        SagaManagerProps::<ReservationSaga>::new(Arc::clone(&saga_store), move |_components| {
             ReservationSaga(ReservationWork {
                 inventory: inventory_key_for_producer.clone(),
                 captured: Arc::clone(&captured_for_producer),
             })
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&journal, &order_id))
-    .spawn(system.process_system())
-    .await;
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&journal, &order_id))
+        .spawn(system.process_system())
+        .await;
 
     // The host's whole input is the saga's own store, plus the slot it records
     // its progress in.  It delivers through `system`, which is how a receiving
@@ -514,19 +511,16 @@ async fn saga_skips_events_that_correlate_to_no_instance() {
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
     let captured_for_producer = Arc::clone(&captured);
 
-    let _saga_proxy = SagaProps::<MatchOnlyReservationSaga>::new(
-        SagaId::new(MATCH_ONLY_SAGA_ID),
-        saga_store,
-        move |_components| {
+    let _saga_proxy =
+        SagaManagerProps::<MatchOnlyReservationSaga>::new(saga_store, move |_components| {
             MatchOnlyReservationSaga(ReservationWork {
                 inventory: "saga-route-inventory".to_owned(),
                 captured: Arc::clone(&captured_for_producer),
             })
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &publisher_id))
-    .spawn(system.process_system())
-    .await;
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &publisher_id))
+        .spawn(system.process_system())
+        .await;
 
     // `MATCH-001` is the barrier rather than a sleep: the poller delivers a
     // stream in ascending order and `ask`s one record at a time, so once seq 2

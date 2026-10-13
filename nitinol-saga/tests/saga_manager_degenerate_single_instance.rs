@@ -2,22 +2,30 @@
 //! correlation is constant.
 //!
 //! ```gherkin
-//!   Scenario: one instance, reached through a manager
+//!   Scenario: one instance, reached through the one host entry point
 //!     Given a saga whose correlate always answers the same SagaId
-//!     And a manager over it, subscribed to one upstream stream
+//!     And it is hosted with one declared source observed
 //!     When an order is placed
 //!     Then Saga::handle runs once, on the instance that id names
-//!     And the instance's own stream holds what the resident wiring writes:
+//!     And the instance's own stream holds what a single resident saga writes:
 //!       the decision, then the fact settling the input it was decided from
+//!     And the wiring says nothing a fanned-out saga's would not: the same
+//!       `observing` per declared source and the same instance passivation
 //! ```
 //!
 //! This is the migration path check.  A `Saga::correlate` that always answers
-//! the same [`SagaId`] reduces the manager to exactly one instance, and what is
-//! then observable must be what `SagaProps` produces for the same scenario — so
-//! the assertions below mirror the saga-side half of
+//! the same [`SagaId`] reduces the host to exactly one instance, and what is
+//! then observable must be what a single resident saga produces for the same
+//! scenario — so the assertions below mirror the saga-side half of
 //! `nitinol-saga/tests/e2e_saga.rs::aggregate_event_drives_saga_to_command_target_aggregate`,
 //! and a divergence in the instance's identity, in its starting sequence, or in
 //! the rows it writes and their order shows up here.
+//!
+//! The wiring clause is the other half of "not a separate mechanism": the chain
+//! below is written with `host` / `observing` / `with_instance_passivation` and
+//! nothing else, which is the same chain a saga correlating to many instances
+//! is wired with.  A degenerate case that needed a setting of its own — or that
+//! could not take one the fanned-out case takes — would not compile here.
 //!
 //! What a persisted decision then causes elsewhere is a delivery host's doing,
 //! and a host reads decisions out of a store without caring which wiring put
@@ -46,9 +54,7 @@ use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
-};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSystemExt};
 
 /// The single instance every upstream event correlates to.  Constant
 /// correlation is what makes the manager degenerate to one resident saga.
@@ -166,6 +172,13 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often a probe re-reads what it is waiting for.
 const PROBE_INTERVAL: Duration = Duration::from_millis(25);
 
+/// The passivation window the wiring names.
+///
+/// Long enough that nothing is passivated inside this test: the clause the
+/// setting serves here is that the degenerate case takes it at all, and what
+/// passivation then does is pinned in `saga_manager_passivation.rs`.
+const INSTANCE_PASSIVATION: Duration = Duration::from_secs(300);
+
 async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
@@ -246,20 +259,21 @@ async fn single_constant_correlation_reproduces_the_resident_saga() {
     let order_id = AggregateId::new("mgr-degenerate-order");
     let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(RESIDENT_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
 
     let captured_for_producer = Arc::clone(&captured);
 
-    let _manager_proxy =
-        SagaManagerProps::<ReservationSaga>::new(Arc::clone(&saga_store), move |_components| {
-            ReservationSaga {
-                captured: Arc::clone(&captured_for_producer),
-            }
+    // The one host entry point, with the one source this alphabet declares
+    // bound and the instances' passivation named — the chain a saga correlating
+    // to many instances is wired with, written for one that correlates to one.
+    let _manager_proxy = system
+        .host::<ReservationSaga>(move |_components| ReservationSaga {
+            captured: Arc::clone(&captured_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&journal, &order_id))
-        .spawn(system.process_system())
+        .observing::<OrderPlaced>(system.subscription(&order_id))
+        .with_instance_passivation(INSTANCE_PASSIVATION)
+        .spawn()
         .await;
 
     order_proxy
@@ -276,12 +290,12 @@ async fn single_constant_correlation_reproduces_the_resident_saga() {
             sequence: 0,
             sku: "SKU-001".to_owned(),
         }],
-        "the manager must route the upstream event to the one instance its \
+        "the host must route the upstream event to the one instance its \
          constant correlation names, exactly once and at sequence 0 — the \
-         instance is indistinguishable from the resident one SagaProps spawns"
+         instance is indistinguishable from a single resident saga"
     );
 
-    let saga_events = wait_until_settled(&saga_store, &saga_id).await;
+    let saga_events = wait_until_settled(&journal, &saga_id).await;
 
     assert_eq!(
         describe(&saga_events),

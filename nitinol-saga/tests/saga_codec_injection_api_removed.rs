@@ -1,4 +1,4 @@
-//! The saga builders must lose their codec typestate along with the rest of the
+//! The saga builder must lose its codec typestate along with the rest of the
 //! codec injection API.
 //!
 //! A saga's journal is written in `S::Event` and its upstream is read as the
@@ -16,9 +16,10 @@
 //! the ambiguity in the crate's favour does not rescue the build either.
 //!
 //! Removing `CodecSet` settles the method as well as the marker:
-//! `SagaProps::with_codec` and `SagaManagerProps::with_codec` exist only to
-//! return `..<S, CodecSet<S::Event>, ..>`, so neither can survive a type that
-//! cannot be named.
+//! `SagaManagerProps::with_codec` — on the one saga builder there is, since a
+//! saga whose `correlate` always answers the same id is the degenerate case of
+//! the manager — exists only to return `..<S, CodecSet<S::Event>, ..>`, so it
+//! cannot survive a type that cannot be named.
 //!
 //! Run with: `cargo test -p nitinol-saga --test saga_codec_injection_api_removed`.
 
@@ -44,7 +45,7 @@ const PROBE_OWNER: &str = "downstream-probe";
 
 /// Given both namespaces are glob-imported, When the bare `CodecUnset` and
 /// `CodecSet` names are used, Then they denote the downstream probe
-/// definitions — the saga builders no longer step through a codec stage.
+/// definitions — the saga builder no longer steps through a codec stage.
 #[test]
 fn the_saga_codec_typestate_names_belong_to_downstream_definitions() {
     let unset = CodecUnset { owner: PROBE_OWNER };

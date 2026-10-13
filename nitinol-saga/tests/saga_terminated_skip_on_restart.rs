@@ -1,10 +1,11 @@
 //! A saga that has durably terminated must not be revived.
 //!
 //! Termination is recorded by a durable `Ended` lifecycle fact in the saga's
-//! own event stream (persisted when `SagaEffect::End` is interpreted).  On a
-//! subsequent spawn, `on_start` replays the stream, detects the `Ended`
-//! fact, and refuses to wire up the upstream subscription — so `Saga::handle`
-//! is never invoked again, no matter how many routed upstream events arrive.
+//! own event stream (persisted when `SagaEffect::End` is interpreted).  An
+//! instance the host spawns afterwards replays that stream in `on_start`,
+//! detects the `Ended` fact and starts in the terminal lifecycle: every record
+//! routed to it is reported and dropped, so `Saga::handle` is never invoked
+//! again, no matter how many routed upstream events arrive.
 //!
 //! The three tests below pin the contract from both directions:
 //! - baseline: a saga with *no* `Ended` fact DOES handle a routed event
@@ -12,7 +13,7 @@
 //! - skip: a saga whose stream carries a seeded `Ended` fact does NOT handle
 //!   the routed event;
 //! - end-to-end: a saga that reaches `End` (persisting the fact itself) is
-//!   skipped when a fresh process is spawned over the same store.
+//!   skipped when a fresh instance replays the same store.
 //!
 //! Which identity the fact is written down under — `nitinol.saga.lifecycle`
 //! rather than an envelope shared with a transport mechanism — is
@@ -39,7 +40,9 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 // Domain types
 
@@ -82,8 +85,8 @@ enum Observed {
     Order(OrderPlaced),
 }
 
-/// Records every `handle` call and never terminates.  Used to observe whether
-/// the upstream subscription was wired up at all.
+/// Records every `handle` call and never terminates.  Used to observe whether a
+/// record the host routes to the instance reaches the saga at all.
 struct RecordingSaga {
     handle_count: Arc<AtomicUsize>,
     handled: Arc<Notify>,
@@ -200,16 +203,14 @@ async fn spawn_recording_saga(
     upstream_key: &str,
     handle_count: Arc<AtomicUsize>,
     handled: Arc<Notify>,
-) -> nitinol_saga::SagaProxy<RecordingSaga> {
-    SagaProps::<RecordingSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(saga_store),
-        move |_components| RecordingSaga {
+) -> nitinol_saga::SagaManagerProxy<RecordingSaga> {
+    SagaManagerProps::<RecordingSaga>::new(Arc::clone(saga_store), move |_components| {
+        RecordingSaga {
             handle_count: Arc::clone(&handle_count),
             handled: Arc::clone(&handled),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(upstream_store, upstream_key))
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(upstream_store, upstream_key))
     .spawn(system.process_system())
     .await
 }
@@ -256,10 +257,10 @@ async fn non_terminated_saga_handles_routed_event() {
 }
 
 /// When the saga stream already carries a durable `Ended` lifecycle fact,
-/// `on_start` must refuse to spawn the upstream subscription, so `handle` is
+/// `on_start` must put the instance in the terminal lifecycle, so `handle` is
 /// never called for a routed upstream event.
 #[tokio::test]
-async fn terminated_saga_skips_subscription_and_never_handles() {
+async fn terminated_saga_drops_routed_records_and_never_handles() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
@@ -288,21 +289,20 @@ async fn terminated_saga_skips_subscription_and_never_handles() {
     )
     .await;
 
-    // Give the process ample time to (incorrectly) replay, subscribe and
-    // deliver the routed event if the terminated-skip guard were missing.
+    // Give the host ample time to (incorrectly) replay and hand the routed
+    // event to the saga if the terminated-skip guard were missing.
     tokio::time::sleep(Duration::from_millis(750)).await;
 
     assert_eq!(
         handle_count.load(Ordering::SeqCst),
         0,
-        "a saga whose stream carries a durable Ended lifecycle fact must not wire \
-         up its upstream subscription; Saga::handle must never be invoked"
+        "an instance whose stream carries a durable Ended lifecycle fact must \
+         drop whatever the host routes to it; Saga::handle must never be invoked"
     );
 }
 
 /// End-to-end: a saga that reaches `End` persists the durable `Ended` lifecycle
-/// fact itself; a freshly spawned process over the same store must then be
-/// skipped.
+/// fact itself; a fresh instance replaying the same store must then be skipped.
 #[tokio::test]
 async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     let ps = ProcessSystem::new().await;
@@ -320,16 +320,15 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     // First incarnation: handle the first event and terminate via End.
     let first_count = Arc::new(AtomicUsize::new(0));
     let first_count_clone = Arc::clone(&first_count);
-    let first_proxy = SagaProps::<EndOnFirstSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| EndOnFirstSaga {
-            handle_count: Arc::clone(&first_count_clone),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-    .spawn(system.process_system())
-    .await;
+    let first_proxy =
+        SagaManagerProps::<EndOnFirstSaga>::new(Arc::clone(&saga_store), move |_components| {
+            EndOnFirstSaga {
+                handle_count: Arc::clone(&first_count_clone),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .spawn(system.process_system())
+        .await;
 
     // Wait until the End interpretation has durably persisted the Ended fact.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -384,7 +383,7 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
     assert_eq!(
         second_count.load(Ordering::SeqCst),
         0,
-        "a re-spawned process over a stream that already ended must be skipped; \
-         Saga::handle must not run for any subsequent upstream event"
+        "a fresh instance replaying a stream that already ended must be \
+         skipped; Saga::handle must not run for any subsequent upstream event"
     );
 }

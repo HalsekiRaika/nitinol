@@ -25,11 +25,6 @@
 //!     Given the batch for upstream seq N exhausted its retries
 //!     When the saga restarts and upstream redelivers seq N
 //!     Then handle runs again (at-least-once; no position was written)
-//!
-//!   Scenario: a subscription resumes past the folded position
-//!     Given positions up to upstream seq N are on the saga's stream
-//!     When the saga restarts and resubscribes
-//!     Then the subscription asks upstream for records after seq N
 //! ```
 //!
 //! What changes with this file is the *means*, not the outcome: a redelivered
@@ -51,10 +46,11 @@
 //! and the delivery answered, so the incarnation stays alive — staying alive is
 //! what lets the *next* input retry the decision, including an `End` whose
 //! `Ended` fact did not land.  Nothing durable claims the record either, so
-//! what re-opens it is a fresh incarnation: its subscription resumes from the
-//! position the journal holds for that source, which such a failure left
-//! exactly where it was.  Every failure test below spawns that successor by
-//! hand.
+//! what re-opens it is a fresh host over the same journal: its shared cursor
+//! sweeps that source from the position it was configured with, and the
+//! instance it spawns drops only the records the journal names as consumed —
+//! which such a failure left exactly where they were.  Every failure test below
+//! spawns that successor by hand.
 //!
 //! Two things make those tests settled rather than sampled.  The store
 //! decorator refuses exactly as many appends as the one under test attempts —
@@ -103,8 +99,8 @@ use nitinol_persistence::{
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe,
-    Subscription, TimerName,
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
+    SagaSubscribe, Subscription, TimerName,
 };
 
 // Domain
@@ -781,29 +777,32 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<Seen> {
     }
 }
 
-/// Stop the incarnation `proxy` addresses and wait until it has left the
-/// runtime's registry.
+/// Stop the host `proxy` addresses and wait until it has left the runtime's
+/// registry.
 ///
-/// An append a saga could not make does *not* take it down — staying alive is
-/// what lets the next input retry the decision — so "the first incarnation is
-/// finished with this record" has to be made true rather than waited for.  A
-/// stop is delivered on the saga's own mailbox and the loop is already inside
-/// the delivery, so the signal is not looked at until `recv` returns: the pid
-/// leaving the registry therefore proves the whole interpretation is over,
-/// every staged retry of the refused batch included.
+/// An append a saga could not make does *not* take its instance down — staying
+/// alive is what lets the next input retry the decision — so "the first
+/// incarnation is finished with this record" has to be made true rather than
+/// waited for.  A stop is delivered on the instance's own mailbox and the loop
+/// is already inside the delivery, so the signal is not looked at until `recv`
+/// returns: the host's pid leaving the registry therefore proves the whole
+/// interpretation is over, every staged retry of the refused batch included —
+/// a process is unregistered only after its children are, so the host is the
+/// last of the fan-out to go.
 ///
 /// Every failure test below goes through this before reading the stream or
 /// spawning a successor.  Without it a retry still in flight could land a row
 /// between the read and the assertion, or race the successor's own appends for
 /// the same stream sequence.
-async fn stop_and_wait<S: Saga>(ps: &ProcessSystem, proxy: &nitinol_saga::SagaProxy<S>) {
+async fn stop_and_wait<S: Saga>(ps: &ProcessSystem, proxy: &nitinol_saga::SagaManagerProxy<S>) {
     proxy.stop().await.expect("stop must succeed");
     wait_until_gone(ps, proxy.pid()).await;
 }
 
-/// The registry is what says an incarnation is gone: a process is unregistered
-/// as the last step of its own termination, after the delivery it was in has
-/// returned and its child poller has been stopped with it.
+/// The registry is what says a process is gone: it is unregistered as the last
+/// step of its own termination, after the delivery it was in has returned and
+/// its children — each source's poller, and the instances the host fronts —
+/// have been stopped with it.
 async fn wait_until_gone(ps: &ProcessSystem, pid: Pid) {
     let deadline = std::time::Instant::now() + BARRIER_TIMEOUT;
     loop {
@@ -846,16 +845,12 @@ async fn spawn_deciding(
     saga_store: &Arc<dyn EventStore>,
     subscription: Subscription,
     handled: &Handled,
-) -> nitinol_saga::SagaProxy<DecidingSaga> {
+) -> nitinol_saga::SagaManagerProxy<DecidingSaga> {
     let handled = Arc::clone(handled);
-    SagaProps::<DecidingSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(saga_store),
-        move |_components| DecidingSaga {
-            handled: Arc::clone(&handled),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(subscription)
+    SagaManagerProps::<DecidingSaga>::new(Arc::clone(saga_store), move |_components| DecidingSaga {
+        handled: Arc::clone(&handled),
+    })
+    .observing::<OrderPlaced>(subscription)
     .spawn(ps)
     .await
 }
@@ -865,16 +860,12 @@ async fn spawn_two_batch(
     saga_store: &Arc<dyn EventStore>,
     subscription: Subscription,
     handled: &Handled,
-) -> nitinol_saga::SagaProxy<TwoBatchSaga> {
+) -> nitinol_saga::SagaManagerProxy<TwoBatchSaga> {
     let handled = Arc::clone(handled);
-    SagaProps::<TwoBatchSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(saga_store),
-        move |_components| TwoBatchSaga {
-            handled: Arc::clone(&handled),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(subscription)
+    SagaManagerProps::<TwoBatchSaga>::new(Arc::clone(saga_store), move |_components| TwoBatchSaga {
+        handled: Arc::clone(&handled),
+    })
+    .observing::<OrderPlaced>(subscription)
     .spawn(ps)
     .await
 }
@@ -884,16 +875,14 @@ async fn spawn_persist_then_end(
     saga_store: &Arc<dyn EventStore>,
     subscription: Subscription,
     handled: &Handled,
-) -> nitinol_saga::SagaProxy<PersistThenEndSaga> {
+) -> nitinol_saga::SagaManagerProxy<PersistThenEndSaga> {
     let handled = Arc::clone(handled);
-    SagaProps::<PersistThenEndSaga>::new(
-        SagaId::new(SAGA_ID),
-        Arc::clone(saga_store),
-        move |_components| PersistThenEndSaga {
+    SagaManagerProps::<PersistThenEndSaga>::new(Arc::clone(saga_store), move |_components| {
+        PersistThenEndSaga {
             handled: Arc::clone(&handled),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(subscription)
+        }
+    })
+    .observing::<OrderPlaced>(subscription)
     .spawn(ps)
     .await
 }
@@ -907,11 +896,11 @@ fn from_source(upstream_store: &Arc<dyn EventStore>, source: &AggregateId) -> Su
 /// The same source, read from every stream of `upstream_store` at once in the
 /// store's own global order.
 ///
-/// A store-wide position is not a stream position, so it is not carried forward
-/// from the consumed positions the saga's own stream records: a source bound
-/// this way really does re-read what it has already consumed after a restart,
-/// which is what lets the tests below put the framework's skip — rather than
-/// the cursor's — under test.
+/// A store-wide cursor cannot be read as a per-stream position at all, so a
+/// source bound this way cannot even in principle be nudged forward by what the
+/// saga's own stream records — which makes it the sharpest shape for the tests
+/// below, where what has to be observed is the framework's skip rather than a
+/// cursor that never offered the record in the first place.
 fn from_every_source(upstream_store: &Arc<dyn EventStore>) -> Subscription {
     Subscription::global(upstream_store)
 }
@@ -1482,80 +1471,18 @@ async fn a_position_of_one_source_does_not_cover_another() {
     );
 }
 
-// CP-RESUME-STREAM / CP-RESUME-BOUND — where the subscription resumes from
-
-/// Acceptance scenario 4.
-///
-/// Given positions up to upstream seq 3 on the saga's own stream,
-/// When the saga restarts with a subscription configured from the beginning,
-/// Then every poll asks upstream for records after seq 3: restart cost stops
-/// being a function of how long the upstream history is.
-#[tokio::test]
-async fn a_stream_subscription_resumes_past_the_folded_position() {
-    let ps = ProcessSystem::new().await;
-
-    let queries: Queries = Arc::new(Mutex::new(Vec::new()));
-    let upstream_store: Arc<dyn EventStore> = Arc::new(QueryRecordingStore {
-        inner: InMemoryEventStore::default(),
-        queries: Arc::clone(&queries),
-    });
-    let source = AggregateId::new("resume-order");
-    for (sequence, sku) in [(1u64, "SKU-1"), (2, "SKU-2"), (3, "SKU-3")] {
-        append_order_placed(&upstream_store, &source, sequence, sku).await;
-    }
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let saga_id = SagaId::new(SAGA_ID);
-
-    let first = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 3).await;
-    first.stop().await.expect("stop must succeed");
-    drop(first);
-
-    take_queries(&queries);
-
-    let _second = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
-    append_order_placed(&upstream_store, &source, 4, "SKU-4").await;
-
-    let barrier = wait_for_handled(&handled, 4).await;
-    let asked_from: Vec<Option<u64>> = take_queries(&queries)
-        .iter()
-        .filter(|q| q.stream_key.as_deref() == Some(source.as_str()))
-        .map(|q| q.from_stream_sequence)
-        .collect();
-
-    assert!(
-        !asked_from.is_empty(),
-        "the second incarnation must have polled upstream at all"
-    );
-    assert!(
-        asked_from.iter().all(|from| *from >= Some(4)),
-        "the subscription resumes past the consumed position — it must never \
-         ask for a record it has already decided from; asked from {asked_from:?}"
-    );
-    assert_eq!(
-        barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4],
-        "each input is handled exactly once across both incarnations"
-    );
-}
+// CP-RESUME-BOUND — where a restarted source's cursor starts from
+//
+// A host's shared cursor is spoken for by no single instance's consumed
+// position, so what it is configured with is where it starts — the sweep from
+// there is what activates the instances that are not resident, and each
+// instance drops what its own stream already names as consumed.  The two tests
+// below pin the two halves of that: the configured position is honoured
+// exactly, and it is never undercut by what the journal happens to hold.
 
 /// Given a subscription configured to start past a record the saga has *not*
 /// consumed,
-/// When the saga restarts with a lower consumed position,
+/// When a fresh host is spawned over a journal with a lower consumed position,
 /// Then the configured floor still holds: `with_after` says "do not deliver
 /// these", and a consumed position is a second reason to skip, never a reason
 /// to start delivering.
@@ -1601,19 +1528,19 @@ async fn the_configured_floor_survives_a_lower_consumed_position() {
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
         vec![1, 4],
-        "resuming from the consumed position must not undercut the configured \
-         floor: seq 2 and 3 are below it and must never be delivered; stream \
-         held {:?}",
+        "the configured position must not be undercut by what the journal \
+         holds: seq 2 and 3 are below the floor and must never be delivered, \
+         however low the consumed position is; stream held {:?}",
         describe(&events)
     );
 }
 
 /// Given a `Global` subscription, whose position is a global ordering that a
 /// per-source stream sequence cannot be translated into,
-/// When the saga restarts,
-/// Then the configured cursor is left exactly where it was — de-duplication is
-/// the position's job here, and guessing a global position from a per-source
-/// one would skip records nobody consumed.
+/// When a fresh host is spawned over a journal that already holds a position,
+/// Then the cursor is left exactly where it was configured — de-duplication is
+/// the position's job, and a cursor that tried to read a global position out of
+/// a per-source one would skip records nobody consumed.
 #[tokio::test]
 async fn a_global_subscription_keeps_its_configured_cursor() {
     let ps = ProcessSystem::new().await;
@@ -2190,30 +2117,28 @@ async fn an_input_that_wrote_nothing_is_still_consumed() {
     let saga_id = SagaId::new(SAGA_ID);
 
     let handled_for_first = Arc::clone(&handled);
-    let first =
-        SagaProps::<EmptyPersistSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            EmptyPersistSaga {
-                handled: Arc::clone(&handled_for_first),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let first = SagaManagerProps::<EmptyPersistSaga>::new(Arc::clone(&saga_store), move |_| {
+        EmptyPersistSaga {
+            handled: Arc::clone(&handled_for_first),
+        }
+    })
+    .observing::<OrderPlaced>(from_source(&upstream_store, &source))
+    .spawn(&ps)
+    .await;
 
     wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
     first.stop().await.expect("stop must succeed");
     drop(first);
 
     let handled_for_second = Arc::clone(&handled);
-    let _second =
-        SagaProps::<EmptyPersistSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move |_| {
-            EmptyPersistSaga {
-                handled: Arc::clone(&handled_for_second),
-            }
-        })
-        .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let _second = SagaManagerProps::<EmptyPersistSaga>::new(Arc::clone(&saga_store), move |_| {
+        EmptyPersistSaga {
+            handled: Arc::clone(&handled_for_second),
+        }
+    })
+    .observing::<OrderPlaced>(from_source(&upstream_store, &source))
+    .spawn(&ps)
+    .await;
     append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
 
     let barrier = wait_for_handled(&handled, 2).await;
@@ -2276,19 +2201,18 @@ async fn a_timer_firing_writes_no_consumed_position() {
     let saga_id = SagaId::new(SAGA_ID);
 
     let fired_for_producer = Arc::clone(&fired);
-    let _proxy = SagaProps::<SchedulingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |components| SchedulingSaga {
-            deadline: components.deadline(),
-            fired: Arc::clone(&fired_for_producer),
-        },
-    )
-    // No scheduler wiring: the alphabet declaring a deadline is the whole
-    // declaration, and the host resolves the resident timer core from it.
-    .subscribed_to::<OrderPlaced>(from_source(&upstream_store, &source))
-    .spawn(&ps)
-    .await;
+    let _proxy =
+        SagaManagerProps::<SchedulingSaga>::new(Arc::clone(&saga_store), move |components| {
+            SchedulingSaga {
+                deadline: components.deadline(),
+                fired: Arc::clone(&fired_for_producer),
+            }
+        })
+        // No scheduler wiring: the alphabet declaring a deadline is the whole
+        // declaration, and the host resolves the resident timer core from it.
+        .observing::<OrderPlaced>(from_source(&upstream_store, &source))
+        .spawn(&ps)
+        .await;
 
     let events =
         wait_for_saga_rows(&saga_store, &saga_id, ReservationRequested::EVENT_TYPE, 1).await;

@@ -20,20 +20,24 @@
 //! # What is observed, and why it is enough
 //!
 //! `replay` is `pub(crate)`, so the hard error is observed where a user meets
-//! it: `SagaProcess::on_start` stops the process instead of subscribing. Two
-//! things are asserted together for every poisoned stream, because either one
-//! alone leaves the wrong implementation passing:
+//! it: the instance the host spawns for the waiting record stops in
+//! `SagaProcess::on_start` instead of taking it. The manager's `ask` to that
+//! instance then fails, so it holds that source's shared cursor and reports the
+//! failure — the record is redelivered rather than read past, and no
+//! incarnation of this saga ever acts on a history it could not read to the
+//! end. Two things are asserted together for every poisoned stream, because
+//! either one alone leaves the wrong implementation passing:
 //!
 //! - **`Saga::handle` is never called**, though a perfectly good upstream
 //!   record is sitting there waiting. A classifier that logged the row and
-//!   carried on would subscribe and hand that record over. The positive
-//!   control `a_sound_stream_still_handles_the_routed_record` is what proves
-//!   the record really was deliverable, so a count of zero cannot pass for the
-//!   wrong reason.
+//!   carried on would replay to the end, stay alive and take that record. The
+//!   positive control `a_sound_stream_still_handles_the_routed_record` is what
+//!   proves the record really was deliverable, so a count of zero cannot pass
+//!   for the wrong reason.
 //! - **the saga's own stream is untouched** — still exactly the rows the test
-//!   seeded. Replay is a fold and a reconnect, so a row appearing here would
-//!   mean the load decided something, whether that is a synthetic marker, a
-//!   re-dispatch or a dead letter.
+//!   seeded. Replay is a fold over that stream and nothing more, so a row
+//!   appearing here would mean the load decided something, whether that is a
+//!   synthetic marker, a re-dispatch or a dead letter.
 //!
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_unknown_reserved_record_fails_fast`.
@@ -60,7 +64,9 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 // Domain types
 
@@ -98,8 +104,8 @@ enum Observed {
     Order(OrderPlaced),
 }
 
-/// Records every `handle` call and never terminates, so whether the upstream
-/// subscription was wired up at all is observable from outside.
+/// Records every `handle` call and never terminates, so whether the waiting
+/// record ever reached the saga is observable from outside.
 struct RecordingSaga {
     handle_count: Arc<AtomicUsize>,
     handled: Arc<Notify>,
@@ -231,30 +237,29 @@ impl Harness {
         }
     }
 
-    async fn spawn(&self) -> nitinol_saga::SagaProxy<RecordingSaga> {
+    async fn spawn(&self) -> nitinol_saga::SagaManagerProxy<RecordingSaga> {
         let handle_count = Arc::clone(&self.handle_count);
         let handled = Arc::clone(&self.handled);
-        SagaProps::<RecordingSaga>::new(
-            self.saga_id.clone(),
-            Arc::clone(&self.saga_store),
-            move |_components| RecordingSaga {
+        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&self.saga_store), move |_components| {
+            RecordingSaga {
                 handle_count: Arc::clone(&handle_count),
                 handled: Arc::clone(&handled),
-            },
-        )
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&self.upstream_store, &self.upstream))
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&self.upstream_store, &self.upstream))
         .spawn(self.system.process_system())
         .await
     }
 }
 
-/// How long a saga that *would* subscribe is given to replay, subscribe and
-/// deliver. The positive control below reaches `handle` well inside this, so a
-/// zero count after it is a refusal rather than a race.
+/// How long a saga that *would* read its own stream to the end is given to
+/// replay and take the waiting record. The positive control below reaches
+/// `handle` well inside this, so a zero count after it is a refusal rather than
+/// a race.
 const SETTLE: Duration = Duration::from_millis(750);
 
-/// Given a poisoned stream, When the saga is spawned over it, Then `handle` is
-/// never reached and the stream is left exactly as it was seeded.
+/// Given a poisoned stream, When the host spawns an instance over it, Then
+/// `handle` is never reached and the stream is left exactly as it was seeded.
 async fn assert_load_refuses(harness: &Harness, seeded: usize, what: &str) {
     let _proxy = harness.spawn().await;
 
@@ -263,9 +268,9 @@ async fn assert_load_refuses(harness: &Harness, seeded: usize, what: &str) {
     assert_eq!(
         harness.handle_count.load(Ordering::SeqCst),
         0,
-        "{what}: the load must fail hard, so the upstream subscription is never \
-         wired and `Saga::handle` never runs — a classifier that reported the \
-         row and carried on would hand the waiting record over"
+        "{what}: the load must fail hard, so the instance stops before taking \
+         the waiting record and `Saga::handle` never runs — a classifier that \
+         reported the row and carried on would take that record instead"
     );
 
     let stream = load_saga_stream(&harness.saga_store, &harness.saga_id).await;

@@ -16,7 +16,9 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct OrderPlaced {
@@ -222,7 +224,6 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
     append_order_placed(&upstream_store, &order_id, 3, "SKU-C").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -230,13 +231,11 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), saga_store, move |_components| {
-            RecordingSaga {
-                captured: Arc::clone(&captured_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
+        SagaManagerProps::<RecordingSaga>::new(saga_store, move |_components| RecordingSaga {
+            captured: Arc::clone(&captured_for_producer),
+            notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -274,17 +273,14 @@ async fn saga_catchup_declines_events_that_correlate_elsewhere() {
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy = SagaProps::<MatchOnlySaga>::new(
-        SagaId::new(MATCH_ONLY_SAGA_ID),
-        saga_store,
-        move |_components| MatchOnlySaga {
+    let _saga_proxy =
+        SagaManagerProps::<MatchOnlySaga>::new(saga_store, move |_components| MatchOnlySaga {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-    .spawn(system.process_system())
-    .await;
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .spawn(system.process_system())
+        .await;
 
     wait_for_count(&captured, &notify, 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -315,22 +311,20 @@ async fn saga_catchup_resumes_from_cursor_after_value() {
     }
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy = SagaProps::<RecordingSaga>::new(saga_id, saga_store, move |_components| {
-        RecordingSaga {
+    let _saga_proxy =
+        SagaManagerProps::<RecordingSaga>::new(saga_store, move |_components| RecordingSaga {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
-        }
-    })
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id).with_after(2))
-    .spawn(system.process_system())
-    .await;
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id).with_after(2))
+        .spawn(system.process_system())
+        .await;
 
     wait_for_count(&captured, &notify, 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -358,7 +352,6 @@ async fn saga_receives_live_events_after_catchup_via_durable_stream() {
     append_order_placed(&upstream_store, &order_id, 1, "CATCHUP").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -366,11 +359,11 @@ async fn saga_receives_live_events_after_catchup_via_durable_stream() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id, saga_store, move |_components| RecordingSaga {
+        SagaManagerProps::<RecordingSaga>::new(saga_store, move |_components| RecordingSaga {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -403,7 +396,6 @@ async fn saga_catchup_ignores_events_of_other_types() {
     append_order_placed(&upstream_store, &order_id, 3, "ORDER-2").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -411,11 +403,11 @@ async fn saga_catchup_ignores_events_of_other_types() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id, saga_store, move |_components| RecordingSaga {
+        SagaManagerProps::<RecordingSaga>::new(saga_store, move |_components| RecordingSaga {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn(system.process_system())
         .await;
 
@@ -459,7 +451,6 @@ async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
     append_order_placed(&upstream_store, &agg_b, 2, "B2").await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -467,11 +458,11 @@ async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id, saga_store, move |_components| RecordingSaga {
+        SagaManagerProps::<RecordingSaga>::new(saga_store, move |_components| RecordingSaga {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::global(&upstream_store))
+        .observing::<OrderPlaced>(Subscription::global(&upstream_store))
         .spawn(system.process_system())
         .await;
 

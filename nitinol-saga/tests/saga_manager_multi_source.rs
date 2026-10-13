@@ -290,8 +290,8 @@ async fn a_manager_decodes_each_source_once_and_routes_both_to_the_same_instance
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&order_store, &order_key))
-        .subscribed_to::<StockReserved>(Subscription::stream(&stock_store, &stock_key))
+        .observing::<OrderPlaced>(Subscription::stream(&order_store, &order_key))
+        .observing::<StockReserved>(Subscription::stream(&stock_store, &stock_key))
         .spawn(system.process_system())
         .await;
 

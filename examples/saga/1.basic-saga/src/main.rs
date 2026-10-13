@@ -5,7 +5,7 @@
 //!
 //! * the two aggregates — the order whose fact starts the process, and the
 //!   inventory the reservation is addressed to;
-//! * the saga, with one `subscribed_to` call per source its alphabet declares;
+//! * the saga, with one `observing` call per source its alphabet declares;
 //! * the **delivery host**, which is what turns the saga's persisted decisions
 //!   into commands at the inventory.  Without it the saga still decides and
 //!   still journals, and nothing is ever delivered.
@@ -56,8 +56,8 @@ async fn main() {
     //
     // `InMemoryStore` also supplies a delivery-checkpoint slot, which is the
     // second thing a delivery host needs: a store with no such slot makes
-    // `saga_delivery_props` below a compile error rather than a host that
-    // cannot record where it got to.
+    // `deliver` below a compile error rather than a host that cannot record
+    // where it got to.
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
@@ -70,34 +70,39 @@ async fn main() {
         .spawn_aggregate::<Inventory>(inventory_id.clone())
         .await;
 
-    // The producer is handed the capabilities the framework resolved for this
-    // saga; this one needs none of them, so it ignores them.  It is called again
-    // if the runtime restarts the process, so what it captures must be
-    // re-acquirable — an `AggregateId` trivially is, being the address of the
-    // inventory rather than a live reference to it.
+    // `host` is the one verb a saga is started with, and it always starts a
+    // manager.  `ReservationSaga::correlate` answers the same id for every
+    // order, so what runs is that manager with a single instance — the
+    // degenerate case rather than a different kind of spawn, which is why no
+    // `SagaId` is named here.
     //
-    // One `subscribed_to` call per source the alphabet declares — here the
-    // order's stream, read as `OrderPlaced` — and `spawn` exists only once every
+    // The factory is handed the capabilities the framework resolved for this
+    // saga; this one needs none of them, so it ignores them.  It is called
+    // again for every instance and whenever the runtime rebuilds one, so what
+    // it captures must be re-acquirable — an `AggregateId` trivially is, being
+    // the address of the inventory rather than a live reference to it.
+    //
+    // One `observing` call per source the alphabet declares — here the order's
+    // stream, read as `OrderPlaced` — and `spawn` exists only once every
     // declared source has one.
     let saga_inventory = inventory_id.clone();
     let _saga_proxy = system
-        .spawn_saga(ReservationSaga::instance_id(), move |_components| {
-            ReservationSaga {
-                inventory: saga_inventory.clone(),
-            }
+        .host::<ReservationSaga>(move |_components| ReservationSaga {
+            inventory: saga_inventory.clone(),
         })
-        .subscribed_to::<OrderPlaced>(system.subscription(&order_id))
+        .observing::<OrderPlaced>(system.subscription(&order_id))
         .spawn()
         .await;
 
-    // The delivery host.  It subscribes to the decisions every instance of
-    // `ReservationSaga` has persisted — its input is the store, so it needs
-    // nothing of the saga process and keeps no saga resident — asks
-    // `ReservationSaga::dispatch` what each one implies, and `ask`s the
-    // addressed aggregate.  The handle is only how an operator reaches the
-    // running host; dropping it would not stop it.
+    // The delivery host, started by `deliver` — symmetric with `host`.  It
+    // subscribes to the decisions every instance of `ReservationSaga` has
+    // persisted — its input is the store, so it needs nothing of the saga
+    // process and keeps no saga resident — asks `ReservationSaga::dispatch`
+    // what each one implies, and `ask`s the addressed aggregate.  The handle is
+    // only how an operator reaches the running host; dropping it would not
+    // stop it.
     let _delivery = system
-        .saga_delivery_props::<ReservationSaga>()
+        .deliver::<ReservationSaga>()
         .with_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;

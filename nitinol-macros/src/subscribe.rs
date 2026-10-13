@@ -219,7 +219,7 @@ fn declare_bindings(
         /// The binding typestate of the alphabet above: one slot per declared
         /// external source, written by `#[derive(SagaSubscribe)]`.
         ///
-        /// Each `subscribed_to::<E>` call on a saga spawn builder moves this
+        /// Each `observing::<E>` call on the saga spawn builder moves this
         /// type's slot for `E` from unbound to bound, and `spawn` exists only on
         /// the shape where every slot is bound.
         #[doc(hidden)]

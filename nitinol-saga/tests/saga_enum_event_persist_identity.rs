@@ -25,7 +25,9 @@ use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 // Upstream aggregate fixtures
 
@@ -179,13 +181,13 @@ async fn saga_persist_stores_the_declared_event_type_for_every_arm() {
     let handled = Arc::new(Notify::new());
     let handled_for_saga = Arc::clone(&handled);
 
-    let _saga_proxy =
-        SagaProps::<WorkflowSaga>::new(saga_id.clone(), Arc::clone(&store), move |_components| {
+    let _manager_proxy =
+        SagaManagerProps::<WorkflowSaga>::new(Arc::clone(&store), move |_components| {
             WorkflowSaga {
                 handled: Arc::clone(&handled_for_saga),
             }
         })
-        .subscribed_to::<UpstreamTriggered>(Subscription::stream(&store, &upstream_id))
+        .observing::<UpstreamTriggered>(Subscription::stream(&store, &upstream_id))
         .spawn(system.process_system())
         .await;
 

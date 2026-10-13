@@ -25,7 +25,10 @@
 //!    An inherent method wins method resolution over a trait one, so while the
 //!    inherent method exists the call below is checked against *it* and fails
 //!    on its argument. Once it is gone the blanket method is the only candidate
-//!    and resolves.
+//!    and resolves. Every withdrawn builder name is claimed on
+//!    `SagaManagerProps`, which is the one saga builder there is to claim it on:
+//!    the standalone spawn path's separate builder is withdrawn too, which
+//!    `saga_standalone_spawn_api_removed.rs` settles.
 //! 3. **A released `Saga` trait item** — `on_tell_failed` is probed by an
 //!    extension trait claiming the same name for the same receiver, the way
 //!    `saga_trait_snapshot_methods_removed.rs` probes `snapshot`.
@@ -96,7 +99,7 @@ mod probe {
         pub label: &'static str,
     }
 
-    /// Claims the outbox push wiring on both saga builders.
+    /// Claims the outbox push wiring on the saga builder.
     pub trait NoOutboxPushWiring {
         fn with_crash_restart_factory(&self, label: &'static str) -> Declined {
             Declined { label }
@@ -105,7 +108,7 @@ mod probe {
 
     impl<T> NoOutboxPushWiring for T {}
 
-    /// Claims the dead-letter wiring on both saga builders.
+    /// Claims the dead-letter wiring on the saga builder.
     pub trait NoDeadLetterWiring {
         fn with_dead_letter_subscriber(&self, label: &'static str) -> Declined {
             Declined { label }
@@ -264,10 +267,6 @@ fn store() -> Arc<dyn EventStore> {
     Arc::new(InMemoryEventStore::default())
 }
 
-fn props() -> SagaProps<ProbeSaga> {
-    SagaProps::<ProbeSaga>::new(SagaId::new(PROBE_SAGA_ID), store(), |_components| ProbeSaga)
-}
-
 fn manager_props() -> SagaManagerProps<ProbeSaga> {
     SagaManagerProps::<ProbeSaga>::new(store(), |_components| ProbeSaga)
 }
@@ -315,33 +314,28 @@ fn the_dlq_type_names_belong_to_downstream_definitions() {
 }
 
 /// Given a blanket extension trait that claims the `with_crash_restart_factory`
-/// name, When it is called on each saga builder, Then it resolves to the
-/// extension — neither builder has an inherent method of that name to win
+/// name, When it is called on the saga builder, Then it resolves to the
+/// extension — the builder has no inherent method of that name to win
 /// resolution.
 #[test]
 fn the_crash_restart_factory_name_belongs_to_downstream_definitions() {
     assert_eq!(
-        (
-            props().with_crash_restart_factory(PROBE_LABEL).label,
-            manager_props()
-                .with_crash_restart_factory(PROBE_LABEL)
-                .label,
-        ),
-        (PROBE_LABEL, PROBE_LABEL),
-        "neither `SagaProps` nor `SagaManagerProps` may take a crash-restart \
-         factory: replay is a fold and a reconnect, so there is no pending \
-         command for a user-written hook to rebuild"
+        manager_props()
+            .with_crash_restart_factory(PROBE_LABEL)
+            .label,
+        PROBE_LABEL,
+        "`SagaManagerProps` must not take a crash-restart factory: replay is a \
+         fold and a reconnect, so there is no pending command for a \
+         user-written hook to rebuild"
     );
 }
 
 /// Given a blanket extension trait that claims the two dead-letter builder
-/// names, When each is called on each saga builder, Then all four calls resolve
-/// to the extension.
+/// names, When each is called on the saga builder, Then both calls resolve to
+/// the extension.
 #[test]
 fn the_dead_letter_builder_names_belong_to_downstream_definitions() {
     let labels = [
-        props().with_dead_letter_subscriber(PROBE_LABEL).label,
-        props().with_enqueue_policy(PROBE_LABEL).label,
         manager_props()
             .with_dead_letter_subscriber(PROBE_LABEL)
             .label,
@@ -350,9 +344,9 @@ fn the_dead_letter_builder_names_belong_to_downstream_definitions() {
 
     assert!(
         labels.iter().all(|label| *label == PROBE_LABEL),
-        "no saga builder may take a dead-letter subscriber or an enqueue \
-         policy: there is no queue left to subscribe to or filter for; got \
-         {labels:?}"
+        "`SagaManagerProps` must not take a dead-letter subscriber or an \
+         enqueue policy: there is no queue left to subscribe to or filter for; \
+         got {labels:?}"
     );
 }
 

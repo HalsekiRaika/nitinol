@@ -217,7 +217,7 @@ async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 

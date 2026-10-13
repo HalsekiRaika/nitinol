@@ -51,7 +51,9 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 // Domain types
 
@@ -170,17 +172,21 @@ fn describe(events: &[LoadedEvent]) -> Vec<String> {
         .collect()
 }
 
-/// A saga, its store and its upstream, with the saga already spawned.
+/// A saga, its store and its upstream, with the host already spawned.
 struct Running {
-    _proxy: nitinol_saga::SagaProxy<RecordingSaga>,
+    _proxy: nitinol_saga::SagaManagerProxy<RecordingSaga>,
     saga_store: Arc<dyn EventStore>,
     saga_id: SagaId,
     handle_count: Arc<AtomicUsize>,
     handled: Arc<Notify>,
 }
 
-/// Spawn the saga over `saga_store` with one upstream stream, after `seed` has
-/// had its chance to put rows on the saga's own stream.
+/// Spawn the host over `saga_store` with one upstream stream observed, after
+/// `seed` has had its chance to put rows on the instance's own stream.
+///
+/// Every record `correlate` claims here names the one instance [`SAGA_ID`], so
+/// what the host spawns on the first arrival is the single resident saga this
+/// file reads the facts of.
 async fn run(
     upstream_key: &str,
     upstream_records: &[(u64, &str)],
@@ -220,17 +226,16 @@ async fn run(
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let proxy = SagaProps::<RecordingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |_components| RecordingSaga {
-            handle_count: Arc::clone(&handle_count_for_producer),
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(system.process_system())
-    .await;
+    let proxy =
+        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&saga_store), move |_components| {
+            RecordingSaga {
+                handle_count: Arc::clone(&handle_count_for_producer),
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+        .spawn(system.process_system())
+        .await;
 
     Running {
         _proxy: proxy,
@@ -241,8 +246,9 @@ async fn run(
     }
 }
 
-/// How long a saga that *would* subscribe is given to replay, subscribe and
-/// deliver. The first test below reaches `handle` well inside this.
+/// How long an instance that *would* act on the waiting record is given to be
+/// spawned by the host, replay its own stream and be handed that record. The
+/// first test below reaches `handle` well inside this.
 const SETTLE: Duration = Duration::from_millis(750);
 
 /// The facts on the saga's own stream, as the rows that can be read as one.

@@ -72,9 +72,9 @@
 #[path = "common/helpers.rs"]
 mod common;
 use common::{
-    decode_schedule_kind, encode_schedule_scheduled, lifecycle_fact, lifecycle_kind_of,
-    schedule_kind_of, schedule_transition, JsonCodec, ScheduleKind, CONSUMED_MARKER,
-    SCHEDULE_MARKER,
+    decode_schedule_kind, encode_consumed_fact, encode_schedule_scheduled, lifecycle_fact,
+    lifecycle_kind_of, schedule_kind_of, schedule_transition, JsonCodec, ScheduleKind,
+    CONSUMED_MARKER, SCHEDULE_MARKER,
 };
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -96,8 +96,8 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, PendingDeadline, Saga, SagaContext, SagaEffect, SagaId, SagaProps,
-    Subscription, TimerName,
+    Deadline, DeadlineMessage, PendingDeadline, Saga, SagaContext, SagaEffect, SagaId,
+    SagaManagerProps, Subscription, TimerName,
 };
 
 // Domain
@@ -615,12 +615,31 @@ async fn wait_for_ended(store: &Arc<dyn EventStore>, saga_id: &SagaId) {
 /// nothing an earlier incarnation registered can fire into this one.
 struct Incarnation {
     _system: ProcessSystem,
-    _proxy: nitinol_saga::SagaProxy<FiringSaga>,
+    _proxy: nitinol_saga::SagaManagerProxy<FiringSaga>,
     upstream: Arc<dyn EventStore>,
     upstream_key: &'static str,
     probes_sent: AtomicU64,
     fires: Fires,
     reports: Reports,
+}
+
+/// The upstream sequence the record that wakes an instance sits at.
+///
+/// A host spawns an instance when a record that instance's correlation claims
+/// arrives, so even an incarnation whose whole subject is replay needs one
+/// record to arrive.  This one is paired with a position already naming it, and
+/// both are written before the host starts: the position's row therefore sits
+/// at a settled place on the stream, and the arrival itself is dropped before
+/// `Saga::handle` — so it reports nothing, decides nothing, and shifts no probe
+/// report behind it.  The probes below start one sequence later.
+const BOOT_SEQUENCE: u64 = 1;
+
+/// The sequence a row appended to the saga's own stream next would take.
+async fn next_sequence(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> u64 {
+    load_saga_events(store, saga_id)
+        .await
+        .last()
+        .map_or(1, |event| event.sequence + 1)
 }
 
 impl Incarnation {
@@ -632,24 +651,57 @@ impl Incarnation {
         let system = ProcessSystem::new().await;
         // An upstream of its own: a position this incarnation records is
         // keyed by the stream it read, so sharing one key with an earlier
-        // incarnation would make its probe look already consumed.
+        // incarnation would make its probes look already consumed.
         let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+
+        let boot_row = next_sequence(saga_store, saga_id).await;
+        saga_store
+            .append(
+                saga_id.as_str(),
+                vec![AppendingEvent {
+                    sequence: boot_row,
+                    event_type: CONSUMED_MARKER,
+                    payload: encode_consumed_fact(
+                        upstream_key,
+                        BOOT_SEQUENCE,
+                        &Probe::EVENT_TYPE.to_string(),
+                    ),
+                    occurred_at: jiff::Timestamp::now(),
+                }],
+            )
+            .await
+            .expect("seeding the boot record's position must succeed");
+        let boot = serde_json::to_vec(&Probe)
+            .map(Bytes::from)
+            .expect("encode Probe must succeed");
+        upstream
+            .append(
+                upstream_key,
+                vec![AppendingEvent {
+                    sequence: BOOT_SEQUENCE,
+                    event_type: Probe::EVENT_TYPE,
+                    payload: boot,
+                    occurred_at: jiff::Timestamp::now(),
+                }],
+            )
+            .await
+            .expect("appending the boot record must succeed");
+
         let fires: Fires = Arc::new(Mutex::new(Vec::new()));
         let reports: Reports = Arc::new(Mutex::new(Vec::new()));
         let fires_for_saga = Arc::clone(&fires);
         let reports_for_saga = Arc::clone(&reports);
-        let proxy = SagaProps::<FiringSaga>::new(
-            saga_id.clone(),
-            Arc::clone(saga_store),
-            move |components| FiringSaga {
-                deadline: components.deadline(),
-                fires: Arc::clone(&fires_for_saga),
-                reports: Arc::clone(&reports_for_saga),
-            },
-        )
-        .subscribed_to::<Probe>(Subscription::stream(&upstream, upstream_key))
-        .spawn(&system)
-        .await;
+        let proxy =
+            SagaManagerProps::<FiringSaga>::new(Arc::clone(saga_store), move |components| {
+                FiringSaga {
+                    deadline: components.deadline(),
+                    fires: Arc::clone(&fires_for_saga),
+                    reports: Arc::clone(&reports_for_saga),
+                }
+            })
+            .observing::<Probe>(Subscription::stream(&upstream, upstream_key))
+            .spawn(&system)
+            .await;
         Self {
             _system: system,
             _proxy: proxy,
@@ -676,7 +728,9 @@ impl Incarnation {
             .append(
                 self.upstream_key,
                 vec![AppendingEvent {
-                    sequence: sent,
+                    // The boot record holds this upstream's first sequence, so
+                    // the probes that are actually asked about start after it.
+                    sequence: BOOT_SEQUENCE + sent,
                     event_type: Probe::EVENT_TYPE,
                     payload,
                     occurred_at: jiff::Timestamp::now(),
@@ -754,10 +808,11 @@ async fn a_firing_whose_decision_landed_writes_its_fired_marker_after_the_decisi
     let events = wait_for_transition(&saga_store, &saga_id, "fired", 1).await;
     assert_eq!(
         stream_facts(&events),
-        facts(&["scheduled", "recorded", "fired"]),
+        facts(&["scheduled", "consumed", "recorded", "fired"]),
         "the `fired` marker settles the firing, so it may only be written once \
          the decision it settles is durable — and nothing else belongs on the \
-         stream for a firing, which consumes no upstream input"
+         stream for a firing, which consumes no upstream input: the `consumed` \
+         row is the boot record's, seeded before the host started"
     );
 
     let settled = first.probe().await;
@@ -907,10 +962,11 @@ async fn a_firing_that_ends_the_saga_writes_no_fired_marker() {
     let events = load_saga_events(&saga_store, &saga_id).await;
     assert_eq!(
         stream_facts(&events),
-        facts(&["scheduled", "ended"]),
+        facts(&["scheduled", "consumed", "ended"]),
         "a saga that terminated on a firing re-arms nothing, so the firing needs \
          no settlement — and a `fired` marker written here would record the \
-         closing of a deadline the terminal fact already closed"
+         closing of a deadline the terminal fact already closed; the `consumed` \
+         row is the boot record's, seeded before the host started"
     );
 }
 
@@ -945,10 +1001,11 @@ async fn a_refused_firing_is_settled_by_its_fired_marker_alone() {
     let events = wait_for_transition(&saga_store, &saga_id, "fired", 1).await;
     assert_eq!(
         stream_facts(&events),
-        facts(&["scheduled", "fired"]),
+        facts(&["scheduled", "consumed", "fired"]),
         "a refusal produces no decision, so the `fired` marker is the whole of \
          what the firing leaves — the discipline an upstream record `handle` \
-         refused is settled by, where the position alone is that row"
+         refused is settled by, where the position alone is that row; the \
+         `consumed` row is the boot record's, seeded before the host started"
     );
 
     let second = Incarnation::start(&saga_store, &saga_id, "settle-up-4b").await;
@@ -997,9 +1054,10 @@ async fn an_unreadable_firing_is_settled_by_its_fired_marker_alone() {
     let events = wait_for_transition(&saga_store, &saga_id, "fired", 1).await;
     assert_eq!(
         stream_facts(&events),
-        facts(&["scheduled", "fired"]),
+        facts(&["scheduled", "consumed", "fired"]),
         "a firing that cannot be read back decides nothing, so the `fired` \
-         marker is the whole of what it leaves"
+         marker is the whole of what it leaves; the `consumed` row is the boot \
+         record's, seeded before the host started"
     );
     assert!(
         first.fires_so_far().is_empty(),
@@ -1060,9 +1118,10 @@ async fn a_firing_that_decides_nothing_is_settled_by_its_fired_marker_alone() {
     let events = wait_for_transition(&saga_store, &saga_id, "fired", 1).await;
     assert_eq!(
         stream_facts(&events),
-        facts(&["scheduled", "fired"]),
+        facts(&["scheduled", "consumed", "fired"]),
         "deciding nothing still has to be settled, and the `fired` marker is the \
-         only row that says so — an empty batch writes nothing of its own"
+         only row that says so — an empty batch writes nothing of its own; the \
+         `consumed` row is the boot record's, seeded before the host started"
     );
 
     let second = Incarnation::start(&saga_store, &saga_id, "settle-up-6b").await;
@@ -1271,10 +1330,11 @@ async fn a_firing_that_sets_a_differently_named_deadline_still_writes_its_fired_
     let events = wait_for_transition(&saga_store, &saga_id, "fired", 1).await;
     assert_eq!(
         stream_facts(&events),
-        facts(&["scheduled", "scheduled", "fired"]),
+        facts(&["scheduled", "consumed", "scheduled", "fired"]),
         "the deadline that fired is not the one that was set, so it still needs \
          its own settlement — written after what the firing decided, as every \
-         settlement is"
+         settlement is; the `consumed` row is the boot record's, seeded before \
+         the host started"
     );
     assert_eq!(
         fired_timer_names(&events),

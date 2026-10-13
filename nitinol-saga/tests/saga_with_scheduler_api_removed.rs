@@ -1,5 +1,5 @@
-//! The hosting machinery owns the scheduler, so no builder takes one and no
-//! user can hold one.
+//! The hosting machinery owns the scheduler, so the builder does not take one
+//! and no user can hold one.
 //!
 //! Two names are settled here:
 //!
@@ -13,9 +13,12 @@
 //!    crate's favour does not rescue the build either.
 //! 2. **`with_scheduler` is no longer a builder method.**  Observed by a
 //!    blanket extension trait: an inherent method wins method resolution over a
-//!    trait one, so while `SagaProps::with_scheduler` exists the call below is
-//!    checked against *it* and fails on its argument.  Once it is gone the
-//!    blanket method is the only candidate and resolves.
+//!    trait one, so while `SagaManagerProps::with_scheduler` exists the call
+//!    below is checked against *it* and fails on its argument.  Once it is gone
+//!    the blanket method is the only candidate and resolves.
+//!    `SagaManagerProps` is the one saga builder there is to claim the name on:
+//!    a saga whose `correlate` always answers the same id is the degenerate
+//!    case of the manager, so there is no second builder to probe.
 //!
 //! `SchedulerProcess` stays exported on purpose: it is the type key the host
 //! resolves the resident timer core by, and the positive half — a saga whose
@@ -52,7 +55,7 @@ mod probe {
         pub owner: &'static str,
     }
 
-    /// What `with_scheduler` means to a downstream crate once the builders stop
+    /// What `with_scheduler` means to a downstream crate once the builder stops
     /// claiming the name: nothing the framework decides.
     pub struct Declined {
         pub label: &'static str,
@@ -174,26 +177,18 @@ fn the_scheduler_proxy_name_belongs_to_downstream_definitions() {
 }
 
 /// Given a blanket extension trait that claims the `with_scheduler` name,
-/// When it is called on each saga builder,
-/// Then it resolves to the extension — neither builder has an inherent method
-/// of that name to win resolution.
+/// When it is called on the saga builder,
+/// Then it resolves to the extension — the builder has no inherent method of
+/// that name to win resolution.
 #[test]
 fn the_with_scheduler_name_belongs_to_downstream_definitions() {
-    let props = SagaProps::<ProbeSaga>::new(
-        SagaId::new("with-scheduler-removed"),
-        store(),
-        |_components| ProbeSaga,
-    );
     let manager_props = SagaManagerProps::<ProbeSaga>::new(store(), |_components| ProbeSaga);
 
     assert_eq!(
-        (
-            props.with_scheduler(PROBE_LABEL).label,
-            manager_props.with_scheduler(PROBE_LABEL).label,
-        ),
-        (PROBE_LABEL, PROBE_LABEL),
-        "neither `SagaProps` nor `SagaManagerProps` may take a scheduler: the \
-         host resolves the resident timer core from the saga's own alphabet"
+        manager_props.with_scheduler(PROBE_LABEL).label,
+        PROBE_LABEL,
+        "`SagaManagerProps` must not take a scheduler: the host resolves the \
+         resident timer core from the saga's own alphabet"
     );
 }
 

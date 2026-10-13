@@ -49,8 +49,8 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe,
-    Subscription, TimerName,
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
+    SagaSubscribe, Subscription, TimerName,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -415,16 +415,15 @@ async fn all_empty_persist_writes_only_the_consumed_position() {
     let handled = Arc::new(AtomicUsize::new(0));
 
     let handled_clone = Arc::clone(&handled);
-    let _saga_proxy = SagaProps::<EmptyThenRealSaga>::new(
-        SagaId::new(EMPTY_THEN_REAL_SAGA_ID),
-        Arc::clone(&saga_store),
-        move |_components| EmptyThenRealSaga {
-            handled: Arc::clone(&handled_clone),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-    .spawn(&ps)
-    .await;
+    let _manager_proxy =
+        SagaManagerProps::<EmptyThenRealSaga>::new(Arc::clone(&saga_store), move |_components| {
+            EmptyThenRealSaga {
+                handled: Arc::clone(&handled_clone),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .spawn(&ps)
+        .await;
 
     let recorded = wait_for_domain_batch(&batches).await;
 
@@ -499,17 +498,16 @@ async fn persist_with_no_events_but_a_schedule_is_not_a_noop() {
     let handled = Arc::new(AtomicUsize::new(0));
 
     let handled_clone = Arc::clone(&handled);
-    let _saga_proxy = SagaProps::<ScheduleOnlySaga>::new(
-        SagaId::new(SCHEDULE_ONLY_SAGA_ID),
-        Arc::clone(&saga_store),
-        move |components| ScheduleOnlySaga {
-            deadline: components.deadline(),
-            handled: Arc::clone(&handled_clone),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-    .spawn(&ps)
-    .await;
+    let _manager_proxy =
+        SagaManagerProps::<ScheduleOnlySaga>::new(Arc::clone(&saga_store), move |components| {
+            ScheduleOnlySaga {
+                deadline: components.deadline(),
+                handled: Arc::clone(&handled_clone),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .spawn(&ps)
+        .await;
 
     // The `scheduled` fact and the consumed position of the input it was
     // decided from, in the one atomic append the branch produces.

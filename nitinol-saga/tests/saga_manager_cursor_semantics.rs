@@ -323,7 +323,7 @@ async fn instance_handler_error_holds_the_shared_cursor() {
             seen: Arc::clone(&seen_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 
@@ -372,7 +372,7 @@ async fn uncorrelated_event_advances_the_cursor() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 
@@ -428,7 +428,7 @@ async fn ended_instance_does_not_stall_the_shared_subscription() {
                 notify: Arc::clone(&notify_for_producer),
             }
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
         .await;
 

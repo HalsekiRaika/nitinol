@@ -6,18 +6,19 @@
 //! decoded is a deterministic, permanent failure with no typed event to
 //! correlate on, so the one thing to do with it is log it and move the cursor
 //! past it.  That behaviour is pinned positively in
-//! `saga_upstream_decode_failure_is_skipped.rs`; what is pinned here is that no
-//! builder still takes a route function.
+//! `saga_upstream_decode_failure_is_skipped.rs`; what is pinned here is that the
+//! builder no longer takes a route function.
 //!
 //! ## How the absence is observed
 //!
 //! A blanket extension trait claims the `with_decode_failure_route` name.  An
 //! inherent method wins method resolution over a trait one, so while
-//! `SagaProps::with_decode_failure_route` exists the calls below are checked
-//! against *it* and fail on their argument; once it is gone the blanket method
-//! is the only candidate and resolves.  Both builders are probed, because
-//! removing the setting from one and leaving it on the other would leave the
-//! manager path still deciding attribution.
+//! `SagaManagerProps::with_decode_failure_route` exists the call below is
+//! checked against *it* and fails on its argument; once it is gone the blanket
+//! method is the only candidate and resolves.  `SagaManagerProps` is the one
+//! saga builder there is to probe: a saga whose `correlate` always answers the
+//! same id is the degenerate case of the manager, so the route function is
+//! withdrawn from the only path that could still have decided attribution.
 //!
 //! `DecodeFailureRouteFn` is `pub(crate)`, so its removal is not observable from
 //! a downstream build at all; a definition left behind with no caller is caught
@@ -37,10 +38,10 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{EventType, Family, TypeName};
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaProps};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
 
 /// What `with_decode_failure_route` means to a downstream crate once the
-/// builders stop claiming the name: nothing the framework decides.
+/// builder stops claiming the name: nothing the framework decides.
 mod probe {
     pub struct Declined {
         pub label: &'static str,
@@ -59,7 +60,7 @@ use probe::DecodeFailuresAreSkipped;
 
 const PROBE_LABEL: &str = "downstream-label";
 
-// A minimal saga, so builder values exist to call the probed method on.
+// A minimal saga, so a builder value exists to call the probed method on.
 
 struct UnitCodec;
 
@@ -141,26 +142,18 @@ fn store() -> Arc<dyn EventStore> {
 
 /// Given a blanket extension trait that claims the
 /// `with_decode_failure_route` name,
-/// When it is called on each saga builder,
-/// Then it resolves to the extension — neither builder has an inherent method
-/// of that name to win resolution.
+/// When it is called on the saga builder,
+/// Then it resolves to the extension — the builder has no inherent method of
+/// that name to win resolution.
 #[test]
 fn the_decode_failure_route_name_belongs_to_downstream_definitions() {
-    let props = SagaProps::<ProbeSaga>::new(
-        SagaId::new("decode-failure-route-removed"),
-        store(),
-        |_components| ProbeSaga,
-    );
     let manager_props = SagaManagerProps::<ProbeSaga>::new(store(), |_components| ProbeSaga);
 
     assert_eq!(
-        (
-            props.with_decode_failure_route(PROBE_LABEL).label,
-            manager_props.with_decode_failure_route(PROBE_LABEL).label,
-        ),
-        (PROBE_LABEL, PROBE_LABEL),
-        "neither `SagaProps` nor `SagaManagerProps` may take a decode-failure \
-         route: a record that cannot be decoded has no owner to attribute it to \
-         and no dead letter to attribute it into"
+        manager_props.with_decode_failure_route(PROBE_LABEL).label,
+        PROBE_LABEL,
+        "`SagaManagerProps` must not take a decode-failure route: a record that \
+         cannot be decoded has no owner to attribute it to and no dead letter \
+         to attribute it into"
     );
 }

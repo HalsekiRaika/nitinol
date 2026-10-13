@@ -103,8 +103,8 @@
 //! The host needs one slot beyond the journal: somewhere to keep its checkpoint.
 //! That is the provider's *delivery-checkpoint* slot, and
 //! [`nitinol_saga::SagaDeliveryExt`] — the trait that supplies
-//! `system.saga_delivery_props::<FanOutSaga>()` — exists only on a system whose
-//! store holds one.  A deployment that forgot to name a store for its hosts'
+//! `system.deliver::<FanOutSaga>()` — exists only on a system whose store holds
+//! one.  A deployment that forgot to name a store for its hosts'
 //! progress is told so while the wiring compiles, not when a host first tries to
 //! record where it got to.
 //!

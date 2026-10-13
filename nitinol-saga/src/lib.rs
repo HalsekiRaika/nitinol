@@ -16,16 +16,20 @@
 //! | Reactive context | [`SagaContext`] |
 //! | Effect ADT | [`SagaEffect`] |
 //! | Identifier | [`SagaId`] |
-//! | Spawn builder | [`SagaProps`] |
-//! | System-bound spawn builder | [`SagaSpawn`] (from [`SagaSystemExt::spawn_saga`]) |
+//! | Spawn verb | [`SagaSystemExt::host`] |
+//! | Spawn builder | [`SagaManagerProps`] (what [`host`](SagaSystemExt::host) hands back, and what names a journal of its own) |
 //! | Upstream subscription value | [`Subscription`] |
-//! | Handle | [`SagaProxy`] |
-//! | Instance-manager spawn builder | [`SagaManagerProps`] |
-//! | Instance-manager handle | [`SagaManagerProxy`] |
+//! | Handle | [`SagaManagerProxy`] |
 //! | Delivery mapping | [`Saga::dispatch`] answering [`SagaDelivery`] |
+//! | Delivery-host spawn verb | [`SagaDeliveryExt::deliver`] |
 //! | Delivery-host spawn builder | [`SagaDeliveryProps`] |
 //! | Delivery-host handle | [`SagaDeliveryProxy`] |
 //! | Delivery-host identifier | [`SagaDeliveryId`] |
+//!
+//! There is one spawn builder and one handle because there is one kind of
+//! saga: [`host`](SagaSystemExt::host) always starts a manager, and a saga
+//! whose [`Saga::correlate`] always answers the same [`SagaId`] is that
+//! manager with a single instance rather than a second mechanism.
 //!
 //! The runtime `Process` trait is intentionally hidden — the user only
 //! implements [`Saga`].
@@ -35,9 +39,11 @@
 //! - Subscription-driven: each source the saga's alphabet declares is observed
 //!   through its own upstream [`nitinol_persistence::store::EventStore`], via a
 //!   runtime child `DirectPollerProcess` of its own (catchup + live, at-least-once
-//!   delivery), with its own cursor. Every poller's lifetime is bound to the saga
-//!   process; when the saga stops the runtime cascade-stops every child poller
-//!   automatically.
+//!   delivery), with its own cursor. Every poller's lifetime is bound to the
+//!   manager process that owns it; when the manager stops the runtime
+//!   cascade-stops every child poller automatically.
+//!   [`Subscription::with_poll_interval`] is how often one source is asked,
+//!   which is a deployment's choice rather than the framework's.
 //! - Consumed inputs are de-duplicated by the framework.  Most positions are
 //!   written onto the saga's own stream by the append that closes out the
 //!   `handle` decision the input produced — the last one, when one `handle`
@@ -46,9 +52,11 @@
 //!   [`Saga::handle`] answered `Err` produces no decision at all and is
 //!   settled by a position-only append: it was seen, it produced nothing, and
 //!   that one row is all it leaves.  Either way, replay rebuilds those
-//!   positions from the stream alone, a redelivered record at or below one is
-//!   dropped before [`Saga::handle`] runs again, and a stream subscription
-//!   resumes past it instead of re-reading the upstream history.  An effect
+//!   positions from the stream alone and a redelivered record at or below one
+//!   is dropped before [`Saga::handle`] runs again.  A source's cursor is the
+//!   manager's and starts where the [`Subscription`] named, because it is
+//!   spoken for by no single instance's position — so the sweep from there is
+//!   also what activates the instances that are not resident.  An effect
 //!   that writes nothing else still commits a consumed-position-only append,
 //!   so a no-op decision is not redelivered either; what the guarantee does
 //!   *not* cover — an append that never landed, and the entry points with no
@@ -61,45 +69,49 @@
 //!   routing" below.
 //! - Symmetric spawn: [`SagaSystemExt`] extends
 //!   [`nitinol_eventsource::system::EventSourceSystem`] with
-//!   [`spawn_saga`](SagaSystemExt::spawn_saga), the counterpart of
+//!   [`host`](SagaSystemExt::host), the counterpart of
 //!   `EventSourceSystem::spawn_aggregate` — the `ProcessSystem` and the journal
 //!   both come from the system, and the formats are settled already by the
-//!   event types themselves.  [`SagaProps`] stays the entry point for the
-//!   settings that builder does not take.
+//!   event types themselves.  What a wiring site still says is the binding of
+//!   each declared source ([`observing`](SagaManagerProps::observing)) and the
+//!   instances' residency
+//!   ([`with_instance_passivation`](SagaManagerProps::with_instance_passivation)),
+//!   which is why one verb is enough.
 //! - One supplier: a system is built with a
 //!   [`PersistenceProvider`](nitinol_persistence::provider::PersistenceProvider),
 //!   and [`SagaSystemExt`] resolves the journal from it —
-//!   [`spawn_saga`](SagaSystemExt::spawn_saga) for a standalone saga's own
-//!   stream, [`subscription`](SagaSystemExt::subscription) for the upstream it
-//!   polls, and [`saga_manager_props`](SagaSystemExt::saga_manager_props) for
-//!   both at once on a manager.  `EventStore` is stream-keyed, so that one
-//!   store holds the upstream stream and every instance's own stream side by
-//!   side.  Reaching a *different* destination is written down rather than
-//!   defaulted: [`Subscription::stream`] names a source's store, and
-//!   [`SagaProps::new`] / [`SagaManagerProps::new`] name a journal.
-//! - Where delivery progress is kept: [`SagaDeliveryExt`] resolves the journal
-//!   and the delivery-checkpoint slot from the same supplier, and exists only
-//!   where that supplier's store holds the slot — so a deployment with no
-//!   store for a host's progress is told while the wiring is compiled.
+//!   [`host`](SagaSystemExt::host) for every instance's own stream, and
+//!   [`subscription`](SagaSystemExt::subscription) for an upstream it polls.
+//!   `EventStore` is stream-keyed, so that one store holds the upstream stream
+//!   and every instance's own stream side by side.  Reaching a *different*
+//!   destination is written down rather than defaulted:
+//!   [`Subscription::stream`] names a source's store, and
+//!   [`SagaManagerProps::new`] names a journal.
+//! - Where delivery progress is kept: [`deliver`](SagaDeliveryExt::deliver)
+//!   resolves the journal and the delivery-checkpoint slot from the same
+//!   supplier, and exists only where that supplier's store holds the slot — so
+//!   a deployment with no store for a host's progress is told while the wiring
+//!   is compiled.
 //! - Reaching the host from inside: a saga spawned through [`SagaSystemExt`]
 //!   is handed the hosting system by
 //!   [`SagaComponents::system`](crate::SagaComponents::system), so a producer
 //!   that needs a reference into the host resolves it there rather than from a
 //!   clone of the system captured outside the spawn.
-//! - Instance management: [`SagaManagerProps`] spawns one manager that holds
-//!   one upstream subscription per declared source, shared by every instance
-//!   of a saga type, so an upstream record is decoded once no matter how far
-//!   the correlation fans out.  It interprets [`Saga::correlate`] at runtime: a
-//!   correlation id with no resident instance is spawned and replayed on
-//!   arrival, an id already resident is handed the event directly, and
-//!   [`SagaManagerProps::with_instance_passivation`] stops instances that fall
-//!   idle — a later event revives them from their own stream.  Owning each
+//! - Instance management: the manager [`host`](SagaSystemExt::host) starts
+//!   holds one upstream subscription per declared source, shared by every
+//!   instance of a saga type, so an upstream record is decoded once no matter
+//!   how far the correlation fans out.  It interprets [`Saga::correlate`] at
+//!   runtime: a correlation id with no resident instance is spawned and
+//!   replayed on arrival, an id already resident is handed the event directly,
+//!   and [`SagaManagerProps::with_instance_passivation`] stops instances that
+//!   fall idle — a later event revives them from their own stream.  Owning each
 //!   source's cursor makes it the manager's decision whether a record from
 //!   that source is settled: it withholds the cursor when the addressed
 //!   instance could not settle the record, and advances past a record no
 //!   instance claims so one unclaimed record cannot stall the rest.  A
 //!   [`Saga::correlate`] that always answers the same id reduces the manager to
-//!   the single resident saga [`SagaProps`] spawns.
+//!   a single resident instance, which is how a saga with one process is run —
+//!   the degenerate case, not a mechanism of its own.
 //! - Delivery of what a saga decided: [`Saga::dispatch`] is a pure mapping from
 //!   one of the saga's own events to the commands it implies and whom each is
 //!   addressed to, and [`SagaDeliveryProps`] starts the host that carries them.
@@ -322,7 +334,7 @@ pub use self::delivery::{
 };
 pub use self::effect::{SagaEffect, ScheduleSpec};
 pub use self::id::SagaId;
-pub use self::process::{SagaManagerProps, SagaManagerProxy, SagaProps, SagaProxy};
+pub use self::process::{SagaManagerProps, SagaManagerProxy};
 pub use self::saga::Saga;
 pub use self::scheduler::{ScheduleToken, SchedulerProcess, TimerName};
 pub use self::subscribe::{
@@ -330,7 +342,7 @@ pub use self::subscribe::{
     SagaSubscribe, SourceBindings, SubscriptionSet, SubscriptionUnset,
 };
 pub use self::subscription::Subscription;
-pub use self::system_ext::{SagaDeliveryExt, SagaSpawn, SagaSystemExt};
+pub use self::system_ext::{SagaDeliveryExt, SagaSystemExt};
 
 /// `#[derive(SagaSubscribe)]`, co-located with the [`SagaSubscribe`] trait so a
 /// single `use nitinol::saga::SagaSubscribe;` brings both into scope (trait in

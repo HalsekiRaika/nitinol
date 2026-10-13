@@ -54,7 +54,9 @@ use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, Subscription};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 // Domain types
 
@@ -177,13 +179,12 @@ async fn stream_after_one_end(upstream_key: &str, sku: &str) -> Vec<LoadedEvent>
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
 
-    let _proxy =
-        SagaProps::<EndOnFirstSaga>::new(saga_id.clone(), Arc::clone(&saga_store), |_components| {
-            EndOnFirstSaga
-        })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaManagerProps::<EndOnFirstSaga>::new(Arc::clone(&saga_store), |_components| {
+        EndOnFirstSaga
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+    .spawn(system.process_system())
+    .await;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {

@@ -20,8 +20,9 @@
 //! be wired on this store at all, so what the first clause fixes is that a
 //! deployment with no projector in it is a deployment the supplier can express.
 //!
-//! The host is wired through the system's own entry point and started with
-//! nothing re-injected, so what the first clause also fixes is that the
+//! The host is wired through the system's own entry point — `deliver`, the
+//! delivery-host counterpart of the one saga-hosting verb `host` — and started
+//! with nothing re-injected, so what the first clause also fixes is that the
 //! delivery-only shape reaches the argument-free spawn the other hosted props
 //! have.
 //!
@@ -115,7 +116,7 @@ async fn a_store_without_a_projection_slot_still_wires_a_delivery_host() {
     // When: the host is wired from the system alone — neither the journal, the
     // checkpoint slot, nor the process system is named here.
     let _host = system
-        .saga_delivery_props::<DeliverySaga>()
+        .deliver::<DeliverySaga>()
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
         .with_poll_interval(TEST_POLL_INTERVAL)
@@ -161,7 +162,7 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
     let delivered = append_decided(&first_journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     let _first_host = first_system
-        .saga_delivery_props::<DeliverySaga>()
+        .deliver::<DeliverySaga>()
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
         .with_poll_interval(TEST_POLL_INTERVAL)
@@ -191,7 +192,7 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
         .with_persistence(delivery_persistence(&second_journal, &checkpoints))
         .build();
     let _second_host = second_system
-        .saga_delivery_props::<DeliverySaga>()
+        .deliver::<DeliverySaga>()
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
         .with_poll_interval(TEST_POLL_INTERVAL)

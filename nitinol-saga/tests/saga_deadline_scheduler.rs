@@ -37,7 +37,9 @@
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{encode_schedule_scheduled, schedule_kind_of, schedule_transition};
+use common::{
+    encode_consumed_fact, encode_schedule_scheduled, schedule_kind_of, schedule_transition,
+};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,8 +60,8 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaProps, Subscription,
-    TimerName,
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
+    Subscription, TimerName,
 };
 
 // Local JSON codec for the domain events — self-contained so this file does not
@@ -458,27 +460,69 @@ async fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
     }
 }
 
-/// Spawn a [`TimerSaga`] with no scheduler wiring: the alphabet declaring a
-/// deadline variant is the whole of the declaration, and the host resolves the
-/// resident timer core from it.
+/// Spawn a host over [`TimerSaga`] with no scheduler wiring: the alphabet
+/// declaring a deadline variant is the whole of the declaration, and the host
+/// resolves the resident timer core from it.
 async fn spawn_timer_saga(
     ps: &ProcessSystem,
-    saga_id: &SagaId,
     saga_store: &Arc<dyn EventStore>,
     upstream_store: &Arc<dyn EventStore>,
     upstream_key: &str,
     fired: &Arc<Mutex<Vec<String>>>,
-) -> nitinol_saga::SagaProxy<TimerSaga> {
+) -> nitinol_saga::SagaManagerProxy<TimerSaga> {
     let fired = Arc::clone(fired);
-    SagaProps::<TimerSaga>::new(saga_id.clone(), Arc::clone(saga_store), move |components| {
-        TimerSaga {
-            deadline: components.deadline(),
-            fired: Arc::clone(&fired),
-        }
+    SagaManagerProps::<TimerSaga>::new(Arc::clone(saga_store), move |components| TimerSaga {
+        deadline: components.deadline(),
+        fired: Arc::clone(&fired),
     })
-    .subscribed_to::<Trigger>(Subscription::stream(upstream_store, upstream_key))
+    .observing::<Trigger>(Subscription::stream(upstream_store, upstream_key))
     .spawn(ps)
     .await
+}
+
+/// The sequence the record that wakes an instance sits at upstream.
+const BOOT_SEQUENCE: u64 = 1;
+
+/// Pair an upstream record with a position already naming it, so its arrival
+/// wakes an instance without deciding anything.
+///
+/// A host spawns an instance when a record that instance's correlation claims
+/// arrives; a host over an empty upstream holds nothing to restore.  So a test
+/// whose subject is replay alone still needs one record to arrive — and
+/// pairing it with a consumed position keeps the arrival inert: replay restores
+/// the position, the record is dropped before `Saga::handle`, and the stream
+/// gains no row for it.
+async fn seed_an_inert_boot_record(
+    saga_store: &Arc<dyn EventStore>,
+    saga_id: &SagaId,
+    saga_sequence: u64,
+    upstream_store: &Arc<dyn EventStore>,
+    upstream_key: &str,
+) {
+    saga_store
+        .append(
+            saga_id.as_str(),
+            vec![AppendingEvent {
+                sequence: saga_sequence,
+                event_type: common::CONSUMED_MARKER,
+                payload: encode_consumed_fact(
+                    upstream_key,
+                    BOOT_SEQUENCE,
+                    &Trigger::EVENT_TYPE.to_string(),
+                ),
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("seeding a consumed position must succeed");
+
+    append_trigger(
+        upstream_store,
+        upstream_key,
+        BOOT_SEQUENCE,
+        Trigger::setting("already-consumed", 0),
+    )
+    .await;
 }
 
 fn assert_correlate_was_never_asked_about_a_deadline() {
@@ -510,12 +554,10 @@ async fn a_deadline_fires_into_the_deadline_arm_of_handle() {
     .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let _proxy = spawn_timer_saga(
         &ps,
-        &saga_id,
         &saga_store,
         &upstream_store,
         "deadline-upstream-1",
@@ -564,12 +606,10 @@ async fn a_decision_and_the_deadline_it_sets_reach_the_store_in_one_append() {
         inner: InMemoryEventStore::default(),
         batches: Arc::clone(&batches),
     });
-    let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let _proxy = spawn_timer_saga(
         &ps,
-        &saga_id,
         &saga_store,
         &upstream_store,
         "deadline-upstream-batch",
@@ -630,7 +670,6 @@ async fn setting_and_firing_persist_schedule_markers_on_the_saga_stream() {
 
     let _proxy = spawn_timer_saga(
         &ps,
-        &saga_id,
         &saga_store,
         &upstream_store,
         "deadline-upstream-2",
@@ -703,12 +742,10 @@ async fn resetting_the_same_name_auto_cancels_the_earlier_deadline() {
     .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let _proxy = spawn_timer_saga(
         &ps,
-        &saga_id,
         &saga_store,
         &upstream_store,
         "deadline-upstream-3",
@@ -763,7 +800,6 @@ async fn cancel_prevents_the_deadline_from_firing() {
 
     let _proxy = spawn_timer_saga(
         &ps,
-        &saga_id,
         &saga_store,
         &upstream_store,
         "deadline-upstream-4",
@@ -816,7 +852,13 @@ async fn cancel_prevents_the_deadline_from_firing() {
 
 /// A fresh incarnation started against a store that already holds an unfired
 /// `scheduled` marker must re-arm the deadline from replay and fire it — even
-/// though this incarnation never receives the upstream trigger itself.
+/// though no upstream trigger ever reaches its `handle`.
+///
+/// The boot record below is what makes the incarnation exist at all: a host
+/// spawns an instance when a record its correlation claims arrives.  That
+/// record's position is already on the stream, so it is dropped before
+/// `handle` and decides nothing — leaving replay as the only account of the
+/// deadline.
 ///
 /// The seeded payload is written with `ReminderCodec`, which is also what the
 /// derive has to read the schedule fact back through: a replay that reached for
@@ -857,17 +899,26 @@ async fn replay_rearms_an_unfired_deadline_and_fires_it() {
         .await
         .expect("seeding an unfired schedule fact must succeed");
 
-    // An empty upstream, so the only way this incarnation can learn about the
-    // deadline is replay.
+    // One upstream record, already named by a position on the saga's own
+    // stream: it is what wakes the instance, and it is dropped before
+    // `Saga::handle`, so replay stays the only way this incarnation can learn
+    // about the deadline.
     let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    seed_an_inert_boot_record(
+        &saga_store,
+        &saga_id,
+        2,
+        &upstream_store,
+        "deadline-upstream-5-boot",
+    )
+    .await;
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let _proxy = spawn_timer_saga(
         &ps,
-        &saga_id,
         &saga_store,
         &upstream_store,
-        "deadline-upstream-5-empty",
+        "deadline-upstream-5-boot",
         &fired,
     )
     .await;
@@ -916,13 +967,11 @@ async fn a_deadline_beyond_the_old_wheel_horizon_fires() {
     .await;
 
     let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let set_at = Instant::now();
     let _proxy = spawn_timer_saga(
         &ps,
-        &saga_id,
         &saga_store,
         &upstream_store,
         "deadline-upstream-horizon",
@@ -981,20 +1030,19 @@ async fn a_deadline_reset_from_its_own_firing_survives_replay() {
 
     let fires_1 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_1_producer = Arc::clone(&fires_1);
-    let _proxy_1 = SagaProps::<OnceRescheduleSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |components| OnceRescheduleSaga {
-            deadline: components.deadline(),
-            fires: Arc::clone(&fires_1_producer),
-        },
-    )
-    .subscribed_to::<Trigger>(Subscription::stream(
-        &upstream_store,
-        "deadline-upstream-arch004",
-    ))
-    .spawn(&ps)
-    .await;
+    let _proxy_1 =
+        SagaManagerProps::<OnceRescheduleSaga>::new(Arc::clone(&saga_store), move |components| {
+            OnceRescheduleSaga {
+                deadline: components.deadline(),
+                fires: Arc::clone(&fires_1_producer),
+            }
+        })
+        .observing::<Trigger>(Subscription::stream(
+            &upstream_store,
+            "deadline-upstream-arch004",
+        ))
+        .spawn(&ps)
+        .await;
 
     let fires_1_check = Arc::clone(&fires_1);
     let ok = wait_until(Duration::from_secs(5), || {
@@ -1029,25 +1077,26 @@ async fn a_deadline_reset_from_its_own_firing_survives_replay() {
          remove the very schedule the arm just wrote"
     );
 
-    // Incarnation #2 shares the store but subscribes to an empty upstream, so
-    // it can only learn about the re-set deadline via replay.
-    let upstream_empty: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // A second host over the same store and the same source.  The one record
+    // there is already named by a position on the saga's own stream, so it
+    // wakes the instance this host fronts and is then dropped before
+    // `Saga::handle` — which leaves replay as the only account of the re-set
+    // deadline, and is what `fires_2` below reads back.
     let fires_2 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_2_producer = Arc::clone(&fires_2);
-    let _proxy_2 = SagaProps::<OnceRescheduleSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&saga_store),
-        move |components| OnceRescheduleSaga {
-            deadline: components.deadline(),
-            fires: Arc::clone(&fires_2_producer),
-        },
-    )
-    .subscribed_to::<Trigger>(Subscription::stream(
-        &upstream_empty,
-        "deadline-upstream-arch004-empty",
-    ))
-    .spawn(&ps)
-    .await;
+    let _proxy_2 =
+        SagaManagerProps::<OnceRescheduleSaga>::new(Arc::clone(&saga_store), move |components| {
+            OnceRescheduleSaga {
+                deadline: components.deadline(),
+                fires: Arc::clone(&fires_2_producer),
+            }
+        })
+        .observing::<Trigger>(Subscription::stream(
+            &upstream_store,
+            "deadline-upstream-arch004",
+        ))
+        .spawn(&ps)
+        .await;
 
     let fires_2_check = Arc::clone(&fires_2);
     let ok = wait_until(Duration::from_secs(8), || {

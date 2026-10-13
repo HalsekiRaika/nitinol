@@ -53,9 +53,9 @@ async fn main() {
     // manager's subscription narrows it back down to the order's stream, and the
     // delivery host's narrows it down to the saga's own decision event type.
     // How far the host has got is not a stream at all, so it is a slot of its
-    // own: without it there is no `saga_delivery_props` on this system to call,
-    // which is the wiring being told so while it is compiled rather than when
-    // the host first tries to record something.
+    // own: without it there is no `deliver` on this system to call, which is
+    // the wiring being told so while it is compiled rather than when the host
+    // first tries to record something.
     //
     // The journal handle is kept here as well, because the streams are what this
     // demonstration verifies itself against.
@@ -72,16 +72,16 @@ async fn main() {
     let order_id = AggregateId::new("order-cobalt-42");
     let order = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
-    // One `subscribed_to` call per source the saga's alphabet declares — here
-    // the order's stream, read as `OrderPlaced` — and `spawn` exists only once
+    // One `observing` call per source the saga's alphabet declares — here the
+    // order's stream, read as `OrderPlaced` — and `spawn` exists only once
     // every declared source has one.
     //
     // The saga holds nothing, because it sends nothing: its only effect is the
-    // decision it persists, so the producer needs none of the capabilities it is
+    // decision it persists, so the factory needs none of the capabilities it is
     // handed.
     let _manager = system
-        .saga_manager_props(|_| ReservationSaga)
-        .subscribed_to::<OrderPlaced>(system.subscription(&order_id))
+        .host::<ReservationSaga>(|_| ReservationSaga)
+        .observing::<OrderPlaced>(system.subscription(&order_id))
         .spawn()
         .await;
 
@@ -93,7 +93,7 @@ async fn main() {
     // Without this the saga would still decide and still journal, and no stock
     // item would ever hear about it.
     let _delivery = system
-        .saga_delivery_props::<ReservationSaga>()
+        .deliver::<ReservationSaga>()
         .with_poll_interval(DELIVERY_POLL_INTERVAL)
         .spawn()
         .await;

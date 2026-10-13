@@ -7,9 +7,8 @@
 //! cursor of each source — which makes "do not advance on failure" a manager
 //! decision rather than an instance one.
 //!
-//! Sources stay independent under a manager exactly as they are under a
-//! standalone saga: one cursor each, no order between them, and a stalled source
-//! holding up nothing but itself.
+//! The declared sources stay independent of one another: one cursor each, no
+//! order between them, and a stalled source holding up nothing but itself.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -32,25 +31,25 @@ pub(crate) struct SagaManagerProcess<S: Saga> {
     pub(crate) producer: SagaProducer<S>,
     /// The system this manager was wired from, where it was wired from one.
     ///
-    /// Handed to every instance it spawns, so a correlated instance reaches
-    /// the host's resources on the same terms a standalone hosted saga does.
+    /// Handed to every instance it spawns, so an instance reaches the host's
+    /// resources without a reference to the system being captured outside the
+    /// spawn.
     pub(crate) host: Option<SystemHandle>,
     /// One subscription per declared source, shared by every instance the
     /// manager fronts.
     ///
-    /// Each starts exactly where it was configured, unlike the cursor of a saga
-    /// that owns its subscriptions: a shared cursor is spoken for by no single
-    /// instance's consumed position, and the sweep from the configured position
-    /// is what activates the instances that are not resident.  Each instance
-    /// still drops the records it has already consumed, so the sweep costs no
-    /// second decision.
+    /// Each starts exactly where its [`Subscription`](crate::Subscription) said:
+    /// a shared cursor is spoken for by no single instance's consumed position,
+    /// and the sweep from the configured position is what activates the
+    /// instances that are not resident.  Each instance still drops the records
+    /// it has already consumed, so the sweep costs no second decision.
     pub(crate) upstream: Vec<OwnedUpstream<S::Subscribe>>,
     /// Passivation window handed to every instance this manager spawns.
     pub(crate) instance_idle_timeout: IdleTimeout,
     /// The resident timer core handed to every instance this manager spawns,
     /// resolved at the manager's spawn boundary from the saga's own alphabet —
-    /// so a manager's instances get their deadlines on the same terms a
-    /// standalone saga does.
+    /// which is the whole of a saga's deadline wiring, however many instances
+    /// the correlation fans out to.
     pub(crate) scheduler: Option<SchedulerProxy>,
     /// The instances currently resident, keyed by the id `Saga::correlate`
     /// named.  An id absent here is not an id that never existed — it is one
@@ -87,15 +86,12 @@ impl<S: Saga> SagaManagerProcess<S> {
             store: Arc::clone(&self.store),
             producer: Arc::clone(&self.producer),
             host: self.host.clone(),
-            // This manager holds the subscriptions; an instance that opened its
-            // own would decode every observed record a second time.
-            upstream: Vec::new(),
             scheduler: self.scheduler.clone(),
             // A deadline this instance registers outlives it: the firing is
             // addressed here, with the instance's id, so a deadline reached
             // after passivation brings the instance back instead of landing in
             // a stopped process.
-            delivery: ScheduleDelivery::ThroughTheManager(ctx.self_proxy().clone()),
+            delivery: ScheduleDelivery::through(ctx.self_proxy().clone()),
         }
         .into_props()
         .with_idle_timeout(self.instance_idle_timeout);
@@ -112,9 +108,9 @@ impl<S: Saga> SagaManagerProcess<S> {
 
 impl<S: Saga> Process for SagaManagerProcess<S> {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
-        // One poller per declared source, each from its own configured position:
-        // the fan-out observes exactly what a standalone saga would, and a
-        // source whose upstream has stalled holds up only itself.
+        // One poller per declared source, each from its own configured
+        // position, so a source whose upstream has stalled holds up only
+        // itself.
         for source in self.upstream.clone() {
             source.config.spawn_child(ctx, source.cursor).await;
         }

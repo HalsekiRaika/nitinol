@@ -8,7 +8,7 @@
 //!
 //! It is also the point at which the binding typestate stops being expressible:
 //! the slot for a source is keyed by its type, so a duplicate would need two
-//! slots keyed alike and `subscribed_to::<Placed>` would name neither.
+//! slots keyed alike and `observing::<Placed>` would name neither.
 
 use nitinol::saga::SagaSubscribe;
 

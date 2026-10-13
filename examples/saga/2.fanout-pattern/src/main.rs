@@ -59,8 +59,8 @@ async fn main() {
     //
     // The delivery-checkpoint slot is the second thing the supplier owes: it is
     // where the host records how far it has finished, and naming it is what
-    // makes `saga_delivery_props` below exist at all.  A store without it is a
-    // compile error at the wiring rather than a failure at the first save.
+    // makes `deliver` below exist at all.  A store without it is a compile
+    // error at the wiring rather than a failure at the first save.
     let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
@@ -76,29 +76,30 @@ async fn main() {
 
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
-    // The manager, not `spawn_saga`, is what turns a subscription into one saga
-    // instance per correlation key, spawning it on the first event that
-    // correlates to it.  One `subscribed_to` call per source the saga's alphabet
-    // declares — here the run's stream, read as `PayrollRunApproved` — and
-    // `spawn` exists only once every declared source has one.
+    // `host` turns a subscription into one saga instance per correlation key,
+    // spawning it on the first event that correlates to it.  One `observing`
+    // call per source the saga's alphabet declares — here the run's stream,
+    // read as `PayrollRunApproved` — and `spawn` exists only once every
+    // declared source has one.
     //
-    // The producer ignores what it is handed: a saga that only persists its own
+    // The factory ignores what it is handed: a saga that only persists its own
     // decisions needs no reference to anything, since addressing the children is
     // a pure function of the decision and resolving them is the host's work.
     let _manager = system
-        .saga_manager_props(|_components| FanOutSaga)
-        .subscribed_to::<PayrollRunApproved>(system.subscription(&run_id))
+        .host::<FanOutSaga>(|_components| FanOutSaga)
+        .observing::<PayrollRunApproved>(system.subscription(&run_id))
         .spawn()
         .await;
 
-    // The delivery host.  It subscribes across *every* instance of `FanOutSaga`
-    // by the event type the saga declares — not to one stream — because what it
-    // consumes is "the decisions of this saga type", wherever they were made and
-    // whichever incarnation made them.  Nothing is named here: the journal it
-    // reads, the slot it records progress in and the system it delivers through
-    // all come from the system these props were taken from.
+    // The delivery host, started by `deliver`.  It subscribes across *every*
+    // instance of `FanOutSaga` by the event type the saga declares — not to one
+    // stream — because what it consumes is "the decisions of this saga type",
+    // wherever they were made and whichever incarnation made them.  Nothing is
+    // named here: the journal it reads, the slot it records progress in and the
+    // system it delivers through all come from the system these props were
+    // taken from.
     let _delivery = system
-        .saga_delivery_props::<FanOutSaga>()
+        .deliver::<FanOutSaga>()
         .with_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;

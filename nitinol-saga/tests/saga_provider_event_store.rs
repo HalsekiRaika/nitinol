@@ -1,14 +1,13 @@
-//! A saga spawned from a system, and which store each of its two directions
+//! A saga hosted from a system, and which store each of its two directions
 //! resolves.
 //!
 //! A saga touches two stores: the one it journals its own events onto, and the
 //! one it polls for upstream records.  Both are resolved from the provider the
-//! system was built with when the caller names neither —
-//! `spawn_saga(saga_id, producer)` for the journal, `system.subscription(&key)`
-//! for the upstream.
+//! system was built with when the caller names neither — `host::<S>(producer)`
+//! for the journal, `system.subscription(&key)` for the upstream.
 //!
 //! Reaching a different destination is written down rather than defaulted:
-//! `SagaProps::new` names a journal, and `Subscription::stream` names an
+//! `SagaManagerProps::new` names a journal, and `Subscription::stream` names an
 //! upstream store.  There is no per-spawn override on the system itself.
 //!
 //! The two directions are pinned separately: a wiring that resolves the journal
@@ -36,7 +35,8 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaProps, SagaSubscribe, SagaSystemExt, Subscription,
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, SagaSystemExt,
+    Subscription,
 };
 
 // Fixtures
@@ -177,7 +177,7 @@ async fn loaded_stream(store: &Arc<dyn EventStore>, key: &SagaId) -> Vec<LoadedE
 /// SKUs of the saga's own events on its own stream in `store`.
 ///
 /// Reading a *named* store back is what tells the journal stores apart — the
-/// `SagaProxy` a spawn returns looks the same whichever store it writes to.
+/// proxy a spawn returns looks the same whichever store its instances write to.
 async fn persisted_skus(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<String> {
     loaded_stream(store, saga_id)
         .await
@@ -207,10 +207,10 @@ async fn wait_for_persisted(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Ve
 
 // The provider's journal: the saga's own stream
 
-/// `spawn_saga(saga_id, producer)` — no journal argument — must write the
-/// saga's own events onto the journal the system's provider supplies.
+/// `host::<S>(producer)` — no journal argument — must write the saga's own
+/// events onto the journal the system's provider supplies.
 #[tokio::test]
-async fn spawn_saga_journals_onto_the_providers_event_store() {
+async fn host_journals_onto_the_providers_event_store() {
     // Given: a system over one provider, and an unrelated upstream
     let ps = ProcessSystem::new().await;
     let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
@@ -231,13 +231,13 @@ async fn spawn_saga_journals_onto_the_providers_event_store() {
     let handled_for_producer = Arc::clone(&handled);
     let notify_for_producer = Arc::clone(&notify);
 
-    // When: spawning without naming a journal store
-    let _saga_proxy = system
-        .spawn_saga(saga_id.clone(), move |_components| RecordingSaga {
+    // When: hosting without naming a journal store
+    let _host_proxy = system
+        .host::<RecordingSaga>(move |_components| RecordingSaga {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
         .spawn()
         .await;
 
@@ -248,7 +248,7 @@ async fn spawn_saga_journals_onto_the_providers_event_store() {
     assert_eq!(
         wait_for_persisted(&default_store, &saga_id).await,
         vec!["SKU-DEFAULT-JOURNAL".to_owned()],
-        "spawn_saga must journal onto the store the provider supplies"
+        "host must journal onto the store the provider supplies"
     );
 }
 
@@ -279,17 +279,14 @@ async fn system_subscription_polls_the_providers_event_store() {
     let handled_for_producer = Arc::clone(&handled);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy = SagaProps::<RecordingSaga>::new(
-        SagaId::new(RECORDING_SAGA_ID),
-        journal_store,
-        move |_components| RecordingSaga {
+    let _host_proxy =
+        SagaManagerProps::<RecordingSaga>::new(journal_store, move |_components| RecordingSaga {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(system.subscription(&order_id))
-    .spawn(system.process_system())
-    .await;
+        })
+        .observing::<OrderPlaced>(system.subscription(&order_id))
+        .spawn(system.process_system())
+        .await;
 
     // When: the record is written only to the store the provider supplies
     append_order_placed(&default_store, &order_id, 1, "SKU-VIA-DEFAULT").await;
@@ -306,8 +303,8 @@ async fn system_subscription_polls_the_providers_event_store() {
 
 // A journal named explicitly: the provider's store receives nothing
 
-/// A journal named on [`SagaProps`] must be the only store the saga's own
-/// stream reaches — the provider's journal must not receive it at all.
+/// A journal named on [`SagaManagerProps`] must be the only store the saga's
+/// own stream reaches — the provider's journal must not receive it at all.
 ///
 /// This is how a saga is placed in another destination now that the system has
 /// no per-spawn override: the low-level props are where a second destination is
@@ -336,17 +333,16 @@ async fn a_journal_named_on_props_keeps_the_saga_out_of_the_providers_store() {
     let notify_for_producer = Arc::clone(&notify);
 
     // When
-    let _saga_proxy = SagaProps::<RecordingSaga>::new(
-        saga_id.clone(),
-        Arc::clone(&override_store),
-        move |_components| RecordingSaga {
-            handled: Arc::clone(&handled_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        },
-    )
-    .subscribed_to::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-    .spawn(system.process_system())
-    .await;
+    let _host_proxy =
+        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&override_store), move |_components| {
+            RecordingSaga {
+                handled: Arc::clone(&handled_for_producer),
+                notify: Arc::clone(&notify_for_producer),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
+        .spawn(system.process_system())
+        .await;
 
     append_order_placed(&upstream_store, &order_id, 1, "SKU-OVERRIDE-JOURNAL").await;
     wait_for_handled(&handled, &notify, 1).await;
@@ -396,14 +392,12 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_polled() {
     let notify_for_producer = Arc::clone(&notify);
 
     // When
-    let _saga_proxy = system
-        .spawn_saga(SagaId::new(RECORDING_SAGA_ID), move |_components| {
-            RecordingSaga {
-                handled: Arc::clone(&handled_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
+    let _host_proxy = system
+        .host::<RecordingSaga>(move |_components| RecordingSaga {
+            handled: Arc::clone(&handled_for_producer),
+            notify: Arc::clone(&notify_for_producer),
         })
-        .subscribed_to::<OrderPlaced>(Subscription::stream(&override_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&override_store, &order_id))
         .spawn()
         .await;
 
