@@ -20,9 +20,7 @@ use delivery::{
     RecordingOffsetStore, SelectiveSaga,
 };
 
-use std::sync::Arc;
-
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
@@ -31,7 +29,7 @@ async fn each_partition_records_under_its_own_key() {
     // Given: one instance per partition, both delivering to receivers that
     // accept.
     let (system, _aggregates) = in_memory_system().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
 
     let first_target = AggregateId::new("ledger-per-partition-a");
@@ -55,7 +53,7 @@ async fn each_partition_records_under_its_own_key() {
     .await;
 
     // When
-    let _host = spawn_host::<SelectiveSaga>(&system, &journal, &offsets, 2).await;
+    let _host = spawn_host::<SelectiveSaga, _>(&system, &journal, &offsets, 2).await;
 
     // Then
     for partition in [0usize, 1] {

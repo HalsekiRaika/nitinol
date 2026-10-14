@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -152,6 +152,7 @@ impl Saga for TwoSourceSaga {
 /// Models a source that is stuck rather than empty: an empty stream still
 /// completes, so a shared poller would move on from it.  A stream that neither
 /// yields nor ends is what actually holds a shared cursor in place.
+#[derive(Clone)]
 struct StallingStore {
     inner: InMemoryEventStore,
     stalled_key: String,
@@ -177,12 +178,7 @@ impl EventStore for StallingStore {
 
 // Helpers
 
-async fn append_alpha(
-    store: &Arc<dyn EventStore>,
-    stream: &AggregateId,
-    sequence: u64,
-    note: &str,
-) {
+async fn append_alpha(store: &Journal, stream: &AggregateId, sequence: u64, note: &str) {
     append_raw(
         store,
         stream,
@@ -197,7 +193,7 @@ async fn append_alpha(
     .await;
 }
 
-async fn append_beta(store: &Arc<dyn EventStore>, stream: &AggregateId, sequence: u64, note: &str) {
+async fn append_beta(store: &Journal, stream: &AggregateId, sequence: u64, note: &str) {
     append_raw(
         store,
         stream,
@@ -213,7 +209,7 @@ async fn append_beta(store: &Arc<dyn EventStore>, stream: &AggregateId, sequence
 }
 
 async fn append_raw(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     stream: &AggregateId,
     sequence: u64,
     event_type: EventType,
@@ -258,7 +254,7 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<Seen> {
     }
 }
 
-async fn wait_for_positions(store: &Arc<dyn EventStore>, saga_id: &SagaId, expected: usize) {
+async fn wait_for_positions(store: &Journal, saga_id: &SagaId, expected: usize) {
     let deadline = Instant::now() + BARRIER_TIMEOUT;
     loop {
         let rows: Vec<LoadedEvent> = store
@@ -291,17 +287,15 @@ fn as_set(observed: &[Seen]) -> Vec<Seen> {
 
 async fn spawn_two_source_saga(
     ps: &ProcessSystem,
-    saga_store: &Arc<dyn EventStore>,
-    upstream_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
+    upstream_store: &Journal,
     alpha_stream: &AggregateId,
     beta_stream: &AggregateId,
     handled: &Handled,
 ) -> nitinol_saga::SagaManagerProxy<TwoSourceSaga> {
     let handled = Arc::clone(handled);
-    SagaManagerProps::<TwoSourceSaga>::new(Arc::clone(saga_store), move |_components| {
-        TwoSourceSaga {
-            handled: Arc::clone(&handled),
-        }
+    SagaManagerProps::<TwoSourceSaga>::new(saga_store.clone(), move |_components| TwoSourceSaga {
+        handled: Arc::clone(&handled),
     })
     .observing::<Alpha>(Subscription::stream(upstream_store, alpha_stream))
     .observing::<Beta>(Subscription::stream(upstream_store, beta_stream))
@@ -319,14 +313,14 @@ async fn spawn_two_source_saga(
 async fn each_source_is_owed_only_what_its_own_position_leaves() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let alpha_stream = AggregateId::new("icur-alpha");
     let beta_stream = AggregateId::new("icur-beta");
     append_alpha(&upstream_store, &alpha_stream, 1, "a1").await;
     append_alpha(&upstream_store, &alpha_stream, 2, "a2").await;
     append_alpha(&upstream_store, &alpha_stream, 3, "a3").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let first_handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
@@ -411,7 +405,7 @@ async fn a_stalled_source_does_not_stop_the_other_from_progressing() {
 
     let alpha_stream = AggregateId::new("stall-alpha");
     let beta_stream = AggregateId::new("stall-beta");
-    let upstream_store: Arc<dyn EventStore> = Arc::new(StallingStore {
+    let upstream_store = Journal::from(StallingStore {
         inner: InMemoryEventStore::default(),
         stalled_key: alpha_stream.as_str().to_owned(),
     });
@@ -420,7 +414,7 @@ async fn a_stalled_source_does_not_stop_the_other_from_progressing() {
     append_alpha(&upstream_store, &alpha_stream, 1, "never-delivered").await;
     append_beta(&upstream_store, &beta_stream, 1, "b1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let _proxy = spawn_two_source_saga(

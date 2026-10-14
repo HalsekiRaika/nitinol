@@ -46,7 +46,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -130,12 +130,7 @@ fn released_position_identity() -> EventType {
     )
 }
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    upstream: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, upstream: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -155,7 +150,7 @@ async fn append_order_placed(
         .expect("append OrderPlaced must succeed");
 }
 
-async fn load_saga_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_stream(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -175,7 +170,7 @@ fn describe(events: &[LoadedEvent]) -> Vec<String> {
 /// A saga, its store and its upstream, with the host already spawned.
 struct Running {
     _proxy: nitinol_saga::SagaManagerProxy<RecordingSaga>,
-    saga_store: Arc<dyn EventStore>,
+    saga_store: Journal,
     saga_id: SagaId,
     handle_count: Arc<AtomicUsize>,
     handled: Arc<Notify>,
@@ -197,13 +192,13 @@ async fn run(
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new(upstream_key);
     for (sequence, sku) in upstream_records {
         append_order_placed(&upstream_store, &upstream, *sequence, sku).await;
     }
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
 
     if let Some((event_type, payload)) = seed {
@@ -226,16 +221,15 @@ async fn run(
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let proxy =
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&saga_store), move |_components| {
-            RecordingSaga {
-                handle_count: Arc::clone(&handle_count_for_producer),
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-        .spawn(system.process_system())
-        .await;
+    let proxy = SagaManagerProps::<RecordingSaga>::new(saga_store.clone(), move |_components| {
+        RecordingSaga {
+            handle_count: Arc::clone(&handle_count_for_producer),
+            handled: Arc::clone(&handled_for_producer),
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+    .spawn(system.process_system())
+    .await;
 
     Running {
         _proxy: proxy,

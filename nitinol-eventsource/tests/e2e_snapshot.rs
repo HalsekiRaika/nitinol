@@ -8,8 +8,6 @@
 //   2. Snapshot + delta: snapshot at seq=N + M more events → state = N+M
 //   3. No snapshot: all events replayed from scratch → correct state
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 
 use nitinol_eventsource::{
@@ -17,7 +15,7 @@ use nitinol_eventsource::{
     SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, PersistedSnapshot, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -163,7 +161,7 @@ impl Codec<u64> for SnapshotCodec {
 async fn spawn_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    store: Arc<dyn EventStore>,
+    store: Journal,
     snapshot_ref: SnapshotPersistorProxy,
 ) -> AggregateProxy<Counter> {
     AggregateProps::<Counter>::new(id, store)
@@ -176,7 +174,7 @@ async fn spawn_counter(
 async fn spawn_plain_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    store: Arc<dyn EventStore>,
+    store: Journal,
 ) -> AggregateProxy<PlainCounter> {
     AggregateProps::<PlainCounter>::new(id, store)
         .spawn(system)
@@ -192,25 +190,19 @@ async fn spawn_plain_counter(
 async fn e2e_snapshot_at_latest_sequence_restores_state() {
     // Given: shared system and persistors
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store))
-            .snapshot(Arc::new(InMemorySnapshotStore::default()))
+            .eventstore(InMemoryEventStore::default())
+            .snapshot(InMemorySnapshotStore::default())
             .build(),
     );
+    let store = persistence.event_store();
     let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("e2e-snap-latest");
 
     // Write 3 events via process 1
     {
-        let proxy1 = spawn_counter(
-            &system,
-            id.clone(),
-            Arc::clone(&store),
-            snapshot_ref.clone(),
-        )
-        .await;
+        let proxy1 = spawn_counter(&system, id.clone(), store.clone(), snapshot_ref.clone()).await;
         proxy1.ask(Increment).await.expect("ask 1");
         proxy1.ask(Increment).await.expect("ask 2");
         proxy1.ask(Increment).await.expect("ask 3");
@@ -248,25 +240,19 @@ async fn e2e_snapshot_at_latest_sequence_restores_state() {
 async fn e2e_snapshot_plus_delta_events_combine_correctly() {
     // Given: shared system and persistors
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store))
-            .snapshot(Arc::new(InMemorySnapshotStore::default()))
+            .eventstore(InMemoryEventStore::default())
+            .snapshot(InMemorySnapshotStore::default())
             .build(),
     );
+    let store = persistence.event_store();
     let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("e2e-snap-delta");
 
     // Write 8 events
     {
-        let proxy1 = spawn_counter(
-            &system,
-            id.clone(),
-            Arc::clone(&store),
-            snapshot_ref.clone(),
-        )
-        .await;
+        let proxy1 = spawn_counter(&system, id.clone(), store.clone(), snapshot_ref.clone()).await;
         for _ in 0..8 {
             proxy1.ask(Increment).await.expect("ask must succeed");
         }
@@ -303,12 +289,12 @@ async fn e2e_snapshot_plus_delta_events_combine_correctly() {
 async fn e2e_no_snapshot_means_full_event_replay() {
     // Given: event store only (no snapshot store)
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("e2e-snap-no-snap");
 
     // Write 5 events via process 1
     {
-        let proxy1 = spawn_plain_counter(&system, id.clone(), Arc::clone(&store)).await;
+        let proxy1 = spawn_plain_counter(&system, id.clone(), store.clone()).await;
         for _ in 0..5 {
             proxy1.ask(Increment).await.expect("ask must succeed");
         }

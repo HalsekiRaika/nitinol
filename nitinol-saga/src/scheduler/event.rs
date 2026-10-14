@@ -7,12 +7,11 @@
 //! which transition — `scheduled` / `cancelled` / `fired` — the marker records.
 
 use std::borrow::Borrow;
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{reserved_event, EventType};
 
 use crate::consumed::{
@@ -182,7 +181,7 @@ impl nitinol_eventsource::DeclaresEventType for ScheduleEvent {
 /// closing out its input — the interpreter's `Sequence` handling only ever
 /// hands the position to that one.
 pub(crate) async fn append_schedule_marker(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     sequence: &mut u64,
     event: ScheduleEvent,

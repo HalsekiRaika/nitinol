@@ -26,9 +26,7 @@ use delivery::{
     wait_until_operations, PartlyRefusedSaga, RecordingOffsetStore, REFUSED_SUFFIX,
 };
 
-use std::sync::Arc;
-
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
@@ -36,7 +34,7 @@ use nitinol_saga::SagaId;
 async fn a_partly_delivered_record_is_not_progress() {
     // Given
     let (system, aggregates) = in_memory_system().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-partly-delivered");
@@ -45,7 +43,7 @@ async fn a_partly_delivered_record_is_not_progress() {
     append_decided(&journal, &saga_id, 2, target.as_str(), "op-2").await;
 
     // When
-    let _host = spawn_host::<PartlyRefusedSaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<PartlyRefusedSaga, _>(&system, &journal, &offsets, 1).await;
 
     // Then: the delivery that can land, lands.
     let ledger = system.aggregate_proxy::<delivery::Ledger>(target.clone());

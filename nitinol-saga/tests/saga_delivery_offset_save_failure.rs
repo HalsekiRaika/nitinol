@@ -47,9 +47,7 @@ use delivery::{
     wait_until_refused, wait_until_stored, DeliverySaga, Ledger, RecordingOffsetStore,
 };
 
-use std::sync::Arc;
-
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
@@ -62,7 +60,7 @@ fn carried_out(operations: &[&str]) -> Vec<String> {
 async fn a_refused_save_skips_nothing_and_stops_nothing() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-save-failure");
@@ -74,7 +72,7 @@ async fn a_refused_save_skips_nothing_and_stops_nothing() {
     offsets.fail_next_saves(3);
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
     let ledger = system.aggregate_proxy::<Ledger>(target.clone());
 
     // Then: nothing was skipped on account of the store's refusals.

@@ -18,8 +18,6 @@
 //! Run with:
 //! `cargo test -p nitinol-eventsource --test aggregate_uses_the_codec_its_event_names`.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 
@@ -29,7 +27,7 @@ use nitinol_eventsource::{
     Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Query,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -193,7 +191,7 @@ impl Query<GetLabel> for Nameplate {
 
 /// The payloads stored under `id`, in stream order, exactly as the activation
 /// wrote them.
-async fn stored_payloads(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<Bytes> {
+async fn stored_payloads(store: &Journal, id: &AggregateId) -> Vec<Bytes> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await
@@ -208,7 +206,7 @@ async fn stored_payloads(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<B
 async fn spawn_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    store: Arc<dyn EventStore>,
+    store: Journal,
 ) -> AggregateProxy<Counter> {
     AggregateProps::<Counter>::new(id, store)
         .spawn(system)
@@ -223,10 +221,10 @@ async fn spawn_counter(
 #[tokio::test]
 async fn an_append_writes_the_bytes_the_events_codec_produces() {
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("named-codec-append");
 
-    let proxy = spawn_counter(&system, id.clone(), Arc::clone(&store)).await;
+    let proxy = spawn_counter(&system, id.clone(), store.clone()).await;
     proxy.ask(Increment(7)).await.expect("first ask");
     proxy.ask(Increment(5)).await.expect("second ask");
 
@@ -260,11 +258,11 @@ async fn an_append_writes_the_bytes_the_events_codec_produces() {
 #[tokio::test]
 async fn a_replay_reads_the_stream_through_the_events_codec() {
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("named-codec-replay");
 
     {
-        let writer = spawn_counter(&system, id.clone(), Arc::clone(&store)).await;
+        let writer = spawn_counter(&system, id.clone(), store.clone()).await;
         writer.ask(Increment(7)).await.expect("first ask");
         writer.ask(Increment(5)).await.expect("second ask");
     }
@@ -286,15 +284,15 @@ async fn a_replay_reads_the_stream_through_the_events_codec() {
 #[tokio::test]
 async fn two_event_types_on_one_system_each_use_their_own_codec() {
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-
     // No `with_codec` step: the builder binds a store and nothing else.
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .build(),
-        ))
+        .with_persistence(persistence)
         .build();
 
     let counter_id = AggregateId::new("named-codec-counter");

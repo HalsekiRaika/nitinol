@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use nitinol_eventsource::{DurableSubscription, SequenceCursor};
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{AggregateId, LoadedEvent};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
@@ -140,7 +140,7 @@ pub(crate) enum Lifecycle {
 pub struct SagaProcess<S: Saga> {
     pub(crate) state: S,
     pub(crate) saga_id: SagaId,
-    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) store: Journal,
     pub(crate) sequence: u64,
     /// How far each upstream source this saga reads has been consumed.
     ///
@@ -268,7 +268,7 @@ impl<S: Saga> SagaProcess<S> {
             state: &mut self.state,
             saga_id: self.saga_id.clone(),
             sequence: &mut self.sequence,
-            store: Arc::clone(&self.store),
+            store: self.store.clone(),
             retry_policy: self.retry_policy.clone(),
             process_ctx,
             lifecycle: &mut self.lifecycle,
@@ -727,11 +727,12 @@ mod tests {
 
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use futures_core::Stream;
     use nitinol_persistence::error::{AppendError, LoadError};
-    use nitinol_persistence::store::EventStream;
+    use nitinol_persistence::store::{EventStore, EventStream};
     use nitinol_persistence::{
         AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
     };
@@ -740,14 +741,20 @@ mod tests {
 
     /// Refuses the first append and accepts every one after it, so a test can
     /// observe both halves of "the sequence advances only on success".
+    ///
+    /// The flag is behind an [`Arc`] because every handle of this store has to
+    /// be the one store: a `Clone` building a flag of its own would refuse once
+    /// per handle, and the clause below reads the second attempt through a
+    /// handle the journal distributed.
+    #[derive(Clone)]
     struct FailOnceStore {
-        has_failed: AtomicBool,
+        has_failed: Arc<AtomicBool>,
     }
 
     impl FailOnceStore {
         fn new() -> Self {
             Self {
-                has_failed: AtomicBool::new(false),
+                has_failed: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -801,7 +808,7 @@ mod tests {
     /// no gap.
     #[tokio::test]
     async fn settling_a_refused_input_claims_its_sequence_only_once_the_append_lands() {
-        let store: Arc<dyn EventStore> = Arc::new(FailOnceStore::new());
+        let store = Journal::from(FailOnceStore::new());
         let saga_id = SagaId::new("position-only-settle");
         let mut sequence: u64 = 0;
         let mut consumed = ConsumedPositions::default();

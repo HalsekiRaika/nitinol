@@ -1,18 +1,18 @@
-//! `ProjectorProps::new` holds an `Arc<dyn EventStore>` directly.
+//! `ProjectorProps::new` holds a `Journal` directly.
 //!
 //! The projector process now owns its event-store reference inline; it
 //! catches up by calling `store.load` directly instead of asking an
 //! `EventPersistor` process.  The handle reaches it through the
 //! `PersistenceProvider` its props are built from, whose journal slot *is*
-//! an `Arc<dyn EventStore>`.
+//! a `Journal`.
 //!
 //! Two complementary checks:
 //!
-//! 1. Compile-time type assertion — the journal a `ProjectorProps` is built
-//!    over is named as `Arc<dyn EventStore>`.  A regression to
-//!    `EventPersistorProxy` fails to compile.
-//! 2. Runtime integration — events pre-loaded into the store are observed
-//!    by the projector during catchup.
+//! 1. Compile-time type assertion — a `ProjectorProps` is built over a
+//!    provider assembled from a backend handle, and the offset slot is named
+//!    by the backend's own type rather than a shared wrapper.
+//! 2. Runtime integration — events pre-loaded into the journal the provider
+//!    answers with are observed by the projector during catchup.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use nitinol_eventsource::{
     codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -75,7 +75,7 @@ impl Projector<PingEvent> for CountingProjector {
 
 // Compile-time type assertion
 
-/// `ProjectorProps::new` MUST take its journal as `Arc<dyn EventStore>` — the
+/// `ProjectorProps::new` MUST take its journal as `Journal` — the
 /// provider it is given names the journal with exactly that type.  Not a
 /// `#[test]` — the compiler enforces the signature.
 ///
@@ -83,10 +83,10 @@ impl Projector<PingEvent> for CountingProjector {
 /// generic over the projector type — a function pointer assignment cannot
 /// capture this generic shape directly, so we call it and discard.
 #[allow(dead_code)]
-fn _assert_sig_projector_props_new_accepts_arc_dyn_event_store(
+fn _assert_sig_projector_props_new_accepts_a_provider_over_a_journal(
     pid: ProjectionId,
-    store: Arc<dyn EventStore>,
-    cs: Arc<InMemoryOffsetStore>,
+    store: InMemoryEventStore,
+    cs: InMemoryOffsetStore,
 ) {
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
@@ -104,15 +104,20 @@ fn _assert_sig_projector_props_new_accepts_arc_dyn_event_store(
 
 // Runtime: catchup processes pre-loaded events via direct store
 
-/// A projector spawned with Arc<dyn EventStore> catches up by reading events
+/// A projector spawned over a journal catches up by reading events
 /// pre-loaded into the same store — confirming the projector calls
 /// `store.load` directly (no proxy in between).
 #[tokio::test]
-async fn projector_catches_up_via_direct_arc_dyn_event_store() {
+async fn projector_catches_up_via_the_journal_it_was_wired_over() {
     // Given
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .projection_offsets(InMemoryOffsetStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let agg_id = AggregateId::new("projector-direct-store");
 
     // Pre-populate the store with 3 events
@@ -136,13 +141,7 @@ async fn projector_catches_up_via_direct_arc_dyn_event_store() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    // When: spawn projector over the same Arc<dyn EventStore> (no EventPersistor)
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(Arc::clone(&store))
-            .projection_offsets(Arc::clone(&offset_store))
-            .build(),
-    );
+    // When: spawn the projector over the same journal (no EventPersistor)
     let _proxy = ProjectorProps::new(
         ProjectionId::new("direct-store-projector"),
         &persistence,

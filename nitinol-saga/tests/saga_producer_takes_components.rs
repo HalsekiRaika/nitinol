@@ -34,7 +34,7 @@
 mod common;
 use common::JsonCodec;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -45,7 +45,7 @@ use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -124,7 +124,7 @@ impl Saga for TrivialSaga {
 const THROUGH_MANAGER_PROPS: &str = "producer-manager-props";
 const THROUGH_HOST: &str = "producer-host";
 
-async fn append_ping(store: &Arc<dyn EventStore>, at: &str) {
+async fn append_ping(store: &Journal, at: &str) {
     store
         .append(
             at,
@@ -183,13 +183,13 @@ async fn wait_for_all(expected: &[&str]) -> Vec<String> {
 #[tokio::test]
 async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
     let ps = ProcessSystem::new().await;
-    let own_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let own_store = Journal::from(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
 
     // Entry point 1 — `SagaManagerProps`, built on a store of its own.
     append_ping(&upstream_store, THROUGH_MANAGER_PROPS).await;
     let _through_manager_props =
-        SagaManagerProps::<TrivialSaga>::new(Arc::clone(&own_store), |_components| {
+        SagaManagerProps::<TrivialSaga>::new(own_store.clone(), |_components| {
             TrivialSaga::default()
         })
         .observing::<Ping>(Subscription::stream(&upstream_store, THROUGH_MANAGER_PROPS))
@@ -198,14 +198,14 @@ async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
 
     // Entry point 2 — `host` on a system, journalling onto the store the
     // provider supplies.
-    let provider_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps.clone())
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&provider_store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let provider_store = system.persistence().event_store();
     append_ping(&provider_store, THROUGH_HOST).await;
 
     let _through_host = system

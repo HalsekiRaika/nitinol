@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use bytes::Bytes;
 
@@ -8,7 +6,7 @@ use nitinol_eventsource::{
     ProjectionId, Projector, ProjectorProps,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -85,7 +83,7 @@ impl Projector<Incremented> for NoopProjector {
 async fn aggregate_props_correct_chain_compiles_and_spawns() {
     // Given
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
 
     // When: the full required chain
     let proxy = AggregateProps::<Counter>::new(AggregateId::new("typestate-agg-ok"), store)
@@ -106,11 +104,10 @@ async fn aggregate_props_correct_chain_compiles_and_spawns() {
 async fn projector_props_correct_chain_compiles_and_spawns() {
     // Given
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let offset_store = InMemoryOffsetStore::default();
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(store)
+            .eventstore(InMemoryEventStore::default())
             .projection_offsets(offset_store)
             .build(),
     );
@@ -143,11 +140,10 @@ impl NoopProjector {
 async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
     // Given
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let offset_store = InMemoryOffsetStore::default();
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(store)
+            .eventstore(InMemoryEventStore::default())
             .projection_offsets(offset_store)
             .build(),
     );
@@ -174,11 +170,10 @@ async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
 async fn projector_props_catchup_from_aggregate_enables_spawn() {
     // Given
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let offset_store = InMemoryOffsetStore::default();
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(store)
+            .eventstore(InMemoryEventStore::default())
             .projection_offsets(offset_store)
             .build(),
     );

@@ -156,7 +156,7 @@ impl<St: Store> SagaSystemExt for EventSourceSystem<St> {
     where
         K: ?Sized + Borrow<str>,
     {
-        Subscription::stream(&self.persistence().event_store(), key)
+        Subscription::stream(self.persistence().event_store(), key)
     }
 }
 
@@ -173,7 +173,11 @@ impl<St: Store> SagaSystemExt for EventSourceSystem<St> {
 pub trait SagaDeliveryExt {
     /// The backend's own offset store, as the provider's saga slot is
     /// configured with it.
-    type SagaOffsets: OffsetStore + 'static;
+    ///
+    /// `Clone` because a host holds the handle by value and names it once per
+    /// partition: distribution is the backend's own clone, which is what
+    /// `PRV-1` has the store keep.
+    type SagaOffsets: OffsetStore + Clone + 'static;
 
     /// Deliver what the saga `S` decided, through a host over this system.
     ///

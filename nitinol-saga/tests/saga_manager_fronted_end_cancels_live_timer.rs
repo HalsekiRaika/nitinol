@@ -54,7 +54,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -168,7 +168,7 @@ impl Saga for EndingSaga {
 
 // Helpers
 
-async fn append_ping(store: &Arc<dyn EventStore>, sequence: u64) {
+async fn append_ping(store: &Journal, sequence: u64) {
     let payload = serde_json::to_vec(&Ping)
         .map(Bytes::from)
         .expect("encode Ping must succeed");
@@ -186,7 +186,7 @@ async fn append_ping(store: &Arc<dyn EventStore>, sequence: u64) {
         .expect("append Ping must succeed");
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -200,7 +200,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 /// the timeout elapses.  Returns the full stream snapshot so the caller can
 /// make additional assertions on what led up to it.
 async fn wait_for_ended_fact(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     timeout: Duration,
 ) -> Vec<LoadedEvent> {
@@ -254,15 +254,15 @@ async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(INSTANCE_ID);
 
     let instances_spawned = Arc::new(AtomicUsize::new(0));
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
     let _manager_proxy =
-        SagaManagerProps::<EndingSaga>::new(Arc::clone(&saga_store), move |components| {
+        SagaManagerProps::<EndingSaga>::new(saga_store.clone(), move |components| {
             spawned_for_producer.fetch_add(1, Ordering::SeqCst);
             EndingSaga {
                 deadline: components.deadline(),

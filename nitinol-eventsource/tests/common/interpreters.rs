@@ -33,7 +33,7 @@ use nitinol_eventsource::{
     Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event, ExecError, Query,
 };
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 
@@ -158,11 +158,7 @@ impl ActivationInterpretation {
 impl Interpretation for ActivationInterpretation {
     type Interpreter = ActivationInterpreter;
 
-    fn interpret(
-        &self,
-        ledger: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> BoxFuture<'_, Self::Interpreter> {
+    fn interpret(&self, ledger: AggregateId, store: Journal) -> BoxFuture<'_, Self::Interpreter> {
         Box::pin(async move {
             let proxy = AggregateProps::<Ledger>::new(ledger.clone(), store)
                 .spawn(&self.process_system)
@@ -244,11 +240,7 @@ pub struct DirectInterpretation;
 impl Interpretation for DirectInterpretation {
     type Interpreter = DirectInterpreter;
 
-    fn interpret(
-        &self,
-        ledger: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> BoxFuture<'_, Self::Interpreter> {
+    fn interpret(&self, ledger: AggregateId, store: Journal) -> BoxFuture<'_, Self::Interpreter> {
         Box::pin(async move {
             let replayed = replay(&store, &ledger).await;
             DirectInterpreter {
@@ -276,7 +268,7 @@ enum Recorded {
     Failed(Fault),
 }
 
-async fn replay(store: &Arc<dyn EventStore>, ledger: &AggregateId) -> Replayed {
+async fn replay(store: &Journal, ledger: &AggregateId) -> Replayed {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(ledger))
         .await
@@ -304,7 +296,7 @@ const REFUSAL_LOCK: &str = "the refusal buffer guards only a push and a read, so
 
 pub struct DirectInterpreter {
     ledger: AggregateId,
-    store: Arc<dyn EventStore>,
+    store: Journal,
     writer: tokio::sync::Mutex<Replayed>,
     refusals: Mutex<Vec<String>>,
 }

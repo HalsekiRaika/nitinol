@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -178,7 +178,7 @@ impl Saga for HostedSaga {
 
 // Helpers
 
-async fn append_start(store: &Arc<dyn EventStore>, stream_key: &str, label: &str) {
+async fn append_start(store: &Journal, stream_key: &str, label: &str) {
     store
         .append(
             stream_key,
@@ -220,11 +220,11 @@ async fn wait_for_fired(fired: &Arc<Mutex<Vec<String>>>, expected: usize) -> Vec
 async fn spawn_hosted(
     ps: &ProcessSystem,
     label: &str,
-    upstream_store: &Arc<dyn EventStore>,
+    upstream_store: &Journal,
     upstream_key: &str,
     fired: &Arc<Mutex<Vec<String>>>,
 ) -> nitinol_saga::SagaManagerProxy<HostedSaga> {
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let fired = Arc::clone(fired);
     // The label is the correlation rule, so it is also the id of the one
     // instance this host ever spawns.
@@ -249,7 +249,7 @@ async fn spawn_hosted(
 async fn a_deadline_fires_without_any_scheduler_wiring() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_start(&upstream_store, "host-upstream-1", "host-saga-1").await;
 
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -283,7 +283,7 @@ async fn several_sagas_converge_on_one_resident_timer_core() {
     // the system already held.
     let before = ps.spawn_resident::<SchedulerProcess>().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_start(&upstream_store, "host-upstream-a", "host-saga-a").await;
     append_start(&upstream_store, "host-upstream-b", "host-saga-b").await;
 

@@ -4,7 +4,6 @@
 // EventStore (and optionally a SnapshotPersistor) before the process begins
 // serving user messages.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,7 +16,7 @@ use nitinol_eventsource::{
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
-    EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore,
+    EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore, Journal,
 };
 use nitinol_persistence::LoadQuery;
 use nitinol_persistence::{
@@ -169,8 +168,9 @@ impl Codec<u64> for BigEndianU64Codec {
 
 /// Wraps InMemoryEventStore to introduce a delay in `load`, simulating slow storage.
 /// Used to test that messages sent during replay are correctly buffered by the mpsc channel.
+#[derive(Clone)]
 struct SlowEventStore {
-    inner: Arc<InMemoryEventStore>,
+    inner: InMemoryEventStore,
     load_delay: Duration,
 }
 
@@ -192,23 +192,23 @@ impl EventStore for SlowEventStore {
 
 // Helpers
 
-/// Spawns a fresh Counter process using the provided `Arc<dyn EventStore>`.
+/// Spawns a fresh Counter process using the provided `Journal`.
 async fn spawn_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    store: Arc<dyn EventStore>,
+    store: Journal,
 ) -> AggregateProxy<Counter> {
     AggregateProps::<Counter>::new(id, store)
         .spawn(system)
         .await
 }
 
-/// Spawns a SnapshotableCounter process using the provided `Arc<dyn EventStore>`
+/// Spawns a SnapshotableCounter process using the provided `Journal`
 /// and `SnapshotPersistorProxy`.
 async fn spawn_snapshotable(
     system: &ProcessSystem,
     id: AggregateId,
-    store: Arc<dyn EventStore>,
+    store: Journal,
     snapshot_ref: SnapshotPersistorProxy,
 ) -> AggregateProxy<SnapshotableCounter> {
     AggregateProps::<SnapshotableCounter>::new(id, store)
@@ -225,12 +225,12 @@ async fn spawn_snapshotable(
 async fn replay_restores_state_from_persisted_events() {
     // Given: shared system and event store
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("replay-basic");
 
     // Write 3 events through process 1
     {
-        let proxy = spawn_counter(&system, id.clone(), Arc::clone(&store)).await;
+        let proxy = spawn_counter(&system, id.clone(), store.clone()).await;
         proxy.ask(Increment).await.expect("ask 1");
         proxy.ask(Increment).await.expect("ask 2");
         proxy.ask(Increment).await.expect("ask 3");
@@ -251,7 +251,7 @@ async fn replay_restores_state_from_persisted_events() {
 async fn replay_from_empty_store_starts_with_default_state() {
     // Given: fresh event store with no events
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
 
     // When
     let proxy = spawn_counter(&system, AggregateId::new("replay-empty"), store).await;
@@ -269,13 +269,13 @@ async fn replay_from_empty_store_starts_with_default_state() {
 async fn replay_with_snapshot_only_restores_snapshot_state() {
     // Given: a SnapshotPersistor with a pre-saved snapshot (value=5, sequence=5)
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store))
-            .snapshot(Arc::new(InMemorySnapshotStore::default()))
+            .eventstore(InMemoryEventStore::default())
+            .snapshot(InMemorySnapshotStore::default())
             .build(),
     );
+    let store = persistence.event_store();
     let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("replay-snap-only");
 
@@ -306,25 +306,20 @@ async fn replay_with_snapshot_only_restores_snapshot_state() {
 async fn replay_applies_delta_events_after_snapshot() {
     // Given: shared persistors
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store))
-            .snapshot(Arc::new(InMemorySnapshotStore::default()))
+            .eventstore(InMemoryEventStore::default())
+            .snapshot(InMemorySnapshotStore::default())
             .build(),
     );
+    let store = persistence.event_store();
     let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("replay-snap-delta");
 
     // Write 5 events through a snapshotable process
     {
-        let proxy = spawn_snapshotable(
-            &system,
-            id.clone(),
-            Arc::clone(&store),
-            snapshot_ref.clone(),
-        )
-        .await;
+        let proxy =
+            spawn_snapshotable(&system, id.clone(), store.clone(), snapshot_ref.clone()).await;
         for _ in 0..5 {
             proxy.ask(Increment).await.expect("ask must succeed");
         }
@@ -360,24 +355,19 @@ async fn replay_applies_delta_events_after_snapshot() {
 async fn replay_snapshot_at_latest_sequence_no_delta_events() {
     // Given: pre-write 3 events through a process, then save a snapshot at seq=3
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store))
-            .snapshot(Arc::new(InMemorySnapshotStore::default()))
+            .eventstore(InMemoryEventStore::default())
+            .snapshot(InMemorySnapshotStore::default())
             .build(),
     );
+    let store = persistence.event_store();
     let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("replay-snap-latest");
 
     {
-        let proxy = spawn_snapshotable(
-            &system,
-            id.clone(),
-            Arc::clone(&store),
-            snapshot_ref.clone(),
-        )
-        .await;
+        let proxy =
+            spawn_snapshotable(&system, id.clone(), store.clone(), snapshot_ref.clone()).await;
         proxy.ask(Increment).await.expect("ask 1");
         proxy.ask(Increment).await.expect("ask 2");
         proxy.ask(Increment).await.expect("ask 3");
@@ -417,12 +407,12 @@ async fn replay_snapshot_at_latest_sequence_no_delta_events() {
 #[tokio::test]
 async fn messages_buffered_during_slow_replay_are_processed_after() {
     // Given: pre-write 2 events to the inner store
-    let inner = Arc::new(InMemoryEventStore::default());
+    let inner = InMemoryEventStore::default();
     let id = AggregateId::new("replay-buffering");
 
     {
         let system = ProcessSystem::new().await;
-        let store: Arc<dyn EventStore> = inner.clone();
+        let store = Journal::from(inner.clone());
         let proxy = spawn_counter(&system, id.clone(), store).await;
         proxy.ask(Increment).await.expect("setup ask 1");
         proxy.ask(Increment).await.expect("setup ask 2");
@@ -430,8 +420,8 @@ async fn messages_buffered_during_slow_replay_are_processed_after() {
     }
 
     // A slow store introduces a 50 ms delay in load so that replay takes measurable time.
-    let slow_store: Arc<dyn EventStore> = Arc::new(SlowEventStore {
-        inner: Arc::clone(&inner),
+    let slow_store = Journal::from(SlowEventStore {
+        inner: inner.clone(),
         load_delay: Duration::from_millis(50),
     });
 

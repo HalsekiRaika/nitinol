@@ -32,9 +32,7 @@ use delivery::{
     RecordingOffsetStore,
 };
 
-use std::sync::Arc;
-
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
@@ -66,14 +64,14 @@ async fn a_collision_with_an_existing_target_is_not_treated_as_delivered() {
     )
     .await;
 
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let journal: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
     wait_until_loads(&recording, 4, "the host must keep polling while held").await;
     settle().await;
 

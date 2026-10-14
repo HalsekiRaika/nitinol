@@ -30,7 +30,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -122,7 +122,7 @@ impl Saga for CountingSaga {
 
 // Helpers
 
-async fn append_ping(store: &Arc<dyn EventStore>, upstream_key: &AggregateId, sequence: u64) {
+async fn append_ping(store: &Journal, upstream_key: &AggregateId, sequence: u64) {
     let payload = serde_json::to_vec(&Ping { nonce: sequence })
         .map(Bytes::from)
         .expect("encode Ping must succeed");
@@ -182,9 +182,9 @@ async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-passivation-pings");
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
 
     let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -195,7 +195,7 @@ async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
     let _manager_proxy =
-        SagaManagerProps::<CountingSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<CountingSaga>::new(saga_store.clone(), move |_components| {
             spawned_for_producer.fetch_add(1, Ordering::SeqCst);
             CountingSaga {
                 seen: 0,
@@ -264,9 +264,9 @@ async fn manager_outlives_a_system_default_idle_timeout_during_a_quiet_upstream(
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-quiet-upstream-pings");
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
 
     let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -274,7 +274,7 @@ async fn manager_outlives_a_system_default_idle_timeout_during_a_quiet_upstream(
     let notify_for_producer = Arc::clone(&notify);
 
     let _manager_proxy =
-        SagaManagerProps::<CountingSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<CountingSaga>::new(saga_store.clone(), move |_components| {
             CountingSaga {
                 seen: 0,
                 observed: Arc::clone(&observed_for_producer),

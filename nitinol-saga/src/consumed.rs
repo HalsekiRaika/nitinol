@@ -44,11 +44,10 @@
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{
     is_within_reserved_namespace, reserved_event, AggregateId, AppendingEvent, EventType,
 };
@@ -281,7 +280,7 @@ pub(crate) fn append_consumed_position(
 /// Returns `false` when the store refused the append, which leaves the input
 /// unconsumed so a redelivery can reach `handle` again.
 pub(crate) async fn settle_with_position(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     sequence: &mut u64,
     position: &ConsumedPositionEvent,

@@ -90,7 +90,7 @@ use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -359,6 +359,7 @@ enum Reject {
 /// Per row rather than per batch key: the rows the firing path writes are
 /// several separate appends, and which one is refused is the whole subject of
 /// these tests.
+#[derive(Clone)]
 struct RejectingStore {
     inner: InMemoryEventStore,
     reject: Reject,
@@ -500,7 +501,7 @@ fn position_of(stream: &[String], fact: &str) -> Option<usize> {
 
 // Fixtures
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -517,7 +518,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 /// whose subject is a firing nobody can read can name an identity the current
 /// declaration disagrees with.
 async fn seed_firing(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     reminder: Reminder,
     message_type: &str,
@@ -568,7 +569,7 @@ const QUIET_WINDOW: Duration = Duration::from_millis(600);
 /// Wait until the saga's own stream holds at least `expected` markers of
 /// `transition`, answering with the rows loaded when it did.
 async fn wait_for_transition(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     transition: &'static str,
     expected: usize,
@@ -590,7 +591,7 @@ async fn wait_for_transition(
 }
 
 /// Wait until the saga's own stream carries the durable `Ended` fact.
-async fn wait_for_ended(store: &Arc<dyn EventStore>, saga_id: &SagaId) {
+async fn wait_for_ended(store: &Journal, saga_id: &SagaId) {
     let barrier = Instant::now() + BARRIER_TIMEOUT;
     loop {
         let events = load_saga_events(store, saga_id).await;
@@ -616,7 +617,7 @@ async fn wait_for_ended(store: &Arc<dyn EventStore>, saga_id: &SagaId) {
 struct Incarnation {
     _system: ProcessSystem,
     _proxy: nitinol_saga::SagaManagerProxy<FiringSaga>,
-    upstream: Arc<dyn EventStore>,
+    upstream: Journal,
     upstream_key: &'static str,
     probes_sent: AtomicU64,
     fires: Fires,
@@ -635,7 +636,7 @@ struct Incarnation {
 const BOOT_SEQUENCE: u64 = 1;
 
 /// The sequence a row appended to the saga's own stream next would take.
-async fn next_sequence(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> u64 {
+async fn next_sequence(store: &Journal, saga_id: &SagaId) -> u64 {
     load_saga_events(store, saga_id)
         .await
         .last()
@@ -643,16 +644,12 @@ async fn next_sequence(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> u64 {
 }
 
 impl Incarnation {
-    async fn start(
-        saga_store: &Arc<dyn EventStore>,
-        saga_id: &SagaId,
-        upstream_key: &'static str,
-    ) -> Self {
+    async fn start(saga_store: &Journal, saga_id: &SagaId, upstream_key: &'static str) -> Self {
         let system = ProcessSystem::new().await;
         // An upstream of its own: a position this incarnation records is
         // keyed by the stream it read, so sharing one key with an earlier
         // incarnation would make its probes look already consumed.
-        let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let upstream = Journal::from(InMemoryEventStore::default());
 
         let boot_row = next_sequence(saga_store, saga_id).await;
         saga_store
@@ -692,12 +689,10 @@ impl Incarnation {
         let fires_for_saga = Arc::clone(&fires);
         let reports_for_saga = Arc::clone(&reports);
         let proxy =
-            SagaManagerProps::<FiringSaga>::new(Arc::clone(saga_store), move |components| {
-                FiringSaga {
-                    deadline: components.deadline(),
-                    fires: Arc::clone(&fires_for_saga),
-                    reports: Arc::clone(&reports_for_saga),
-                }
+            SagaManagerProps::<FiringSaga>::new(saga_store.clone(), move |components| FiringSaga {
+                deadline: components.deadline(),
+                fires: Arc::clone(&fires_for_saga),
+                reports: Arc::clone(&reports_for_saga),
             })
             .observing::<Probe>(Subscription::stream(&upstream, upstream_key))
             .spawn(&system)
@@ -784,7 +779,7 @@ impl Incarnation {
 /// finds the deadline neither pending nor re-armed.
 #[tokio::test]
 async fn a_firing_whose_decision_landed_writes_its_fired_marker_after_the_decision() {
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -849,7 +844,7 @@ async fn a_firing_whose_decision_landed_writes_its_fired_marker_after_the_decisi
 #[tokio::test]
 async fn a_firing_whose_decision_never_landed_is_re_armed_and_re_delivered_after_a_restart() {
     let refusing = Arc::new(AtomicBool::new(false));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RejectingStore {
+    let saga_store = Journal::from(RejectingStore {
         inner: InMemoryEventStore::default(),
         reject: Reject::Decision,
         armed: Arc::clone(&refusing),
@@ -933,7 +928,7 @@ async fn a_firing_whose_decision_never_landed_is_re_armed_and_re_delivered_after
 /// saga re-arms nothing, so there is nothing for a settlement to prevent.
 #[tokio::test]
 async fn a_firing_that_ends_the_saga_writes_no_fired_marker() {
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -978,7 +973,7 @@ async fn a_firing_that_ends_the_saga_writes_no_fired_marker() {
 /// not re-armed, and `handle` is not called again.
 #[tokio::test]
 async fn a_refused_firing_is_settled_by_its_fired_marker_alone() {
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -1037,7 +1032,7 @@ const STALE_MESSAGE_TYPE: &str = "settle-reminder-v0";
 /// skipped by.
 #[tokio::test]
 async fn an_unreadable_firing_is_settled_by_its_fired_marker_alone() {
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -1095,7 +1090,7 @@ async fn an_unreadable_firing_is_settled_by_its_fired_marker_alone() {
 /// re-armed.
 #[tokio::test]
 async fn a_firing_that_decides_nothing_is_settled_by_its_fired_marker_alone() {
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -1152,7 +1147,7 @@ async fn a_firing_that_decides_nothing_is_settled_by_its_fired_marker_alone() {
 #[tokio::test]
 async fn a_firing_whose_fired_marker_never_landed_is_re_delivered_after_a_restart() {
     let refusing = Arc::new(AtomicBool::new(false));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RejectingStore {
+    let saga_store = Journal::from(RejectingStore {
         inner: InMemoryEventStore::default(),
         reject: Reject::FiredMarker,
         armed: Arc::clone(&refusing),
@@ -1228,7 +1223,7 @@ async fn a_firing_whose_fired_marker_never_landed_is_re_delivered_after_a_restar
 #[tokio::test]
 async fn a_reset_whose_schedule_fact_never_landed_leaves_the_original_deadline_to_re_fire() {
     let refusing = Arc::new(AtomicBool::new(false));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RejectingStore {
+    let saga_store = Journal::from(RejectingStore {
         inner: InMemoryEventStore::default(),
         reject: Reject::ScheduledMarker,
         armed: Arc::clone(&refusing),
@@ -1307,7 +1302,7 @@ async fn a_reset_whose_schedule_fact_never_landed_leaves_the_original_deadline_t
 /// early does.
 #[tokio::test]
 async fn a_firing_that_sets_a_differently_named_deadline_still_writes_its_fired_marker() {
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,

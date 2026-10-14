@@ -162,18 +162,15 @@ async fn wait_for_child_pid(slot: &Arc<tokio::sync::Mutex<Option<Pid>>>) -> Pid 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_poller_config_delivers_catchup_events_to_subscriber() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg = AggregateId::new("dpc-catchup-agg");
 
     append_evt(&store, agg.as_str(), 1).await;
     append_evt(&store, agg.as_str(), 2).await;
     append_evt(&store, agg.as_str(), 3).await;
 
-    let config = DurableSubscription::<EventEnvelope<Evt>>::new(
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        to_envelope,
-    )
-    .with_poll_interval(TEST_POLL_INTERVAL);
+    let config = DurableSubscription::<EventEnvelope<Evt>>::new(store.clone(), to_envelope)
+        .with_poll_interval(TEST_POLL_INTERVAL);
 
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
@@ -207,14 +204,11 @@ async fn durable_poller_config_delivers_catchup_events_to_subscriber() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_poller_config_registers_poller_as_child() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg = AggregateId::new("dpc-child-agg");
 
-    let config = DurableSubscription::<EventEnvelope<Evt>>::new(
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        to_envelope,
-    )
-    .with_poll_interval(TEST_POLL_INTERVAL);
+    let config = DurableSubscription::<EventEnvelope<Evt>>::new(store.clone(), to_envelope)
+        .with_poll_interval(TEST_POLL_INTERVAL);
 
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
@@ -254,14 +248,11 @@ async fn durable_poller_config_registers_poller_as_child() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_poller_config_poller_stops_with_subscriber() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg = AggregateId::new("dpc-stop-agg");
 
-    let config = DurableSubscription::<EventEnvelope<Evt>>::new(
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        to_envelope,
-    )
-    .with_poll_interval(TEST_POLL_INTERVAL);
+    let config = DurableSubscription::<EventEnvelope<Evt>>::new(store.clone(), to_envelope)
+        .with_poll_interval(TEST_POLL_INTERVAL);
 
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
@@ -328,7 +319,7 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
     use nitinol_runtime::{IdleTimeout, SupervisionStrategy, Terminated};
 
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
 
     let on_terminated_called = Arc::new(AtomicBool::new(false));
     let on_start_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -399,11 +390,8 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
         }
     }
 
-    let config = DurableSubscription::<EventEnvelope<Evt>>::new(
-        Arc::clone(&store) as Arc<dyn nitinol_persistence::store::EventStore>,
-        to_envelope,
-    )
-    .with_poll_interval(TEST_POLL_INTERVAL);
+    let config = DurableSubscription::<EventEnvelope<Evt>>::new(store.clone(), to_envelope)
+        .with_poll_interval(TEST_POLL_INTERVAL);
 
     let otc = on_terminated_called.clone();
     let osc = on_start_count.clone();

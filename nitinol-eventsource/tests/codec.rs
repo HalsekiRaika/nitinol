@@ -12,15 +12,13 @@
 //! the same claim is now made where a caller can actually see it: the answer
 //! `ask` gives when the named codec refuses to encode.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::error::{AskError, CodecError, PersistError, Retryability};
 use nitinol_eventsource::{Aggregate, AggregateProps, Decider, Decision, Event};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -201,7 +199,7 @@ impl Decider<Record> for Recorder {
 #[tokio::test]
 async fn a_failing_encode_is_reported_as_a_codec_error_on_the_persist_path() {
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
 
     let proxy = AggregateProps::<Recorder>::new(AggregateId::new("codec-encode-fails"), store)
         .spawn(&system)

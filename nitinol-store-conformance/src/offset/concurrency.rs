@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use nitinol_persistence::store::{OffsetScope, OffsetStore};
 
 use super::fixture;
@@ -73,7 +71,7 @@ async fn writers_under_keys_of_their_own_do_not_disturb_each_other<
 
     let joins: Vec<_> = (0..WRITERS)
         .map(|writer| {
-            let backend = Arc::clone(&backend);
+            let backend = backend.clone();
             executor.spawn(Box::pin(async move {
                 record_under_a_key_of_its_own(backend, writer).await;
             }))
@@ -110,7 +108,7 @@ async fn writers_under_keys_of_their_own_do_not_disturb_each_other<
 /// but forward moves and one that overwrites whatever it is handed are both
 /// conforming, so a writer that went backwards would be judging `OFS-4` — which
 /// the contract leaves to the backend.
-async fn record_under_a_key_of_its_own<S: OffsetStore>(backend: Arc<S>, writer: usize) {
+async fn record_under_a_key_of_its_own<S: OffsetStore>(backend: S, writer: usize) {
     let consumer = key_of(writer);
 
     for position in positions_of(writer) {

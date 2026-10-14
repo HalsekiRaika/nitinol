@@ -123,19 +123,20 @@ impl TxProvider for MockTxProvider {
 ///
 /// Records whether save() was called with Some(tx) (ExactlyOnce+TxProvider path)
 /// or None (all other paths).
+#[derive(Clone)]
 pub struct MockOffsetStore {
-    state: Mutex<HashMap<String, u64>>,
+    state: Arc<Mutex<HashMap<String, u64>>>,
     /// True if save() was ever called with Some(&mut tx).
     saved_with_tx: Arc<AtomicBool>,
 }
 
 impl MockOffsetStore {
-    fn new() -> (Arc<Self>, Arc<AtomicBool>) {
+    fn new() -> (Self, Arc<AtomicBool>) {
         let saved_with_tx = Arc::new(AtomicBool::new(false));
-        let store = Arc::new(Self {
-            state: Mutex::new(HashMap::new()),
+        let store = Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
             saved_with_tx: Arc::clone(&saved_with_tx),
-        });
+        };
         (store, saved_with_tx)
     }
 }
@@ -263,7 +264,7 @@ async fn wait_for(notify: &Arc<Notify>) {
 async fn tx_provider_supplies_tx_to_projection_context() {
     // Given
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let (mock_cs, _saved_flag) = MockOffsetStore::new();
     let agg_id = AggregateId::new("tx-ctx-test");
 
@@ -279,8 +280,8 @@ async fn tx_provider_supplies_tx_to_projection_context() {
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&mock_cs))
+            .eventstore(store.clone())
+            .projection_offsets(mock_cs.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(
@@ -316,7 +317,7 @@ async fn tx_provider_supplies_tx_to_projection_context() {
 async fn exactly_once_with_tx_provider_saves_offset_in_same_tx() {
     // Given
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let (mock_cs, saved_with_tx) = MockOffsetStore::new();
     let agg_id = AggregateId::new("tx-ckpt-test");
 
@@ -329,8 +330,8 @@ async fn exactly_once_with_tx_provider_saves_offset_in_same_tx() {
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&mock_cs))
+            .eventstore(store.clone())
+            .projection_offsets(mock_cs.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(
@@ -366,7 +367,7 @@ async fn exactly_once_with_tx_provider_saves_offset_in_same_tx() {
 async fn tx_provider_commit_called_after_successful_project() {
     // Given
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let (mock_cs, _saved_flag) = MockOffsetStore::new();
     let agg_id = AggregateId::new("tx-commit-test");
 
@@ -379,8 +380,8 @@ async fn tx_provider_commit_called_after_successful_project() {
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&mock_cs))
+            .eventstore(store.clone())
+            .projection_offsets(mock_cs.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(
@@ -424,7 +425,7 @@ async fn tx_provider_commit_called_after_successful_project() {
 async fn tx_provider_rollback_called_when_project_fails() {
     // Given
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let (mock_cs, saved_with_tx) = MockOffsetStore::new();
     let agg_id = AggregateId::new("tx-rollback-test");
 
@@ -437,8 +438,8 @@ async fn tx_provider_rollback_called_when_project_fails() {
     // When: spawn projector that always fails (ExactlyOnce forced by with_tx_provider)
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&mock_cs))
+            .eventstore(store.clone())
+            .projection_offsets(mock_cs.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(
@@ -495,10 +496,10 @@ async fn tx_provider_rollback_called_when_project_fails() {
 async fn without_tx_provider_ctx_tx_returns_none() {
     // Given: use InMemoryOffsetStore (Tx = ()) to test the default path
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("tx-none-test");
     use nitinol_persistence::store::InMemoryOffsetStore;
-    let cs = Arc::new(InMemoryOffsetStore::default());
+    let cs = InMemoryOffsetStore::default();
 
     append_tick(&store, &agg_id, 1).await;
 
@@ -533,7 +534,7 @@ async fn without_tx_provider_ctx_tx_returns_none() {
     // When: spawn without TxProvider (default Tx = ())
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store) as Arc<dyn EventStore>)
+            .eventstore(store.clone())
             .projection_offsets(cs)
             .build(),
     );

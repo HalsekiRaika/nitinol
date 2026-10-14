@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use nitinol_persistence::error::SnapshotError;
 use nitinol_persistence::provider::{PersistenceProvider, SnapshotSlot};
-use nitinol_persistence::store::SnapshotStore;
+use nitinol_persistence::store::Album;
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::ProcessProxy;
@@ -21,11 +19,11 @@ pub(crate) struct LoadLatestSnapshot {
 
 // SnapshotPersistor
 
-/// Persistence process that exclusively owns an `Arc<dyn SnapshotStore>`.
+/// Persistence process that exclusively owns the supplier's [`Album`].
 ///
 /// All snapshot operations are serialized through this process's message loop.
 pub struct SnapshotPersistor {
-    store: Arc<dyn SnapshotStore>,
+    store: Album,
 }
 
 impl Process for SnapshotPersistor {}
@@ -96,7 +94,7 @@ impl SnapshotPersistor {
     ) -> SnapshotPersistorProxy {
         let store = persistence.snapshot_store();
         let props = Props::new(move || SnapshotPersistor {
-            store: Arc::clone(&store),
+            store: store.clone(),
         })
         .with_supervision_strategy(SupervisionStrategy::Resume)
         .with_idle_timeout(IdleTimeout::Persistent);

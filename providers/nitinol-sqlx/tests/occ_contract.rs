@@ -31,8 +31,6 @@ mod fixture;
 #[path = "common/harness.rs"]
 mod harness;
 
-use std::sync::Arc;
-
 use fixture::{
     committed, conflicted, content, continues_from, highest, observe, payloads, recorded,
 };
@@ -161,11 +159,11 @@ async fn two_appends_racing_for_one_sequence_leave_exactly_one_winner() {
     let store = backend.bring_up_store().await;
 
     let one = tokio::spawn({
-        let store = Arc::clone(&store);
+        let store = store.clone();
         async move { store.append(STREAM, vec![recorded(1, b"one")]).await }
     });
     let other = tokio::spawn({
-        let store = Arc::clone(&store);
+        let store = store.clone();
         async move { store.append(STREAM, vec![recorded(1, b"other")]).await }
     });
     let one = one.await.expect("a racing append must run to completion");

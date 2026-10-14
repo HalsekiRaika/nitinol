@@ -30,9 +30,7 @@ use delivery::{
     RecordingOffsetStore,
 };
 
-use std::sync::Arc;
-
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
@@ -40,7 +38,7 @@ use nitinol_saga::SagaId;
 async fn a_host_resumes_above_the_recorded_position() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-resumes");
@@ -50,7 +48,7 @@ async fn a_host_resumes_above_the_recorded_position() {
     offsets.put(&scope_of(0), first);
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target);
@@ -85,7 +83,7 @@ async fn a_lost_position_redelivers_without_doubling_the_effect() {
     // Given: the state a crash between a delivery and its recording leaves —
     // the receiver has the operation, the host has no position.
     let (system, aggregates) = in_memory_system().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-lost-position");
@@ -109,7 +107,7 @@ async fn a_lost_position_redelivers_without_doubling_the_effect() {
     );
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target.clone());

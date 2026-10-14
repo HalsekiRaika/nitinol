@@ -25,12 +25,11 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_core::future::BoxFuture;
 use linkme::distributed_slice;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{EventRegistryEntry, EventType, Family, TypeName, EVENT_REGISTRY};
 use nitinol_sqlx::{PostgresEventStore, PostgresOffsetStore};
 use nitinol_store_conformance::offset::OffsetStoreUnderTest;
@@ -142,17 +141,17 @@ pub async fn postgres_backend() -> Option<PostgresBackend> {
 impl PostgresBackend {
     /// A store holding nothing: a schema of its own, migrated, over a pool of
     /// its own.
-    pub async fn bring_up_store(&self) -> Arc<dyn EventStore> {
+    pub async fn bring_up_store(&self) -> Journal {
         let schema = self.migrated_schema().await;
         let store = PostgresEventStore::new(schema.pool())
             .expect("the event types this test binary linked claim distinct canonical paths");
-        Arc::new(store) as Arc<dyn EventStore>
+        Journal::from(store)
     }
 
     /// A migrated schema holding nothing, for a clause that puts more than one
     /// thing over it.
     ///
-    /// `bring_up_store` answers with an `EventStore` and nothing else, which is
+    /// `bring_up_store` answers with a `Journal` and nothing else, which is
     /// the whole of what a clause about the journal needs. A clause about
     /// offsets needs the journal, the offset table and a read model of
     /// its own to be the *same* database — otherwise the transaction it is
@@ -250,7 +249,7 @@ async fn pool_on(url: &str, schema: &str, connections: u32) -> PgPool {
 }
 
 impl StoreUnderTest for PostgresBackend {
-    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn EventStore>> {
+    fn bring_up(&self) -> BoxFuture<'_, Journal> {
         Box::pin(async move { self.bring_up_store().await })
     }
 }
@@ -264,10 +263,10 @@ impl OffsetStoreUnderTest for PostgresBackend {
     /// A schema of its own, migrated, over a pool of its own: the offset
     /// table is keyed by the rendered scope alone, so two clauses sharing one
     /// schema would have each reading the other's rows.
-    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
         Box::pin(async move {
             let schema = self.migrated_schema().await;
-            Arc::new(PostgresOffsetStore::new(schema.pool()))
+            PostgresOffsetStore::new(schema.pool())
         })
     }
 }

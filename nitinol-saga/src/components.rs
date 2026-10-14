@@ -118,12 +118,11 @@ impl<S: Saga> SagaComponents<S> {
     /// # use bytes::Bytes;
     /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::Event;
-    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+    /// # use nitinol_persistence::store::InMemoryEventStore;
     /// # use nitinol_persistence::{EventType, Family, TypeName};
     /// # use nitinol_saga::{
     /// #     Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
     /// # };
-    /// # use std::sync::Arc;
     /// # struct DocCodec;
     /// # #[derive(Clone)] struct Nudge;
     /// # #[derive(Clone)] struct Noted;
@@ -170,7 +169,7 @@ impl<S: Saga> SagaComponents<S> {
     /// #     async fn handle(&mut self, _: Observed, _: &mut SagaContext)
     /// #         -> Result<SagaEffect<Noted>, Self::Error> { Ok(SagaEffect::None) }
     /// # }
-    /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    /// # let store = InMemoryEventStore::default();
     /// // `Observed`'s `Deadline` is `NoDeadline`, not `HasDeadline<Reminder>`,
     /// // so the `where` clause below has nothing to satisfy this call with.
     /// SagaManagerProps::<Undeclared>::new(store, |components| Undeclared {

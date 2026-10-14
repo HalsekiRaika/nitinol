@@ -29,10 +29,8 @@ mod fixture;
 #[path = "common/harness.rs"]
 mod harness;
 
-use std::sync::Arc;
-
 use linkme::distributed_slice;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{
     AppendingEvent, EventRegistryEntry, EventType, Family, LoadQuery, TypeName, EVENT_REGISTRY,
 };
@@ -84,7 +82,7 @@ async fn a_load_for_one_event_type_reads_that_type_rather_than_the_journal() {
     // measurable where the backend that ran it is the backend that publishes
     // what it did.
     let pool = schema.pinned_pool().await;
-    let store: Arc<dyn EventStore> = Arc::new(
+    let store = Journal::from(
         PostgresEventStore::new(pool.clone())
             .expect("the event types this test binary linked claim distinct canonical paths"),
     );
@@ -161,7 +159,7 @@ async fn a_load_for_one_event_type_reads_that_type_rather_than_the_journal() {
 ///
 /// Two streams, so neither type owns one and the condition cannot be satisfied
 /// by the stream key instead.
-async fn seed(store: &Arc<dyn EventStore>) -> Vec<u64> {
+async fn seed(store: &Journal) -> Vec<u64> {
     const FIRST: &str = "index.probe.stream-a";
     const SECOND: &str = "index.probe.stream-b";
     const BATCH: u64 = 500;

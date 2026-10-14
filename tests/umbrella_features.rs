@@ -202,7 +202,7 @@ fn eventsource_error_facade_exposes_user_facing_types() {
 
 /// When the "postgres" feature is enabled, the sqlx provider must be reachable
 /// through the umbrella crate, and its store must be usable as the framework's
-/// `Arc<dyn EventStore>` handle.
+/// `Journal` handle.
 ///
 /// Without the feature the provider is not part of the build at all, which is
 /// what `optional = true` on the dependency gives: there is nothing to import
@@ -210,19 +210,17 @@ fn eventsource_error_facade_exposes_user_facing_types() {
 #[cfg(feature = "postgres")]
 #[test]
 fn postgres_feature_exposes_the_sqlx_event_store() {
-    use std::sync::Arc;
-
     use nitinol::persistence::__private::linked_event_registry;
-    use nitinol::persistence::store::EventStore;
+    use nitinol::persistence::store::Journal;
     use nitinol::persistence::EventRegistryError;
     use nitinol::sqlx::sqlx::PgPool;
     use nitinol::sqlx::PostgresEventStore;
 
     // Compile-time check: what the provider builds is what the framework plugs in.
-    fn plugged_in(store: PostgresEventStore) -> Arc<dyn EventStore> {
-        Arc::new(store)
+    fn plugged_in(store: PostgresEventStore) -> Journal {
+        Journal::from(store)
     }
-    let _: fn(PostgresEventStore) -> Arc<dyn EventStore> = plugged_in;
+    let _: fn(PostgresEventStore) -> Journal = plugged_in;
 
     // A store is opened over a pool alone: the event types it serves are the
     // ones its binary linked, so there is no registry for a caller to pass in

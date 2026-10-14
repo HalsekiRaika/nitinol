@@ -26,10 +26,9 @@ use delivery::{
     wait_until_loads, DeliverySaga, LoadFault, RecordingEventStore, RecordingOffsetStore,
 };
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_saga::SagaDeliveryProps;
 
 /// Slow enough that the position below is in the store well before the query
@@ -46,12 +45,12 @@ const MOVED_ON_TO: u64 = 5;
 async fn a_restarted_partition_resumes_from_the_position_now_recorded() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let journal: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
     recording.fault_on(FAILING_CALL, LoadFault::Panic);
 
-    let _host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingOffsetStore>>::new(
+    let _host = SagaDeliveryProps::<DeliverySaga, RecordingOffsetStore>::new(
         &delivery_persistence(&journal, &offsets),
     )
     .with_delivery_id(delivery_id())

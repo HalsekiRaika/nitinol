@@ -29,10 +29,8 @@ use delivery::{
     DeliverySaga, RecordingOffsetStore, TEST_DELIVERY_ID,
 };
 
-use std::sync::Arc;
-
 use nitinol_persistence::is_within_reserved_namespace;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_saga::SagaId;
 
 /// The key is composed before anything runs, so this half needs no host.
@@ -71,7 +69,7 @@ fn the_key_a_partition_asks_for_is_framework_owned() {
 #[tokio::test]
 async fn the_host_records_under_the_key_it_asked_for() {
     let (system, _aggregates) = in_memory_system().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
 
     let last = append_decided(
@@ -83,7 +81,7 @@ async fn the_host_records_under_the_key_it_asked_for() {
     )
     .await;
 
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
 
     wait_until_stored(
         &offsets,

@@ -314,7 +314,7 @@ async fn a_conflict_inside_a_transaction_is_refused_the_way_one_without_a_transa
 /// task can finish outright before the second begins, which is the sequential
 /// case these clauses are not about.
 async fn racing_save(
-    store: Arc<PostgresOffsetStore>,
+    store: PostgresOffsetStore,
     scope: OffsetScope,
     sequence: u64,
     mut tx: PgTransaction<'static>,
@@ -378,7 +378,7 @@ async fn two_transactions_carrying_an_existing_offset_forward_leave_one_winner()
     };
     let schema = backend.migrated_schema().await;
     let pool = schema.pool();
-    let store = Arc::new(PostgresOffsetStore::new(pool.clone()));
+    let store = PostgresOffsetStore::new(pool.clone());
     let scope = OffsetScope::new("sqlx.offset.race.existing");
 
     store
@@ -397,14 +397,14 @@ async fn two_transactions_carrying_an_existing_offset_forward_leave_one_winner()
     let both_ready = Arc::new(Barrier::new(2));
 
     let one = tokio::spawn(racing_save(
-        Arc::clone(&store),
+        store.clone(),
         scope.clone(),
         9,
         one_tx,
         Arc::clone(&both_ready),
     ));
     let other = tokio::spawn(racing_save(
-        Arc::clone(&store),
+        store.clone(),
         scope.clone(),
         9,
         other_tx,
@@ -433,7 +433,7 @@ async fn two_transactions_saving_a_projection_first_offset_leave_one_winner() {
     };
     let schema = backend.migrated_schema().await;
     let pool = schema.pool();
-    let store = Arc::new(PostgresOffsetStore::new(pool.clone()));
+    let store = PostgresOffsetStore::new(pool.clone());
     let scope = OffsetScope::new("sqlx.offset.race.first");
 
     let one_tx = pool
@@ -447,14 +447,14 @@ async fn two_transactions_saving_a_projection_first_offset_leave_one_winner() {
     let both_ready = Arc::new(Barrier::new(2));
 
     let one = tokio::spawn(racing_save(
-        Arc::clone(&store),
+        store.clone(),
         scope.clone(),
         1,
         one_tx,
         Arc::clone(&both_ready),
     ));
     let other = tokio::spawn(racing_save(
-        Arc::clone(&store),
+        store.clone(),
         scope.clone(),
         1,
         other_tx,

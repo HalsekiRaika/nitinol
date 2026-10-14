@@ -1,9 +1,7 @@
-use std::sync::Arc;
-
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use jiff::Timestamp;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 
 /// The event type every fact the suite appends carries.
@@ -30,7 +28,7 @@ pub(crate) fn fact(sequence: u64, payload: &'static [u8]) -> AppendingEvent {
 /// A store that cannot answer a load at all is not one any clause can judge, so
 /// neither panic here names a clause: this is the suite failing to run rather
 /// than a contract being broken.
-pub(crate) async fn observe(backend: &Arc<dyn EventStore>, query: LoadQuery) -> Vec<LoadedEvent> {
+pub(crate) async fn observe(backend: &Journal, query: LoadQuery) -> Vec<LoadedEvent> {
     let stream = backend.load(query).await.unwrap_or_else(|failure| {
         panic!("the suite cannot judge a store that fails a load outright: {failure}")
     });

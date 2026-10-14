@@ -39,8 +39,8 @@ use futures_util::stream;
 use nitinol_persistence::error::{AppendError, LoadError, OffsetError, SnapshotError};
 use nitinol_persistence::provider::{CustomStore, Store, Unprovided};
 use nitinol_persistence::store::{
-    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore,
-    InMemoryStore, OffsetScope, OffsetStore, SnapshotStore,
+    Album, EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore,
+    InMemoryStore, Journal, OffsetScope, OffsetStore, SnapshotStore,
 };
 use nitinol_persistence::{
     is_within_reserved_namespace, AggregateId, AppendOutcome, AppendingEvent, LoadQuery,
@@ -55,8 +55,8 @@ use nitinol_store_conformance::{Executor, StoreUnderTest};
 pub struct ReferenceStore;
 
 impl StoreUnderTest for ReferenceStore {
-    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn EventStore>> {
-        Box::pin(async { Arc::new(InMemoryEventStore::default()) as Arc<dyn EventStore> })
+    fn bring_up(&self) -> BoxFuture<'_, Journal> {
+        Box::pin(async { Journal::from(InMemoryEventStore::default()) })
     }
 }
 
@@ -115,9 +115,9 @@ impl FaultyStore {
 }
 
 impl StoreUnderTest for FaultyStore {
-    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn EventStore>> {
+    fn bring_up(&self) -> BoxFuture<'_, Journal> {
         let fault = self.fault;
-        Box::pin(async move { Arc::new(SkewedEventStore::injecting(fault)) as Arc<dyn EventStore> })
+        Box::pin(async move { Journal::from(SkewedEventStore::injecting(fault)) })
     }
 }
 
@@ -144,9 +144,14 @@ struct SkewedState {
 /// It owns its numbering instead of decorating [`InMemoryEventStore`]: pulling
 /// the order events are numbered in apart from the order they become visible in
 /// takes hold of the counter itself.
+/// The state is behind an [`Arc`] because this store is a *handle*: a clone
+/// reaching a region of its own would be the `PRV-1` fault rather than the
+/// one clause the fault names, and the suite distributes the handle by cloning
+/// it.
+#[derive(Clone)]
 pub struct SkewedEventStore {
     fault: Fault,
-    state: Mutex<SkewedState>,
+    state: Arc<Mutex<SkewedState>>,
 }
 
 /// What one `append` left behind, and whether a reader has to pass it before it
@@ -160,7 +165,7 @@ impl SkewedEventStore {
     fn injecting(fault: Fault) -> Self {
         Self {
             fault,
-            state: Mutex::new(SkewedState {
+            state: Arc::new(Mutex::new(SkewedState {
                 visible: Vec::new(),
                 withheld: Vec::new(),
                 hidden_once: HashSet::new(),
@@ -168,7 +173,7 @@ impl SkewedEventStore {
                 // implementation.
                 next_global_sequence: 1,
                 highest_global_sequence_a_load_returned: 0,
-            }),
+            })),
         }
     }
 
@@ -348,8 +353,8 @@ fn matches_query(event: &LoadedEvent, query: &LoadQuery) -> bool {
 pub struct ReferenceSnapshotStore;
 
 impl SnapshotStoreUnderTest for ReferenceSnapshotStore {
-    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn SnapshotStore>> {
-        Box::pin(async { Arc::new(InMemorySnapshotStore::default()) as Arc<dyn SnapshotStore> })
+    fn bring_up(&self) -> BoxFuture<'_, Album> {
+        Box::pin(async { Album::from(InMemorySnapshotStore::default()) })
     }
 }
 
@@ -394,16 +399,18 @@ pub enum SnapshotFault {
 /// It keeps the saves it was handed rather than an answer it has already chosen,
 /// so each fault is a way of reading that log back and there is one copy of
 /// what happened.
+/// Cloneable over shared saves, for the reason [`SkewedEventStore`] states.
+#[derive(Clone)]
 pub struct SkewedSnapshotStore {
     fault: SnapshotFault,
-    saves: Mutex<Vec<PersistedSnapshot>>,
+    saves: Arc<Mutex<Vec<PersistedSnapshot>>>,
 }
 
 impl SkewedSnapshotStore {
     fn injecting(fault: SnapshotFault) -> Self {
         Self {
             fault,
-            saves: Mutex::new(Vec::new()),
+            saves: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -465,11 +472,9 @@ impl FaultySnapshotStore {
 }
 
 impl SnapshotStoreUnderTest for FaultySnapshotStore {
-    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn SnapshotStore>> {
+    fn bring_up(&self) -> BoxFuture<'_, Album> {
         let fault = self.fault;
-        Box::pin(async move {
-            Arc::new(SkewedSnapshotStore::injecting(fault)) as Arc<dyn SnapshotStore>
-        })
+        Box::pin(async move { Album::from(SkewedSnapshotStore::injecting(fault)) })
     }
 }
 
@@ -483,8 +488,8 @@ pub struct ReferenceOffsetStore;
 impl OffsetStoreUnderTest for ReferenceOffsetStore {
     type Store = InMemoryOffsetStore;
 
-    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
-        Box::pin(async { Arc::new(InMemoryOffsetStore::default()) })
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
+        Box::pin(async { InMemoryOffsetStore::default() })
     }
 }
 
@@ -527,16 +532,19 @@ const THE_ONLY_ROW: &str = "the one row this store has";
 
 /// An offset store that keeps the contract except for the clause its fault
 /// names.
+/// Cloneable over shared positions, for the reason [`SkewedEventStore`]
+/// states.
+#[derive(Clone)]
 pub struct SkewedOffsetStore {
     fault: OffsetFault,
-    positions: Mutex<HashMap<String, u64>>,
+    positions: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl SkewedOffsetStore {
     fn injecting(fault: OffsetFault) -> Self {
         Self {
             fault,
-            positions: Mutex::new(HashMap::new()),
+            positions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -628,9 +636,9 @@ impl FaultyOffsetStore {
 impl OffsetStoreUnderTest for FaultyOffsetStore {
     type Store = SkewedOffsetStore;
 
-    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
         let fault = self.fault;
-        Box::pin(async move { Arc::new(SkewedOffsetStore::injecting(fault)) })
+        Box::pin(async move { SkewedOffsetStore::injecting(fault) })
     }
 }
 
@@ -663,10 +671,9 @@ impl ProviderUnderTest for ReferenceProvider {
 pub struct AStoreOfItsOwnPerCall;
 
 impl Store for AStoreOfItsOwnPerCall {
-    type Events = InMemoryEventStore;
-
-    fn events(&self) -> Self::Events {
-        InMemoryEventStore::default()
+    /// The fault: every call erases a backend of its own.
+    fn events(&self) -> Journal {
+        Journal::from(InMemoryEventStore::default())
     }
 }
 
@@ -689,9 +696,16 @@ impl ProviderUnderTest for FaultyProvider {
 /// built fresh state splits the deployment in two with nothing reported. Every
 /// clause that takes a slot twice from one handle passes this store, which is
 /// why the clause reads across a clone as well.
-#[derive(Default)]
 pub struct AStoreWhoseCloneSplitsTheWorld {
-    events: InMemoryEventStore,
+    events: Journal,
+}
+
+impl Default for AStoreWhoseCloneSplitsTheWorld {
+    fn default() -> Self {
+        Self {
+            events: Journal::from(InMemoryEventStore::default()),
+        }
+    }
 }
 
 /// The fault: what should copy the handle constructs a new region instead.
@@ -702,9 +716,7 @@ impl Clone for AStoreWhoseCloneSplitsTheWorld {
 }
 
 impl Store for AStoreWhoseCloneSplitsTheWorld {
-    type Events = InMemoryEventStore;
-
-    fn events(&self) -> Self::Events {
+    fn events(&self) -> Journal {
         self.events.clone()
     }
 }
@@ -722,8 +734,7 @@ impl ProviderUnderTest for ProviderWithCloneThatSplitsTheWorld {
 
 /// What [`ProviderWithCollidingOffsetSlots`] brings up: both offset
 /// slots named with a store that keeps one position for every key.
-pub type CollidingOffsets =
-    CustomStore<InMemoryEventStore, Unprovided, Arc<SkewedOffsetStore>, Arc<SkewedOffsetStore>>;
+pub type CollidingOffsets = CustomStore<Unprovided, SkewedOffsetStore, SkewedOffsetStore>;
 
 /// A store whose two offset slots reach a store with one slot for every
 /// scope.
@@ -742,9 +753,9 @@ impl ProviderUnderTest for ProviderWithCollidingOffsetSlots {
         Box::pin(async {
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
-                .offsets(Arc::new(SkewedOffsetStore::injecting(
+                .offsets(SkewedOffsetStore::injecting(
                     OffsetFault::OneSlotForEveryScope,
-                )))
+                ))
                 .build()
         })
     }

@@ -46,7 +46,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -147,12 +147,7 @@ impl Saga for CorrelationSaga {
 
 // Helpers
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -175,7 +170,7 @@ async fn append_order_placed(
 /// The upstream stream every test in this file uses: the three correlation
 /// classes interleaved, with a declined event *last* so that a run which
 /// wrongly accepts it is still observed after the wait for the matching ones.
-async fn append_mixed_correlation_stream(store: &Arc<dyn EventStore>, agg_id: &AggregateId) {
+async fn append_mixed_correlation_stream(store: &Journal, agg_id: &AggregateId) {
     for (sequence, sku) in [
         (1u64, "NONE-1"),
         (2, "OTHER-1"),
@@ -217,7 +212,7 @@ async fn wait_for_count(captured: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>
     });
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -232,9 +227,9 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 /// correlation lives on `CorrelationSaga`.
 async fn spawn_correlation_saga(
     system: &EventSourceSystem<InMemoryStore>,
-    upstream_store: &Arc<dyn EventStore>,
+    upstream_store: &Journal,
     agg_id: &AggregateId,
-    saga_store: Arc<dyn EventStore>,
+    saga_store: Journal,
     captured: &Arc<Mutex<Vec<String>>>,
     notify: &Arc<Notify>,
 ) {
@@ -266,11 +261,11 @@ async fn each_record_reaches_handle_on_the_instance_correlate_names() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("correlate-routing-order");
     append_mixed_correlation_stream(&upstream_store, &order_id).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -315,11 +310,11 @@ async fn a_record_that_names_no_instance_is_silent_and_writes_nothing() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("correlate-routing-silent-order");
     append_mixed_correlation_stream(&upstream_store, &order_id).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -327,7 +322,7 @@ async fn a_record_that_names_no_instance_is_silent_and_writes_nothing() {
         &system,
         &upstream_store,
         &order_id,
-        Arc::clone(&saga_store),
+        saga_store.clone(),
         &captured,
         &notify,
     )

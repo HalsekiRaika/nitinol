@@ -59,7 +59,7 @@ use bytes::Bytes;
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -178,7 +178,7 @@ impl Saga for ComponentlessSaga {
 
 // Helpers
 
-async fn append_nudge(store: &Arc<dyn EventStore>, sequence: u64, note: &str) {
+async fn append_nudge(store: &Journal, sequence: u64, note: &str) {
     store
         .append(
             UPSTREAM,
@@ -205,17 +205,17 @@ async fn append_nudge(store: &Arc<dyn EventStore>, sequence: u64, note: &str) {
 async fn a_saga_declaring_a_deadline_without_the_component_runs_normally() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_nudge(&upstream_store, 1, "first").await;
     append_nudge(&upstream_store, 2, "second").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let handled_for_producer = Arc::clone(&handled);
     // The whole of the producer: the components are offered and declined.
     let _proxy =
-        SagaManagerProps::<ComponentlessSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<ComponentlessSaga>::new(saga_store.clone(), move |_components| {
             ComponentlessSaga {
                 handled: Arc::clone(&handled_for_producer),
             }

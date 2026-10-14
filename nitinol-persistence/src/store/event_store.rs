@@ -12,12 +12,21 @@ pub type EventStream<'a> = Pin<Box<dyn Stream<Item = Result<LoadedEvent, LoadErr
 /// Append-and-load surface for events.
 ///
 /// The `append` and `load` methods take the stream key as `&str` rather than a
-/// typed identifier so the trait remains dyn-compatible (`Arc<dyn EventStore>`
-/// is the framework's primary handle for plugging in a backend).  Callers
-/// supply the key via `id.borrow()` (or `id.as_str()`) on their newtype —
+/// typed identifier so the trait remains dyn-compatible
+/// ([`Journal`](crate::store::Journal), which wraps a `Box<dyn EventStore>`, is
+/// the framework's primary handle for plugging in a backend).  Callers supply
+/// the key via `id.borrow()` (or `id.as_str()`) on their newtype —
 /// `AggregateId` and `SagaId` both implement `Borrow<str>`.
+///
+/// # What an implementor owes beyond the clauses
+///
+/// [`Clone`], through the [`EventStoreClone`] supertrait. A store is
+/// distributed by being cloned rather than by being shared, so deriving
+/// `Clone` over the backend's own handle is what lets the framework hand the
+/// journal to every wiring point. Deriving it is the whole of it — the
+/// `clone_box` the erasure needs comes from the blanket implementation.
 #[async_trait]
-pub trait EventStore: Send + Sync {
+pub trait EventStore: EventStoreClone + Send + Sync {
     /// Appends `events` to the stream identified by `key`.
     ///
     /// The clauses below are the optimistic-concurrency-control (OCC) contract
@@ -187,23 +196,33 @@ pub trait EventStore: Send + Sync {
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError>;
 }
 
-/// A journal reached through an `Arc` is that journal.
+/// How a journal whose backend type has been erased is cloned.
 ///
-/// What this is for is naming a store that is not a cloneable value of its own
-/// — a trait object, or a backend handle a deployment shares — as a slot of an
-/// assembly: the `Arc` is the cloneable handle, and the clauses above are
-/// whatever the store behind it keeps.
-#[async_trait]
-impl<T: EventStore + ?Sized> EventStore for std::sync::Arc<T> {
-    async fn append(
-        &self,
-        key: &str,
-        events: Vec<AppendingEvent>,
-    ) -> Result<AppendOutcome, AppendError> {
-        T::append(self, key, events).await
-    }
+/// A supertrait of [`EventStore`] rather than a bound callers name: the
+/// blanket implementation below supplies it for every backend that derives
+/// [`Clone`], so an implementor writes nothing. What it buys is
+/// [`Journal`](crate::store::Journal) — a `Box<dyn EventStore>` the framework
+/// can clone, which is how the registered store is distributed once its type is
+/// out of the signature.
+///
+/// Cloning a boxed journal is therefore the *backend's* clone, one level down,
+/// which is what carries `PRV-1` through the erasure.
+pub trait EventStoreClone {
+    /// This store's own clone, boxed.
+    fn clone_box(&self) -> Box<dyn EventStore>;
+}
 
-    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        T::load(self, query).await
+impl<T> EventStoreClone for T
+where
+    T: EventStore + Clone + 'static,
+{
+    fn clone_box(&self) -> Box<dyn EventStore> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn EventStore> {
+    fn clone(&self) -> Self {
+        self.clone_box()
     }
 }

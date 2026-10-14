@@ -14,10 +14,8 @@
 //! stream the running model cannot account for never reaches
 //! [`Saga::handle`](crate::Saga::handle).
 
-use std::sync::Arc;
-
 use futures_util::StreamExt;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 
 use crate::consumed::ConsumedPositions;
@@ -51,7 +49,7 @@ pub(crate) struct ReplayOutcome {
 pub(crate) async fn replay<S: Saga>(
     saga_id: &SagaId,
     state: &mut S,
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     sequence: &mut u64,
 ) -> Result<ReplayOutcome, ()> {
     let journal = load_journal(saga_id, state, store, *sequence).await?;
@@ -78,7 +76,7 @@ pub(crate) async fn replay<S: Saga>(
 async fn load_journal<S: Saga>(
     saga_id: &SagaId,
     state: &mut S,
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     from_sequence: u64,
 ) -> Result<JournalState, ()> {
     let query = LoadQuery {

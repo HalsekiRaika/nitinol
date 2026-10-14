@@ -39,8 +39,6 @@
 //! tests in `nitinol-saga` run a supplier and the processes it supplies at
 //! once.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
@@ -48,7 +46,7 @@ use jiff::Timestamp;
 use nitinol_persistence::provider::{
     PersistenceProvider, ProjectionOffsetSlot, SagaOffsetSlot, SnapshotSlot, Store,
 };
-use nitinol_persistence::store::{EventStore, OffsetScope, OffsetStore, SnapshotStore};
+use nitinol_persistence::store::{Album, Journal, OffsetScope, OffsetStore};
 use nitinol_persistence::{AggregateId, LoadQuery, PersistedSnapshot};
 
 use crate::fixture::fact;
@@ -351,12 +349,7 @@ where
 // Staging and judging a clause
 
 /// An append a clause requires to be taken.
-async fn appended(
-    clause: &str,
-    store: &Arc<dyn EventStore>,
-    stream: &AggregateId,
-    payload: &'static [u8],
-) {
+async fn appended(clause: &str, store: &Journal, stream: &AggregateId, payload: &'static [u8]) {
     store
         .append(stream.as_str(), vec![fact(1, payload)])
         .await
@@ -370,7 +363,7 @@ async fn appended(
 }
 
 /// What a journal handle answers with for `stream`, in stored order.
-async fn payloads(clause: &str, store: &Arc<dyn EventStore>, stream: &AggregateId) -> Vec<Bytes> {
+async fn payloads(clause: &str, store: &Journal, stream: &AggregateId) -> Vec<Bytes> {
     let found: Vec<_> = store
         .load(LoadQuery::by_stream(stream))
         .await
@@ -397,7 +390,7 @@ async fn payloads(clause: &str, store: &Arc<dyn EventStore>, stream: &AggregateI
 /// A snapshot save a clause requires to be taken.
 async fn saved_snapshot(
     clause: &str,
-    store: &Arc<dyn SnapshotStore>,
+    store: &Album,
     aggregate: &AggregateId,
     sequence: u64,
     payload: &'static [u8],
@@ -421,7 +414,7 @@ async fn saved_snapshot(
 /// What a snapshot handle answers with for `aggregate`.
 async fn loaded_snapshot(
     clause: &str,
-    store: &Arc<dyn SnapshotStore>,
+    store: &Album,
     aggregate: &AggregateId,
 ) -> PersistedSnapshot {
     store
@@ -446,7 +439,7 @@ async fn loaded_snapshot(
 ///
 /// Every save the suite makes is a strict move forward under a key no other
 /// writer in the clause uses, which is what a correct consumer makes.
-async fn saved<Cs: OffsetStore>(clause: &str, store: &Arc<Cs>, scope: &OffsetScope, sequence: u64) {
+async fn saved<Cs: OffsetStore>(clause: &str, store: &Cs, scope: &OffsetScope, sequence: u64) {
     store
         .save(scope, sequence, None)
         .await
@@ -461,7 +454,7 @@ async fn saved<Cs: OffsetStore>(clause: &str, store: &Arc<Cs>, scope: &OffsetSco
 }
 
 /// What an offset slot answers with for `scope`.
-async fn held<Cs: OffsetStore>(clause: &str, store: &Arc<Cs>, scope: &OffsetScope) -> Option<u64> {
+async fn held<Cs: OffsetStore>(clause: &str, store: &Cs, scope: &OffsetScope) -> Option<u64> {
     store.load(scope).await.unwrap_or_else(|failure| {
         panic!(
             "{clause} is broken: loading the position filed under {:?} reported {failure}, and a \
@@ -481,7 +474,7 @@ async fn held<Cs: OffsetStore>(clause: &str, store: &Arc<Cs>, scope: &OffsetScop
 struct EventStoreSlot<'u, U>(&'u U);
 
 impl<U: ProviderUnderTest> StoreUnderTest for EventStoreSlot<'_, U> {
-    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn EventStore>> {
+    fn bring_up(&self) -> BoxFuture<'_, Journal> {
         Box::pin(async move { PersistenceProvider::new(self.0.bring_up().await).event_store() })
     }
 }
@@ -494,7 +487,7 @@ where
     U: ProviderUnderTest,
     U::Store: SnapshotSlot,
 {
-    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn SnapshotStore>> {
+    fn bring_up(&self) -> BoxFuture<'_, Album> {
         Box::pin(async move { PersistenceProvider::new(self.0.bring_up().await).snapshot_store() })
     }
 }
@@ -510,7 +503,7 @@ where
 {
     type Store = <U::Store as ProjectionOffsetSlot>::ProjectionOffsets;
 
-    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
         Box::pin(
             async move { PersistenceProvider::new(self.0.bring_up().await).projection_offsets() },
         )
@@ -528,7 +521,7 @@ where
 {
     type Store = <U::Store as SagaOffsetSlot>::SagaOffsets;
 
-    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>> {
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store> {
         Box::pin(async move { PersistenceProvider::new(self.0.bring_up().await).saga_offsets() })
     }
 }

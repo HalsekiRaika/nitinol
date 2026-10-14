@@ -36,7 +36,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -175,7 +175,7 @@ impl Saga for RecordingSaga {
 // Helpers
 
 async fn append<E: Event + Serialize>(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     upstream_key: &AggregateId,
     sequence: u64,
     event: &E,
@@ -245,9 +245,9 @@ async fn a_manager_decodes_each_source_once_and_routes_both_to_the_same_instance
 
     // Each source reads a stream key of its own, which is the ordinary shape:
     // two aggregates a coordinator watches.
-    let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let order_store = Journal::from(InMemoryEventStore::default());
     let order_key = AggregateId::new("mgr-multi-orders");
-    let stock_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let stock_store = Journal::from(InMemoryEventStore::default());
     let stock_key = AggregateId::new("mgr-multi-stock");
 
     for (index, order) in ORDERS.iter().enumerate() {
@@ -272,7 +272,7 @@ async fn a_manager_decodes_each_source_once_and_routes_both_to_the_same_instance
         .await;
     }
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
 
     let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -283,7 +283,7 @@ async fn a_manager_decodes_each_source_once_and_routes_both_to_the_same_instance
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
     let _manager_proxy =
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<RecordingSaga>::new(saga_store.clone(), move |_components| {
             spawned_for_producer.fetch_add(1, Ordering::SeqCst);
             RecordingSaga {
                 seen: Arc::clone(&seen_for_producer),

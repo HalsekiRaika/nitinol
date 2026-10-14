@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSystemExt};
@@ -179,7 +179,7 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(25);
 /// passivation then does is pinned in `saga_manager_passivation.rs`.
 const INSTANCE_PASSIVATION: Duration = Duration::from_secs(300);
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -225,7 +225,7 @@ async fn wait_until_handled(
 ///
 /// That row is the last of the batch the decision rides in, so waiting for it
 /// means the whole append has landed and the stream can be read in full.
-async fn wait_until_settled(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn wait_until_settled(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
     loop {
         let events = load_saga_events(store, saga_id).await;
@@ -247,14 +247,14 @@ async fn wait_until_settled(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Ve
 #[tokio::test]
 async fn single_constant_correlation_reproduces_the_resident_saga() {
     let ps = ProcessSystem::new().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&journal))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let journal = system.persistence().event_store();
 
     let order_id = AggregateId::new("mgr-degenerate-order");
     let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;

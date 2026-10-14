@@ -47,11 +47,10 @@ use common::{
 };
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Duration;
 
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaDeliveryId;
 
@@ -82,7 +81,13 @@ async fn a_restarted_delivery_host_completes_the_payslips_an_interrupted_fanout_
     // One store holds the payroll run's stream, the saga's journal and all 32
     // payslip streams; both incarnations below are wired to this same instance,
     // which is what makes the second one a continuation of the first one's state.
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    //
+    // The backend handle is kept because the second incarnation is wired with it
+    // directly, and `store` is the erased handle the assertions read through —
+    // one clone of one backend either way, which is what makes the two the one
+    // durable state.
+    let backend = InMemoryEventStore::default();
+    let store = Journal::from(backend.clone());
 
     // One saga-offset slot, handed to both incarnations under one
     // identifier: the second host is *the same host restarted*, so it resumes
@@ -103,17 +108,11 @@ async fn a_restarted_delivery_host_completes_the_payslips_an_interrupted_fanout_
     // Run 1 — the fan-out is cut off part-way.
 
     let unreachable = UnreachablePayslipStore::new(
-        Arc::clone(&store),
+        store.clone(),
         missing.iter().cloned().collect::<HashSet<String>>(),
     );
 
-    let first_run = spawn_world(
-        &run_id,
-        Arc::clone(&unreachable) as Arc<dyn EventStore>,
-        offsets.clone(),
-        &delivery_id,
-    )
-    .await;
+    let first_run = spawn_world(&run_id, unreachable.clone(), offsets.clone(), &delivery_id).await;
 
     first_run
         .payroll_run
@@ -199,7 +198,7 @@ async fn a_restarted_delivery_host_completes_the_payslips_an_interrupted_fanout_
 
     // Bound for the rest of the test: this handle owns the second incarnation's
     // `ProcessSystem`, and the assertions below observe the state it produces.
-    let _second_run = spawn_world(&run_id, Arc::clone(&store), offsets.clone(), &delivery_id).await;
+    let _second_run = spawn_world(&run_id, backend.clone(), offsets.clone(), &delivery_id).await;
 
     wait_for_issued(&store, &payslips, EMPLOYEE_COUNT, FANOUT_TIMEOUT).await;
 

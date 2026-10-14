@@ -56,7 +56,7 @@ use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -220,6 +220,7 @@ impl Saga for ViewSaga {
 /// Models a crash before the schedule fact lands: the dead letter reporting the
 /// failure still has to be writable, or the saga would hold the upstream record
 /// instead of moving on and the later probe would never arrive.
+#[derive(Clone)]
 struct FailScheduleAppendStore {
     inner: InMemoryEventStore,
     failing: Arc<AtomicBool>,
@@ -253,7 +254,7 @@ impl EventStore for FailScheduleAppendStore {
 
 const UPSTREAM: &str = "deadline-view-upstream";
 
-async fn append_probe(store: &Arc<dyn EventStore>, sequence: u64, set: Option<(&str, u64)>) {
+async fn append_probe(store: &Journal, sequence: u64, set: Option<(&str, u64)>) {
     let probe = Probe {
         set: set.map(|(name, after_millis)| ProbeSet {
             name: name.to_owned(),
@@ -277,7 +278,7 @@ async fn append_probe(store: &Arc<dyn EventStore>, sequence: u64, set: Option<(&
 }
 
 async fn seed_scheduled(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     sequence: u64,
     name: &str,
@@ -348,14 +349,14 @@ async fn wait_for_fires(fires: &Fires, expected: usize) -> Vec<String> {
 
 async fn spawn_view_saga(
     ps: &ProcessSystem,
-    saga_store: &Arc<dyn EventStore>,
-    upstream_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
+    upstream_store: &Journal,
     reports: &Reports,
     fires: &Fires,
 ) -> nitinol_saga::SagaManagerProxy<ViewSaga> {
     let reports = Arc::clone(reports);
     let fires = Arc::clone(fires);
-    SagaManagerProps::<ViewSaga>::new(Arc::clone(saga_store), move |components| ViewSaga {
+    SagaManagerProps::<ViewSaga>::new(saga_store.clone(), move |components| ViewSaga {
         deadline: components.deadline(),
         reports: Arc::clone(&reports),
         fires: Arc::clone(&fires),
@@ -374,10 +375,10 @@ async fn spawn_view_saga(
 /// before `Saga::handle` — which is what keeps the reports below counting only
 /// the probes the test asks about.
 async fn seed_an_inert_boot_probe(
-    saga_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
     saga_id: &SagaId,
     saga_sequence: u64,
-    upstream_store: &Arc<dyn EventStore>,
+    upstream_store: &Journal,
 ) {
     saga_store
         .append(
@@ -411,13 +412,13 @@ fn due(anchor_unix_millis: i64, after: Duration) -> jiff::Timestamp {
 async fn replay_restores_the_pending_deadline_view_from_the_journal() {
     let ps = ProcessSystem::new().await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let anchor = jiff::Timestamp::now().as_millisecond();
     let after = Duration::from_secs(10);
     seed_scheduled(&saga_store, &saga_id, 1, "far-off", after, anchor).await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_probe(&upstream_store, 1, None).await;
 
     let reports: Reports = Arc::new(Mutex::new(Vec::new()));
@@ -441,7 +442,7 @@ async fn replay_restores_the_pending_deadline_view_from_the_journal() {
 async fn a_fired_deadline_leaves_the_pending_view() {
     let ps = ProcessSystem::new().await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let anchor = jiff::Timestamp::now().as_millisecond();
     seed_scheduled(
@@ -457,7 +458,7 @@ async fn a_fired_deadline_leaves_the_pending_view() {
     // One already-consumed probe, so the instance this host fronts exists and
     // replays; it is dropped before `handle`, so the only report below is the
     // one the test asks for.
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     seed_an_inert_boot_probe(&saga_store, &saga_id, 2, &upstream_store).await;
     let reports: Reports = Arc::new(Mutex::new(Vec::new()));
     let fires: Fires = Arc::new(Mutex::new(Vec::new()));
@@ -489,12 +490,12 @@ async fn a_fired_deadline_leaves_the_pending_view() {
 async fn an_append_that_never_landed_leaves_the_pending_view_empty() {
     let ps = ProcessSystem::new().await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(FailScheduleAppendStore {
+    let saga_store = Journal::from(FailScheduleAppendStore {
         inner: InMemoryEventStore::default(),
         failing: Arc::new(AtomicBool::new(true)),
     });
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     // The first probe sets a deadline whose fact cannot land; the second reads
     // the view back.
     append_probe(&upstream_store, 1, Some(("never-landed", 10_000))).await;

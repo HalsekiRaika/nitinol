@@ -25,7 +25,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -109,12 +109,7 @@ impl Saga for PersistThenEndSaga {
     }
 }
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -134,7 +129,7 @@ async fn append_order_placed(
         .expect("append OrderPlaced must succeed");
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -151,11 +146,11 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("end-order");
     append_order_placed(&upstream_store, &order_id, 1, "FIRST").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(PERSIST_THEN_END_SAGA_ID);
     let handle_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let handled_first = Arc::new(Notify::new());
@@ -164,7 +159,7 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     let handled_first_clone = Arc::clone(&handled_first);
 
     let _saga_proxy =
-        SagaManagerProps::<PersistThenEndSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<PersistThenEndSaga>::new(saga_store.clone(), move |_components| {
             PersistThenEndSaga {
                 handle_count: Arc::clone(&handle_count_clone),
                 handled_first: Arc::clone(&handled_first_clone),

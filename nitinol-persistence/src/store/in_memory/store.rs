@@ -1,5 +1,6 @@
 use crate::provider::{ProjectionOffsetSlot, SagaOffsetSlot, SnapshotSlot, Store};
 use crate::store::in_memory::{InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore};
+use crate::store::{Album, Journal};
 
 /// The in-memory reference [`Store`]: every slot, over the reference
 /// implementations.
@@ -19,26 +20,35 @@ use crate::store::in_memory::{InMemoryEventStore, InMemoryOffsetStore, InMemoryS
 ///
 /// Intended for tests and examples; the stores it holds are not for production
 /// use.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct InMemoryStore {
-    events: InMemoryEventStore,
-    snapshots: InMemorySnapshotStore,
+    events: Journal,
+    snapshots: Album,
     projection_offsets: InMemoryOffsetStore,
     saga_offsets: InMemoryOffsetStore,
 }
 
-impl Store for InMemoryStore {
-    type Events = InMemoryEventStore;
+/// The two erased slots are erased here, once, so cloning the store clones the
+/// one handle each was built over rather than erasing a fresh backend per call.
+impl Default for InMemoryStore {
+    fn default() -> Self {
+        Self {
+            events: Journal::from(InMemoryEventStore::default()),
+            snapshots: Album::from(InMemorySnapshotStore::default()),
+            projection_offsets: InMemoryOffsetStore::default(),
+            saga_offsets: InMemoryOffsetStore::default(),
+        }
+    }
+}
 
-    fn events(&self) -> InMemoryEventStore {
+impl Store for InMemoryStore {
+    fn events(&self) -> Journal {
         self.events.clone()
     }
 }
 
 impl SnapshotSlot for InMemoryStore {
-    type Snapshots = InMemorySnapshotStore;
-
-    fn snapshots(&self) -> InMemorySnapshotStore {
+    fn snapshots(&self) -> Album {
         self.snapshots.clone()
     }
 }

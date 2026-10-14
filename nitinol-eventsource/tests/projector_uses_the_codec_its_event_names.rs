@@ -234,8 +234,8 @@ async fn seed(
 #[tokio::test]
 async fn each_subscribed_event_is_decoded_by_the_codec_it_names() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("named-projection-source");
 
     seed(
@@ -264,8 +264,8 @@ async fn each_subscribed_event_is_decoded_by_the_codec_it_names() {
 
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(

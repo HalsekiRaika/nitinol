@@ -3,8 +3,9 @@ use std::sync::Arc;
 use crate::projection::ProjectionId;
 use nitinol_contract::Aggregate;
 use nitinol_persistence::provider::{
-    DynStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
+    PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
 };
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use tokio::sync::OnceCell;
@@ -27,7 +28,7 @@ pub struct PersistenceUnset;
 /// is written — names this one type for every store. It reaches the same
 /// process system, the same aggregate registry and the same journal the system
 /// it was erased from does.
-pub type SystemHandle = EventSourceSystem<DynStore>;
+pub type SystemHandle = EventSourceSystem<Journal>;
 
 /// Props that carry no system, so the caller names the process system at the
 /// spawn.
@@ -299,13 +300,12 @@ impl<St: Store> EventSourceSystem<St> {
     /// The entry point that took one is gone:
     ///
     /// ```compile_fail
-    /// # use std::sync::Arc;
     /// # use nitinol_eventsource::system::EventSourceSystem;
-    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+    /// # use nitinol_persistence::store::InMemoryEventStore;
     /// # use nitinol_runtime::ProcessSystem;
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    /// # let store = InMemoryEventStore::default();
     /// // `with_event_store` does not exist: the stores come from a supplier
     /// let system = EventSourceSystem::builder(ps).with_event_store(store).build();
     /// # }
@@ -347,16 +347,31 @@ impl<St: Store> EventSourceSystem<St> {
     /// identity through the erased handle reaches the activation the original
     /// would.
     ///
-    /// Only the journal survives the erasure — [`DynStore`] holds no other slot
-    /// — so a slot a deployment did not supply stays a compile error rather than
-    /// becoming reachable through a handle that lost the type saying so.
+    /// Only the journal survives the erasure — a [`Journal`] *is* the store
+    /// holding the journal alone, and it holds no other slot — so a slot a
+    /// deployment did not supply stays a compile error rather than becoming
+    /// reachable through a handle that lost the type saying so:
+    ///
+    /// ```compile_fail
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// let system = EventSourceSystem::builder(ps)
+    ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+    ///     .build();
+    /// // the erased handle has no snapshot slot, whatever the store it came
+    /// // from supplied
+    /// system.erase_store().snapshot_persistor().await;
+    /// # }
+    /// ```
     pub fn erase_store(&self) -> SystemHandle {
         EventSourceSystem {
             ps: self.ps.clone(),
             registry: Arc::clone(&self.registry),
-            persistence: Arc::new(PersistenceProvider::new(DynStore::new(
-                self.persistence.store().clone(),
-            ))),
+            persistence: Arc::new(PersistenceProvider::new(self.persistence.event_store())),
             snapshot_persistor: Arc::clone(&self.snapshot_persistor),
         }
     }

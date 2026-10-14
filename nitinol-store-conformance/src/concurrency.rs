@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::LoadQuery;
 
 use crate::fixture;
@@ -59,7 +59,7 @@ async fn a_checkpoint_reader_observes_every_committed_event_exactly_once<
 
     let joins: Vec<_> = (0..WRITERS)
         .map(|writer| {
-            let backend = Arc::clone(&backend);
+            let backend = backend.clone();
             let committed = Arc::clone(&committed);
             let writing = Writing(Arc::clone(&writers_left));
             executor.spawn(Box::pin(async move {
@@ -156,7 +156,7 @@ impl Drop for Writing {
 /// Batches of one and of two alternate, so the commit unit the reader has to
 /// keep up with is not always a single event.
 async fn append_a_stream_of_its_own(
-    backend: Arc<dyn EventStore>,
+    backend: Journal,
     committed: Arc<Mutex<Vec<u64>>>,
     writer: usize,
 ) {

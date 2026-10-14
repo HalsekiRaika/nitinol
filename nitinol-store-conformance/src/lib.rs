@@ -50,13 +50,12 @@
 //! a green run of those.
 //!
 //! ```rust,ignore
-//! # use std::sync::Arc;
 //! # use futures_core::future::BoxFuture;
-//! # use nitinol_persistence::store::EventStore;
+//! # use nitinol_persistence::store::Journal;
 //! # use nitinol_store_conformance::{Executor, StoreUnderTest};
 //! # struct MyBackend;
 //! impl StoreUnderTest for MyBackend {
-//!     fn bring_up(&self) -> BoxFuture<'_, Arc<dyn EventStore>> {
+//!     fn bring_up(&self) -> BoxFuture<'_, Journal> {
 //!         Box::pin(async { /* a store of yours holding nothing */ })
 //!     }
 //! }

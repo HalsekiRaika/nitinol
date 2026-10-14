@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -108,7 +108,7 @@ impl Saga for RecordingSaga {
     }
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -133,7 +133,7 @@ fn decisions(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
 /// longer occupies its stream alone, so counting rows would return while the
 /// saga still owes a decision.
 async fn wait_for_decisions(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     expected: usize,
     timeout: Duration,
@@ -152,17 +152,17 @@ async fn wait_for_decisions(
 }
 
 #[tokio::test]
-async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
+async fn aggregate_and_saga_share_one_journal() {
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("direct-order");
     let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
@@ -175,11 +175,9 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     let done_for_producer = Arc::clone(&done);
 
     let _saga_proxy =
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&store), move |_components| {
-            RecordingSaga {
-                captured: Arc::clone(&captured_for_producer),
-                done: Arc::clone(&done_for_producer),
-            }
+        SagaManagerProps::<RecordingSaga>::new(store.clone(), move |_components| RecordingSaga {
+            captured: Arc::clone(&captured_for_producer),
+            done: Arc::clone(&done_for_producer),
         })
         .observing::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
@@ -240,15 +238,15 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
 #[tokio::test]
 async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("drop-proxy-order");
     let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
@@ -261,11 +259,9 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let done_for_producer = Arc::clone(&done);
 
     let saga_proxy =
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&store), move |_components| {
-            RecordingSaga {
-                captured: Arc::clone(&captured_for_producer),
-                done: Arc::clone(&done_for_producer),
-            }
+        SagaManagerProps::<RecordingSaga>::new(store.clone(), move |_components| RecordingSaga {
+            captured: Arc::clone(&captured_for_producer),
+            done: Arc::clone(&done_for_producer),
         })
         .observing::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
@@ -307,14 +303,14 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
 #[tokio::test]
 async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("replay-order");
     let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
@@ -327,11 +323,9 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let done_first = Arc::clone(&done);
 
     let saga_proxy =
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&store), move |_components| {
-            RecordingSaga {
-                captured: Arc::clone(&captured_first),
-                done: Arc::clone(&done_first),
-            }
+        SagaManagerProps::<RecordingSaga>::new(store.clone(), move |_components| RecordingSaga {
+            captured: Arc::clone(&captured_first),
+            done: Arc::clone(&done_first),
         })
         .observing::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())
@@ -357,11 +351,9 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let done2_for_producer = Arc::clone(&done2);
 
     let _saga_proxy2 =
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&store), move |_components| {
-            RecordingSaga {
-                captured: Arc::clone(&captured2),
-                done: Arc::clone(&done2_for_producer),
-            }
+        SagaManagerProps::<RecordingSaga>::new(store.clone(), move |_components| RecordingSaga {
+            captured: Arc::clone(&captured2),
+            done: Arc::clone(&done2_for_producer),
         })
         .observing::<OrderPlaced>(Subscription::stream(&store, &order_id))
         .spawn(system.process_system())

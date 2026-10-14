@@ -48,10 +48,9 @@
 mod delivery;
 use delivery::{DeliverySaga, RecordingEventStore, Triggered, TEST_POLL_INTERVAL};
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaManagerProps, SagaManagerProxy, Subscription};
@@ -76,7 +75,7 @@ const UPSTREAM_KEY: &str = "saga-subscription-poll-interval-upstream";
 /// while the window runs — a dropped `ProcessSystem` would take the poller down
 /// and make an interval look longer than it is.
 struct Observer {
-    recording: Arc<RecordingEventStore>,
+    recording: RecordingEventStore,
     _system: ProcessSystem,
     _manager: SagaManagerProxy<DeliverySaga>,
 }
@@ -85,14 +84,13 @@ struct Observer {
 /// that source's interval named by `interval` — or left unnamed by `None`.
 async fn observe(interval: Option<Duration>) -> Observer {
     let system = ProcessSystem::new().await;
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let upstream: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
     // A journal of its own, so the only store the clauses read is the one the
     // source polls.
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
 
     let key = AggregateId::new(UPSTREAM_KEY);
-    let subscription = Subscription::stream(&upstream, &key);
+    let subscription = Subscription::stream(recording.clone(), &key);
     let subscription = match interval {
         Some(interval) => subscription.with_poll_interval(interval),
         None => subscription,

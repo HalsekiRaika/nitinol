@@ -30,7 +30,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
@@ -114,9 +114,9 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 async fn spawn_writer(
     ps: &ProcessSystem,
     id: &AggregateId,
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id.clone(), Arc::clone(store))
+    AggregateProps::<Counter>::new(id.clone(), store.clone())
         .spawn(ps)
         .await
 }
@@ -141,7 +141,7 @@ async fn pin_replayed_state(proxy: &AggregateProxy<Counter>, expected: u64) {
 }
 
 /// Stream sequences stored under `id`, in ascending order.
-async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<u64> {
+async fn stored_sequences(store: &Journal, id: &AggregateId) -> Vec<u64> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await
@@ -181,7 +181,7 @@ async fn await_stopped(proxy: &AggregateProxy<Counter>) {
 async fn non_genesis_conflict_stops_the_losing_writer() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("conflict-non-genesis");
 
     let winner = spawn_writer(&ps, &id, &store).await;
@@ -232,7 +232,7 @@ async fn non_genesis_conflict_stops_the_losing_writer() {
 async fn a_tell_to_a_writer_stopped_by_a_conflict_is_refused() {
     // Given: the loser of the same race C-1 stops
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("conflict-non-genesis-tell");
 
     let winner = spawn_writer(&ps, &id, &store).await;
@@ -276,7 +276,7 @@ async fn genesis_conflict_is_answered_as_already_created() {
     // Given: both writers exist before anything is stored, so both address the
     // genesis sequence.
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("conflict-genesis-answer");
 
     let creator = spawn_writer(&ps, &id, &store).await;
@@ -310,7 +310,7 @@ async fn genesis_conflict_is_answered_as_already_created() {
 async fn genesis_conflict_leaves_the_writer_alive_and_unchanged() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("conflict-genesis-alive");
 
     let creator = spawn_writer(&ps, &id, &store).await;
@@ -346,7 +346,7 @@ async fn genesis_conflict_leaves_the_writer_alive_and_unchanged() {
 async fn genesis_conflict_does_not_advance_the_writer_sequence() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("conflict-genesis-sequence");
 
     let creator = spawn_writer(&ps, &id, &store).await;
@@ -391,13 +391,14 @@ async fn genesis_conflict_does_not_advance_the_writer_sequence() {
 async fn genesis_conflict_keeps_the_reference_on_its_activation() {
     // Given: a resolved reference parked at the genesis sequence
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .build(),
-        ))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("conflict-genesis-reference");
 
@@ -405,7 +406,7 @@ async fn genesis_conflict_keeps_the_reference_on_its_activation() {
     pin_replayed_state(&resolved, 0).await;
 
     // And: someone else creates the aggregate first
-    let creator = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
+    let creator = AggregateProps::<Counter>::new(id.clone(), store.clone())
         .spawn(system.process_system())
         .await;
     creator.ask(Increment).await.expect("genesis append");
@@ -438,16 +439,17 @@ async fn genesis_conflict_keeps_the_reference_on_its_activation() {
 /// backend for every call after — including its own retries by a later
 /// activation.  Models a transient replay failure (backend hiccup) rather
 /// than a permanently broken store.
+#[derive(Clone)]
 struct FailFirstLoadStore {
     inner: InMemoryEventStore,
-    fail_next_load: AtomicBool,
+    fail_next_load: Arc<AtomicBool>,
 }
 
 impl FailFirstLoadStore {
     fn new() -> Self {
         Self {
             inner: InMemoryEventStore::default(),
-            fail_next_load: AtomicBool::new(true),
+            fail_next_load: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -486,7 +488,7 @@ impl EventStore for FailFirstLoadStore {
 async fn replay_failure_does_not_masquerade_as_a_genesis_conflict() {
     // Given: the writer's own replay fails before anything is stored.
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(FailFirstLoadStore::new());
+    let store = Journal::from(FailFirstLoadStore::new());
     let id = AggregateId::new("conflict-genesis-replay-failure");
 
     let unreplayed = spawn_writer(&ps, &id, &store).await;
@@ -525,7 +527,7 @@ async fn replay_decode_failure_does_not_masquerade_as_a_genesis_conflict() {
     // Given: the stream already holds an event this writer's codec cannot
     // decode.
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("conflict-genesis-decode-failure");
     store
         .append(

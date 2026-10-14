@@ -93,8 +93,15 @@ use crate::snapshot::PersistedSnapshot;
 /// `nitinol-eventsource/tests/e2e_snapshot.rs` runs the restore-then-replay
 /// path.  A store shown to keep SNAP-1 … SNAP-4 has not thereby been shown to
 /// be driven correctly.
+///
+/// # What an implementor owes beyond the clauses
+///
+/// [`Clone`], through the [`SnapshotStoreClone`] supertrait, for the reason
+/// [`EventStore`](crate::store::EventStore) states: the store is distributed by
+/// being cloned, and deriving `Clone` is the whole of what an implementor
+/// writes.
 #[async_trait]
-pub trait SnapshotStore: Send + Sync {
+pub trait SnapshotStore: SnapshotStoreClone + Send + Sync {
     /// Stores `snapshot` as the state of its aggregate at its `sequence`.
     ///
     /// SNAP-2 and SNAP-3 are what a caller may rely on here: the save reads
@@ -112,17 +119,28 @@ pub trait SnapshotStore: Send + Sync {
     ) -> Result<Option<PersistedSnapshot>, SnapshotError>;
 }
 
-/// A snapshot store reached through an `Arc` is that store.
-#[async_trait]
-impl<T: SnapshotStore + ?Sized> SnapshotStore for std::sync::Arc<T> {
-    async fn save(&self, snapshot: PersistedSnapshot) -> Result<(), SnapshotError> {
-        T::save(self, snapshot).await
-    }
+/// How a snapshot store whose backend type has been erased is cloned.
+///
+/// The snapshot half of
+/// [`EventStoreClone`](crate::store::EventStoreClone), with the same shape and
+/// the same reason: it is what makes [`Album`](crate::store::Album) cloneable
+/// by asking the backend to clone itself.
+pub trait SnapshotStoreClone {
+    /// This store's own clone, boxed.
+    fn clone_box(&self) -> Box<dyn SnapshotStore>;
+}
 
-    async fn load_latest(
-        &self,
-        aggregate_id: &AggregateId,
-    ) -> Result<Option<PersistedSnapshot>, SnapshotError> {
-        T::load_latest(self, aggregate_id).await
+impl<T> SnapshotStoreClone for T
+where
+    T: SnapshotStore + Clone + 'static,
+{
+    fn clone_box(&self) -> Box<dyn SnapshotStore> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn SnapshotStore> {
+    fn clone(&self) -> Self {
+        self.clone_box()
     }
 }

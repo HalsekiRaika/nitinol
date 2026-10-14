@@ -21,10 +21,9 @@ use delivery::{
     RecordingEventStore, RecordingOffsetStore, TEST_POLL_INTERVAL,
 };
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_saga::SagaDeliveryProps;
 
 /// Deliberately far from any framework default, and far enough above it that a
@@ -40,12 +39,12 @@ async fn the_configured_interval_is_the_interval_between_queries() {
     // Given: nothing to deliver, so the gaps are the poll interval and not the
     // time taken by work.
     let (system, _aggregates) = in_memory_system().await;
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let journal: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
 
     // When
-    let _host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingOffsetStore>>::new(
+    let _host = SagaDeliveryProps::<DeliverySaga, RecordingOffsetStore>::new(
         &delivery_persistence(&journal, &offsets),
     )
     .with_delivery_id(delivery_id())
@@ -75,12 +74,12 @@ async fn the_configured_interval_is_the_interval_between_queries() {
 async fn a_shorter_interval_polls_more_often_in_the_same_window() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let journal: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
     tokio::time::sleep(WINDOW).await;
 
     // Then

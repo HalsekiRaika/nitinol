@@ -45,7 +45,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
@@ -131,6 +131,7 @@ type Batches = Arc<Mutex<Vec<Vec<RecordedEvent>>>>;
 
 /// `EventStore` decorator that appends one entry to `batches` per successful
 /// `append` call, preserving the events of that call as a group.
+#[derive(Clone)]
 struct RecordingStore {
     inner: InMemoryEventStore,
     batches: Batches,
@@ -644,12 +645,7 @@ impl Saga for PersistThenEndSaga {
 
 // Fixtures
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -777,22 +773,22 @@ fn assert_single_atomic_batch(recorded: &[Vec<RecordedEvent>], shape: &str) {
 /// the assertions stay in each test.
 struct Fixture {
     ps: ProcessSystem,
-    upstream_store: Arc<dyn EventStore>,
+    upstream_store: Journal,
     order_id: AggregateId,
     batches: Batches,
-    saga_store: Arc<dyn EventStore>,
+    saga_store: Journal,
     handled: Arc<Notify>,
 }
 
 async fn fixture(stream: &str, sku: &str) -> Fixture {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new(stream);
     append_order_placed(&upstream_store, &order_id, 1, sku).await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore::new(Arc::clone(&batches)));
+    let saga_store = Journal::from(RecordingStore::new(Arc::clone(&batches)));
 
     Fixture {
         ps,
@@ -829,7 +825,7 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
 
     let handled = Arc::clone(&f.handled);
     let _manager_proxy = SagaManagerProps::<PersistCombineScheduleSaga>::new(
-        Arc::clone(&f.saga_store),
+        f.saga_store.clone(),
         move |components| PersistCombineScheduleSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
@@ -860,7 +856,7 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
 
     let handled = Arc::clone(&f.handled);
     let _manager_proxy = SagaManagerProps::<PersistSequencedWithScheduleSaga>::new(
-        Arc::clone(&f.saga_store),
+        f.saga_store.clone(),
         move |components| PersistSequencedWithScheduleSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
@@ -889,7 +885,7 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
 
     let handled = Arc::clone(&f.handled);
     let _manager_proxy = SagaManagerProps::<PersistSequencedWithEmptyNestedSequenceSaga>::new(
-        Arc::clone(&f.saga_store),
+        f.saga_store.clone(),
         move |components| PersistSequencedWithEmptyNestedSequenceSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
@@ -921,7 +917,7 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
 
     let handled = Arc::clone(&f.handled);
     let _manager_proxy = SagaManagerProps::<PersistSequencedWithNoneLeafSaga>::new(
-        Arc::clone(&f.saga_store),
+        f.saga_store.clone(),
         move |components| PersistSequencedWithNoneLeafSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
@@ -951,7 +947,7 @@ async fn combined_schedules_keep_left_to_right_order_inside_the_single_batch() {
 
     let handled = Arc::clone(&f.handled);
     let _manager_proxy = SagaManagerProps::<PersistCombineTwoSchedulesSaga>::new(
-        Arc::clone(&f.saga_store),
+        f.saga_store.clone(),
         move |components| PersistCombineTwoSchedulesSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
@@ -1010,7 +1006,7 @@ async fn a_cancellation_is_a_hard_boundary_the_fold_does_not_cross() {
 
     let handled = Arc::clone(&f.handled);
     let _manager_proxy =
-        SagaManagerProps::<PersistCancelSaga>::new(Arc::clone(&f.saga_store), move |components| {
+        SagaManagerProps::<PersistCancelSaga>::new(f.saga_store.clone(), move |components| {
             PersistCancelSaga {
                 deadline: components.deadline(),
                 handled: Arc::clone(&handled),
@@ -1074,15 +1070,15 @@ async fn end_is_a_hard_boundary_the_fold_does_not_cross() {
     let f = fixture("combine-end-order", "SKU-END").await;
 
     let handled = Arc::clone(&f.handled);
-    let _manager_proxy = SagaManagerProps::<PersistThenEndSaga>::new(
-        Arc::clone(&f.saga_store),
-        move |_components| PersistThenEndSaga {
-            handled: Arc::clone(&handled),
-        },
-    )
-    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
-    .spawn(&f.ps)
-    .await;
+    let _manager_proxy =
+        SagaManagerProps::<PersistThenEndSaga>::new(f.saga_store.clone(), move |_components| {
+            PersistThenEndSaga {
+                handled: Arc::clone(&handled),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
+        .spawn(&f.ps)
+        .await;
 
     // domain event + the `Ended` lifecycle fact + the consumed position.
     let recorded = f.observe(3).await;

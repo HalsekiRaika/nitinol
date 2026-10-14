@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::LoadedEvent;
 use nitinol_runtime::error::SpawnError;
 use nitinol_runtime::ident::ProcessName;
@@ -27,22 +27,21 @@ pub struct CursorUnset;
 pub struct CursorSet(SequenceCursor);
 
 /// Builder + spawn entry-point for an at-least-once event stream backed by an
-/// [`EventStore`] poller.
+/// [`EventStore`](nitinol_persistence::store::EventStore) poller.
 ///
 /// Typestate guarantees that `spawn` is only callable once a `SequenceCursor`
 /// has been supplied via [`cursor`][DurableStream::cursor].  See the
 /// `compile_fail` doctest below.
 ///
 /// ```compile_fail
-/// # use std::sync::Arc;
 /// # use nitinol_eventsource::DurableStream;
-/// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+/// # use nitinol_persistence::store::InMemoryEventStore;
 /// # use nitinol_persistence::LoadedEvent;
 /// # use nitinol_runtime::ident::ProcessName;
 /// # use nitinol_runtime::ProcessSystem;
 /// # async fn bad() {
 /// let system = ProcessSystem::new().await;
-/// let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+/// let store = InMemoryEventStore::default();
 /// // compile error: spawn() requires CursorSet — call cursor(...) first
 /// DurableStream::<()>::new(ProcessName::new("topic"), store, |_: LoadedEvent| None)
 ///     .spawn(&system)
@@ -52,7 +51,7 @@ pub struct CursorSet(SequenceCursor);
 /// ```
 pub struct DurableStream<T, S = CursorUnset> {
     topic: ProcessName,
-    store: Arc<dyn EventStore>,
+    store: Journal,
     transform: TransformFn<T>,
     poll_interval: Duration,
     cursor: S,
@@ -72,13 +71,17 @@ where
     /// `transform` maps each loaded event into the stream's payload type.
     /// Returning `None` skips the event but advances the cursor, which
     /// prevents the same payload from being re-loaded on every poll.
-    pub fn new<F>(topic: ProcessName, store: Arc<dyn EventStore>, transform: F) -> Self
+    ///
+    /// The journal arrives as whatever the caller holds: a backend handle, a
+    /// [`Journal`] a supplier answered with, or a reference to one the caller
+    /// keeps.
+    pub fn new<F>(topic: ProcessName, store: impl Into<Journal>, transform: F) -> Self
     where
         F: Fn(LoadedEvent) -> Option<T> + Send + Sync + 'static,
     {
         Self {
             topic,
-            store,
+            store: store.into(),
             transform: Arc::new(transform),
             poll_interval: super::DEFAULT_POLL_INTERVAL,
             cursor: CursorUnset,
@@ -126,11 +129,11 @@ where
             ..
         } = self;
 
-        let proxy_store = Arc::clone(&store);
+        let proxy_store = store.clone();
         let proxy_transform = Arc::clone(&transform);
 
         let start_open = Arc::new(AtomicBool::new(false));
-        let producer_store = Arc::clone(&store);
+        let producer_store = store;
         let producer_transform = Arc::clone(&transform);
         let producer_publisher = publisher.clone();
         let producer_start_open = Arc::clone(&start_open);
@@ -143,7 +146,7 @@ where
         let driver = IntervalDriver::<DurablePollerProcess<T>>::new(poll_interval);
         let poller_name = proxy::shared_poller_name(stream_proxy.pid());
         let props = Props::new(move || DurablePollerProcess {
-            store: Arc::clone(&producer_store),
+            store: producer_store.clone(),
             publisher: producer_publisher.clone(),
             transform: Arc::clone(&producer_transform),
             cursor: producer_cursor.clone(),

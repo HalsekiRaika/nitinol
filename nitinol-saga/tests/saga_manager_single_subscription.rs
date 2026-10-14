@@ -24,7 +24,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -129,7 +129,7 @@ impl Saga for RecordingSaga {
 // Helpers
 
 async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     upstream_key: &AggregateId,
     sequence: u64,
     order: &str,
@@ -192,14 +192,14 @@ async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-single-orders");
     for (index, order) in UPSTREAM_ORDERS.iter().enumerate() {
         let sequence = u64::try_from(index + 1).expect("test sequence fits in u64");
         append_order_placed(&upstream_store, &upstream_key, sequence, order).await;
     }
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
 
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -210,7 +210,7 @@ async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
     let _manager_proxy =
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<RecordingSaga>::new(saga_store.clone(), move |_components| {
             spawned_for_producer.fetch_add(1, Ordering::SeqCst);
             RecordingSaga {
                 handled: Arc::clone(&handled_for_producer),

@@ -96,13 +96,13 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 #[tokio::test]
 async fn catchup_all_events_processed_from_empty_offset() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("cu-all-agg");
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
 
@@ -145,14 +145,14 @@ async fn catchup_all_events_processed_from_empty_offset() {
 #[tokio::test]
 async fn catchup_skips_events_before_offset() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("cu-skip-agg");
     let projection_id = ProjectionId::new("cu-skip");
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
 
@@ -201,8 +201,8 @@ async fn catchup_skips_events_before_offset() {
 #[tokio::test]
 async fn catchup_empty_store_project_never_called() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
 
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
@@ -238,14 +238,14 @@ async fn catchup_empty_store_project_never_called() {
 #[tokio::test]
 async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_a = AggregateId::new("cu-multi-a");
     let agg_b = AggregateId::new("cu-multi-b");
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
 
@@ -285,13 +285,13 @@ async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
 #[tokio::test]
 async fn catchup_then_live_append_is_projected_via_durable_stream() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("cu-then-live-agg");
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
 

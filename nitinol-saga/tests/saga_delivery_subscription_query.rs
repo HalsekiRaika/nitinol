@@ -24,10 +24,8 @@ use delivery::{
     Decided, DeliverySaga, RecordingEventStore, RecordingOffsetStore,
 };
 
-use std::sync::Arc;
-
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_saga::SagaId;
 
@@ -35,8 +33,8 @@ use nitinol_saga::SagaId;
 async fn every_query_names_the_event_type_and_the_position() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let journal: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-subscription-query");
@@ -44,7 +42,7 @@ async fn every_query_names_the_event_type_and_the_position() {
     append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
     let queries = wait_until_loads(&recording, 3, "the host must poll the store").await;
 
     // Then
@@ -80,8 +78,8 @@ async fn every_query_names_the_event_type_and_the_position() {
 async fn the_position_asked_for_follows_the_progress_recorded() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let journal: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-query-follows-progress");
@@ -89,7 +87,7 @@ async fn the_position_asked_for_follows_the_progress_recorded() {
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
     wait_until_stored(
         &offsets,
         &scope_of(0),

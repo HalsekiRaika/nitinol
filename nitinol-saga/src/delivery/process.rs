@@ -5,7 +5,6 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{FutureExt, StreamExt};
@@ -13,7 +12,7 @@ use futures_util::{FutureExt, StreamExt};
 use nitinol_eventsource::codec;
 use nitinol_eventsource::system::SystemHandle;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, OffsetScope, OffsetStore};
+use nitinol_persistence::store::{Journal, OffsetScope, OffsetStore};
 use nitinol_persistence::{LoadQuery, LoadedEvent};
 use nitinol_runtime::error::HandlerError;
 use nitinol_runtime::process::{Driver, Process, ProcessContext, Receive};
@@ -68,8 +67,8 @@ pub struct SagaDeliveryPartition<S: Saga, Cs: OffsetStore> {
     partition: usize,
     partitions: NonZeroUsize,
     scope: OffsetScope,
-    journal: Arc<dyn EventStore>,
-    offsets: Arc<Cs>,
+    journal: Journal,
+    offsets: Cs,
     system: SystemHandle,
     poll_interval: Duration,
     /// Absent until the recorded progress has been read.
@@ -95,8 +94,8 @@ where
         delivery_id: SagaDeliveryId,
         partition: usize,
         partitions: NonZeroUsize,
-        journal: Arc<dyn EventStore>,
-        offsets: Arc<Cs>,
+        journal: Journal,
+        offsets: Cs,
         system: SystemHandle,
         poll_interval: Duration,
     ) -> Self {

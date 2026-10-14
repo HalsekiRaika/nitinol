@@ -32,7 +32,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -105,12 +105,7 @@ impl Saga for RecordingSaga {
     }
 }
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -162,7 +157,7 @@ async fn wait_for_handled(
 
 /// SKUs of the saga's own events on its own stream, decoded with the same JSON
 /// wire format the codec `ReservationRequested` names produces.
-async fn persisted_skus(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<String> {
+async fn persisted_skus(store: &Journal, saga_id: &SagaId) -> Vec<String> {
     let events: Vec<LoadedEvent> = store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -181,7 +176,7 @@ async fn persisted_skus(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<St
         .collect()
 }
 
-async fn wait_for_persisted(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<String> {
+async fn wait_for_persisted(store: &Journal, saga_id: &SagaId) -> Vec<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         let skus = persisted_skus(store, saga_id).await;
@@ -198,16 +193,16 @@ async fn wait_for_persisted(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Ve
 #[tokio::test]
 async fn host_uses_the_codecs_its_events_name() {
     let ps = ProcessSystem::new().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&journal))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let journal = system.persistence().event_store();
 
-    let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let order_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-host-entry-order");
 
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
@@ -251,7 +246,7 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let order_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-host-entry-catchup-order");
     append_order_placed(&order_store, &order_id, 1, "BEFORE-1").await;
     append_order_placed(&order_store, &order_id, 2, "BEFORE-2").await;
@@ -285,7 +280,7 @@ async fn stream_subscription_after_override_skips_records_up_to_that_position() 
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let order_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-host-entry-resume-order");
     append_order_placed(&order_store, &order_id, 1, "SKIPPED").await;
     append_order_placed(&order_store, &order_id, 2, "DELIVERED").await;

@@ -3,11 +3,11 @@
 //! A backend may implement [`Store`] itself — the traits are public and
 //! [`InMemoryStore`](crate::store::InMemoryStore) is one — but mixing backends,
 //! or naming a handle a deployment already holds, is what [`CustomStore`] is
-//! for: one type parameter per slot, moved from [`Unprovided`] to the handle's
-//! own type by the builder call that names it.
+//! for: each builder call names one handle and moves that slot out of
+//! [`Unprovided`], so which slots a store supplies is settled in the type.
 
 use crate::provider::{ProjectionOffsetSlot, SagaOffsetSlot, SnapshotSlot, Store};
-use crate::store::{EventStore, OffsetStore, SnapshotStore};
+use crate::store::{Album, EventStore, Journal, OffsetStore, SnapshotStore};
 
 /// A slot no handle has been named for.
 ///
@@ -27,21 +27,29 @@ pub struct EventStoreUnset;
 
 /// A [`Store`] assembled from named handles.
 ///
-/// Each type parameter is the handle its slot was named with, or [`Unprovided`]
-/// where none was. Nothing fills a slot that was not named, which is `PRV-3`:
-/// a mixture is written down or it does not happen.
+/// Each type parameter records whether its slot was named — [`Unprovided`]
+/// where none was — and nothing fills a slot that was not named, which is
+/// `PRV-3`: a mixture is written down or it does not happen.
+///
+/// There is no parameter for the journal, and the snapshot slot's is
+/// [`Album`] rather than the backend it was named with. Those two are erased
+/// where the handle is named, so the backend's type is written once, in the
+/// builder call, rather than carried through every signature that mentions the
+/// assembled store. The offset slots keep the backend's own type because
+/// [`OffsetStore::Tx`] has to stay visible to a projector settling its update
+/// and its position together.
 ///
 /// Cloning this clones each handle it holds, so it reaches the regions those
 /// handles name — never regions of its own.
 #[derive(Clone)]
-pub struct CustomStore<E, S = Unprovided, P = Unprovided, Sg = Unprovided> {
-    events: E,
+pub struct CustomStore<S = Unprovided, P = Unprovided, Sg = Unprovided> {
+    events: Journal,
     snapshots: S,
     projection_offsets: P,
     saga_offsets: Sg,
 }
 
-impl CustomStore<EventStoreUnset> {
+impl CustomStore {
     /// Begin assembling a store, with no handle named yet.
     pub fn builder() -> CustomStoreBuilder {
         CustomStoreBuilder {
@@ -59,14 +67,14 @@ impl CustomStore<EventStoreUnset> {
 /// compile error and the handle a slot answers with is settled in one place:
 ///
 /// ```compile_fail
-/// # use std::sync::Arc;
 /// # use nitinol_persistence::provider::CustomStore;
 /// # use nitinol_persistence::store::{InMemoryOffsetStore, InMemoryEventStore};
-/// // the snapshot slot has already moved, so there is no second `snapshot`
+/// // the projection slot has already moved, so there is no second
+/// // `projection_offsets`
 /// CustomStore::builder()
 ///     .eventstore(InMemoryEventStore::default())
-///     .projection_offsets(Arc::new(InMemoryOffsetStore::default()))
-///     .projection_offsets(Arc::new(InMemoryOffsetStore::default()))
+///     .projection_offsets(InMemoryOffsetStore::default())
+///     .projection_offsets(InMemoryOffsetStore::default())
 ///     .build();
 /// ```
 ///
@@ -91,15 +99,16 @@ pub struct CustomStoreBuilder<E = EventStoreUnset, S = Unprovided, P = Unprovide
 impl<S, P, Sg> CustomStoreBuilder<EventStoreUnset, S, P, Sg> {
     /// Name `events` as the journal this deployment's streams are kept in.
     ///
-    /// A handle that is not a cloneable value of its own is named through an
-    /// `Arc`, which the store traits' blanket implementations make a handle in
-    /// its own right.
-    pub fn eventstore<E>(self, events: E) -> CustomStoreBuilder<E, S, P, Sg>
+    /// The backend is handed over as itself; it is erased here, so this is the
+    /// one place its type is written. `Clone` is not named because
+    /// [`EventStore`] requires it — a backend that could not be cloned could
+    /// not be distributed.
+    pub fn eventstore<E>(self, events: E) -> CustomStoreBuilder<Journal, S, P, Sg>
     where
-        E: EventStore + Clone + 'static,
+        E: EventStore + 'static,
     {
         CustomStoreBuilder {
-            events,
+            events: Journal::from(events),
             snapshots: self.snapshots,
             projection_offsets: self.projection_offsets,
             saga_offsets: self.saga_offsets,
@@ -110,13 +119,15 @@ impl<S, P, Sg> CustomStoreBuilder<EventStoreUnset, S, P, Sg> {
 impl<E, P, Sg> CustomStoreBuilder<E, Unprovided, P, Sg> {
     /// Name `snapshots` as where this deployment's aggregate snapshots are
     /// kept.
-    pub fn snapshot<S>(self, snapshots: S) -> CustomStoreBuilder<E, S, P, Sg>
+    ///
+    /// Erased here as the journal is, and for the same reason.
+    pub fn snapshot<S>(self, snapshots: S) -> CustomStoreBuilder<E, Album, P, Sg>
     where
-        S: SnapshotStore + Clone + 'static,
+        S: SnapshotStore + 'static,
     {
         CustomStoreBuilder {
             events: self.events,
-            snapshots,
+            snapshots: Album::from(snapshots),
             projection_offsets: self.projection_offsets,
             saga_offsets: self.saga_offsets,
         }
@@ -183,15 +194,14 @@ impl<E, S> CustomStoreBuilder<E, S, Unprovided, Unprovided> {
     }
 }
 
-impl<E, S, P, Sg> CustomStoreBuilder<E, S, P, Sg>
+impl<S, P, Sg> CustomStoreBuilder<Journal, S, P, Sg>
 where
-    E: EventStore + Clone + 'static,
     S: Clone + Send + Sync + 'static,
     P: Clone + Send + Sync + 'static,
     Sg: Clone + Send + Sync + 'static,
 {
     /// The assembled store.
-    pub fn build(self) -> CustomStore<E, S, P, Sg> {
+    pub fn build(self) -> CustomStore<S, P, Sg> {
         CustomStore {
             events: self.events,
             snapshots: self.snapshots,
@@ -201,37 +211,29 @@ where
     }
 }
 
-impl<E, S, P, Sg> Store for CustomStore<E, S, P, Sg>
+impl<S, P, Sg> Store for CustomStore<S, P, Sg>
 where
-    E: EventStore + Clone + 'static,
     S: Clone + Send + Sync + 'static,
     P: Clone + Send + Sync + 'static,
     Sg: Clone + Send + Sync + 'static,
 {
-    type Events = E;
-
-    fn events(&self) -> E {
+    fn events(&self) -> Journal {
         self.events.clone()
     }
 }
 
-impl<E, S, P, Sg> SnapshotSlot for CustomStore<E, S, P, Sg>
+impl<P, Sg> SnapshotSlot for CustomStore<Album, P, Sg>
 where
-    E: EventStore + Clone + 'static,
-    S: SnapshotStore + Clone + 'static,
     P: Clone + Send + Sync + 'static,
     Sg: Clone + Send + Sync + 'static,
 {
-    type Snapshots = S;
-
-    fn snapshots(&self) -> S {
+    fn snapshots(&self) -> Album {
         self.snapshots.clone()
     }
 }
 
-impl<E, S, P, Sg> ProjectionOffsetSlot for CustomStore<E, S, P, Sg>
+impl<S, P, Sg> ProjectionOffsetSlot for CustomStore<S, P, Sg>
 where
-    E: EventStore + Clone + 'static,
     S: Clone + Send + Sync + 'static,
     P: OffsetStore + Clone + 'static,
     Sg: Clone + Send + Sync + 'static,
@@ -243,9 +245,8 @@ where
     }
 }
 
-impl<E, S, P, Sg> SagaOffsetSlot for CustomStore<E, S, P, Sg>
+impl<S, P, Sg> SagaOffsetSlot for CustomStore<S, P, Sg>
 where
-    E: EventStore + Clone + 'static,
     S: Clone + Send + Sync + 'static,
     P: Clone + Send + Sync + 'static,
     Sg: OffsetStore + Clone + 'static,

@@ -29,7 +29,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -115,12 +115,7 @@ impl Saga for FanoutSaga {
 
 // Helpers
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    key: &AggregateId,
-    sequence: u64,
-    order: &str,
-) {
+async fn append_order_placed(store: &Journal, key: &AggregateId, sequence: u64, order: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         order: order.to_owned(),
     })
@@ -171,7 +166,7 @@ async fn wait_for_handled(
 }
 
 /// Orders of the instance's own events on its own stream in `store`.
-async fn instance_persisted_orders(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<String> {
+async fn instance_persisted_orders(store: &Journal, saga_id: &SagaId) -> Vec<String> {
     let loaded: Vec<LoadedEvent> = store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -192,7 +187,7 @@ async fn instance_persisted_orders(store: &Arc<dyn EventStore>, saga_id: &SagaId
         .collect()
 }
 
-async fn wait_for_instance_persisted(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<String> {
+async fn wait_for_instance_persisted(store: &Journal, saga_id: &SagaId) -> Vec<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         let orders = instance_persisted_orders(store, saga_id).await;
@@ -215,14 +210,14 @@ async fn wait_for_instance_persisted(store: &Arc<dyn EventStore>, saga_id: &Saga
 async fn the_host_uses_the_providers_event_store_for_upstream_and_journal() {
     // Given: one provider, whose journal holds the upstream stream
     let ps = ProcessSystem::new().await;
-    let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&default_store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let default_store = system.persistence().event_store();
 
     let upstream_key = AggregateId::new("mgr-default-store-orders");
 
@@ -270,15 +265,15 @@ async fn the_host_uses_the_providers_event_store_for_upstream_and_journal() {
 async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls() {
     // Given: the same stream key exists in both stores, holding different records
     let ps = ProcessSystem::new().await;
-    let provider_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let named_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let named_store = Journal::from(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&provider_store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let provider_store = system.persistence().event_store();
 
     let upstream_key = AggregateId::new("mgr-override-store-orders");
     // Seeded before the spawn so a subscription that wrongly resolved to the

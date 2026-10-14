@@ -16,10 +16,9 @@
 //! depends on an interpreter agreeing with its own account of what it did.
 //!
 //! ```rust,ignore
-//! # use std::sync::Arc;
 //! # use futures_core::future::BoxFuture;
 //! # use nitinol_conformance::{Interpretation, Interpreter, Ledger};
-//! # use nitinol_persistence::store::EventStore;
+//! # use nitinol_persistence::store::Journal;
 //! # use nitinol_persistence::AggregateId;
 //! # struct MyMachinery;
 //! # struct MyInterpreter;
@@ -29,7 +28,7 @@
 //!     fn interpret(
 //!         &self,
 //!         ledger: AggregateId,
-//!         store: Arc<dyn EventStore>,
+//!         store: Journal,
 //!     ) -> BoxFuture<'_, Self::Interpreter> {
 //!         Box::pin(async move { /* bring one `Ledger` up on `store` */ })
 //!     }

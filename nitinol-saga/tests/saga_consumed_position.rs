@@ -92,7 +92,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -403,6 +403,7 @@ type Batches = Arc<Mutex<Vec<Vec<RecordedEvent>>>>;
 
 /// Records one entry per successful `append`, preserving the batch boundary —
 /// the only place the atomicity of "decision + position" is observable.
+#[derive(Clone)]
 struct RecordingStore {
     inner: InMemoryEventStore,
     batches: Batches,
@@ -449,21 +450,25 @@ impl EventStore for RecordingStore {
 /// deterministic — the attempt under test exhausts it, and the redelivery that
 /// its failure causes meets a store that works, so each assertion below is
 /// about a settled stream rather than a moment in a retry loop.
+#[derive(Clone)]
 struct FailFirstAppendsStore {
     inner: InMemoryEventStore,
     reject: fn(&[AppendingEvent]) -> bool,
-    budget: AtomicU64,
+    /// Shared, so a clone of this handle spends the same budget: a store that
+    /// refused `budget` appends per handle would refuse more of them than the
+    /// clause names.
+    budget: Arc<AtomicU64>,
 }
 
 impl FailFirstAppendsStore {
     /// A saga store that refuses the first `budget` appends `reject` answers
-    /// `true` for.  Handed back as the trait object a saga is spawned with,
+    /// `true` for.  Handed back as the erased journal a saga is spawned with,
     /// because that is the only shape a test ever needs it in.
-    fn refusing(reject: fn(&[AppendingEvent]) -> bool, budget: u64) -> Arc<dyn EventStore> {
-        Arc::new(Self {
+    fn refusing(reject: fn(&[AppendingEvent]) -> bool, budget: u64) -> Journal {
+        Journal::from(Self {
             inner: InMemoryEventStore::default(),
             reject,
-            budget: AtomicU64::new(budget),
+            budget: Arc::new(AtomicU64::new(budget)),
         })
     }
 
@@ -538,6 +543,7 @@ fn carries_a_schedule_marker(events: &[AppendingEvent]) -> bool {
 /// saga more than once; this reproduces that deterministically, without the
 /// restart the other tests use, so the position the interpreter holds in
 /// memory is what the second delivery is judged against.
+#[derive(Clone)]
 struct DuplicatingStore {
     inner: InMemoryEventStore,
 }
@@ -567,6 +573,7 @@ type Queries = Arc<Mutex<Vec<LoadQuery>>>;
 /// Records the [`LoadQuery`] of every poll, so the position a fresh
 /// incarnation *asks upstream from* — not merely what it does with what
 /// arrives — is observable.
+#[derive(Clone)]
 struct QueryRecordingStore {
     inner: InMemoryEventStore,
     queries: Queries,
@@ -601,12 +608,7 @@ fn take_queries(queries: &Queries) -> Vec<LoadQuery> {
 
 // Store helpers
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    source: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, source: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -629,7 +631,7 @@ async fn append_order_placed(
 /// Write a raw row onto the saga's own stream, the way a previous incarnation
 /// would have left it behind.
 async fn seed_saga_row(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     sequence: u64,
     event_type: EventType,
@@ -665,7 +667,7 @@ fn consumed(source: &AggregateId, sequence: u64) -> ConsumedFactPayload {
 }
 
 async fn seed_consumed_position(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     sequence: u64,
     source: &AggregateId,
@@ -689,11 +691,7 @@ async fn seed_consumed_position(
 /// payload, so the codec's `decode` call fails the same way a corrupted wire
 /// record would — exercising the source transform's decode-failure path
 /// instead of its decoded one.
-async fn append_corrupt_order_placed(
-    store: &Arc<dyn EventStore>,
-    source: &AggregateId,
-    sequence: u64,
-) {
+async fn append_corrupt_order_placed(store: &Journal, source: &AggregateId, sequence: u64) {
     store
         .append(
             source.as_str(),
@@ -708,7 +706,7 @@ async fn append_corrupt_order_placed(
         .expect("append corrupt OrderPlaced must succeed");
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -820,7 +818,7 @@ async fn wait_until_gone(ps: &ProcessSystem, pid: Pid) {
 }
 
 async fn wait_for_saga_rows(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     event_type: EventType,
     expected: usize,
@@ -842,12 +840,12 @@ async fn wait_for_saga_rows(
 
 async fn spawn_deciding(
     ps: &ProcessSystem,
-    saga_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
     subscription: Subscription,
     handled: &Handled,
 ) -> nitinol_saga::SagaManagerProxy<DecidingSaga> {
     let handled = Arc::clone(handled);
-    SagaManagerProps::<DecidingSaga>::new(Arc::clone(saga_store), move |_components| DecidingSaga {
+    SagaManagerProps::<DecidingSaga>::new(saga_store.clone(), move |_components| DecidingSaga {
         handled: Arc::clone(&handled),
     })
     .observing::<OrderPlaced>(subscription)
@@ -857,12 +855,12 @@ async fn spawn_deciding(
 
 async fn spawn_two_batch(
     ps: &ProcessSystem,
-    saga_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
     subscription: Subscription,
     handled: &Handled,
 ) -> nitinol_saga::SagaManagerProxy<TwoBatchSaga> {
     let handled = Arc::clone(handled);
-    SagaManagerProps::<TwoBatchSaga>::new(Arc::clone(saga_store), move |_components| TwoBatchSaga {
+    SagaManagerProps::<TwoBatchSaga>::new(saga_store.clone(), move |_components| TwoBatchSaga {
         handled: Arc::clone(&handled),
     })
     .observing::<OrderPlaced>(subscription)
@@ -872,12 +870,12 @@ async fn spawn_two_batch(
 
 async fn spawn_persist_then_end(
     ps: &ProcessSystem,
-    saga_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
     subscription: Subscription,
     handled: &Handled,
 ) -> nitinol_saga::SagaManagerProxy<PersistThenEndSaga> {
     let handled = Arc::clone(handled);
-    SagaManagerProps::<PersistThenEndSaga>::new(Arc::clone(saga_store), move |_components| {
+    SagaManagerProps::<PersistThenEndSaga>::new(saga_store.clone(), move |_components| {
         PersistThenEndSaga {
             handled: Arc::clone(&handled),
         }
@@ -889,7 +887,7 @@ async fn spawn_persist_then_end(
 
 /// The one declared source of every saga in this file, read from the `source`
 /// stream of `upstream_store` from the beginning.
-fn from_source(upstream_store: &Arc<dyn EventStore>, source: &AggregateId) -> Subscription {
+fn from_source(upstream_store: &Journal, source: &AggregateId) -> Subscription {
     Subscription::stream(upstream_store, source)
 }
 
@@ -901,7 +899,7 @@ fn from_source(upstream_store: &Arc<dyn EventStore>, source: &AggregateId) -> Su
 /// saga's own stream records — which makes it the sharpest shape for the tests
 /// below, where what has to be observed is the framework's skip rather than a
 /// cursor that never offered the record in the first place.
-fn from_every_source(upstream_store: &Arc<dyn EventStore>) -> Subscription {
+fn from_every_source(upstream_store: &Journal) -> Subscription {
     Subscription::global(upstream_store)
 }
 
@@ -916,12 +914,12 @@ fn from_every_source(upstream_store: &Arc<dyn EventStore>) -> Subscription {
 async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("atomic-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore {
+    let saga_store = Journal::from(RecordingStore {
         inner: InMemoryEventStore::default(),
         batches: Arc::clone(&batches),
     });
@@ -993,7 +991,7 @@ async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() 
 async fn a_batch_that_never_landed_writes_no_consumed_position() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("failed-batch-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
@@ -1059,7 +1057,7 @@ async fn a_batch_that_never_landed_writes_no_consumed_position() {
 async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("at-least-once-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
@@ -1132,11 +1130,11 @@ async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
 async fn a_consumed_input_never_reaches_handle_after_a_restart() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("skip-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
@@ -1190,11 +1188,11 @@ async fn a_consumed_input_never_reaches_handle_after_a_restart() {
 async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("global-skip-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
@@ -1252,12 +1250,12 @@ async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it
 async fn a_corrupt_record_redelivered_over_a_global_cursor_writes_nothing() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("decode-skip-order");
     append_corrupt_order_placed(&upstream_store, &source, 1).await;
     append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     // A position row already naming the corrupt record's upstream position, so
     // the count below distinguishes "no row was added for it" from "no row
@@ -1309,11 +1307,11 @@ async fn the_same_input_delivered_twice_in_one_incarnation_reaches_handle_once()
     let ps = ProcessSystem::new().await;
 
     let inner = InMemoryEventStore::default();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(DuplicatingStore { inner });
+    let upstream_store = Journal::from(DuplicatingStore { inner });
     let source = AggregateId::new("duplicate-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
@@ -1357,12 +1355,12 @@ async fn the_same_input_delivered_twice_in_one_incarnation_reaches_handle_once()
 async fn replay_restores_the_consumed_position_from_the_journal_alone() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("fold-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
     append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_consumed_position(&saga_store, &saga_id, 1, &source, 1).await;
 
@@ -1395,13 +1393,13 @@ async fn replay_restores_the_consumed_position_from_the_journal_alone() {
 async fn a_later_lower_position_does_not_move_the_position_backwards() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("fold-max-order");
     for (sequence, sku) in [(1u64, "SKU-1"), (2, "SKU-2"), (3, "SKU-3")] {
         append_order_placed(&upstream_store, &source, sequence, sku).await;
     }
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_consumed_position(&saga_store, &saga_id, 1, &source, 2).await;
     seed_consumed_position(&saga_store, &saga_id, 2, &source, 1).await;
@@ -1437,13 +1435,13 @@ async fn a_later_lower_position_does_not_move_the_position_backwards() {
 async fn a_position_of_one_source_does_not_cover_another() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source_a = AggregateId::new("per-source-a");
     let source_b = AggregateId::new("per-source-b");
     append_order_placed(&upstream_store, &source_a, 1, "SKU-A1").await;
     append_order_placed(&upstream_store, &source_b, 1, "SKU-B1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_consumed_position(&saga_store, &saga_id, 1, &source_a, 1).await;
 
@@ -1490,11 +1488,11 @@ async fn a_position_of_one_source_does_not_cover_another() {
 async fn the_configured_floor_survives_a_lower_consumed_position() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("floor-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
@@ -1546,14 +1544,14 @@ async fn a_global_subscription_keeps_its_configured_cursor() {
     let ps = ProcessSystem::new().await;
 
     let queries: Queries = Arc::new(Mutex::new(Vec::new()));
-    let upstream_store: Arc<dyn EventStore> = Arc::new(QueryRecordingStore {
+    let upstream_store = Journal::from(QueryRecordingStore {
         inner: InMemoryEventStore::default(),
         queries: Arc::clone(&queries),
     });
     let source = AggregateId::new("global-resume-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
@@ -1617,11 +1615,11 @@ async fn a_global_subscription_keeps_its_configured_cursor() {
 async fn an_input_whose_effect_takes_two_appends_is_recorded_as_consumed_once() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("two-batch-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
@@ -1666,11 +1664,11 @@ async fn an_input_whose_effect_takes_two_appends_is_recorded_as_consumed_once() 
 async fn an_input_closed_out_by_end_mid_sequence_is_recorded_as_consumed() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("persist-then-end-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
@@ -1720,7 +1718,7 @@ async fn an_input_closed_out_by_end_mid_sequence_is_recorded_as_consumed() {
 async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("two-batch-crash-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
@@ -1804,7 +1802,7 @@ async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
 async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("two-batch-opening-crash-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
@@ -1893,7 +1891,7 @@ async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed()
 async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritten() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("opening-crash-then-end-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
@@ -2006,7 +2004,7 @@ async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritte
 async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("middle-append-crash-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
@@ -2108,37 +2106,35 @@ async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed()
 async fn an_input_that_wrote_nothing_is_still_consumed() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("empty-persist-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
     let handled_for_first = Arc::clone(&handled);
-    let first = SagaManagerProps::<EmptyPersistSaga>::new(Arc::clone(&saga_store), move |_| {
-        EmptyPersistSaga {
+    let first =
+        SagaManagerProps::<EmptyPersistSaga>::new(saga_store.clone(), move |_| EmptyPersistSaga {
             handled: Arc::clone(&handled_for_first),
-        }
-    })
-    .observing::<OrderPlaced>(from_source(&upstream_store, &source))
-    .spawn(&ps)
-    .await;
+        })
+        .observing::<OrderPlaced>(from_source(&upstream_store, &source))
+        .spawn(&ps)
+        .await;
 
     wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
     first.stop().await.expect("stop must succeed");
     drop(first);
 
     let handled_for_second = Arc::clone(&handled);
-    let _second = SagaManagerProps::<EmptyPersistSaga>::new(Arc::clone(&saga_store), move |_| {
-        EmptyPersistSaga {
+    let _second =
+        SagaManagerProps::<EmptyPersistSaga>::new(saga_store.clone(), move |_| EmptyPersistSaga {
             handled: Arc::clone(&handled_for_second),
-        }
-    })
-    .observing::<OrderPlaced>(from_source(&upstream_store, &source))
-    .spawn(&ps)
-    .await;
+        })
+        .observing::<OrderPlaced>(from_source(&upstream_store, &source))
+        .spawn(&ps)
+        .await;
     append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
 
     let barrier = wait_for_handled(&handled, 2).await;
@@ -2188,12 +2184,12 @@ async fn an_input_that_wrote_nothing_is_still_consumed() {
 async fn a_timer_firing_writes_no_consumed_position() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let source = AggregateId::new("timer-order");
     append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore {
+    let saga_store = Journal::from(RecordingStore {
         inner: InMemoryEventStore::default(),
         batches: Arc::clone(&batches),
     });
@@ -2201,18 +2197,17 @@ async fn a_timer_firing_writes_no_consumed_position() {
     let saga_id = SagaId::new(SAGA_ID);
 
     let fired_for_producer = Arc::clone(&fired);
-    let _proxy =
-        SagaManagerProps::<SchedulingSaga>::new(Arc::clone(&saga_store), move |components| {
-            SchedulingSaga {
-                deadline: components.deadline(),
-                fired: Arc::clone(&fired_for_producer),
-            }
-        })
-        // No scheduler wiring: the alphabet declaring a deadline is the whole
-        // declaration, and the host resolves the resident timer core from it.
-        .observing::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let _proxy = SagaManagerProps::<SchedulingSaga>::new(saga_store.clone(), move |components| {
+        SchedulingSaga {
+            deadline: components.deadline(),
+            fired: Arc::clone(&fired_for_producer),
+        }
+    })
+    // No scheduler wiring: the alphabet declaring a deadline is the whole
+    // declaration, and the host resolves the resident timer core from it.
+    .observing::<OrderPlaced>(from_source(&upstream_store, &source))
+    .spawn(&ps)
+    .await;
 
     let events =
         wait_for_saga_rows(&saga_store, &saga_id, ReservationRequested::EVENT_TYPE, 1).await;

@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -104,12 +104,7 @@ impl Saga for CapturingSaga {
     }
 }
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -170,12 +165,12 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-upstream-order");
 
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -209,14 +204,14 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-upstream-seq-order");
 
     append_order_placed(&upstream_store, &order_id, 1, "S-1").await;
     append_order_placed(&upstream_store, &order_id, 2, "S-2").await;
     append_order_placed(&upstream_store, &order_id, 3, "S-3").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -253,12 +248,12 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-now-order");
 
     append_order_placed(&upstream_store, &order_id, 1, "NOW-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -300,12 +295,12 @@ async fn saga_context_existing_accessors_remain_saga_scoped() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-ctx-saga-scope-order");
 
     append_order_placed(&upstream_store, &order_id, 7, "SCOPE-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());

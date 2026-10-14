@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use nitinol_contract::{Aggregate, Snapshotable};
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
@@ -22,17 +22,22 @@ use crate::system::{Hosted, SystemHandle, Unhosted};
 /// activating it per call.
 pub struct AggregateProps<A: Aggregate, H = Unhosted> {
     aggregate_id: AggregateId,
-    store: Arc<dyn EventStore>,
+    store: Journal,
     snapshot_ref: Option<SnapshotPersistorProxy>,
     snapshot_restore: Option<SnapshotRestoreFn<A>>,
     host: H,
 }
 
 impl<A: Aggregate> AggregateProps<A, Unhosted> {
-    pub fn new(aggregate_id: AggregateId, store: Arc<dyn EventStore>) -> Self {
+    /// Configure an activation of `aggregate_id` over `store`.
+    ///
+    /// The journal arrives as whatever the caller holds: a backend handle, a
+    /// [`Journal`] a supplier answered with, or a reference to one the caller
+    /// keeps. All three name one destination.
+    pub fn new(aggregate_id: AggregateId, store: impl Into<Journal>) -> Self {
         Self {
             aggregate_id,
-            store,
+            store: store.into(),
             snapshot_ref: None,
             snapshot_restore: None,
             host: Unhosted,
@@ -121,7 +126,7 @@ impl<A: Aggregate, H> AggregateProps<A, H> {
         let activation: Activation<A> = Arc::new(move || AggregateProcess {
             state: A::default(),
             aggregate_id: aggregate_id.clone(),
-            store: Arc::clone(&store),
+            store: store.clone(),
             snapshot_ref: snapshot_ref.clone(),
             sequence: 0,
             snapshot_restore: snapshot_restore.clone(),

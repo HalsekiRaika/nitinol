@@ -22,7 +22,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -112,7 +112,7 @@ impl Saga for WorkflowSaga {
     }
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -125,7 +125,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 /// Poll the saga's own stream until both domain rows are present, so the
 /// assertion is settled by the state it is about rather than by a fixed wait.
 async fn wait_for_domain_rows(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     expected: usize,
 ) -> Vec<LoadedEvent> {
@@ -163,14 +163,14 @@ fn domain_rows(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
 #[tokio::test]
 async fn saga_persist_stores_the_declared_event_type_for_every_arm() {
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let store = system.persistence().event_store();
 
     let upstream_id = AggregateId::new("identity-upstream-agg");
     let upstream_proxy = system
@@ -182,10 +182,8 @@ async fn saga_persist_stores_the_declared_event_type_for_every_arm() {
     let handled_for_saga = Arc::clone(&handled);
 
     let _manager_proxy =
-        SagaManagerProps::<WorkflowSaga>::new(Arc::clone(&store), move |_components| {
-            WorkflowSaga {
-                handled: Arc::clone(&handled_for_saga),
-            }
+        SagaManagerProps::<WorkflowSaga>::new(store.clone(), move |_components| WorkflowSaga {
+            handled: Arc::clone(&handled_for_saga),
         })
         .observing::<UpstreamTriggered>(Subscription::stream(&store, &upstream_id))
         .spawn(system.process_system())

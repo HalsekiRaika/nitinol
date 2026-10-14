@@ -9,8 +9,6 @@
 // that this file tells a single cohesive user story rather than testing individual
 // features in isolation.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +17,7 @@ use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event, Query,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -103,13 +101,14 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 async fn e2e_ask_persists_the_fact_its_decision_stated() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .build(),
-        ))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("e2e-agg-ask");
     let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
@@ -158,10 +157,11 @@ async fn e2e_ask_persists_the_fact_its_decision_stated() {
 async fn e2e_persisted_state_is_visible_through_a_later_reference() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
-            CustomStore::builder().eventstore(store).build(),
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .build(),
         ))
         .build();
     let id = AggregateId::new("e2e-agg-restart");
@@ -193,13 +193,14 @@ async fn e2e_persisted_state_is_visible_through_a_later_reference() {
 async fn e2e_multiple_asks_advance_sequence_monotonically() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .build(),
-        ))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("e2e-agg-multi");
     let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;

@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::system::{EventSourceSystem, EventSourceSystemBuilder, PersistenceUnset};
 use nitinol_eventsource::{codec::Codec, Aggregate, Decider, Decision, Event, Query};
 use nitinol_persistence::provider::{PersistenceProvider, Store};
-use nitinol_persistence::store::{EventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -103,7 +103,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 }
 
 /// Stream sequences stored under `id`, in ascending order.
-async fn stored_sequences(store: &dyn EventStore, id: &AggregateId) -> Vec<u64> {
+async fn stored_sequences(store: &Journal, id: &AggregateId) -> Vec<u64> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await
@@ -221,7 +221,7 @@ async fn clone_and_original_share_the_suppliers_event_store() {
 
     // Then: the clone's supplier answers with the store that received it
     assert_eq!(
-        stored_sequences(&*handle.persistence().event_store(), &id).await,
+        stored_sequences(&handle.persistence().event_store(), &id).await,
         vec![1],
         "the clone must carry the supplier the original was built with, \
          not an empty store of its own"

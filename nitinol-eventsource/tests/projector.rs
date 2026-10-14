@@ -179,8 +179,8 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 #[tokio::test]
 async fn projector_single_event_type_project_called_during_catchup() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("proj-single-agg");
 
     append_counted(&event_store, &agg_id, 1).await;
@@ -191,8 +191,8 @@ async fn projector_single_event_type_project_called_during_catchup() {
 
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(ProjectionId::new("proj-single"), &persistence, move || {
@@ -220,8 +220,8 @@ async fn projector_single_event_type_project_called_during_catchup() {
 #[tokio::test]
 async fn projector_context_provides_correct_projection_id() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("proj-ctx-id-agg");
     let projection_id = ProjectionId::new("my-projection");
 
@@ -235,8 +235,8 @@ async fn projector_context_provides_correct_projection_id() {
 
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -269,8 +269,8 @@ async fn projector_context_provides_correct_projection_id() {
 #[tokio::test]
 async fn projector_context_provides_current_sequence() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("proj-ctx-seq-agg");
 
     for seq in 1..=3 {
@@ -286,8 +286,8 @@ async fn projector_context_provides_current_sequence() {
 
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(ProjectionId::new("proj-ctx-seq"), &persistence, move || {
@@ -316,8 +316,8 @@ async fn projector_context_provides_current_sequence() {
 #[tokio::test]
 async fn projector_multiple_event_types_each_receives_correct_event() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("proj-multi-agg");
 
     append_counted(&event_store, &agg_id, 1).await;
@@ -331,8 +331,8 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
 
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(ProjectionId::new("proj-multi"), &persistence, move || {
@@ -368,8 +368,8 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
 #[tokio::test]
 async fn projector_live_event_is_projected_after_catchup() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("proj-live-agg");
     let projection_id = ProjectionId::new("proj-live");
 
@@ -380,8 +380,8 @@ async fn projector_live_event_is_projected_after_catchup() {
 
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id, &persistence, move || TrackingProjector {
@@ -422,8 +422,8 @@ async fn projector_live_event_is_projected_after_catchup() {
 #[tokio::test]
 async fn projector_dispatches_on_the_declaration_a_row_carries_and_not_its_descendants() {
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("proj-identity-dispatch-agg");
 
     event_store
@@ -447,8 +447,8 @@ async fn projector_dispatches_on_the_declaration_a_row_carries_and_not_its_desce
 
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(

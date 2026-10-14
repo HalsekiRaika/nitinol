@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaId;
@@ -191,21 +191,21 @@ async fn a_held_delivery_is_retried_with_a_growing_pause_and_is_diagnosable() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::new(AppendRefusingEventStore) as Arc<dyn EventStore>)
+                .eventstore(AppendRefusingEventStore)
                 .build(),
         ))
         .build();
     let target = AggregateId::new("ledger-transient");
     let _unwritable = system.spawn_aggregate::<Ledger>(target.clone()).await;
 
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let journal: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let held = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
     let queries = wait_until_loads(&recording, 6, "the host must keep retrying the record").await;
 
     // Then: the record is asked for again, and again.

@@ -5,7 +5,6 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,7 +16,7 @@ use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::error::OffsetError;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
 use nitinol_persistence::store::{
-    EventStore, InMemoryEventStore, InMemoryOffsetStore, OffsetScope, OffsetStore,
+    InMemoryEventStore, InMemoryOffsetStore, Journal, OffsetScope, OffsetStore,
 };
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
@@ -29,9 +28,11 @@ use saga_idempotent_receive::order::{Order, OrderPlaced};
 use saga_idempotent_receive::saga::{ReservationRequested, ReservationSaga};
 use saga_idempotent_receive::stock_item::{StockItem, StockReserved};
 
-/// The system an incarnation of this example assembles: one in-memory journal,
-/// named through an `Arc` because a handle that is not a cloneable value of its
-/// own is named in an assembly that way, and no other slot.
+/// The system an incarnation of this example assembles: one in-memory journal
+/// and no other slot.
+///
+/// A store holding the journal alone *is* the journal, so the system is named
+/// over a [`Journal`] rather than over an assembly wrapping one.
 ///
 /// Where a delivery host keeps its progress is deliberately **not** on this
 /// store.  The restart clauses below hand two successive hosts two different
@@ -40,7 +41,7 @@ use saga_idempotent_receive::stock_item::{StockItem, StockReserved};
 /// stock item a second activation, mixing "the receiver recognised the repeat"
 /// with "the receiver replayed first".  [`ExampleDeliveryStore`] is where the
 /// host's two slots are named instead.
-pub type ExampleSystem = EventSourceSystem<CustomStore<Arc<dyn EventStore>>>;
+pub type ExampleSystem = EventSourceSystem<Journal>;
 
 /// The stock item every order in these tests reserves against.
 pub const SKU: &str = "sku-cobalt-ingot";
@@ -73,26 +74,33 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// observations here rather than two record counts on one stream.
 pub const DECISION_BLOCK_LEN: usize = 2;
 
-/// The one store an incarnation is wired with.
+/// The one store an incarnation is wired with, as the backend handle a wiring
+/// point names it by and the erased handle these clauses read it through.
 ///
 /// `EventStore` is stream-keyed, so a single instance holds the order's stream,
 /// the stock item's stream and the saga's own journal side by side; splitting
 /// them across instances is a deployment choice, not something the pattern
 /// needs.
-pub fn single_store() -> Arc<dyn EventStore> {
-    Arc::new(InMemoryEventStore::default())
+///
+/// Both handles are kept because a delivery host below is wired from a store of
+/// its own over this same journal, and naming a slot is what erases a backend —
+/// so the host's assembly is named with the backend handle while everything
+/// else takes the erased one.  They are one store either way: erasing a backend
+/// takes that backend's own clone.
+pub fn single_store() -> (InMemoryEventStore, Journal) {
+    let backend = InMemoryEventStore::default();
+    let journal = Journal::from(backend.clone());
+    (backend, journal)
 }
 
 /// A system bound to `store`, with no saga and no delivery host on it.
 ///
 /// The direct-dispatch clause drives the receiving aggregate itself, so it needs
 /// the aggregates without the machinery that would also address them.
-pub async fn spawn_system(store: Arc<dyn EventStore>) -> ExampleSystem {
+pub async fn spawn_system(store: Journal) -> ExampleSystem {
     let ps = ProcessSystem::new().await;
     EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder().eventstore(store).build(),
-        ))
+        .with_persistence(PersistenceProvider::new(store))
         .build()
 }
 
@@ -113,7 +121,7 @@ pub struct ReservationWorld {
 /// No delivery host — the clauses that need one name its stores themselves,
 /// because which offset store a host is wired with is the whole subject of
 /// the redelivery tests.  See [`spawn_delivery_host`].
-pub async fn spawn_world(order_id: &AggregateId, store: Arc<dyn EventStore>) -> ReservationWorld {
+pub async fn spawn_world(order_id: &AggregateId, store: Journal) -> ReservationWorld {
     let system = spawn_system(store).await;
 
     let order = system.spawn_aggregate::<Order>(order_id.clone()).await;
@@ -174,22 +182,26 @@ pub fn delivery_scope() -> OffsetScope {
 ///
 /// A host needs exactly those two, so nothing else is filled in — the snapshot
 /// and projection slots are left [`Unprovided`] rather than named with stores no
-/// clause here reads.
-pub type ExampleDeliveryStore<Cs> =
-    CustomStore<Arc<dyn EventStore>, Unprovided, Unprovided, Arc<Cs>>;
+/// clause here reads.  The journal has no parameter of its own: the backend's
+/// type is written once, in the builder call that names it.
+pub type ExampleDeliveryStore<Cs> = CustomStore<Unprovided, Unprovided, Cs>;
 
 /// The supplier a host is wired from, over the two slots it needs.
+///
+/// Both handles are named as the backends themselves and the caller keeps its
+/// own: a store's slots are logical destinations, so naming one twice is
+/// cloning the handle rather than sharing it from outside.
 pub fn delivery_persistence<Cs>(
-    journal: &Arc<dyn EventStore>,
-    offsets: &Arc<Cs>,
+    journal: &InMemoryEventStore,
+    offsets: &Cs,
 ) -> PersistenceProvider<ExampleDeliveryStore<Cs>>
 where
-    Cs: OffsetStore + 'static,
+    Cs: OffsetStore + Clone + 'static,
 {
     PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(journal))
-            .saga_offsets(Arc::clone(offsets))
+            .eventstore(journal.clone())
+            .saga_offsets(offsets.clone())
             .build(),
     )
 }
@@ -203,13 +215,13 @@ where
 /// resident stock item.
 pub async fn spawn_delivery_host<Cs>(
     system: &ExampleSystem,
-    journal: &Arc<dyn EventStore>,
-    offsets: &Arc<Cs>,
+    journal: &InMemoryEventStore,
+    offsets: &Cs,
 ) -> SagaDeliveryProxy<ReservationSaga>
 where
-    Cs: OffsetStore + 'static,
+    Cs: OffsetStore + Clone + 'static,
 {
-    SagaDeliveryProps::<ReservationSaga, Arc<Cs>>::new(&delivery_persistence(journal, offsets))
+    SagaDeliveryProps::<ReservationSaga, Cs>::new(&delivery_persistence(journal, offsets))
         .with_delivery_id(delivery_id())
         .with_poll_interval(POLL_INTERVAL)
         .spawn(system)
@@ -230,16 +242,22 @@ where
 /// missing.  Nothing ever lifts the refusal: the host wired with this one made
 /// its deliveries and is to be treated as gone, so a later success from it would
 /// record progress nobody is behind.
+///
+/// The handle it is named over is held by value, and its clone is that handle's
+/// own: a refusing view the wiring cloned has to read the positions the store
+/// the caller holds does, or "the next host finds nothing recorded" would be a
+/// statement about a store of its own.
+#[derive(Clone)]
 pub struct UnrecordedProgressStore {
-    inner: Arc<InMemoryOffsetStore>,
+    inner: InMemoryOffsetStore,
 }
 
 impl UnrecordedProgressStore {
     /// A refusing view of `inner`, which the next incarnation reads directly.
-    pub fn over(inner: &Arc<InMemoryOffsetStore>) -> Arc<Self> {
-        Arc::new(Self {
-            inner: Arc::clone(inner),
-        })
+    pub fn over(inner: &InMemoryOffsetStore) -> Self {
+        Self {
+            inner: inner.clone(),
+        }
     }
 }
 
@@ -268,7 +286,7 @@ impl OffsetStore for UnrecordedProgressStore {
 
 // Store observation
 
-pub async fn load_stream(store: &Arc<dyn EventStore>, key: &str) -> Vec<LoadedEvent> {
+pub async fn load_stream(store: &Journal, key: &str) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(key))
         .await
@@ -286,7 +304,7 @@ pub async fn load_stream(store: &Arc<dyn EventStore>, key: &str) -> Vec<LoadedEv
 /// was rewritten with equal content".
 pub type StreamFingerprint = Vec<(u64, u64, Vec<u8>)>;
 
-pub async fn fingerprint(store: &Arc<dyn EventStore>, key: &str) -> StreamFingerprint {
+pub async fn fingerprint(store: &Journal, key: &str) -> StreamFingerprint {
     load_stream(store, key)
         .await
         .into_iter()
@@ -339,7 +357,7 @@ pub fn requested_reservations(events: &[LoadedEvent]) -> Vec<String> {
 ///
 /// A delivery host's progress is counted in these, so this is the number a test
 /// waits for an offset to reach.
-pub async fn decision_position(store: &Arc<dyn EventStore>, saga_key: &str) -> u64 {
+pub async fn decision_position(store: &Journal, saga_key: &str) -> u64 {
     let events = load_stream(store, saga_key).await;
     let decisions: Vec<&LoadedEvent> = events
         .iter()
@@ -359,7 +377,7 @@ pub async fn decision_position(store: &Arc<dyn EventStore>, saga_key: &str) -> u
 
 /// Poll the stream `key` until it holds at least `expected` records.
 pub async fn wait_for_records(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     key: &str,
     expected: usize,
     timeout: Duration,
@@ -381,7 +399,7 @@ pub async fn wait_for_records(
 }
 
 /// What `offsets` holds for the single partition of the host under test.
-pub async fn recorded_progress(offsets: &Arc<InMemoryOffsetStore>) -> Option<u64> {
+pub async fn recorded_progress(offsets: &InMemoryOffsetStore) -> Option<u64> {
     offsets
         .load(&delivery_scope())
         .await
@@ -396,7 +414,7 @@ pub async fn recorded_progress(offsets: &Arc<InMemoryOffsetStore>) -> Option<u64
 /// therefore a barrier rather than a guessed window — and because the host
 /// `ask`s, the receiver's own append is already done by the time the offset
 /// moves.
-pub async fn wait_for_progress(offsets: &Arc<InMemoryOffsetStore>, want: u64, label: &str) {
+pub async fn wait_for_progress(offsets: &InMemoryOffsetStore, want: u64, label: &str) {
     let deadline = std::time::Instant::now() + DELIVERY_TIMEOUT;
     loop {
         if recorded_progress(offsets)

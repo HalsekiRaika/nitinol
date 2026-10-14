@@ -13,8 +13,6 @@
 //! Run with:
 //!   cargo run -p eventsource-snapshot
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use tracing::info;
 
@@ -52,7 +50,7 @@ async fn main() {
 
     // Process 1: write 5 events
     {
-        let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
+        let proxy = AggregateProps::<Counter>::new(id.clone(), &store)
             .with_snapshot_persistor(snapshot_ref.clone())
             .spawn(&system)
             .await;
@@ -76,7 +74,7 @@ async fn main() {
 
     // Process 2: add 2 more events (seq=6,7)
     {
-        let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
+        let proxy = AggregateProps::<Counter>::new(id.clone(), &store)
             .with_snapshot_persistor(snapshot_ref.clone())
             .spawn(&system)
             .await;
@@ -86,7 +84,7 @@ async fn main() {
     }
 
     // Process 3: restore from snapshot (seq=5) + apply delta events (seq=6,7)
-    let proxy3 = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
+    let proxy3 = AggregateProps::<Counter>::new(id.clone(), &store)
         .with_snapshot_persistor(snapshot_ref.clone())
         .spawn(&system)
         .await;

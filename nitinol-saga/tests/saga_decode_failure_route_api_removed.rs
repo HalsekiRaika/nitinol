@@ -28,15 +28,13 @@
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_decode_failure_route_api_removed`.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
 
@@ -136,8 +134,8 @@ impl Saga for ProbeSaga {
     }
 }
 
-fn store() -> Arc<dyn EventStore> {
-    Arc::new(InMemoryEventStore::default())
+fn store() -> Journal {
+    Journal::from(InMemoryEventStore::default())
 }
 
 /// Given a blanket extension trait that claims the

@@ -28,10 +28,8 @@ use delivery::{
     Decided, DeliverySaga, RecordingOffsetStore, TEST_POLL_INTERVAL,
 };
 
-use std::sync::Arc;
-
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::{SagaDeliveryId, SagaDeliveryProps, SagaId};
 
@@ -39,7 +37,7 @@ use nitinol_saga::{SagaDeliveryId, SagaDeliveryProps, SagaId};
 async fn the_wired_identifier_is_the_one_progress_is_filed_under() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-explicit-id");
@@ -48,9 +46,9 @@ async fn the_wired_identifier_is_the_one_progress_is_filed_under() {
     let named = SagaDeliveryId::new("orders-delivery");
 
     // When
-    let host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingOffsetStore>>::new(
-        &delivery_persistence(&journal, &offsets),
-    )
+    let host = SagaDeliveryProps::<DeliverySaga, RecordingOffsetStore>::new(&delivery_persistence(
+        &journal, &offsets,
+    ))
     .with_delivery_id(named.clone())
     .with_partitions(partition_count(1))
     .with_poll_interval(TEST_POLL_INTERVAL)
@@ -87,16 +85,16 @@ async fn the_wired_identifier_is_the_one_progress_is_filed_under() {
 async fn an_unwired_identifier_is_derived_from_the_declared_event_type() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-default-id");
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let host = SagaDeliveryProps::<DeliverySaga, Arc<RecordingOffsetStore>>::new(
-        &delivery_persistence(&journal, &offsets),
-    )
+    let host = SagaDeliveryProps::<DeliverySaga, RecordingOffsetStore>::new(&delivery_persistence(
+        &journal, &offsets,
+    ))
     .with_partitions(partition_count(1))
     .with_poll_interval(TEST_POLL_INTERVAL)
     .spawn(&system)

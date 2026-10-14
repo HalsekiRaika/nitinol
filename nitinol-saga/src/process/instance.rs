@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use nitinol_eventsource::system::SystemHandle;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::Props;
 
@@ -101,7 +101,7 @@ impl<S: Saga> ScheduleDelivery<S> {
 /// the same construction with one id in it.
 pub(crate) struct SagaInstanceSpec<S: Saga> {
     pub(crate) saga_id: SagaId,
-    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) store: Journal,
     /// How one incarnation of the saga is built, from the capabilities the
     /// framework resolved for it.
     ///
@@ -145,7 +145,7 @@ impl<S: Saga> SagaInstanceSpec<S> {
                     self.host.clone(),
                 )),
                 saga_id: self.saga_id.clone(),
-                store: Arc::clone(&self.store),
+                store: self.store.clone(),
                 sequence: 0,
                 // Both are restored from the saga's own stream in `on_start`:
                 // a freshly built process knows nothing of what it consumed.

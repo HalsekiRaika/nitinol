@@ -27,9 +27,7 @@ use delivery::{
     REFUSED_SUFFIX,
 };
 
-use std::sync::Arc;
-
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::{partition_of, SagaId};
 
@@ -55,7 +53,7 @@ fn the_two_instances_are_in_different_partitions() {
 async fn a_refusal_in_one_partition_leaves_the_other_delivering() {
     // Given
     let (system, aggregates) = in_memory_system().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
 
     let held_target = format!("stall-target{REFUSED_SUFFIX}");
@@ -79,7 +77,7 @@ async fn a_refusal_in_one_partition_leaves_the_other_delivering() {
     .await;
 
     // When
-    let _host = spawn_host::<SelectiveSaga>(&system, &journal, &offsets, 2).await;
+    let _host = spawn_host::<SelectiveSaga, _>(&system, &journal, &offsets, 2).await;
 
     // Then: the partition that can deliver does.
     let ledger = system.aggregate_proxy::<Ledger>(live_target);

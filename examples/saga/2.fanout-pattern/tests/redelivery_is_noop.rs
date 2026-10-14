@@ -39,12 +39,11 @@ use common::{
     wait_for_delivery_through, wait_for_issued, DECISION_BLOCK_LEN, EMPLOYEE_COUNT,
 };
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent};
 use nitinol_saga::SagaDeliveryId;
 
@@ -58,13 +57,19 @@ use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 /// synchronisation device.
 const FANOUT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The one journal an incarnation is wired with.
+/// The one journal an incarnation is wired with, as the backend handle an
+/// incarnation names it by and the erased handle these clauses read it through.
 ///
 /// `EventStore` is stream-keyed, so a single instance holds the run's stream,
 /// the payslip streams and the saga's journal side by side; splitting them
 /// across instances is a deployment choice, not something the pattern needs.
-fn single_store() -> Arc<dyn EventStore> {
-    Arc::new(InMemoryEventStore::default())
+///
+/// The two are one store: erasing a backend takes its own clone, so what is
+/// appended through the incarnation's handle is what is read through this one.
+fn single_store() -> (InMemoryEventStore, Journal) {
+    let backend = InMemoryEventStore::default();
+    let journal = Journal::from(backend.clone());
+    (backend, journal)
 }
 
 /// One fact, one decision of two rows, 32 payslips.
@@ -76,14 +81,14 @@ fn single_store() -> Arc<dyn EventStore> {
 /// child* — and the 32 payslips exist on streams of their own.
 #[tokio::test]
 async fn one_fact_event_records_the_approval_and_fans_out_to_thirty_two_payslips() {
-    let store = single_store();
+    let (backend, store) = single_store();
     let run_id = AggregateId::new("payroll-run-single-append");
     let employees = employee_ids();
     let payslips = payslip_keys(run_id.as_str(), &employees);
 
     let world = spawn_world(
         &run_id,
-        Arc::clone(&store),
+        backend,
         InMemoryOffsetStore::default(),
         &SagaDeliveryId::new("payslip-delivery"),
     )
@@ -194,7 +199,7 @@ async fn one_fact_event_records_the_approval_and_fans_out_to_thirty_two_payslips
 /// their plain form — no aggregate replay involved.
 #[tokio::test]
 async fn commands_carried_a_second_time_write_no_second_payslip() {
-    let store = single_store();
+    let (backend, store) = single_store();
     let run_id = AggregateId::new("payroll-run-redelivery");
     let employees = employee_ids();
     let payslips = payslip_keys(run_id.as_str(), &employees);
@@ -204,7 +209,7 @@ async fn commands_carried_a_second_time_write_no_second_payslip() {
     let second_host = SagaDeliveryId::new("payslip-delivery-again");
     let offsets = InMemoryOffsetStore::default();
 
-    let world = spawn_world(&run_id, Arc::clone(&store), offsets.clone(), &first_host).await;
+    let world = spawn_world(&run_id, backend, offsets.clone(), &first_host).await;
 
     world
         .payroll_run
@@ -314,14 +319,14 @@ async fn commands_carried_a_second_time_write_no_second_payslip() {
 /// no compensation.
 #[tokio::test]
 async fn duplicate_genesis_append_conflicts_and_preserves_the_first_write() {
-    let store = single_store();
+    let (backend, store) = single_store();
     let run_id = AggregateId::new("payroll-run-genesis-conflict");
     let employees = employee_ids();
     let payslips = payslip_keys(run_id.as_str(), &employees);
 
     let world = spawn_world(
         &run_id,
-        Arc::clone(&store),
+        backend,
         InMemoryOffsetStore::default(),
         &SagaDeliveryId::new("payslip-delivery"),
     )

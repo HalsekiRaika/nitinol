@@ -249,24 +249,3 @@ pub trait OffsetStore: Send + Sync {
         tx: Option<&mut Self::Tx>,
     ) -> Result<(), OffsetError>;
 }
-
-/// An offset store reached through an `Arc` is that store, transaction type
-/// included: erasing it would take away what a projector settling its update
-/// and its position together needs to see.
-#[async_trait]
-impl<T: OffsetStore + ?Sized> OffsetStore for std::sync::Arc<T> {
-    type Tx = T::Tx;
-
-    async fn load(&self, scope: &OffsetScope) -> Result<Option<u64>, OffsetError> {
-        T::load(self, scope).await
-    }
-
-    async fn save(
-        &self,
-        scope: &OffsetScope,
-        sequence: u64,
-        tx: Option<&mut Self::Tx>,
-    ) -> Result<(), OffsetError> {
-        T::save(self, scope, sequence, tx).await
-    }
-}

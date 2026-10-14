@@ -29,7 +29,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -109,12 +109,7 @@ impl Saga for RecordingSaga {
 
 // Helpers
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    key: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, key: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -164,7 +159,7 @@ async fn wait_for_handled(
     });
 }
 
-async fn loaded_stream(store: &Arc<dyn EventStore>, key: &SagaId) -> Vec<LoadedEvent> {
+async fn loaded_stream(store: &Journal, key: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(key))
         .await
@@ -178,7 +173,7 @@ async fn loaded_stream(store: &Arc<dyn EventStore>, key: &SagaId) -> Vec<LoadedE
 ///
 /// Reading a *named* store back is what tells the journal stores apart — the
 /// proxy a spawn returns looks the same whichever store its instances write to.
-async fn persisted_skus(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<String> {
+async fn persisted_skus(store: &Journal, saga_id: &SagaId) -> Vec<String> {
     loaded_stream(store, saga_id)
         .await
         .iter()
@@ -191,7 +186,7 @@ async fn persisted_skus(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<St
         .collect()
 }
 
-async fn wait_for_persisted(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<String> {
+async fn wait_for_persisted(store: &Journal, saga_id: &SagaId) -> Vec<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         let skus = persisted_skus(store, saga_id).await;
@@ -213,16 +208,16 @@ async fn wait_for_persisted(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Ve
 async fn host_journals_onto_the_providers_event_store() {
     // Given: a system over one provider, and an unrelated upstream
     let ps = ProcessSystem::new().await;
-    let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&default_store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let default_store = system.persistence().event_store();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-default-journal-orders");
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
 
@@ -262,16 +257,16 @@ async fn system_subscription_polls_the_providers_event_store() {
     // Given: the journal is named explicitly, so the provider's store is only
     // reachable through the subscription under test
     let ps = ProcessSystem::new().await;
-    let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&default_store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let default_store = system.persistence().event_store();
 
-    let journal_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-default-subscription-orders");
 
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -313,17 +308,17 @@ async fn system_subscription_polls_the_providers_event_store() {
 async fn a_journal_named_on_props_keeps_the_saga_out_of_the_providers_store() {
     // Given
     let ps = ProcessSystem::new().await;
-    let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let override_store = Journal::from(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&default_store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let default_store = system.persistence().event_store();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-override-journal-orders");
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
 
@@ -334,7 +329,7 @@ async fn a_journal_named_on_props_keeps_the_saga_out_of_the_providers_store() {
 
     // When
     let _host_proxy =
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&override_store), move |_components| {
+        SagaManagerProps::<RecordingSaga>::new(override_store.clone(), move |_components| {
             RecordingSaga {
                 handled: Arc::clone(&handled_for_producer),
                 notify: Arc::clone(&notify_for_producer),
@@ -370,15 +365,15 @@ async fn a_journal_named_on_props_keeps_the_saga_out_of_the_providers_store() {
 async fn an_explicitly_subscribed_store_is_the_only_upstream_polled() {
     // Given: the same stream key exists in both stores, holding different records
     let ps = ProcessSystem::new().await;
-    let default_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let override_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let override_store = Journal::from(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&default_store))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let default_store = system.persistence().event_store();
 
     let order_id = AggregateId::new("saga-override-subscription-orders");
     // Seeded before the spawn so a subscription that wrongly resolved to the

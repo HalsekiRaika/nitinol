@@ -4,7 +4,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use nitinol_contract::{Aggregate, Decider, Decision, Event, Query};
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
@@ -140,7 +140,7 @@ pub(crate) struct ExecMsg<M>(pub(crate) M);
 pub struct AggregateProcess<A: Aggregate> {
     pub(crate) state: A,
     pub(crate) aggregate_id: AggregateId,
-    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) store: Journal,
     pub(crate) snapshot_ref: Option<SnapshotPersistorProxy>,
     pub(crate) sequence: u64,
     /// Restores aggregate state from a snapshot payload.

@@ -28,9 +28,7 @@ use nitinol_eventsource::{
     ProjectionContext, ProjectionId, Projector, ProjectorProps, Query, Snapshotable,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{
-    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore,
-};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, PersistedSnapshot, TypeName,
 };
@@ -205,7 +203,7 @@ async fn event_source_system_builder_produces_system() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::new(InMemoryEventStore::default()))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
@@ -222,13 +220,14 @@ async fn event_source_system_builder_produces_system() {
 async fn spawn_aggregate_creates_working_aggregate_proxy() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .build(),
-        ))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("sys-spawn-basic");
 
@@ -264,13 +263,14 @@ async fn spawn_aggregate_creates_working_aggregate_proxy() {
 async fn spawn_aggregate_second_call_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .build(),
-        ))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("sys-replay-state");
 
@@ -320,7 +320,7 @@ async fn spawn_aggregate_sequential_increments_accumulate_state() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::new(InMemoryEventStore::default()))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
@@ -348,14 +348,14 @@ async fn spawn_aggregate_sequential_increments_accumulate_state() {
 async fn projector_props_decode_through_the_codec_each_event_names() {
     // Given
     let ps = ProcessSystem::new().await;
-    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let offset_store = InMemoryOffsetStore::default();
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store))
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(InMemoryEventStore::default())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
+    let event_store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence.clone())
         .build();
@@ -416,8 +416,8 @@ async fn snapshot_roundtrip_via_event_source_system() {
     let ps = ProcessSystem::new().await;
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::new(InMemoryEventStore::default()))
-            .snapshot(Arc::new(InMemorySnapshotStore::default()))
+            .eventstore(InMemoryEventStore::default())
+            .snapshot(InMemorySnapshotStore::default())
             .build(),
     );
     let system = EventSourceSystem::builder(ps)

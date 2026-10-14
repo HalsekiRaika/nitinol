@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -152,7 +152,7 @@ impl Saga for TimerSaga {
 
 // Helpers
 
-async fn append_trigger(store: &Arc<dyn EventStore>, sequence: u64, trigger: Trigger) {
+async fn append_trigger(store: &Journal, sequence: u64, trigger: Trigger) {
     let payload = serde_json::to_vec(&trigger)
         .map(Bytes::from)
         .expect("encode Trigger must succeed");
@@ -201,7 +201,7 @@ async fn manager_fires_the_degenerate_instances_timer() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_trigger(
         &upstream_store,
         1,
@@ -211,12 +211,12 @@ async fn manager_fires_the_degenerate_instances_timer() {
     )
     .await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
     let fired_producer = Arc::clone(&fired);
 
     let _manager_proxy =
-        SagaManagerProps::<TimerSaga>::new(Arc::clone(&saga_store), move |components| TimerSaga {
+        SagaManagerProps::<TimerSaga>::new(saga_store.clone(), move |components| TimerSaga {
             deadline: components.deadline(),
             fired: Arc::clone(&fired_producer),
         })

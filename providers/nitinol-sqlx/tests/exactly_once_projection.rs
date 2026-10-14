@@ -64,7 +64,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::error::OffsetError;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, OffsetScope, OffsetStore};
+use nitinol_persistence::store::{Journal, OffsetScope, OffsetStore};
 use nitinol_persistence::{
     AggregateId, EventRegistryEntry, EventType, Family, TypeName, EVENT_REGISTRY,
 };
@@ -230,6 +230,12 @@ impl Projector<Incremented, PgTransaction<'static>> for CountingProjector {
 /// projector is given keeps one, and keeps it by the name a caller would use:
 /// a conflict is counted only where [`OffsetConflict`] is reachable
 /// through it.
+///
+/// A clone is the same store: the pool handle reaches the same table, and the
+/// count of refusals is shared rather than started again — an assembly hands
+/// the store out by cloning it, and a clone with a counter of its own would
+/// leave a clause reading zero refusals however many were answered.
+#[derive(Clone)]
 struct ObservedOffsets {
     inner: PostgresOffsetStore,
     conflicts: Arc<AtomicUsize>,
@@ -259,11 +265,18 @@ impl OffsetStore for ObservedOffsets {
     }
 }
 
-fn observed(pool: PgPool, conflicts: &Arc<AtomicUsize>) -> Arc<ObservedOffsets> {
-    Arc::new(ObservedOffsets {
+fn observed(pool: PgPool, conflicts: &Arc<AtomicUsize>) -> ObservedOffsets {
+    ObservedOffsets {
         inner: PostgresOffsetStore::new(pool),
         conflicts: Arc::clone(conflicts),
-    })
+    }
+}
+
+/// A journal backend over `pool`, for a slot that is named with the backend
+/// itself rather than with the erased handle a [`Journal`] is.
+fn event_store(pool: &PgPool) -> PostgresEventStore {
+    PostgresEventStore::new(pool.clone())
+        .expect("the event types this test binary linked claim distinct canonical paths")
 }
 
 // What a clause reads and waits on.
@@ -397,10 +410,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     let system = ProcessSystem::new().await;
     let projection_id = ProjectionId::new("sqlx.exactly-once.restart");
     let stream = AggregateId::new("sqlx.exactly-once.restart.stream");
-    let events: Arc<dyn EventStore> = Arc::new(
-        PostgresEventStore::new(pool.clone())
-            .expect("the event types this test binary linked claim distinct canonical paths"),
-    );
+    let events = Journal::from(event_store(&pool));
     let offsets = PostgresOffsetStore::new(pool.clone());
 
     committed(&events, stream.as_str(), vec![typed(1, INCREMENTED, b"")]).await;
@@ -409,7 +419,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     let first_attempts = Arc::new(AtomicUsize::new(0));
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&events))
+            .eventstore(event_store(&pool))
             .projection_offsets(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
             .build(),
     );
@@ -444,7 +454,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     let second_attempts = Arc::new(AtomicUsize::new(0));
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&events))
+            .eventstore(event_store(&pool))
             .projection_offsets(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
             .build(),
     );
@@ -509,10 +519,7 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_offset_where_they_we
     let system = ProcessSystem::new().await;
     let projection_id = ProjectionId::new("sqlx.exactly-once.project-fails");
     let stream = AggregateId::new("sqlx.exactly-once.project-fails.stream");
-    let events: Arc<dyn EventStore> = Arc::new(
-        PostgresEventStore::new(pool.clone())
-            .expect("the event types this test binary linked claim distinct canonical paths"),
-    );
+    let events = Journal::from(event_store(&pool));
     let offsets = PostgresOffsetStore::new(pool.clone());
 
     committed(&events, stream.as_str(), vec![typed(1, INCREMENTED, b"")]).await;
@@ -521,7 +528,7 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_offset_where_they_we
     let attempts = Arc::new(AtomicUsize::new(0));
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&events))
+            .eventstore(event_store(&pool))
             .projection_offsets(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
             .build(),
     );
@@ -603,10 +610,7 @@ async fn a_refused_offset_save_rolls_the_read_model_update_back() {
     let system = ProcessSystem::new().await;
     let projection_id = ProjectionId::new("sqlx.exactly-once.save-refused");
     let stream = AggregateId::new("sqlx.exactly-once.save-refused.stream");
-    let events: Arc<dyn EventStore> = Arc::new(
-        PostgresEventStore::new(pool.clone())
-            .expect("the event types this test binary linked claim distinct canonical paths"),
-    );
+    let events = Journal::from(event_store(&pool));
     let offsets = PostgresOffsetStore::new(pool.clone());
 
     let conflicts = Arc::new(AtomicUsize::new(0));
@@ -614,7 +618,7 @@ async fn a_refused_offset_save_rolls_the_read_model_update_back() {
     let never_fail = Arc::new(AtomicBool::new(false));
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&events))
+            .eventstore(event_store(&pool))
             .projection_offsets(observed(pool.clone(), &conflicts))
             .build(),
     );
@@ -685,14 +689,7 @@ async fn two_projectors_holding_one_offset_apply_the_event_once() {
     let stream = AggregateId::new("sqlx.exactly-once.two.carried.stream");
     let offsets = PostgresOffsetStore::new(one_pool.clone());
 
-    let one_events: Arc<dyn EventStore> = Arc::new(
-        PostgresEventStore::new(one_pool.clone())
-            .expect("the event types this test binary linked claim distinct canonical paths"),
-    );
-    let other_events: Arc<dyn EventStore> = Arc::new(
-        PostgresEventStore::new(other_pool.clone())
-            .expect("the event types this test binary linked claim distinct canonical paths"),
-    );
+    let one_events = Journal::from(event_store(&one_pool));
 
     committed(
         &one_events,
@@ -715,7 +712,7 @@ async fn two_projectors_holding_one_offset_apply_the_event_once() {
     let one_system = ProcessSystem::new().await;
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&one_events))
+            .eventstore(event_store(&one_pool))
             .projection_offsets(observed(one_pool.clone(), &one_conflicts))
             .build(),
     );
@@ -739,7 +736,7 @@ async fn two_projectors_holding_one_offset_apply_the_event_once() {
     let other_system = ProcessSystem::new().await;
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&other_events))
+            .eventstore(event_store(&other_pool))
             .projection_offsets(observed(other_pool.clone(), &other_conflicts))
             .build(),
     );
@@ -822,14 +819,7 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     let stream = AggregateId::new("sqlx.exactly-once.two.first.stream");
     let offsets = PostgresOffsetStore::new(one_pool.clone());
 
-    let one_events: Arc<dyn EventStore> = Arc::new(
-        PostgresEventStore::new(one_pool.clone())
-            .expect("the event types this test binary linked claim distinct canonical paths"),
-    );
-    let other_events: Arc<dyn EventStore> = Arc::new(
-        PostgresEventStore::new(other_pool.clone())
-            .expect("the event types this test binary linked claim distinct canonical paths"),
-    );
+    let one_events = Journal::from(event_store(&one_pool));
 
     committed(
         &one_events,
@@ -846,7 +836,7 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     let one_system = ProcessSystem::new().await;
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&one_events))
+            .eventstore(event_store(&one_pool))
             .projection_offsets(observed(one_pool.clone(), &one_conflicts))
             .build(),
     );
@@ -870,7 +860,7 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     let other_system = ProcessSystem::new().await;
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&other_events))
+            .eventstore(event_store(&other_pool))
             .projection_offsets(observed(other_pool.clone(), &other_conflicts))
             .build(),
     );

@@ -47,7 +47,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{ProjectionContext, ProjectionId, Projector};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, OffsetScope};
+use nitinol_persistence::store::{InMemoryEventStore, OffsetScope};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDeliveryExt, SagaId};
@@ -114,7 +114,7 @@ const DECISIONS: usize = 2;
 async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_was() {
     // Given: one event store, and one offset handle named into both
     // offset slots of the store.
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let shared_offsets = RecordingOffsetStore::new();
     let projection_id = ProjectionId::new("projection-rebuild-read-model");
     let projection = OffsetScope::from(&projection_id);
@@ -127,8 +127,8 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
     let first_system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .offsets(Arc::clone(&shared_offsets))
+                .eventstore(store.clone())
+                .offsets(shared_offsets.clone())
                 .build(),
         ))
         .build();
@@ -197,9 +197,9 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
     let rebuilt_system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .projection_offsets(Arc::clone(&rebuilt_offsets))
-                .saga_offsets(Arc::clone(&shared_offsets))
+                .eventstore(store.clone())
+                .projection_offsets(rebuilt_offsets.clone())
+                .saga_offsets(shared_offsets.clone())
                 .build(),
         ))
         .build();

@@ -27,7 +27,7 @@ use nitinol_eventsource::{Aggregate, AggregateProxy, Decider, Decision, Event, Q
 use nitinol_persistence::error::{AppendError, LoadError, OffsetError};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
 use nitinol_persistence::store::{
-    EventStore, EventStream, InMemoryEventStore, OffsetScope, OffsetStore,
+    EventStore, EventStream, InMemoryEventStore, Journal, OffsetScope, OffsetStore,
 };
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -361,6 +361,10 @@ impl Saga for SelectiveSaga {
 /// A receiver activated on this store accepts a command and then cannot record
 /// it, which is a failure of the machinery rather than a verdict on the command
 /// — the transient half of the stall.
+///
+/// `Clone` carries nothing, because the store holds nothing: every handle onto
+/// it refuses every append and answers every load with the same empty stream.
+#[derive(Clone)]
 pub struct AppendRefusingEventStore;
 
 #[async_trait]
@@ -423,18 +427,18 @@ pub fn partition_count(n: usize) -> NonZeroUsize {
     NonZeroUsize::new(n).expect("a fixture partition count is not zero")
 }
 
-/// The store a delivery host is wired from here: `journal` as the store the
-/// saga's decisions are on, `offsets` as the slot the host records in, and
-/// no other slot named.
+/// The store a delivery host is wired from here: the journal the saga's
+/// decisions are on, `offsets` as the slot the host records in, and no other
+/// slot named.
 ///
 /// A host needs exactly those two, so a store with nothing else on it is what
 /// the fixtures assemble — the projection and snapshot slots are left
 /// unprovided rather than filled with stores no clause here reads.
 ///
-/// Both handles are reached through an `Arc`, which is how a store that is not
-/// a cloneable value of its own is named in an assembly.
-pub type DeliveryStore =
-    CustomStore<Arc<dyn EventStore>, Unprovided, Unprovided, Arc<RecordingOffsetStore>>;
+/// Each handle is named as the backend's own value: the journal is erased where
+/// the builder takes it, and the offset slot keeps its type so the host's
+/// progress is read back through the very handle it was wired with.
+pub type DeliveryStore = CustomStore<Unprovided, Unprovided, RecordingOffsetStore>;
 
 /// The supplier the delivery fixtures wire a host from.
 pub type DeliveryPersistence = PersistenceProvider<DeliveryStore>;
@@ -445,29 +449,32 @@ pub type DeliveryPersistence = PersistenceProvider<DeliveryStore>;
 /// That journal is a different one from the saga's, which is what keeps the
 /// rows a host reads apart from the rows its deliveries write — the fixtures
 /// assert on both.
-pub type DeliverySystem = EventSourceSystem<CustomStore<Arc<dyn EventStore>>>;
+pub type DeliverySystem = EventSourceSystem<CustomStore>;
 
-pub fn delivery_persistence(
-    journal: &Arc<dyn EventStore>,
-    offsets: &Arc<RecordingOffsetStore>,
-) -> DeliveryPersistence {
+pub fn delivery_persistence<E>(journal: &E, offsets: &RecordingOffsetStore) -> DeliveryPersistence
+where
+    E: EventStore + Clone + 'static,
+{
     PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(journal))
-            .saga_offsets(Arc::clone(offsets))
+            .eventstore(journal.clone())
+            .saga_offsets(offsets.clone())
             .build(),
     )
 }
 
 /// Start a delivery host for `S` over `journal`, recording progress in
 /// `offsets`, with `partitions` partitions.
-pub async fn spawn_host<S: Saga>(
+pub async fn spawn_host<S: Saga, E>(
     system: &DeliverySystem,
-    journal: &Arc<dyn EventStore>,
-    offsets: &Arc<RecordingOffsetStore>,
+    journal: &E,
+    offsets: &RecordingOffsetStore,
     partitions: usize,
-) -> SagaDeliveryProxy<S> {
-    SagaDeliveryProps::<S, Arc<RecordingOffsetStore>>::new(&delivery_persistence(journal, offsets))
+) -> SagaDeliveryProxy<S>
+where
+    E: EventStore + Clone + 'static,
+{
+    SagaDeliveryProps::<S, RecordingOffsetStore>::new(&delivery_persistence(journal, offsets))
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(partitions))
         .with_poll_interval(TEST_POLL_INTERVAL)
@@ -475,16 +482,18 @@ pub async fn spawn_host<S: Saga>(
         .await
 }
 
-/// A system over a store whose journal is a fresh in-memory store, and that
-/// journal handle.
-pub async fn in_memory_system() -> (DeliverySystem, Arc<dyn EventStore>) {
+/// A system over a store whose journal is a fresh in-memory store, and the
+/// backend handle that journal was named with.
+///
+/// The handle is answered as the backend's own value rather than as an erased
+/// journal, so a fixture can both name it in a second assembly and read the
+/// rows the system's deliveries wrote through it.
+pub async fn in_memory_system() -> (DeliverySystem, InMemoryEventStore) {
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .build(),
+            CustomStore::builder().eventstore(store.clone()).build(),
         ))
         .build();
     (system, store)
@@ -492,7 +501,7 @@ pub async fn in_memory_system() -> (DeliverySystem, Arc<dyn EventStore>) {
 
 /// Append one row to `stream` under the identity `E` declares.
 pub async fn append_row<E: Event + Serialize>(
-    store: &Arc<dyn EventStore>,
+    store: &dyn EventStore,
     stream: &str,
     sequence: u64,
     event: &E,
@@ -520,7 +529,7 @@ pub async fn append_row<E: Event + Serialize>(
 
 /// Append one decision to a saga's own stream and answer its global position.
 pub async fn append_decided(
-    store: &Arc<dyn EventStore>,
+    store: &dyn EventStore,
     saga_id: &SagaId,
     sequence: u64,
     target: &str,
@@ -539,12 +548,12 @@ pub async fn append_decided(
 }
 
 /// Append one row of the other event type to a saga's own stream.
-pub async fn append_noted(store: &Arc<dyn EventStore>, saga_id: &SagaId, sequence: u64) -> u64 {
+pub async fn append_noted(store: &dyn EventStore, saga_id: &SagaId, sequence: u64) -> u64 {
     append_row(store, saga_id.as_str(), sequence, &Noted).await
 }
 
 /// Every row of `stream`, in ascending global order.
-pub async fn stream_rows(store: &Arc<dyn EventStore>, stream: &str) -> Vec<LoadedEvent> {
+pub async fn stream_rows(store: &dyn EventStore, stream: &str) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(stream))
         .await
@@ -585,7 +594,7 @@ pub async fn wait_until_operations(
 /// Wait until the store has recorded at least `want` load calls, then answer
 /// every query it has seen.
 pub async fn wait_until_loads(
-    store: &Arc<RecordingEventStore>,
+    store: &RecordingEventStore,
     want: usize,
     label: &str,
 ) -> Vec<LoadQuery> {
@@ -613,20 +622,26 @@ pub enum LoadFault {
 
 /// An [`EventStore`] that records every query it is handed, when it was handed
 /// it, and can be told to panic on a chosen call.
+///
+/// Its `Clone` is the handle's: the record of calls and the faults still to be
+/// answered are the one region behind every handle, so a fixture that names
+/// this store in a wiring and keeps a handle of its own reads what the wiring
+/// asked for.
+#[derive(Clone)]
 pub struct RecordingEventStore {
-    inner: Arc<dyn EventStore>,
-    calls: Mutex<Vec<(LoadQuery, Instant)>>,
+    inner: Journal,
+    calls: Arc<Mutex<Vec<(LoadQuery, Instant)>>>,
     /// Faults keyed by 1-based load-call number.
-    faults: Mutex<HashMap<usize, LoadFault>>,
+    faults: Arc<Mutex<HashMap<usize, LoadFault>>>,
 }
 
 impl RecordingEventStore {
-    pub fn new(inner: Arc<dyn EventStore>) -> Arc<Self> {
-        Arc::new(Self {
-            inner,
-            calls: Mutex::new(Vec::new()),
-            faults: Mutex::new(HashMap::new()),
-        })
+    pub fn new(inner: impl Into<Journal>) -> Self {
+        Self {
+            inner: inner.into(),
+            calls: Arc::new(Mutex::new(Vec::new())),
+            faults: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Make the `nth` load call (1-based) answer with `fault`.
@@ -694,27 +709,32 @@ impl EventStore for RecordingEventStore {
 /// Saves only ever move a key forward, so the reference implementation and a
 /// forward-only backend answer a correct host identically; a save that would
 /// move a key backwards is recorded as refused rather than applied.
+///
+/// Its `Clone` is the handle's: the positions, the record of saves and the
+/// failure budget are the one region behind every handle, so the slot a store
+/// is assembled with and the handle a fixture keeps are one store.
+#[derive(Clone)]
 pub struct RecordingOffsetStore {
-    state: Mutex<HashMap<String, u64>>,
-    saves: Mutex<Vec<(String, u64)>>,
+    state: Arc<Mutex<HashMap<String, u64>>>,
+    saves: Arc<Mutex<Vec<(String, u64)>>>,
     /// Every save this store answered with an error, in call order.
     ///
     /// Kept apart from `saves` so a test can wait until a refusal has actually
     /// reached the host, rather than inferring one from a position that is not
     /// there yet — which a slow first tick would read the same way.
-    refusals: Mutex<Vec<(String, u64)>>,
+    refusals: Arc<Mutex<Vec<(String, u64)>>>,
     /// Number of save calls still to be answered with a failure.
-    save_failures: AtomicUsize,
+    save_failures: Arc<AtomicUsize>,
 }
 
 impl RecordingOffsetStore {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            state: Mutex::new(HashMap::new()),
-            saves: Mutex::new(Vec::new()),
-            refusals: Mutex::new(Vec::new()),
-            save_failures: AtomicUsize::new(0),
-        })
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            saves: Arc::new(Mutex::new(Vec::new())),
+            refusals: Arc::new(Mutex::new(Vec::new())),
+            save_failures: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Fail the next `n` save calls.
@@ -830,7 +850,7 @@ fn take_one(budget: &AtomicUsize) -> bool {
 /// the refusal has to have reached the host, and a store told to refuse has not
 /// refused anything until it has been asked.
 pub async fn wait_until_refused(
-    offsets: &Arc<RecordingOffsetStore>,
+    offsets: &RecordingOffsetStore,
     want: usize,
     label: &str,
 ) -> Vec<(String, u64)> {
@@ -852,7 +872,7 @@ pub async fn wait_until_refused(
 
 /// Wait until `scope` holds at least `want`, then answer what it holds.
 pub async fn wait_until_stored(
-    offsets: &Arc<RecordingOffsetStore>,
+    offsets: &RecordingOffsetStore,
     scope: &OffsetScope,
     want: u64,
     label: &str,

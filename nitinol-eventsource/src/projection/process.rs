@@ -27,7 +27,7 @@ pub struct ProjectorProcess<P, Cs, Tx = ()> {
     /// Built once, when this projector is spawned: the key its position is
     /// filed under never changes while it runs.
     pub(crate) offset_scope: OffsetScope,
-    pub(crate) offset_store: Arc<Cs>,
+    pub(crate) offset_store: Cs,
     pub(crate) delivery_mode: DeliveryMode,
     pub(crate) catchup_origin: CatchupOrigin,
     pub(crate) handlers: Vec<Arc<dyn EventTypeHandler<P, Tx>>>,
@@ -99,7 +99,7 @@ where
 
         let projection_id = self.projection_id.clone();
         let delivery_mode = self.delivery_mode;
-        let offset_store = Arc::clone(&self.offset_store);
+        let offset_store = &self.offset_store;
         let current_offset = self.offset_sequence;
         let payload = loaded.payload;
         let offset_scope = &self.offset_scope;
@@ -108,7 +108,7 @@ where
 
         let outcome = delivery::apply(
             delivery_mode,
-            offset_store.as_ref(),
+            offset_store,
             ProjectionIdentity {
                 id: &projection_id,
                 scope: offset_scope,

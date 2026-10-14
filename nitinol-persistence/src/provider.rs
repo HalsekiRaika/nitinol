@@ -19,14 +19,10 @@
 //! through.
 
 mod custom_store;
-mod dyn_store;
 
-use std::sync::Arc;
-
-use crate::store::{EventStore, OffsetStore, SnapshotStore};
+use crate::store::{Album, Journal, OffsetStore};
 
 pub use self::custom_store::{CustomStore, CustomStoreBuilder, EventStoreUnset, Unprovided};
-pub use self::dyn_store::DynStore;
 
 /// The storage a deployment runs on, as one cloneable handle.
 ///
@@ -146,12 +142,14 @@ pub use self::dyn_store::DynStore;
 /// a crash between two writes in every backend. It is stated here because the
 /// name invites the opposite reading.
 pub trait Store: Clone + Send + Sync + 'static {
-    /// The backend's own journal handle.
-    type Events: EventStore + Clone + 'static;
-
     /// The journal every stream in this deployment is appended to and replayed
     /// from.
-    fn events(&self) -> Self::Events;
+    ///
+    /// What comes back is the registered store's own clone with its type
+    /// erased, which is why there is no associated type here: the backend is
+    /// named once, where the store is assembled, and every wiring point reads
+    /// one handle type.
+    fn events(&self) -> Journal;
 }
 
 /// A store that also holds somewhere to keep aggregate snapshots.
@@ -160,11 +158,10 @@ pub trait Store: Clone + Send + Sync + 'static {
 /// refused while the wiring is compiled rather than when a save is first
 /// attempted.
 pub trait SnapshotSlot: Store {
-    /// The backend's own snapshot handle.
-    type Snapshots: SnapshotStore + Clone + 'static;
-
     /// Where aggregate snapshots are kept.
-    fn snapshots(&self) -> Self::Snapshots;
+    ///
+    /// Erased for the reason [`Store::events`] is.
+    fn snapshots(&self) -> Album;
 }
 
 /// A store that also holds somewhere to keep how far a projection has been
@@ -208,9 +205,15 @@ pub trait SagaOffsetSlot: Store {
 /// The supplier every event-sourced deployment has one of.
 ///
 /// It distributes what the [`Store`] it was constructed over answers with, in
-/// the shape the framework's wiring takes: the journal and the snapshot store
-/// behind the `dyn` handles the wiring is written against, and each offset
-/// slot as the backend's own type so a transaction stays visible.
+/// the shape the framework's wiring takes: the journal as a [`Journal`] and the
+/// snapshot store as an [`Album`] — the erased handles the wiring is written
+/// against — and each offset slot as the backend's own type so a transaction
+/// stays visible.
+///
+/// Every one of them is the store's own handle, answered by value. Nothing here
+/// shares a handle on a caller's behalf: identity is the store's obligation
+/// (`PRV-1`), and a supplier that wrapped a handle anyway would be proving the
+/// same property a second time.
 ///
 /// What it does not do is decide anything. The identity of a slot, and whether
 /// a slot exists at all, belong to the store — which is why a supplier adds no
@@ -236,28 +239,28 @@ impl<S: Store> PersistenceProvider<S> {
 
     /// The journal every stream in this deployment is appended to and replayed
     /// from.
-    pub fn event_store(&self) -> Arc<dyn EventStore> {
-        Arc::new(self.store.events())
+    pub fn event_store(&self) -> Journal {
+        self.store.events()
     }
 }
 
 impl<S: SnapshotSlot> PersistenceProvider<S> {
     /// Where aggregate snapshots are kept.
-    pub fn snapshot_store(&self) -> Arc<dyn SnapshotStore> {
-        Arc::new(self.store.snapshots())
+    pub fn snapshot_store(&self) -> Album {
+        self.store.snapshots()
     }
 }
 
 impl<S: ProjectionOffsetSlot> PersistenceProvider<S> {
     /// Where a projection's applied position is kept.
-    pub fn projection_offsets(&self) -> Arc<S::ProjectionOffsets> {
-        Arc::new(self.store.projection_offsets())
+    pub fn projection_offsets(&self) -> S::ProjectionOffsets {
+        self.store.projection_offsets()
     }
 }
 
 impl<S: SagaOffsetSlot> PersistenceProvider<S> {
     /// Where the framework's saga attachments keep their progress.
-    pub fn saga_offsets(&self) -> Arc<S::SagaOffsets> {
-        Arc::new(self.store.saga_offsets())
+    pub fn saga_offsets(&self) -> S::SagaOffsets {
+        self.store.saga_offsets()
     }
 }

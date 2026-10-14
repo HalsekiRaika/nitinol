@@ -30,7 +30,7 @@ use nitinol_eventsource::{
     Query,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
@@ -157,6 +157,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 /// Delegates every call to the in-memory reference store and counts the
 /// `append` calls, so that "one append carrying three events" can be told from
 /// "three appends carrying one event each".
+#[derive(Clone)]
 struct CountingStore {
     inner: InMemoryEventStore,
     appends: Arc<AtomicUsize>,
@@ -171,9 +172,9 @@ impl AppendCount {
     }
 }
 
-fn counting_store() -> (Arc<dyn EventStore>, AppendCount) {
+fn counting_store() -> (Journal, AppendCount) {
     let appends = Arc::new(AtomicUsize::new(0));
-    let store: Arc<dyn EventStore> = Arc::new(CountingStore {
+    let store = Journal::from(CountingStore {
         inner: InMemoryEventStore::default(),
         appends: Arc::clone(&appends),
     });
@@ -202,15 +203,15 @@ impl EventStore for CountingStore {
 async fn spawn_counter(
     ps: &ProcessSystem,
     id: &AggregateId,
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id.clone(), Arc::clone(store))
+    AggregateProps::<Counter>::new(id.clone(), store.clone())
         .spawn(ps)
         .await
 }
 
 /// Stream sequences stored under `id`, in ascending order.
-async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<u64> {
+async fn stored_sequences(store: &Journal, id: &AggregateId) -> Vec<u64> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await

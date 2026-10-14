@@ -1,10 +1,9 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use jiff::Timestamp;
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType, LoadQuery, MaterializedPath};
 
 use crate::fixture;
@@ -445,7 +444,7 @@ struct Stored {
     occurred_at: Timestamp,
 }
 
-async fn content(backend: &Arc<dyn EventStore>) -> Vec<Stored> {
+async fn content(backend: &Journal) -> Vec<Stored> {
     fixture::observe(backend, LoadQuery::default())
         .await
         .into_iter()
@@ -463,7 +462,7 @@ async fn content(backend: &Arc<dyn EventStore>) -> Vec<Stored> {
 /// The global sequences an append a clause requires to succeed was assigned.
 async fn committed(
     clause: &str,
-    backend: &Arc<dyn EventStore>,
+    backend: &Journal,
     key: &str,
     events: Vec<AppendingEvent>,
 ) -> Vec<u64> {

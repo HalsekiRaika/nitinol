@@ -1,11 +1,10 @@
 //! Interpreter for [`SagaEffect`].
 
 use std::borrow::Borrow;
-use std::sync::Arc;
 
 use futures_core::future::BoxFuture;
 use nitinol_eventsource::{EventAppending, SystemEvent};
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::AppendingEvent;
 use nitinol_runtime::process::ProcessContext;
 
@@ -29,7 +28,7 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     pub(crate) state: &'a mut S,
     pub(crate) saga_id: SagaId,
     pub(crate) sequence: &'a mut u64,
-    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) store: Journal,
     pub(crate) retry_policy: RetryPolicy,
     pub(crate) process_ctx: &'a mut ProcessContext<SagaProcess<S>>,
     pub(crate) lifecycle: &'a mut Lifecycle,

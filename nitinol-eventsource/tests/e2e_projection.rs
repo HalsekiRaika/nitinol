@@ -13,7 +13,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
-    DeliveryMode, EventStore, InMemoryEventStore, InMemoryOffsetStore, OffsetScope, OffsetStore,
+    DeliveryMode, InMemoryEventStore, InMemoryOffsetStore, OffsetScope, OffsetStore,
 };
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -101,7 +101,7 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 }
 
 async fn wait_for_offset(
-    store: &Arc<InMemoryOffsetStore>,
+    store: &InMemoryOffsetStore,
     projection_id: &ProjectionId,
     expected: Option<u64>,
 ) {
@@ -124,13 +124,13 @@ async fn wait_for_offset(
 #[tokio::test]
 async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
     let ps = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-                .projection_offsets(Arc::clone(&offset_store))
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
                 .build(),
         ))
         .build();
@@ -167,13 +167,13 @@ async fn e2e_aggregate_ask_then_catchup_projection_sees_event() {
 #[tokio::test]
 async fn e2e_live_projection_sees_published_event_envelope() {
     let ps = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-                .projection_offsets(Arc::clone(&offset_store))
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
                 .build(),
         ))
         .build();
@@ -210,13 +210,13 @@ async fn e2e_live_projection_sees_published_event_envelope() {
 #[tokio::test]
 async fn e2e_at_most_once_delivery_advances_offset_before_project() {
     let ps = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-                .projection_offsets(Arc::clone(&offset_store))
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
                 .build(),
         ))
         .build();

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::LoadedEvent;
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ident::{Pid, ProcessName};
@@ -29,7 +29,7 @@ const POLLER_RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// `DurableSubscription` avoids that by carrying only the ingredients for a
 /// direct poller, with no reference to the shared poller.
 pub struct DurableSubscription<T> {
-    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) store: Journal,
     pub(crate) transform: TransformFn<T>,
     pub(crate) poll_interval: Duration,
 }
@@ -37,7 +37,7 @@ pub struct DurableSubscription<T> {
 impl<T> Clone for DurableSubscription<T> {
     fn clone(&self) -> Self {
         Self {
-            store: Arc::clone(&self.store),
+            store: self.store.clone(),
             transform: Arc::clone(&self.transform),
             poll_interval: self.poll_interval,
         }
@@ -48,12 +48,16 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
     /// Create a config with the default polling cadence (250 ms).
     ///
     /// Use [`Self::with_poll_interval`] to override the interval.
-    pub fn new<F>(store: Arc<dyn EventStore>, transform: F) -> Self
+    ///
+    /// The journal arrives as whatever the caller holds: a backend handle, a
+    /// [`Journal`] a supplier answered with, or a reference to one the caller
+    /// keeps.
+    pub fn new<F>(store: impl Into<Journal>, transform: F) -> Self
     where
         F: Fn(LoadedEvent) -> Option<T> + Send + Sync + 'static,
     {
         Self {
-            store,
+            store: store.into(),
             transform: Arc::new(transform),
             poll_interval: super::DEFAULT_POLL_INTERVAL,
         }
@@ -79,7 +83,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
     where
         S: Process + Receive<T, Response = ()>,
     {
-        let store = Arc::clone(&self.store);
+        let store = self.store.clone();
         let transform = Arc::clone(&self.transform);
         let initial_cursor = cursor;
         let driver = IntervalDriver::<DirectPollerProcess<T, S>>::new(self.poll_interval);
@@ -87,7 +91,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
             SupervisionStrategy::restart(POLLER_RESTART_MAX_RETRIES, POLLER_RESTART_WITHIN)
                 .expect("POLLER_RESTART_WITHIN is a positive duration constant");
         let mut props = Props::new(move || DirectPollerProcess {
-            store: Arc::clone(&store),
+            store: store.clone(),
             subscriber: subscriber.clone(),
             transform: Arc::clone(&transform),
             cursor: initial_cursor.clone(),
@@ -184,7 +188,7 @@ pub(crate) fn direct_poller_name(subscriber_pid: Pid) -> ProcessName {
 /// released.
 pub struct DurableStreamProxy<T> {
     stream_proxy: ProcessProxy<Stream<T>>,
-    store: Arc<dyn EventStore>,
+    store: Journal,
     transform: TransformFn<T>,
     poll_interval: Duration,
     shared_poller: ProcessProxy<DurablePollerProcess<T>>,
@@ -205,7 +209,7 @@ where
         stream_proxy: ProcessProxy<Stream<T>>,
         shared_poller: ProcessProxy<DurablePollerProcess<T>>,
         start_open: Arc<AtomicBool>,
-        store: Arc<dyn EventStore>,
+        store: Journal,
         transform: TransformFn<T>,
         poll_interval: Duration,
     ) -> Self {
@@ -248,7 +252,7 @@ where
         }
 
         let config = DurableSubscription {
-            store: Arc::clone(&self.store),
+            store: self.store.clone(),
             transform: Arc::clone(&self.transform),
             poll_interval: self.poll_interval,
         };

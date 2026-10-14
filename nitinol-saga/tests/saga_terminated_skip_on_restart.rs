@@ -35,7 +35,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -143,12 +143,7 @@ impl Saga for EndOnFirstSaga {
 
 // Helpers
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -170,7 +165,7 @@ async fn append_order_placed(
 
 /// Seed a raw durable `Ended` lifecycle fact at `sequence` on the saga's own
 /// stream, simulating a saga that terminated in a previous incarnation.
-async fn seed_ended_fact(store: &Arc<dyn EventStore>, saga_id: &SagaId, sequence: u64) {
+async fn seed_ended_fact(store: &Journal, saga_id: &SagaId, sequence: u64) {
     store
         .append(
             saga_id.as_str(),
@@ -185,7 +180,7 @@ async fn seed_ended_fact(store: &Arc<dyn EventStore>, saga_id: &SagaId, sequence
         .expect("seed Ended fact must succeed");
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -198,17 +193,15 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 #[allow(clippy::type_complexity)]
 async fn spawn_recording_saga(
     system: &EventSourceSystem<InMemoryStore>,
-    saga_store: &Arc<dyn EventStore>,
-    upstream_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
+    upstream_store: &Journal,
     upstream_key: &str,
     handle_count: Arc<AtomicUsize>,
     handled: Arc<Notify>,
 ) -> nitinol_saga::SagaManagerProxy<RecordingSaga> {
-    SagaManagerProps::<RecordingSaga>::new(Arc::clone(saga_store), move |_components| {
-        RecordingSaga {
-            handle_count: Arc::clone(&handle_count),
-            handled: Arc::clone(&handled),
-        }
+    SagaManagerProps::<RecordingSaga>::new(saga_store.clone(), move |_components| RecordingSaga {
+        handle_count: Arc::clone(&handle_count),
+        handled: Arc::clone(&handled),
     })
     .observing::<OrderPlaced>(Subscription::stream(upstream_store, upstream_key))
     .spawn(system.process_system())
@@ -227,11 +220,11 @@ async fn non_terminated_saga_handles_routed_event() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("baseline-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handle_count = Arc::new(AtomicUsize::new(0));
     let handled = Arc::new(Notify::new());
 
@@ -266,11 +259,11 @@ async fn terminated_saga_drops_routed_records_and_never_handles() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("terminated-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
 
     // Simulate a saga that ended in a previous incarnation.
@@ -310,18 +303,18 @@ async fn saga_that_ended_is_skipped_when_respawned_over_same_store() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("respawn-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-FIRST").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
 
     // First incarnation: handle the first event and terminate via End.
     let first_count = Arc::new(AtomicUsize::new(0));
     let first_count_clone = Arc::clone(&first_count);
     let first_proxy =
-        SagaManagerProps::<EndOnFirstSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<EndOnFirstSaga>::new(saga_store.clone(), move |_components| {
             EndOnFirstSaga {
                 handle_count: Arc::clone(&first_count_clone),
             }

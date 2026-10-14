@@ -89,7 +89,7 @@ impl Projector<Evt> for ConditionallyFailingProjector {
 
 struct ExactlyOnceProjector {
     /// Direct reference to the offset store so the user can save atomically.
-    offset_store: Arc<InMemoryOffsetStore>,
+    offset_store: InMemoryOffsetStore,
     projection_id: ProjectionId,
     count: Arc<AtomicUsize>,
     notify: Arc<Notify>,
@@ -141,7 +141,7 @@ async fn append_evt(store: &InMemoryEventStore, agg_id: &AggregateId, sequence: 
 
 /// Poll the offset store until it reaches `expected` or until the timeout elapses.
 async fn wait_for_offset(
-    store: &Arc<InMemoryOffsetStore>,
+    store: &InMemoryOffsetStore,
     projection_id: &ProjectionId,
     expected: Option<u64>,
 ) {
@@ -189,14 +189,14 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 async fn e2e_at_least_once_failed_projection_retried_on_restart() {
     // Given
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("e2e-ckpt-alo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-alo");
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
 
@@ -304,14 +304,14 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
 async fn e2e_exactly_once_user_saves_offset_prevents_reprocessing() {
     // Given
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("e2e-ckpt-eo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-eo");
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
 
@@ -325,12 +325,12 @@ async fn e2e_exactly_once_user_saves_offset_prevents_reprocessing() {
     {
         let count_c = Arc::clone(&count);
         let notify_c = Arc::clone(&notify);
-        let ckpt_c = Arc::clone(&offset_store);
+        let ckpt_c = offset_store.clone();
         let proj_id_c = projection_id.clone();
 
         let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
             ExactlyOnceProjector {
-                offset_store: Arc::clone(&ckpt_c),
+                offset_store: ckpt_c.clone(),
                 projection_id: proj_id_c.clone(),
                 count: Arc::clone(&count_c),
                 notify: Arc::clone(&notify_c),
@@ -361,12 +361,12 @@ async fn e2e_exactly_once_user_saves_offset_prevents_reprocessing() {
 
     let count_c2 = Arc::clone(&count);
     let notify_c2 = Arc::clone(&notify);
-    let ckpt_c2 = Arc::clone(&offset_store);
+    let ckpt_c2 = offset_store.clone();
     let proj_id_c2 = projection_id.clone();
 
     let _proxy2 = ProjectorProps::new(projection_id.clone(), &persistence, move || {
         ExactlyOnceProjector {
-            offset_store: Arc::clone(&ckpt_c2),
+            offset_store: ckpt_c2.clone(),
             projection_id: proj_id_c2.clone(),
             count: Arc::clone(&count_c2),
             notify: Arc::clone(&notify_c2),
@@ -398,14 +398,14 @@ async fn e2e_exactly_once_user_saves_offset_prevents_reprocessing() {
 async fn e2e_at_most_once_failed_event_not_retried_on_restart() {
     // Given
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("e2e-ckpt-amo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-amo");
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
 

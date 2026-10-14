@@ -18,7 +18,7 @@ use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
 use nitinol_persistence::store::{
-    EventStore, EventStream, InMemoryOffsetStore, OffsetScope, OffsetStore,
+    EventStore, EventStream, InMemoryOffsetStore, Journal, OffsetScope, OffsetStore,
 };
 use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
@@ -31,8 +31,7 @@ use saga_fanout_pattern::payslip::{IsIssued, Payslip};
 use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 
 /// The store this example's deployment assembles: one in-memory journal, named
-/// through an `Arc` because the fault-injecting store the crash clauses wrap it
-/// in is not a cloneable value of its own, plus the saga-offset slot a
+/// by handing the backend handle over as itself, plus the saga-offset slot a
 /// host keeps its progress in.
 ///
 /// Those two slots are exactly what a delivery host needs, and naming the second
@@ -41,8 +40,10 @@ use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 /// exist on the system at all — a deployment that named no store for its hosts'
 /// progress would not compile.  The snapshot and projection slots are left
 /// unprovided rather than filled with stores nothing here reads.
-pub type ExampleStore =
-    CustomStore<Arc<dyn EventStore>, Unprovided, Unprovided, InMemoryOffsetStore>;
+///
+/// The journal has no type parameter here: the backend's type is written once,
+/// in the builder call that names it, and erased from there on.
+pub type ExampleStore = CustomStore<Unprovided, Unprovided, InMemoryOffsetStore>;
 
 /// The system this example's deployment assembles.
 pub type ExampleSystem = EventSourceSystem<ExampleStore>;
@@ -121,15 +122,19 @@ pub struct FanOutWorld {
 /// the saga's own stream are tenants of the same instance and each owner still
 /// reads only its own key.
 ///
-/// Both the journal and the offset store are parameters because the tests
-/// hand the same durable state to two successive incarnations — that is what
-/// makes "a restarted host resumes from the offset the dead one left" a
+/// Both the journal's backend and the offset store are parameters because the
+/// tests hand the same durable state to two successive incarnations — that is
+/// what makes "a restarted host resumes from the offset the dead one left" a
 /// thing a test can set up, and wrapping the journal in
 /// [`UnreachablePayslipStore`] is what makes an interrupted fan-out
 /// reproducible.
+///
+/// The journal is named as the backend handle rather than as an erased
+/// [`Journal`]: naming a slot is what erases it, and an incarnation wired with
+/// the fault-injecting store is wired with that store itself.
 pub async fn spawn_world(
     run_id: &AggregateId,
-    store: Arc<dyn EventStore>,
+    store: impl EventStore + 'static,
     offsets: InMemoryOffsetStore,
     delivery_id: &SagaDeliveryId,
 ) -> FanOutWorld {
@@ -265,7 +270,7 @@ pub async fn settle() {
 
 // Store observation
 
-pub async fn load_stream(store: &Arc<dyn EventStore>, key: &str) -> Vec<LoadedEvent> {
+pub async fn load_stream(store: &Journal, key: &str) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(key))
         .await
@@ -283,7 +288,7 @@ pub async fn load_stream(store: &Arc<dyn EventStore>, key: &str) -> Vec<LoadedEv
 /// was rewritten with equal content".
 pub type StreamFingerprint = Vec<(u64, u64, Vec<u8>)>;
 
-pub async fn fingerprint(store: &Arc<dyn EventStore>, key: &str) -> StreamFingerprint {
+pub async fn fingerprint(store: &Journal, key: &str) -> StreamFingerprint {
     load_stream(store, key)
         .await
         .into_iter()
@@ -297,7 +302,7 @@ pub async fn fingerprint(store: &Arc<dyn EventStore>, key: &str) -> StreamFinger
         .collect()
 }
 
-pub async fn fingerprints(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<StreamFingerprint> {
+pub async fn fingerprints(store: &Journal, keys: &[String]) -> Vec<StreamFingerprint> {
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
         out.push(fingerprint(store, key).await);
@@ -306,7 +311,7 @@ pub async fn fingerprints(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<S
 }
 
 /// The subset of `keys` whose stream already holds at least one record.
-pub async fn issued(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<String> {
+pub async fn issued(store: &Journal, keys: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for key in keys {
         if !load_stream(store, key).await.is_empty() {
@@ -322,7 +327,7 @@ pub async fn issued(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<String>
 /// polling it — rather than sleeping for a guessed duration — is what makes the
 /// positive half of both tests deterministic.
 pub async fn wait_for_issued(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     keys: &[String],
     expected: usize,
     timeout: Duration,
@@ -346,7 +351,7 @@ pub async fn wait_for_issued(
 
 /// Poll the stream `key` until it holds at least `expected` records.
 pub async fn wait_for_records(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     key: &str,
     expected: usize,
     timeout: Duration,
@@ -380,7 +385,7 @@ pub fn decisions(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
 ///
 /// That position is what a delivery host's offset is compared against: a
 /// host that has recorded it has finished every delivery the decision implied.
-pub async fn decision_position(store: &Arc<dyn EventStore>, saga_key: &str) -> u64 {
+pub async fn decision_position(store: &Journal, saga_key: &str) -> u64 {
     let stream = load_stream(store, saga_key).await;
     let decisions = decisions(&stream);
     assert_eq!(
@@ -433,22 +438,28 @@ pub async fn drain_payslips(system: &ExampleSystem, keys: &[String]) -> Vec<bool
 /// `load` always delegates: a later incarnation has to be able to read the
 /// journal this one wrote, and a payslip whose issue was refused must still be
 /// able to replay (and find itself empty).
+///
+/// Every field is shared rather than copied, because a store is distributed by
+/// being cloned: the handle this test keeps and the one the incarnation was
+/// wired with are the same store, or the refusals the test reads would be
+/// another store's.
+#[derive(Clone)]
 pub struct UnreachablePayslipStore {
-    inner: Arc<dyn EventStore>,
+    inner: Journal,
     /// Payslip streams this incarnation can never write.
-    unreachable: HashSet<String>,
-    refused: Mutex<HashSet<String>>,
-    refused_changed: Notify,
+    unreachable: Arc<HashSet<String>>,
+    refused: Arc<Mutex<HashSet<String>>>,
+    refused_changed: Arc<Notify>,
 }
 
 impl UnreachablePayslipStore {
-    pub fn new(inner: Arc<dyn EventStore>, unreachable: HashSet<String>) -> Arc<Self> {
-        Arc::new(Self {
+    pub fn new(inner: Journal, unreachable: HashSet<String>) -> Self {
+        Self {
             inner,
-            unreachable,
-            refused: Mutex::new(HashSet::new()),
-            refused_changed: Notify::new(),
-        })
+            unreachable: Arc::new(unreachable),
+            refused: Arc::new(Mutex::new(HashSet::new())),
+            refused_changed: Arc::new(Notify::new()),
+        }
     }
 
     /// The payslip streams that have had an append refused.

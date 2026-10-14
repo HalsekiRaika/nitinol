@@ -53,7 +53,9 @@ use tokio::sync::Notify;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryStore, Journal,
+};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -155,6 +157,7 @@ type Batches = Arc<Mutex<Vec<Vec<RecordedEvent>>>>;
 
 /// `EventStore` decorator that appends one entry to `batches` per successful
 /// `append` call, preserving the events of that call as a group.
+#[derive(Clone)]
 struct RecordingStore {
     inner: InMemoryEventStore,
     batches: Batches,
@@ -226,12 +229,7 @@ fn decided_sku(event: &RecordedEvent) -> Option<String> {
 
 // Helpers
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    upstream: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, upstream: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -255,7 +253,7 @@ async fn append_order_placed(
 /// saga's own stream: the decision, and the consumed fact that closed out the
 /// input it was decided from.
 async fn seed_one_handled_input(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     upstream: &AggregateId,
     upstream_sequence: u64,
@@ -291,7 +289,7 @@ async fn seed_one_handled_input(
         .expect("seeding the saga's own stream must succeed");
 }
 
-async fn load_saga_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_stream(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -333,13 +331,13 @@ async fn a_restart_appends_nothing_before_its_first_live_decision() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new("replay-pure-orders");
     append_order_placed(&upstream_store, &upstream, 1, CONSUMED_SKU).await;
     append_order_placed(&upstream_store, &upstream, 2, FRESH_SKU).await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore {
+    let saga_store = Journal::from(RecordingStore {
         inner: InMemoryEventStore::default(),
         batches: Arc::clone(&batches),
     });
@@ -355,12 +353,10 @@ async fn a_restart_appends_nothing_before_its_first_live_decision() {
     let handled_for_producer = Arc::clone(&handled);
 
     let _proxy =
-        SagaManagerProps::<FoldingSaga>::new(Arc::clone(&saga_store), move |_components| {
-            FoldingSaga {
-                reserved: Vec::new(),
-                handle_count: Arc::clone(&handle_count_for_producer),
-                handled: Arc::clone(&handled_for_producer),
-            }
+        SagaManagerProps::<FoldingSaga>::new(saga_store.clone(), move |_components| FoldingSaga {
+            reserved: Vec::new(),
+            handle_count: Arc::clone(&handle_count_for_producer),
+            handled: Arc::clone(&handled_for_producer),
         })
         .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
         .spawn(system.process_system())
@@ -447,12 +443,12 @@ async fn a_restart_with_nothing_fresh_upstream_appends_nothing_at_all() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new("replay-quiet-orders");
     append_order_placed(&upstream_store, &upstream, 1, CONSUMED_SKU).await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore {
+    let saga_store = Journal::from(RecordingStore {
         inner: InMemoryEventStore::default(),
         batches: Arc::clone(&batches),
     });
@@ -467,12 +463,10 @@ async fn a_restart_with_nothing_fresh_upstream_appends_nothing_at_all() {
     let handled_for_producer = Arc::clone(&handled);
 
     let _proxy =
-        SagaManagerProps::<FoldingSaga>::new(Arc::clone(&saga_store), move |_components| {
-            FoldingSaga {
-                reserved: Vec::new(),
-                handle_count: Arc::clone(&handle_count_for_producer),
-                handled: Arc::clone(&handled_for_producer),
-            }
+        SagaManagerProps::<FoldingSaga>::new(saga_store.clone(), move |_components| FoldingSaga {
+            reserved: Vec::new(),
+            handle_count: Arc::clone(&handle_count_for_producer),
+            handled: Arc::clone(&handled_for_producer),
         })
         .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
         .spawn(system.process_system())

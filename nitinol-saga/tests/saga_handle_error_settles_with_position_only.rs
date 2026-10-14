@@ -46,7 +46,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -171,12 +171,7 @@ fn released_dead_letter_identity() -> EventType {
     )
 }
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    upstream: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, upstream: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -196,7 +191,7 @@ async fn append_order_placed(
         .expect("append OrderPlaced must succeed");
 }
 
-async fn load_saga_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_stream(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -228,7 +223,7 @@ struct Refusal {
     /// never decide the same record onto one stream.
     _proxy: nitinol_saga::SagaManagerProxy<RefusingSaga>,
     system: EventSourceSystem<InMemoryStore>,
-    saga_store: Arc<dyn EventStore>,
+    saga_store: Journal,
     upstream: AggregateId,
     saga_id: SagaId,
     handle_count: Arc<AtomicUsize>,
@@ -243,11 +238,11 @@ async fn refuse_one_record(upstream_key: &str) -> Refusal {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new(upstream_key);
     append_order_placed(&upstream_store, &upstream, REFUSED_SEQUENCE, "SKU-REFUSED").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
 
     let handle_count = Arc::new(AtomicUsize::new(0));
@@ -255,16 +250,15 @@ async fn refuse_one_record(upstream_key: &str) -> Refusal {
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let proxy =
-        SagaManagerProps::<RefusingSaga>::new(Arc::clone(&saga_store), move |_components| {
-            RefusingSaga {
-                handle_count: Arc::clone(&handle_count_for_producer),
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-        .spawn(system.process_system())
-        .await;
+    let proxy = SagaManagerProps::<RefusingSaga>::new(saga_store.clone(), move |_components| {
+        RefusingSaga {
+            handle_count: Arc::clone(&handle_count_for_producer),
+            handled: Arc::clone(&handled_for_producer),
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+    .spawn(system.process_system())
+    .await;
 
     tokio::time::timeout(SETTLE, handled.notified())
         .await
@@ -391,7 +385,7 @@ async fn the_refused_input_is_not_redelivered() {
 async fn a_restart_does_not_hand_the_refused_input_back() {
     let refusal = refuse_one_record("handle-err-restart-orders").await;
 
-    let restarted_upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let restarted_upstream = Journal::from(InMemoryEventStore::default());
     append_order_placed(
         &restarted_upstream,
         &refusal.upstream,
@@ -412,16 +406,16 @@ async fn a_restart_does_not_hand_the_refused_input_back() {
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let _second = SagaManagerProps::<AcceptingSaga>::new(
-        Arc::clone(&refusal.saga_store),
-        move |_components| AcceptingSaga {
-            handle_count: Arc::clone(&handle_count_for_producer),
-            handled: Arc::clone(&handled_for_producer),
-        },
-    )
-    .observing::<OrderPlaced>(Subscription::stream(&restarted_upstream, &refusal.upstream))
-    .spawn(refusal.system.process_system())
-    .await;
+    let _second =
+        SagaManagerProps::<AcceptingSaga>::new(refusal.saga_store.clone(), move |_components| {
+            AcceptingSaga {
+                handle_count: Arc::clone(&handle_count_for_producer),
+                handled: Arc::clone(&handled_for_producer),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&restarted_upstream, &refusal.upstream))
+        .spawn(refusal.system.process_system())
+        .await;
 
     tokio::time::timeout(SETTLE, handled.notified())
         .await

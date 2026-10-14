@@ -15,7 +15,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use nitinol_eventsource::system::SystemHandle;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Terminated};
 use nitinol_runtime::IdleTimeout;
 
@@ -27,7 +27,7 @@ use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
 
 pub(crate) struct SagaManagerProcess<S: Saga> {
-    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) store: Journal,
     pub(crate) producer: SagaProducer<S>,
     /// The system this manager was wired from, where it was wired from one.
     ///
@@ -83,7 +83,7 @@ impl<S: Saga> SagaManagerProcess<S> {
 
         let props = SagaInstanceSpec::<S> {
             saga_id: saga_id.clone(),
-            store: Arc::clone(&self.store),
+            store: self.store.clone(),
             producer: Arc::clone(&self.producer),
             host: self.host.clone(),
             scheduler: self.scheduler.clone(),

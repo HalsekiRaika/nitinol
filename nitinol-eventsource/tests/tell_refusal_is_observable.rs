@@ -22,7 +22,7 @@ use tracing::{Level, Metadata, Subscriber};
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, Query,
 };
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -197,9 +197,9 @@ async fn a_refused_told_command_is_reported_and_a_carried_out_one_is_not() {
     .expect("this test binary holds one test, so nothing else installs a subscriber");
 
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("tell-refusal-reported");
-    let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
+    let proxy = AggregateProps::<Counter>::new(id.clone(), store.clone())
         .spawn(&ps)
         .await;
 

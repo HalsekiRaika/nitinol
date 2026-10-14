@@ -9,7 +9,6 @@
 // Every error asserted on here is produced by a real dispatch, so the mapping is
 // checked against the errors the framework actually builds.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -21,7 +20,7 @@ use nitinol_eventsource::{
     Query, Retryability,
 };
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -117,9 +116,9 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 async fn spawn_writer(
     ps: &ProcessSystem,
     id: &AggregateId,
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id.clone(), Arc::clone(store))
+    AggregateProps::<Counter>::new(id.clone(), store.clone())
         .spawn(ps)
         .await
 }
@@ -129,7 +128,7 @@ async fn spawn_writer(
 async fn non_genesis_conflict(
     ps: &ProcessSystem,
     id: &AggregateId,
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
 ) -> (AggregateProxy<Counter>, AskError<std::convert::Infallible>) {
     let winner = spawn_writer(ps, id, store).await;
     winner.ask(Increment).await.expect("genesis append");
@@ -167,7 +166,7 @@ async fn non_genesis_conflict(
 async fn sequence_conflict_is_transient() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("retryability-conflict");
 
     // When
@@ -194,7 +193,7 @@ async fn sequence_conflict_is_transient() {
 async fn dispatch_to_a_stopped_activation_is_transient() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("retryability-stopped");
     let (loser, _conflict) = non_genesis_conflict(&ps, &id, &store).await;
 
@@ -229,13 +228,11 @@ async fn dispatch_to_a_stopped_activation_is_transient() {
 async fn decider_rejection_is_permanent() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let proxy = AggregateProps::<Counter>::new(
-        AggregateId::new("retryability-rejection"),
-        Arc::clone(&store),
-    )
-    .spawn(&ps)
-    .await;
+    let store = Journal::from(InMemoryEventStore::default());
+    let proxy =
+        AggregateProps::<Counter>::new(AggregateId::new("retryability-rejection"), store.clone())
+            .spawn(&ps)
+            .await;
 
     // When
     let err = proxy
@@ -262,7 +259,7 @@ async fn decider_rejection_is_permanent() {
 async fn already_created_is_permanent() {
     // Given: both writers address the genesis sequence
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("retryability-already-created");
 
     let creator = spawn_writer(&ps, &id, &store).await;

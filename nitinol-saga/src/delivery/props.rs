@@ -2,13 +2,12 @@
 
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::time::Duration;
 
 use nitinol_eventsource::system::{EventSourceSystem, Hosted, SystemHandle, Unhosted};
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::{PersistenceProvider, SagaOffsetSlot, Store};
-use nitinol_persistence::store::{EventStore, OffsetStore};
+use nitinol_persistence::store::{Journal, OffsetStore};
 use nitinol_runtime::process::SupervisionStrategy;
 use nitinol_runtime::{IdleTimeout, Props};
 
@@ -134,8 +133,8 @@ const RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// [`SagaDeliveryExt::deliver`](crate::SagaDeliveryExt::deliver) they are
 /// [`Hosted`] and `spawn` names nothing.
 pub struct SagaDeliveryProps<S: Saga, Cs: OffsetStore, H = Unhosted> {
-    journal: Arc<dyn EventStore>,
-    offsets: Arc<Cs>,
+    journal: Journal,
+    offsets: Cs,
     delivery_id: Option<SagaDeliveryId>,
     partitions: NonZeroUsize,
     poll_interval: Duration,
@@ -146,7 +145,7 @@ pub struct SagaDeliveryProps<S: Saga, Cs: OffsetStore, H = Unhosted> {
 impl<S, Cs> SagaDeliveryProps<S, Cs, Unhosted>
 where
     S: Saga,
-    Cs: OffsetStore + 'static,
+    Cs: OffsetStore + Clone + 'static,
 {
     /// Begin wiring a host over the two slots `persistence` distributes.
     ///
@@ -194,7 +193,7 @@ where
 impl<S, Cs, H> SagaDeliveryProps<S, Cs, H>
 where
     S: Saga,
-    Cs: OffsetStore + 'static,
+    Cs: OffsetStore + Clone + 'static,
 {
     /// Name this host, so its recorded progress is filed under `id`.
     ///
@@ -249,8 +248,8 @@ where
 
         for partition in 0..self.partitions.get() {
             let delivery_id = delivery_id.clone();
-            let journal = Arc::clone(&self.journal);
-            let offsets = Arc::clone(&self.offsets);
+            let journal = self.journal.clone();
+            let offsets = self.offsets.clone();
             let system_for_partition = host.clone();
             let partitions = self.partitions;
             let poll_interval = self.poll_interval;
@@ -264,8 +263,8 @@ where
                     delivery_id.clone(),
                     partition,
                     partitions,
-                    Arc::clone(&journal),
-                    Arc::clone(&offsets),
+                    journal.clone(),
+                    offsets.clone(),
                     system_for_partition.clone(),
                     poll_interval,
                 )
@@ -292,7 +291,7 @@ where
 impl<S, Cs> SagaDeliveryProps<S, Cs, Unhosted>
 where
     S: Saga,
-    Cs: OffsetStore + 'static,
+    Cs: OffsetStore + Clone + 'static,
 {
     /// Start the host, delivering through `system`, and answer the handle an
     /// operator reaches it through.
@@ -312,7 +311,7 @@ where
 impl<S, Cs> SagaDeliveryProps<S, Cs, Hosted>
 where
     S: Saga,
-    Cs: OffsetStore + 'static,
+    Cs: OffsetStore + Clone + 'static,
 {
     /// Start the host on the system these props came from.
     ///

@@ -23,6 +23,14 @@
 //!     When a projector wired from the system catches up
 //!     Then it read the store's journal
 //!     And it recorded its position in the store's projection slot
+//!
+//!   Scenario: the erased handle is the system over a `Journal`
+//!     Given a system built on a store that supplies every slot
+//!     When its store type is erased
+//!     Then the handle is an `EventSourceSystem<Journal>`, which is the one
+//!          type wiring written before a deployment's store names
+//!     And an aggregate spawned on the original system is read through the
+//!         erased handle's journal
 //! ```
 //!
 //! Every clause reads the store the supplier was *configured with* rather than
@@ -53,15 +61,17 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
-    ProjectionContext, ProjectionId, Projector, ProjectorProps, SnapshotPersistor,
+    codec::Codec,
+    system::{EventSourceSystem, SystemHandle},
+    Aggregate, Decider, Decision, Event, ProjectionContext, ProjectionId, Projector,
+    ProjectorProps, SnapshotPersistor,
 };
 use nitinol_persistence::provider::{
     CustomStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot,
 };
 use nitinol_persistence::store::{
-    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore, InMemoryStore,
-    OffsetScope, OffsetStore, SnapshotStore,
+    Album, EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore,
+    InMemoryStore, Journal, OffsetScope, OffsetStore, SnapshotStore,
 };
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, PersistedSnapshot, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -155,6 +165,22 @@ async fn stream_event_types(store: &dyn EventStore, key: &AggregateId) -> Vec<Ev
     loaded.into_iter().map(|event| event.event_type).collect()
 }
 
+/// The same, through a handle the framework distributes.
+///
+/// A [`Journal`] delegates `load` as an inherent method rather than
+/// implementing [`EventStore`], so the erased handle needs a reader of its own
+/// rather than a `&dyn` coercion.
+async fn journal_event_types(journal: &Journal, key: &AggregateId) -> Vec<EventType> {
+    let loaded: Vec<_> = journal
+        .load(LoadQuery::by_stream(key))
+        .await
+        .expect("loading a stream of a journal succeeds")
+        .try_collect()
+        .await
+        .expect("collecting a stream of a journal succeeds");
+    loaded.into_iter().map(|event| event.event_type).collect()
+}
+
 fn a_snapshot(aggregate_id: &AggregateId, sequence: u64) -> PersistedSnapshot {
     PersistedSnapshot {
         aggregate_id: aggregate_id.clone(),
@@ -170,6 +196,15 @@ async fn snapshot_sequence(store: &dyn SnapshotStore, aggregate: &AggregateId) -
         .load_latest(aggregate)
         .await
         .expect("loading from the configured snapshot store succeeds")
+        .map(|found| found.sequence)
+}
+
+/// The same, through the handle a store answers its snapshot slot with.
+async fn album_sequence(album: &Album, aggregate: &AggregateId) -> Option<u64> {
+    album
+        .load_latest(aggregate)
+        .await
+        .expect("loading from the configured album succeeds")
         .map(|found| found.sequence)
 }
 
@@ -210,10 +245,12 @@ async fn wait_for_offset(
 }
 
 /// A store supplying the journal alone, over the handle the caller keeps.
-fn journal_only(events: &Arc<dyn EventStore>) -> CustomStore<Arc<dyn EventStore>> {
-    CustomStore::builder()
-        .eventstore(Arc::clone(events))
-        .build()
+///
+/// The backend is named as itself and the caller keeps a clone — there is no
+/// type parameter for the journal, because what a store answers with is the
+/// erased [`Journal`] whatever the backend was.
+fn journal_only(events: &InMemoryEventStore) -> CustomStore {
+    CustomStore::builder().eventstore(events.clone()).build()
 }
 
 // The event-store slot, through every aggregate entry point
@@ -224,7 +261,7 @@ fn journal_only(events: &Arc<dyn EventStore>) -> CustomStore<Arc<dyn EventStore>
 async fn spawn_aggregate_persists_onto_the_suppliers_event_store() {
     // Given
     let ps = ProcessSystem::new().await;
-    let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let events = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(journal_only(&events)))
         .build();
@@ -236,7 +273,7 @@ async fn spawn_aggregate_persists_onto_the_suppliers_event_store() {
 
     // Then
     assert_eq!(
-        stream_event_types(&*events, &id).await,
+        stream_event_types(&events, &id).await,
         vec![Incremented::EVENT_TYPE],
         "a spawn resolves the supplier's event store, so that is where the \
          aggregate's events are"
@@ -249,7 +286,7 @@ async fn spawn_aggregate_persists_onto_the_suppliers_event_store() {
 async fn aggregate_props_persists_onto_the_suppliers_event_store() {
     // Given
     let ps = ProcessSystem::new().await;
-    let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let events = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(journal_only(&events)))
         .build();
@@ -261,7 +298,7 @@ async fn aggregate_props_persists_onto_the_suppliers_event_store() {
 
     // Then
     assert_eq!(
-        stream_event_types(&*events, &id).await,
+        stream_event_types(&events, &id).await,
         vec![Incremented::EVENT_TYPE],
         "props taken from the system carry the supplier's event store"
     );
@@ -273,7 +310,7 @@ async fn aggregate_props_persists_onto_the_suppliers_event_store() {
 async fn aggregate_proxy_persists_onto_the_suppliers_event_store() {
     // Given
     let ps = ProcessSystem::new().await;
-    let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let events = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(journal_only(&events)))
         .build();
@@ -285,7 +322,7 @@ async fn aggregate_proxy_persists_onto_the_suppliers_event_store() {
 
     // Then
     assert_eq!(
-        stream_event_types(&*events, &id).await,
+        stream_event_types(&events, &id).await,
         vec![Incremented::EVENT_TYPE],
         "a reference resolved at dispatch time activates onto the supplier's \
          event store"
@@ -300,7 +337,7 @@ async fn aggregate_proxy_persists_onto_the_suppliers_event_store() {
 async fn the_supplier_the_system_carries_is_the_one_its_spawns_resolve() {
     // Given
     let ps = ProcessSystem::new().await;
-    let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let events = InMemoryEventStore::default();
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(journal_only(&events)))
         .build();
@@ -311,9 +348,9 @@ async fn the_supplier_the_system_carries_is_the_one_its_spawns_resolve() {
     proxy.ask(Increment).await.expect("ask must succeed");
 
     // Then
-    let from_the_system = system.persistence().event_store();
+    let from_the_system: Journal = system.persistence().event_store();
     assert_eq!(
-        stream_event_types(&*from_the_system, &id).await,
+        journal_event_types(&from_the_system, &id).await,
         vec![Incremented::EVENT_TYPE],
         "the store the accessor answers with is the store the spawn wrote to"
     );
@@ -326,12 +363,12 @@ async fn the_supplier_the_system_carries_is_the_one_its_spawns_resolve() {
 #[tokio::test]
 async fn the_systems_snapshot_persistor_writes_to_the_suppliers_snapshot_store() {
     // Given
-    let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let events = InMemoryEventStore::default();
     let snapshots = InMemorySnapshotStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&events))
+                .eventstore(events.clone())
                 .snapshot(snapshots.clone())
                 .build(),
         ))
@@ -388,7 +425,7 @@ async fn a_system_and_its_clone_hand_back_one_snapshot_persistor() {
         .await
         .expect("saving through the clone's handle must succeed");
     assert_eq!(
-        snapshot_sequence(&store.snapshots(), &id).await,
+        album_sequence(&store.snapshots(), &id).await,
         Some(5),
         "the shared persistor resolves the snapshot slot of the store the \
          system was built on"
@@ -414,10 +451,10 @@ async fn a_system_and_its_clone_hand_back_one_snapshot_persistor() {
 #[tokio::test]
 async fn a_persistor_spawned_from_the_supplier_reaches_the_same_snapshot_store() {
     // Given
-    let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let events = InMemoryEventStore::default();
     let provider = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&events))
+            .eventstore(events.clone())
             .snapshot(InMemorySnapshotStore::default())
             .build(),
     );
@@ -456,13 +493,13 @@ async fn a_persistor_spawned_from_the_supplier_reaches_the_same_snapshot_store()
 async fn the_systems_projector_follows_the_suppliers_event_store_and_projection_slot() {
     // Given: a system over a store supplying events and projection offsets,
     // with an aggregate that has already decided twice
-    let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let projection_offsets = Arc::new(InMemoryOffsetStore::default());
+    let events = InMemoryEventStore::default();
+    let projection_offsets = InMemoryOffsetStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&events))
-                .projection_offsets(Arc::clone(&projection_offsets))
+                .eventstore(events.clone())
+                .projection_offsets(projection_offsets.clone())
                 .build(),
         ))
         .build();
@@ -500,7 +537,7 @@ async fn the_systems_projector_follows_the_suppliers_event_store_and_projection_
 
     // And: it recorded into the supplier's projection slot
     let held = wait_for_offset(
-        &*projection_offsets,
+        &projection_offsets,
         &projection,
         "the projector must record into the supplier's projection slot",
     )
@@ -558,4 +595,44 @@ async fn projector_props_resolves_both_slots_from_the_supplier() {
         "the position recorded in the supplier's projection slot must have \
          reached the event, and is {held}"
     );
+}
+
+// The handle whose store type is erased
+
+/// Erasing the store type keeps the journal the system was built on, and the
+/// handle it answers with is the one type such wiring names.
+///
+/// Both halves are the clause. A saga's dispatch mapping names its system type
+/// when the mapping is written, long before a deployment assembles a store, so
+/// the erasure has to land on one type for every store — and it has to reach the
+/// records that store holds rather than a region built at the erasure. An
+/// erasure that boxed a journal of its own would hand back a working handle onto
+/// an empty one, and the mapping holding it would read nothing while the
+/// aggregates carried on writing.
+#[tokio::test]
+async fn the_erased_handle_is_the_system_over_the_stores_journal() {
+    // Given
+    let store = InMemoryStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store.clone()))
+        .build();
+    let id = AggregateId::new("system-persistence-erased");
+
+    // When: the aggregate is spawned on the original system, and the handle is
+    // erased
+    let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
+    proxy.ask(Increment).await.expect("ask must succeed");
+    let erased: SystemHandle = system.erase_store();
+
+    // Then: the erased handle's journal is the store's
+    assert_eq!(
+        journal_event_types(&erased.persistence().event_store(), &id).await,
+        vec![Incremented::EVENT_TYPE],
+        "the erased handle reaches the journal the system it was erased from \
+         was built on, so wiring that holds one reads what the aggregates wrote"
+    );
+
+    // And: the store the handle's supplier distributes is the journal itself —
+    // which is what makes `SystemHandle` one type for every deployment.
+    let _: fn(&SystemHandle) -> &PersistenceProvider<Journal> = SystemHandle::persistence;
 }

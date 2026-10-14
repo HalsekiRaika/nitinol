@@ -50,7 +50,7 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::{EventSourceSystem, SystemHandle};
 use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
 use nitinol_persistence::provider::{PersistenceProvider, Store};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -205,12 +205,7 @@ impl Saga for HostedSaga {
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    key: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, key: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -231,7 +226,7 @@ async fn append_order_placed(
 }
 
 /// Stream sequences stored under `id`, in ascending order.
-async fn stored_sequences(store: &dyn EventStore, id: &AggregateId) -> Vec<u64> {
+async fn stored_sequences(store: &Journal, id: &AggregateId) -> Vec<u64> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await
@@ -243,7 +238,7 @@ async fn stored_sequences(store: &dyn EventStore, id: &AggregateId) -> Vec<u64> 
 }
 
 /// The SKUs recorded on `id`, decoded with the codec `Recorded` names.
-async fn recorded_skus(store: &dyn EventStore, id: &AggregateId) -> Vec<String> {
+async fn recorded_skus(store: &Journal, id: &AggregateId) -> Vec<String> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await
@@ -303,7 +298,7 @@ async fn an_instance_the_host_spawns_reaches_the_hosting_systems_resources() {
         .await
         .expect("the first dispatch must persist");
 
-    let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-components-host-order");
     let report = Arc::new(Report::default());
 
@@ -364,13 +359,13 @@ async fn an_instance_the_host_spawns_reaches_the_hosting_systems_resources() {
 async fn a_saga_built_from_props_directly_is_handed_no_host() {
     // Given
     let ps = ProcessSystem::new().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = Journal::from(InMemoryEventStore::default());
+    let upstream = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-components-no-host-order");
     let report = Arc::new(Report::default());
 
     // When
-    let _saga = SagaManagerProps::<HostedSaga>::new(Arc::clone(&journal), producer(&report))
+    let _saga = SagaManagerProps::<HostedSaga>::new(journal.clone(), producer(&report))
         .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
         .spawn(&ps)
         .await;

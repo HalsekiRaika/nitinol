@@ -185,7 +185,7 @@ const TEST_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[tokio::test]
 async fn durable_stream_catchup_all_events_from_zero() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-catchup-agg");
     for seq in 1..=3 {
         append_evt(&store, agg_id.as_str(), seq).await;
@@ -196,7 +196,7 @@ async fn durable_stream_catchup_all_events_from_zero() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-catchup-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -223,7 +223,7 @@ async fn durable_stream_catchup_all_events_from_zero() {
 #[tokio::test]
 async fn durable_stream_resumes_from_start_sequence() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-resume-agg");
     for seq in 1..=3 {
         append_evt(&store, agg_id.as_str(), seq).await;
@@ -234,7 +234,7 @@ async fn durable_stream_resumes_from_start_sequence() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-resume-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -262,7 +262,7 @@ async fn durable_stream_resumes_from_start_sequence() {
 #[tokio::test]
 async fn durable_stream_live_events_after_catchup() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-live-agg");
 
     let recorder = Recorder::new();
@@ -270,7 +270,7 @@ async fn durable_stream_live_events_after_catchup() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-live-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -300,7 +300,7 @@ async fn durable_stream_live_events_after_catchup() {
 #[tokio::test]
 async fn durable_stream_multiple_subscribers_each_receive() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-multi-agg");
 
     let recorder_a = Recorder::new();
@@ -310,7 +310,7 @@ async fn durable_stream_multiple_subscribers_each_receive() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-multi-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -345,7 +345,7 @@ async fn durable_stream_multiple_subscribers_each_receive() {
 #[tokio::test]
 async fn durable_stream_drop_proxy_stops_poller() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-drop-agg");
 
     let recorder = Recorder::new();
@@ -353,7 +353,7 @@ async fn durable_stream_drop_proxy_stops_poller() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-drop-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -390,7 +390,7 @@ async fn durable_stream_drop_proxy_stops_poller() {
 #[tokio::test]
 async fn durable_stream_transform_returns_none_skips_event() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-skip-agg");
 
     append_with_type(&store, agg_id.as_str(), 1, Evt::EVENT_TYPE).await;
@@ -402,7 +402,7 @@ async fn durable_stream_transform_returns_none_skips_event() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-skip-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -430,7 +430,7 @@ async fn durable_stream_transform_returns_none_skips_event() {
 #[tokio::test]
 async fn durable_stream_global_cursor_orders_across_aggregates() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_a = AggregateId::new("ds-global-a");
     let agg_b = AggregateId::new("ds-global-b");
 
@@ -444,7 +444,7 @@ async fn durable_stream_global_cursor_orders_across_aggregates() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-global-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Global { after: 0 })
@@ -468,7 +468,7 @@ async fn durable_stream_global_cursor_orders_across_aggregates() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_stream_catchup_not_lost_before_subscribe() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-presubscribe-agg");
     for seq in 1..=3 {
         append_evt(&store, agg_id.as_str(), seq).await;
@@ -479,7 +479,7 @@ async fn durable_stream_catchup_not_lost_before_subscribe() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-presubscribe-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -508,7 +508,7 @@ async fn durable_stream_catchup_not_lost_before_subscribe() {
 #[tokio::test]
 async fn durable_stream_late_subscriber_catchup_from_own_cursor() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-late-sub-agg");
     for seq in 1..=3 {
         append_evt(&store, agg_id.as_str(), seq).await;
@@ -516,7 +516,7 @@ async fn durable_stream_late_subscriber_catchup_from_own_cursor() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-late-sub-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -559,7 +559,7 @@ async fn durable_stream_late_subscriber_catchup_from_own_cursor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_stream_subscribe_from_ordering_with_concurrent_live_events() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-order-agg");
     for seq in 1..=3 {
         append_evt(&store, agg_id.as_str(), seq).await;
@@ -567,7 +567,7 @@ async fn durable_stream_subscribe_from_ordering_with_concurrent_live_events() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-order-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -612,7 +612,7 @@ async fn durable_stream_subscribe_from_ordering_with_concurrent_live_events() {
 #[tokio::test]
 async fn durable_stream_spawn_with_duplicate_topic_returns_error() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let _existing = system
         .spawn(nitinol_runtime::StreamProps::<EventEnvelope<Evt>>::new(
             ProcessName::new("ds-dup-topic"),
@@ -622,7 +622,7 @@ async fn durable_stream_spawn_with_duplicate_topic_returns_error() {
 
     let result = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-dup-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Global { after: 0 })
@@ -639,7 +639,7 @@ async fn durable_stream_spawn_with_duplicate_topic_returns_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_stream_subscribe_from_does_not_open_shared_gate() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-ds005-agg");
     for seq in 1..=3 {
         append_evt(&store, agg_id.as_str(), seq).await;
@@ -647,7 +647,7 @@ async fn durable_stream_subscribe_from_does_not_open_shared_gate() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-ds005-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -693,11 +693,11 @@ async fn durable_stream_subscribe_from_does_not_open_shared_gate() {
 #[tokio::test]
 async fn durable_stream_shared_poller_observable_via_registry_lookup_by_name() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-registry-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Global { after: 0 })
@@ -719,7 +719,7 @@ async fn durable_stream_shared_poller_observable_via_registry_lookup_by_name() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_stream_poller_panic_is_recovered_by_supervision_restart() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-panic-agg");
     for seq in 1..=3 {
         append_evt(&store, agg_id.as_str(), seq).await;
@@ -747,7 +747,7 @@ async fn durable_stream_poller_panic_is_recovered_by_supervision_restart() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-panic-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         panicking_transform,
     )
     .cursor(SequenceCursor::Stream {
@@ -781,7 +781,7 @@ async fn durable_stream_poller_panic_is_recovered_by_supervision_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_stream_subscribe_from_poller_stops_when_subscriber_terminates() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-direct-stop-agg");
 
     let transform_calls = Arc::new(AtomicUsize::new(0));
@@ -801,7 +801,7 @@ async fn durable_stream_subscribe_from_poller_stops_when_subscriber_terminates()
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-direct-stop-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         counting_transform,
     )
     .cursor(SequenceCursor::Stream {
@@ -856,11 +856,11 @@ async fn durable_stream_subscribe_from_poller_stops_when_subscriber_terminates()
 #[tokio::test]
 async fn durable_stream_direct_poller_observable_via_registry_lookup_by_name() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-direct-registry-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Global { after: 0 })
@@ -898,7 +898,7 @@ async fn durable_stream_direct_poller_observable_via_registry_lookup_by_name() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_stream_drop_proxy_keeps_direct_poller_until_subscriber_stops() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-drop-direct-agg");
 
     let transform_calls = Arc::new(AtomicUsize::new(0));
@@ -918,7 +918,7 @@ async fn durable_stream_drop_proxy_keeps_direct_poller_until_subscriber_stops() 
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-drop-direct-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         counting_transform,
     )
     .cursor(SequenceCursor::Stream {
@@ -980,11 +980,11 @@ async fn durable_stream_drop_proxy_keeps_direct_poller_until_subscriber_stops() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_stream_subscribe_from_twice_new_poller_stays_in_registry() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-resubscribe-registry-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Global { after: 0 })
@@ -1025,12 +1025,12 @@ async fn durable_stream_subscribe_from_twice_new_poller_stays_in_registry() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("ds-resubscribe-agg");
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("ds-resubscribe-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {
@@ -1175,7 +1175,7 @@ impl Receive<EventEnvelope<Evt>> for FailOnceSubscriber {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_poller_cursor_not_advanced_when_handler_returns_err() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("dp-state-consistency-agg");
 
     append_evt(&store, agg_id.as_str(), 1).await;
@@ -1208,7 +1208,7 @@ async fn direct_poller_cursor_not_advanced_when_handler_returns_err() {
 
     let ds = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("dp-state-consistency-topic"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
+        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {

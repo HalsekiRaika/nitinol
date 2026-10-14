@@ -33,8 +33,6 @@ mod concurrency;
 mod deterministic;
 pub(crate) mod fixture;
 
-use std::sync::Arc;
-
 use futures_core::future::BoxFuture;
 use nitinol_persistence::store::OffsetStore;
 
@@ -58,10 +56,14 @@ use crate::under_test::Executor;
 /// provider running the suite as an integration test may want to spawn it.
 pub trait OffsetStoreUnderTest: Send + Sync {
     /// The backend's own store type.
-    type Store: OffsetStore + 'static;
+    ///
+    /// `Clone` because the concurrency clause names the one store in several
+    /// writers at once, and distribution is the backend's own clone — the same
+    /// obligation `PRV-1` states for an assembly.
+    type Store: OffsetStore + Clone + 'static;
 
     /// Hand the suite a store holding nothing.
-    fn bring_up(&self) -> BoxFuture<'_, Arc<Self::Store>>;
+    fn bring_up(&self) -> BoxFuture<'_, Self::Store>;
 }
 
 /// Put an offset store through every clause the suite fixes.

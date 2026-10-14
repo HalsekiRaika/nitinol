@@ -38,7 +38,6 @@
 mod common;
 use common::{lifecycle_fact, lifecycle_kind_of, JsonCodec, CONSUMED_MARKER, LIFECYCLE_MARKER};
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -49,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -127,7 +126,7 @@ fn released_outbox_identity() -> EventType {
     EventType::new(reserved_family("nitinol.saga"), TypeName::new("outbox"))
 }
 
-async fn append_order_placed(store: &Arc<dyn EventStore>, upstream: &AggregateId, sku: &str) {
+async fn append_order_placed(store: &Journal, upstream: &AggregateId, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -147,7 +146,7 @@ async fn append_order_placed(store: &Arc<dyn EventStore>, upstream: &AggregateId
         .expect("append OrderPlaced must succeed");
 }
 
-async fn load_saga_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_stream(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -172,19 +171,18 @@ async fn stream_after_one_end(upstream_key: &str, sku: &str) -> Vec<LoadedEvent>
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new(upstream_key);
     append_order_placed(&upstream_store, &upstream, sku).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
 
-    let _proxy = SagaManagerProps::<EndOnFirstSaga>::new(Arc::clone(&saga_store), |_components| {
-        EndOnFirstSaga
-    })
-    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(system.process_system())
-    .await;
+    let _proxy =
+        SagaManagerProps::<EndOnFirstSaga>::new(saga_store.clone(), |_components| EndOnFirstSaga)
+            .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+            .spawn(system.process_system())
+            .await;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {

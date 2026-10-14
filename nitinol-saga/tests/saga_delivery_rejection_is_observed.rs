@@ -25,9 +25,7 @@ use delivery::{
     RecordingEventStore, RecordingOffsetStore, RefusedSaga,
 };
 
-use std::sync::Arc;
-
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
@@ -35,8 +33,8 @@ use nitinol_saga::SagaId;
 async fn a_refused_delivery_does_not_become_progress() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let journal: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("refuser-rejection-observed");
@@ -44,7 +42,7 @@ async fn a_refused_delivery_does_not_become_progress() {
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<RefusedSaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<RefusedSaga, _>(&system, &journal, &offsets, 1).await;
     wait_until_loads(&recording, 4, "the host must keep polling while held").await;
     settle().await;
 
@@ -70,8 +68,8 @@ async fn a_refused_delivery_does_not_become_progress() {
 async fn the_same_record_is_asked_for_again() {
     // Given
     let (system, _aggregates) = in_memory_system().await;
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let journal: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("refuser-asked-again");
@@ -79,7 +77,7 @@ async fn the_same_record_is_asked_for_again() {
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<RefusedSaga>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<RefusedSaga, _>(&system, &journal, &offsets, 1).await;
     let queries = wait_until_loads(&recording, 4, "the host must keep polling while held").await;
 
     // Then

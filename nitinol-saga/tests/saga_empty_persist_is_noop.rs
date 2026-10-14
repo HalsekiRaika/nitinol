@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
@@ -120,6 +120,7 @@ type Batches = Arc<Mutex<Vec<Vec<RecordedEvent>>>>;
 /// Kept local rather than shared with `saga_combine_persist_single_append.rs`:
 /// that file is the standing evidence for the #69 atomic-batch contract and
 /// owns its own copy for the same reason.
+#[derive(Clone)]
 struct RecordingStore {
     inner: InMemoryEventStore,
     batches: Batches,
@@ -368,12 +369,7 @@ impl Saga for ScheduleOnlySaga {
     }
 }
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -405,18 +401,18 @@ async fn append_order_placed(
 async fn all_empty_persist_writes_only_the_consumed_position() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("empty-persist-order");
     append_order_placed(&upstream_store, &order_id, 1, EMPTY_SKU).await;
     append_order_placed(&upstream_store, &order_id, 2, REAL_SKU).await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore::new(Arc::clone(&batches)));
+    let saga_store = Journal::from(RecordingStore::new(Arc::clone(&batches)));
     let handled = Arc::new(AtomicUsize::new(0));
 
     let handled_clone = Arc::clone(&handled);
     let _manager_proxy =
-        SagaManagerProps::<EmptyThenRealSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<EmptyThenRealSaga>::new(saga_store.clone(), move |_components| {
             EmptyThenRealSaga {
                 handled: Arc::clone(&handled_clone),
             }
@@ -489,17 +485,17 @@ async fn all_empty_persist_writes_only_the_consumed_position() {
 async fn persist_with_no_events_but_a_schedule_is_not_a_noop() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("schedule-only-order");
     append_order_placed(&upstream_store, &order_id, 1, "SKU-SCHEDULE").await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store: Arc<dyn EventStore> = Arc::new(RecordingStore::new(Arc::clone(&batches)));
+    let saga_store = Journal::from(RecordingStore::new(Arc::clone(&batches)));
     let handled = Arc::new(AtomicUsize::new(0));
 
     let handled_clone = Arc::clone(&handled);
     let _manager_proxy =
-        SagaManagerProps::<ScheduleOnlySaga>::new(Arc::clone(&saga_store), move |components| {
+        SagaManagerProps::<ScheduleOnlySaga>::new(saga_store.clone(), move |components| {
             ScheduleOnlySaga {
                 deadline: components.deadline(),
                 handled: Arc::clone(&handled_clone),

@@ -21,7 +21,6 @@
 mod common;
 use common::{encode_schedule_scheduled, schedule_kind_of, schedule_transition, SCHEDULE_MARKER};
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
@@ -46,7 +45,7 @@ const DEADLINE: Duration = Duration::from_millis(200);
 /// is nobody to decode it for.
 const SCHEDULED_PAYLOAD: &[u8] = br#"{"note":"never-fires"}"#;
 
-async fn load_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_stream(store: &dyn EventStore, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -64,7 +63,7 @@ async fn load_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<Loade
 #[tokio::test]
 async fn a_resident_scheduler_alone_restores_nothing() {
     // Given: the durable trace of a deadline a crashed incarnation had set
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = InMemoryEventStore::default();
     let saga_id = SagaId::new(ORPHANED_SAGA_ID);
     saga_store
         .append(
@@ -92,7 +91,7 @@ async fn a_resident_scheduler_alone_restores_nothing() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&saga_store))
+                .eventstore(saga_store.clone())
                 .build(),
         ))
         .build();

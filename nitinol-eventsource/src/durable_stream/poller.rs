@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{FutureExt, StreamExt};
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::LoadedEvent;
 use nitinol_runtime::error::HandlerError;
 use nitinol_runtime::process::{
@@ -76,7 +76,7 @@ where
 }
 
 pub(crate) struct DurablePollerProcess<T> {
-    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) store: Journal,
     pub(crate) publisher: ProcessProxy<Stream<T>>,
     pub(crate) transform: TransformFn<T>,
     pub(crate) cursor: SequenceCursor,
@@ -104,7 +104,7 @@ where
 }
 
 pub(crate) struct DirectPollerProcess<T, P> {
-    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) store: Journal,
     pub(crate) subscriber: ProcessProxy<P>,
     pub(crate) transform: TransformFn<T>,
     pub(crate) cursor: SequenceCursor,
@@ -155,7 +155,7 @@ where
 }
 
 async fn poll_direct_once<T, P>(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     proxy: &ProcessProxy<P>,
     transform: &TransformFn<T>,
     cursor: &mut SequenceCursor,
@@ -211,7 +211,7 @@ where
 }
 
 async fn poll_once<T>(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     stream_proxy: &ProcessProxy<Stream<T>>,
     transform: &TransformFn<T>,
     cursor: &mut SequenceCursor,

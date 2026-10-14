@@ -1,13 +1,11 @@
 // Integration tests for SnapshotPersistor process.
 //
-// SnapshotPersistor is a dedicated persistence process that owns Arc<dyn SnapshotStore>.
+// SnapshotPersistor is a dedicated persistence process that owns Album.
 // AggregateProcess communicates with it via SnapshotPersistorRef, never holding the
 // store directly — satisfying the Phase 2 lockless messaging design.
 //
 // Compile errors are expected until SnapshotPersistor and SnapshotPersistorRef are
 // implemented in nitinol-eventsource/src/process/persistence/.
-
-use std::sync::Arc;
 
 use bytes::Bytes;
 use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
@@ -23,8 +21,8 @@ async fn setup() -> (ProcessSystem, SnapshotPersistorProxy) {
     let system = ProcessSystem::new().await;
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::new(InMemoryEventStore::default()))
-            .snapshot(Arc::new(InMemorySnapshotStore::default()))
+            .eventstore(InMemoryEventStore::default())
+            .snapshot(InMemorySnapshotStore::default())
             .build(),
     );
     let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;

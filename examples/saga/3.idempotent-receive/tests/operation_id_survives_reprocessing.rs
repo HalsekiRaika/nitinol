@@ -14,8 +14,6 @@ use common::{
     ORDER_QUANTITY, SKU,
 };
 
-use std::sync::Arc;
-
 use nitinol_persistence::store::InMemoryOffsetStore;
 use nitinol_persistence::AggregateId;
 
@@ -84,23 +82,23 @@ fn the_operation_id_is_derived_from_the_upstream_event_alone() {
 /// any other id, or a receiver that forgot, would reserve a second time.
 #[tokio::test]
 async fn a_decision_reprocessed_by_a_new_host_converges_on_one_reservation() {
-    let store = single_store();
+    let (backend, store) = single_store();
     let order_id = AggregateId::new("order-reprocessed");
     let stock_key = StockItem::stream_key(SKU);
     let saga_key = ReservationSaga::instance_id(order_id.as_str());
 
     // Where a host's progress would be kept. The first incarnation cannot reach
     // it; the second reads it directly and finds nothing.
-    let offsets = Arc::new(InMemoryOffsetStore::default());
+    let offsets = InMemoryOffsetStore::default();
 
     // Incarnation 1 — the reservation is applied, and the host's progress is
     // never recorded, so the operation stays owed as far as any later host can
     // tell.
 
-    let first = spawn_world(&order_id, Arc::clone(&store)).await;
+    let first = spawn_world(&order_id, store.clone()).await;
     let _interrupted_host = spawn_delivery_host(
         &first.system,
-        &store,
+        &backend,
         &UnrecordedProgressStore::over(&offsets),
     )
     .await;
@@ -160,8 +158,8 @@ async fn a_decision_reprocessed_by_a_new_host_converges_on_one_reservation() {
     // instance drops; its delivery host reads the decision that instance already
     // wrote and carries it again. Bound for the rest of the test: this handle
     // owns the system the assertions observe.
-    let second = spawn_world(&order_id, Arc::clone(&store)).await;
-    let _resumed_host = spawn_delivery_host(&second.system, &store, &offsets).await;
+    let second = spawn_world(&order_id, store.clone()).await;
+    let _resumed_host = spawn_delivery_host(&second.system, &backend, &offsets).await;
 
     wait_for_progress(
         &offsets,

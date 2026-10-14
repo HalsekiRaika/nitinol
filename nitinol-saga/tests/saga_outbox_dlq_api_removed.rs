@@ -56,14 +56,12 @@
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_outbox_dlq_api_removed`.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use bytes::Bytes;
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 /// What a downstream crate is free to define once the names are released.
@@ -263,8 +261,8 @@ impl OnTellFailedProbe for ProbeSaga {
     }
 }
 
-fn store() -> Arc<dyn EventStore> {
-    Arc::new(InMemoryEventStore::default())
+fn store() -> Journal {
+    Journal::from(InMemoryEventStore::default())
 }
 
 fn manager_props() -> SagaManagerProps<ProbeSaga> {

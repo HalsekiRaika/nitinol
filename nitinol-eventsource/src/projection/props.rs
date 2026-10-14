@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::projection::ProjectionId;
 use nitinol_contract::Event;
 use nitinol_persistence::provider::{PersistenceProvider, ProjectionOffsetSlot};
-use nitinol_persistence::store::{DeliveryMode, EventStore, OffsetScope, OffsetStore};
+use nitinol_persistence::store::{DeliveryMode, Journal, OffsetScope, OffsetStore};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{ProcessSystem, Props, SupervisionStrategy};
@@ -29,8 +29,8 @@ pub struct OriginSet(pub(crate) CatchupOrigin);
 /// spawn with nothing re-injected.
 pub struct ProjectorProps<P, Cs, Tx = (), E = EventUnset, O = OriginUnset, H = Unhosted> {
     projection_id: ProjectionId,
-    store: Arc<dyn EventStore>,
-    offset_store: Arc<Cs>,
+    store: Journal,
+    offset_store: Cs,
     delivery_mode: DeliveryMode,
     catchup_origin: O,
     tx_provider: Option<Arc<dyn ErasedTxProvider<Tx> + Send + Sync>>,
@@ -222,7 +222,7 @@ where
 impl<P, Cs, Tx, H> ProjectorProps<P, Cs, Tx, EventSet, OriginSet, H>
 where
     P: Send + Sync + 'static,
-    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Clone + Send + Sync + 'static,
     Tx: Send + 'static,
 {
     /// The runtime declaration this projector runs under, and the position it
@@ -260,7 +260,7 @@ where
         };
 
         let upstream_config =
-            DurableSubscription::<nitinol_persistence::LoadedEvent>::new(Arc::clone(&store), Some);
+            DurableSubscription::<nitinol_persistence::LoadedEvent>::new(&store, Some);
 
         let upstream_config_for_props = upstream_config;
         let cursor_for_props = cursor;
@@ -269,7 +269,7 @@ where
             projector: producer(),
             projection_id: projection_id.clone(),
             offset_scope: offset_scope.clone(),
-            offset_store: Arc::clone(&offset_store),
+            offset_store: offset_store.clone(),
             delivery_mode,
             catchup_origin: catchup_origin.clone(),
             handlers: handlers.clone(),
@@ -293,7 +293,7 @@ where
 impl<P, Cs, Tx> ProjectorProps<P, Cs, Tx, EventSet, OriginSet, Unhosted>
 where
     P: Send + Sync + 'static,
-    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Clone + Send + Sync + 'static,
     Tx: Send + 'static,
 {
     /// Spawn the projector process on `system`.
@@ -372,7 +372,7 @@ where
 impl<P, Cs, Tx> ProjectorProps<P, Cs, Tx, EventSet, OriginSet, Hosted>
 where
     P: Send + Sync + 'static,
-    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Clone + Send + Sync + 'static,
     Tx: Send + 'static,
 {
     /// Spawn the projector process on the system these props came from.

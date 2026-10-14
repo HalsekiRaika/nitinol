@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -114,12 +114,7 @@ impl Saga for StatelessSaga {
 
 // Helpers
 
-async fn append_requested(
-    store: &Arc<dyn EventStore>,
-    stream: &AggregateId,
-    sequence: u64,
-    order: &str,
-) {
+async fn append_requested(store: &Journal, stream: &AggregateId, sequence: u64, order: &str) {
     store
         .append(
             stream.as_str(),
@@ -138,7 +133,7 @@ async fn append_requested(
         .expect("append Requested must succeed");
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -151,11 +146,7 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 const BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-async fn wait_for_decisions(
-    store: &Arc<dyn EventStore>,
-    saga_id: &SagaId,
-    expected: usize,
-) -> Vec<Translated> {
+async fn wait_for_decisions(store: &Journal, saga_id: &SagaId, expected: usize) -> Vec<Translated> {
     let deadline = Instant::now() + BARRIER_TIMEOUT;
     loop {
         let decisions: Vec<Translated> = load_saga_events(store, saga_id)
@@ -187,25 +178,24 @@ async fn wait_for_decisions(
 async fn a_saga_without_apply_still_journals_its_decisions() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new("apply-optional-upstream");
     append_requested(&upstream_store, &upstream, 1, "ord-1").await;
     append_requested(&upstream_store, &upstream, 2, "ord-2").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let handled = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy =
-        SagaManagerProps::<StatelessSaga>::new(Arc::clone(&saga_store), move |_components| {
-            StatelessSaga {
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .observing::<Requested>(Subscription::stream(&upstream_store, &upstream))
-        .spawn(&ps)
-        .await;
+    let _proxy = SagaManagerProps::<StatelessSaga>::new(saga_store.clone(), move |_components| {
+        StatelessSaga {
+            handled: Arc::clone(&handled_for_producer),
+        }
+    })
+    .observing::<Requested>(Subscription::stream(&upstream_store, &upstream))
+    .spawn(&ps)
+    .await;
 
     let decisions = wait_for_decisions(&saga_store, &saga_id, 2).await;
 
@@ -233,16 +223,16 @@ async fn a_saga_without_apply_still_journals_its_decisions() {
 async fn replay_over_a_saga_without_apply_adds_no_second_decision() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new("apply-optional-replay-upstream");
     append_requested(&upstream_store, &upstream, 1, "ord-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let handled = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let handled_for_first = Arc::clone(&handled);
-    let saga_store_for_first = Arc::clone(&saga_store);
+    let saga_store_for_first = saga_store.clone();
     let first = SagaManagerProps::<StatelessSaga>::new(saga_store_for_first, move |_components| {
         StatelessSaga {
             handled: Arc::clone(&handled_for_first),
@@ -257,15 +247,14 @@ async fn replay_over_a_saga_without_apply_adds_no_second_decision() {
     drop(first);
 
     let handled_for_second = Arc::clone(&handled);
-    let _second =
-        SagaManagerProps::<StatelessSaga>::new(Arc::clone(&saga_store), move |_components| {
-            StatelessSaga {
-                handled: Arc::clone(&handled_for_second),
-            }
-        })
-        .observing::<Requested>(Subscription::stream(&upstream_store, &upstream))
-        .spawn(&ps)
-        .await;
+    let _second = SagaManagerProps::<StatelessSaga>::new(saga_store.clone(), move |_components| {
+        StatelessSaga {
+            handled: Arc::clone(&handled_for_second),
+        }
+    })
+    .observing::<Requested>(Subscription::stream(&upstream_store, &upstream))
+    .spawn(&ps)
+    .await;
 
     // Upstream seq 2 is the barrier: the poller delivers ascending and asks one
     // record at a time, so once seq 2 has been decided, seq 1's fate is settled.

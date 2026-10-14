@@ -15,14 +15,13 @@
 // turns a persisted decision into a command at its target, and without it the
 // saga would decide and journal while B stayed untouched.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
 
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
@@ -42,7 +41,7 @@ const RELAY_DEADLINE: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// How many events `id` holds.
-async fn stored_len(store: &Arc<dyn EventStore>, id: &AggregateId) -> usize {
+async fn stored_len(store: &Journal, id: &AggregateId) -> usize {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await

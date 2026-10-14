@@ -59,7 +59,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -142,7 +142,7 @@ fn saga_record(type_name: &'static str) -> EventType {
     EventType::new(reserved_family("nitinol.saga"), TypeName::new(type_name))
 }
 
-async fn append_order_placed(store: &Arc<dyn EventStore>, upstream: &AggregateId, sequence: u64) {
+async fn append_order_placed(store: &Journal, upstream: &AggregateId, sequence: u64) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: "SKU-1".to_owned(),
     })
@@ -166,7 +166,7 @@ async fn append_order_placed(store: &Arc<dyn EventStore>, upstream: &AggregateId
 /// framework: the subject of every test here is a row no current writer
 /// produces.
 async fn seed_raw_row(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     sequence: u64,
     event_type: EventType,
@@ -186,7 +186,7 @@ async fn seed_raw_row(
         .expect("seeding a raw row on the saga's own stream must succeed");
 }
 
-async fn load_saga_stream(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_stream(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -207,8 +207,8 @@ fn describe(events: &[LoadedEvent]) -> Vec<String> {
 /// already waiting, and the handle counter.
 struct Harness {
     system: EventSourceSystem<InMemoryStore>,
-    saga_store: Arc<dyn EventStore>,
-    upstream_store: Arc<dyn EventStore>,
+    saga_store: Journal,
+    upstream_store: Journal,
     upstream: AggregateId,
     saga_id: SagaId,
     handle_count: Arc<AtomicUsize>,
@@ -222,13 +222,13 @@ impl Harness {
             .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
             .build();
 
-        let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let upstream_store = Journal::from(InMemoryEventStore::default());
         let upstream = AggregateId::new(upstream_key);
         append_order_placed(&upstream_store, &upstream, 1).await;
 
         Self {
             system,
-            saga_store: Arc::new(InMemoryEventStore::default()),
+            saga_store: Journal::from(InMemoryEventStore::default()),
             upstream_store,
             upstream,
             saga_id: SagaId::new(SAGA_ID),
@@ -240,7 +240,7 @@ impl Harness {
     async fn spawn(&self) -> nitinol_saga::SagaManagerProxy<RecordingSaga> {
         let handle_count = Arc::clone(&self.handle_count);
         let handled = Arc::clone(&self.handled);
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&self.saga_store), move |_components| {
+        SagaManagerProps::<RecordingSaga>::new(self.saga_store.clone(), move |_components| {
             RecordingSaga {
                 handle_count: Arc::clone(&handle_count),
                 handled: Arc::clone(&handled),

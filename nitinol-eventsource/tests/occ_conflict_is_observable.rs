@@ -41,7 +41,7 @@ use nitinol_eventsource::{
     Query,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
@@ -148,6 +148,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 // before it was wrapped and then fails its append for a reason that is not a
 // lost race.
 
+#[derive(Clone)]
 struct AppendFailsWithBackendError {
     inner: InMemoryEventStore,
 }
@@ -301,9 +302,9 @@ fn observations_of(reported: &Mutex<Vec<Reported>>, aggregate_id: &str) -> Vec<R
 async fn spawn_writer(
     ps: &ProcessSystem,
     id: &AggregateId,
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id.clone(), Arc::clone(store))
+    AggregateProps::<Counter>::new(id.clone(), store.clone())
         .spawn(ps)
         .await
 }
@@ -354,7 +355,7 @@ async fn a_non_genesis_conflict_is_observed_once_and_nothing_else_is() {
     {
         // Given: a writer that replayed to sequence 1, and a winner that then
         // takes sequence 2 out from under it.
-        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let store = Journal::from(InMemoryEventStore::default());
         let id = AggregateId::new("occ-observed-non-genesis");
 
         let winner = spawn_writer(&ps, &id, &store).await;
@@ -409,7 +410,7 @@ async fn a_non_genesis_conflict_is_observed_once_and_nothing_else_is() {
     // rate with events that are not races at all.
     {
         // Given
-        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let store = Journal::from(InMemoryEventStore::default());
         let id = AggregateId::new("occ-observed-genesis");
 
         let creator = spawn_writer(&ps, &id, &store).await;
@@ -444,8 +445,7 @@ async fn a_non_genesis_conflict_is_observed_once_and_nothing_else_is() {
     {
         // Given
         let id = AggregateId::new("occ-observed-backend-failure");
-        let store: Arc<dyn EventStore> =
-            Arc::new(AppendFailsWithBackendError::seeded_with_genesis(&id).await);
+        let store = Journal::from(AppendFailsWithBackendError::seeded_with_genesis(&id).await);
 
         let writer = spawn_writer(&ps, &id, &store).await;
         pin_replayed_state(&writer, 1).await;
@@ -478,7 +478,7 @@ async fn a_non_genesis_conflict_is_observed_once_and_nothing_else_is() {
     // all.
     {
         // Given
-        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let store = Journal::from(InMemoryEventStore::default());
         let id = AggregateId::new("occ-observed-rejection");
 
         let writer = spawn_writer(&ps, &id, &store).await;

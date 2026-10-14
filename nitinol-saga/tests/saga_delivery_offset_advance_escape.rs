@@ -32,9 +32,7 @@ use delivery::{
     RecordingOffsetStore, SelectiveSaga, REFUSED_SUFFIX,
 };
 
-use std::sync::Arc;
-
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
@@ -42,8 +40,8 @@ use nitinol_saga::SagaId;
 async fn an_operator_moves_a_held_partition_past_the_hold() {
     // Given: a held partition, and a decision behind it that cannot be reached.
     let (system, aggregates) = in_memory_system().await;
-    let recording = RecordingEventStore::new(Arc::new(InMemoryEventStore::default()));
-    let journal: Arc<dyn EventStore> = recording.clone();
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
 
@@ -53,7 +51,7 @@ async fn an_operator_moves_a_held_partition_past_the_hold() {
     let held = append_decided(&journal, &saga_id, 1, &refused_target, "op-refused").await;
     let behind = append_decided(&journal, &saga_id, 2, live_target.as_str(), "op-behind").await;
 
-    let host = spawn_host::<SelectiveSaga>(&system, &journal, &offsets, 1).await;
+    let host = spawn_host::<SelectiveSaga, _>(&system, &journal, &offsets, 1).await;
     wait_until_loads(&recording, 3, "the host must reach the held record").await;
     settle().await;
 
@@ -103,13 +101,13 @@ async fn an_operator_moves_a_held_partition_past_the_hold() {
 async fn moving_a_partition_backwards_is_refused() {
     // Given: a partition that has finished a record.
     let (system, _aggregates) = in_memory_system().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-escape-backwards");
 
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
-    let host = spawn_host::<SelectiveSaga>(&system, &journal, &offsets, 1).await;
+    let host = spawn_host::<SelectiveSaga, _>(&system, &journal, &offsets, 1).await;
     wait_until_stored(
         &offsets,
         &scope_of(0),

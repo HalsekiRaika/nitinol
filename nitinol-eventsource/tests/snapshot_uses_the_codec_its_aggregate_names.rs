@@ -21,8 +21,6 @@
 //! Run with:
 //! `cargo test -p nitinol-eventsource --test snapshot_uses_the_codec_its_aggregate_names`.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 
 use nitinol_eventsource::codec::Codec;
@@ -31,7 +29,7 @@ use nitinol_eventsource::{
     SnapshotPersistorProxy, Snapshotable,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, PersistedSnapshot, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -155,7 +153,7 @@ impl Query<GetCount> for Counter {
 async fn spawn_counter(
     system: &ProcessSystem,
     id: AggregateId,
-    store: Arc<dyn EventStore>,
+    store: Journal,
     snapshot_ref: SnapshotPersistorProxy,
 ) -> AggregateProxy<Counter> {
     AggregateProps::<Counter>::new(id, store)
@@ -201,24 +199,18 @@ fn a_caller_reaches_the_snapshot_format_through_the_aggregates_codec() {
 #[tokio::test]
 async fn an_activation_restores_through_the_codec_the_aggregate_names() {
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store))
-            .snapshot(Arc::new(InMemorySnapshotStore::default()))
+            .eventstore(InMemoryEventStore::default())
+            .snapshot(InMemorySnapshotStore::default())
             .build(),
     );
+    let store = persistence.event_store();
     let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("named-snapshot-restore");
 
     {
-        let writer = spawn_counter(
-            &system,
-            id.clone(),
-            Arc::clone(&store),
-            snapshot_ref.clone(),
-        )
-        .await;
+        let writer = spawn_counter(&system, id.clone(), store.clone(), snapshot_ref.clone()).await;
         writer.ask(Increment).await.expect("first ask");
         writer.ask(Increment).await.expect("second ask");
     }
@@ -252,24 +244,18 @@ async fn an_activation_restores_through_the_codec_the_aggregate_names() {
 #[tokio::test]
 async fn a_restore_and_a_delta_replay_use_their_own_codecs() {
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&store))
-            .snapshot(Arc::new(InMemorySnapshotStore::default()))
+            .eventstore(InMemoryEventStore::default())
+            .snapshot(InMemorySnapshotStore::default())
             .build(),
     );
+    let store = persistence.event_store();
     let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
     let id = AggregateId::new("named-snapshot-delta");
 
     {
-        let writer = spawn_counter(
-            &system,
-            id.clone(),
-            Arc::clone(&store),
-            snapshot_ref.clone(),
-        )
-        .await;
+        let writer = spawn_counter(&system, id.clone(), store.clone(), snapshot_ref.clone()).await;
         writer.ask(Increment).await.expect("first ask");
         writer.ask(Increment).await.expect("second ask");
 

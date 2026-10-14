@@ -1,7 +1,8 @@
 //! The contract every `SnapshotStore` owes, made executable for any backend.
 //!
-//! [`SnapshotStore`] states it as clauses `SNAP-1` … `SNAP-4`; this module is
-//! those clauses as something to run.
+//! [`SnapshotStore`](nitinol_persistence::store::SnapshotStore) states it as
+//! clauses `SNAP-1` … `SNAP-4`; this module is those clauses as something to
+//! run.
 //!
 //! # One entry point, and why there is no second
 //!
@@ -19,12 +20,10 @@
 //! it; see the [crate documentation](crate) for where the combined contracts
 //! are fixed.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use jiff::Timestamp;
-use nitinol_persistence::store::SnapshotStore;
+use nitinol_persistence::store::Album;
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 
 /// The snapshot backend a run of the `SNAP` clauses is about.
@@ -38,7 +37,7 @@ use nitinol_persistence::{AggregateId, PersistedSnapshot};
 /// provider running the suite as an integration test may want to spawn it.
 pub trait SnapshotStoreUnderTest: Send + Sync {
     /// Hand the suite a store holding nothing.
-    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn SnapshotStore>>;
+    fn bring_up(&self) -> BoxFuture<'_, Album>;
 }
 
 /// Put a snapshot store through every clause of the snapshot contract.
@@ -112,7 +111,8 @@ async fn one_save_reads_back_whole<S: SnapshotStoreUnderTest>(store: &S) {
 /// raised anywhere.
 ///
 /// A save at a position the stored snapshot has already reached is left to the
-/// backend and is not judged here; see [`SnapshotStore`] for why.
+/// backend and is not judged here; see
+/// [`SnapshotStore`](nitinol_persistence::store::SnapshotStore) for why.
 async fn the_save_that_came_last_is_what_a_load_answers_with<S: SnapshotStoreUnderTest>(store: &S) {
     const CLAUSE: &str = "SNAP-3";
 
@@ -201,7 +201,7 @@ fn snapshot(
 }
 
 /// A save a clause requires to succeed.
-async fn saved(clause: &str, backend: &Arc<dyn SnapshotStore>, snapshot: PersistedSnapshot) {
+async fn saved(clause: &str, backend: &Album, snapshot: PersistedSnapshot) {
     let aggregate_id = snapshot.aggregate_id.clone();
     let sequence = snapshot.sequence;
     backend.save(snapshot).await.unwrap_or_else(|failure| {
@@ -215,7 +215,7 @@ async fn saved(clause: &str, backend: &Arc<dyn SnapshotStore>, snapshot: Persist
 /// The snapshot a clause requires the store to answer with.
 async fn present(
     clause: &str,
-    backend: &Arc<dyn SnapshotStore>,
+    backend: &Album,
     aggregate_id: &AggregateId,
     holds: &str,
 ) -> PersistedSnapshot {
@@ -238,12 +238,7 @@ async fn present(
 
 /// A load a clause requires to answer that there is no snapshot — neither one
 /// of somebody else's, nor a failure.
-async fn absent(
-    clause: &str,
-    backend: &Arc<dyn SnapshotStore>,
-    aggregate_id: &AggregateId,
-    because: &str,
-) {
+async fn absent(clause: &str, backend: &Album, aggregate_id: &AggregateId, because: &str) {
     match backend.load_latest(aggregate_id).await {
         Ok(None) => {}
         Ok(Some(found)) => panic!(

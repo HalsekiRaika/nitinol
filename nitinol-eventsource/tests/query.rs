@@ -18,14 +18,13 @@
 //! `Receive<M>` contract.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 use bytes::Bytes;
 
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, ExecError, Query,
 };
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -168,7 +167,7 @@ impl Query<Tally> for TallyCounter {
 async fn exec_delivers_the_query_response_exactly_once() {
     // Given
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let proxy = AggregateProps::<TallyCounter>::new(AggregateId::new("query-tally"), store)
         .spawn(&system)
         .await;
@@ -217,7 +216,7 @@ async fn exec_delivers_the_query_response_exactly_once() {
 async fn exec_delivers_query_error_as_exec_error_domain() {
     // Given
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let proxy = AggregateProps::<Counter>::new(AggregateId::new("query-unlabelled"), store)
         .spawn(&system)
         .await;

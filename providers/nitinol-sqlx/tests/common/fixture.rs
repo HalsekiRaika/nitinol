@@ -10,14 +10,12 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use jiff::Timestamp;
 use linkme::distributed_slice;
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{
     AppendOutcome, AppendingEvent, EventRegistryEntry, EventType, Family, LoadQuery, LoadedEvent,
     TypeName, EVENT_REGISTRY,
@@ -84,7 +82,7 @@ pub struct Stored {
     occurred_at: Timestamp,
 }
 
-pub async fn content(store: &Arc<dyn EventStore>) -> Vec<Stored> {
+pub async fn content(store: &Journal) -> Vec<Stored> {
     observe(store, LoadQuery::default())
         .await
         .into_iter()
@@ -99,7 +97,7 @@ pub async fn content(store: &Arc<dyn EventStore>) -> Vec<Stored> {
         .collect()
 }
 
-pub async fn observe(store: &Arc<dyn EventStore>, query: LoadQuery) -> Vec<LoadedEvent> {
+pub async fn observe(store: &Journal, query: LoadQuery) -> Vec<LoadedEvent> {
     let stream = store
         .load(query)
         .await
@@ -115,11 +113,7 @@ pub fn payloads(events: &[LoadedEvent]) -> Vec<&[u8]> {
 }
 
 /// An append a clause requires to succeed.
-pub async fn committed(
-    store: &Arc<dyn EventStore>,
-    key: &str,
-    events: Vec<AppendingEvent>,
-) -> AppendOutcome {
+pub async fn committed(store: &Journal, key: &str, events: Vec<AppendingEvent>) -> AppendOutcome {
     let sequences: Vec<u64> = events.iter().map(|event| event.sequence).collect();
     store.append(key, events).await.unwrap_or_else(|refusal| {
         panic!("appending the sequences {sequences:?} to {key:?} was refused with {refusal}")
@@ -127,12 +121,7 @@ pub async fn committed(
 }
 
 /// An append a clause requires to be refused as a sequence conflict.
-pub async fn conflicted(
-    store: &Arc<dyn EventStore>,
-    key: &str,
-    events: Vec<AppendingEvent>,
-    what: &str,
-) {
+pub async fn conflicted(store: &Journal, key: &str, events: Vec<AppendingEvent>, what: &str) {
     match store.append(key, events).await {
         Err(AppendError::SequenceConflict(_)) => {}
         Err(other) => panic!("{what} is a sequence conflict, and the store reported {other}"),

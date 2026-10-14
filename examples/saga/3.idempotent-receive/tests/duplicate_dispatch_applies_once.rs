@@ -13,8 +13,6 @@ use common::{
     DELIVERY_TIMEOUT, ORDER_QUANTITY, SKU,
 };
 
-use std::sync::Arc;
-
 use nitinol_persistence::store::InMemoryOffsetStore;
 use nitinol_persistence::AggregateId;
 
@@ -34,8 +32,8 @@ const DIRECT_RESERVATION: &str = "order-direct/reservation";
 /// arrives again, Then it is accepted and its stream is left exactly as it was.
 #[tokio::test]
 async fn a_repeated_reserve_is_accepted_and_appends_nothing() {
-    let store = single_store();
-    let system = spawn_system(Arc::clone(&store)).await;
+    let (_backend, store) = single_store();
+    let system = spawn_system(store.clone()).await;
 
     let stock_key = StockItem::stream_key(SKU);
     let stock = stock_ref(&system, &stock_key);
@@ -93,18 +91,18 @@ async fn a_repeated_reserve_is_accepted_and_appends_nothing() {
 /// delivery that record implied has been answered.
 #[tokio::test]
 async fn a_redelivered_decision_writes_no_second_reservation() {
-    let store = single_store();
+    let (backend, store) = single_store();
     let order_id = AggregateId::new("order-redelivered");
     let stock_key = StockItem::stream_key(SKU);
     let saga_key = ReservationSaga::instance_id(order_id.as_str());
 
     // Where a host's progress would be kept.  The first one cannot reach it.
-    let offsets = Arc::new(InMemoryOffsetStore::default());
+    let offsets = InMemoryOffsetStore::default();
 
-    let world = spawn_world(&order_id, Arc::clone(&store)).await;
+    let world = spawn_world(&order_id, store.clone()).await;
     let _interrupted_host = spawn_delivery_host(
         &world.system,
-        &store,
+        &backend,
         &UnrecordedProgressStore::over(&offsets),
     )
     .await;
@@ -158,7 +156,7 @@ async fn a_redelivered_decision_writes_no_second_reservation() {
     // The second host — same journal, same delivery id, and an offset store
     // that works. It resumes from what was recorded for that id, which is
     // nothing, so the decision is read and delivered a second time.
-    let _resumed_host = spawn_delivery_host(&world.system, &store, &offsets).await;
+    let _resumed_host = spawn_delivery_host(&world.system, &backend, &offsets).await;
 
     wait_for_progress(
         &offsets,

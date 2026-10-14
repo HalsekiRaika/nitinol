@@ -72,7 +72,7 @@ use serde::{Deserialize, Serialize};
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::Event;
 use nitinol_persistence::__private::reserved_family;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -151,12 +151,7 @@ impl Saga for SkippingSaga {
 
 // Helpers
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    stream: &AggregateId,
-    sequence: u64,
-    order: &str,
-) {
+async fn append_order_placed(store: &Journal, stream: &AggregateId, sequence: u64, order: &str) {
     append_raw(
         store,
         stream,
@@ -172,7 +167,7 @@ async fn append_order_placed(
 
 /// A record carrying the declared event type and bytes its codec cannot read —
 /// the same shape a corrupted wire record has.
-async fn append_corrupt(store: &Arc<dyn EventStore>, stream: &AggregateId, sequence: u64) {
+async fn append_corrupt(store: &Journal, stream: &AggregateId, sequence: u64) {
     append_raw(
         store,
         stream,
@@ -182,12 +177,7 @@ async fn append_corrupt(store: &Arc<dyn EventStore>, stream: &AggregateId, seque
     .await;
 }
 
-async fn append_raw(
-    store: &Arc<dyn EventStore>,
-    stream: &AggregateId,
-    sequence: u64,
-    payload: Bytes,
-) {
+async fn append_raw(store: &Journal, stream: &AggregateId, sequence: u64, payload: Bytes) {
     store
         .append(
             stream.as_str(),
@@ -202,7 +192,7 @@ async fn append_raw(
         .expect("appending an upstream record must succeed");
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -273,7 +263,7 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<Seen> {
 /// ascending order and asks one record at a time, so once seq 2 has been handled
 /// the corrupt seq 1's fate is already decided — no sleep settles the negative
 /// claims.
-async fn seed_upstream(store: &Arc<dyn EventStore>, stream: &AggregateId) {
+async fn seed_upstream(store: &Journal, stream: &AggregateId) {
     append_corrupt(store, stream, CORRUPT_SEQUENCE).await;
     append_order_placed(store, stream, READABLE_SEQUENCE, "ord-2").await;
 }
@@ -298,24 +288,23 @@ fn position_of_the_readable_record(upstream: &AggregateId) -> ConsumedFactPayloa
 async fn a_corrupt_upstream_record_is_skipped_and_writes_nothing() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new("decode-skip-upstream");
     seed_upstream(&upstream_store, &upstream).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy =
-        SagaManagerProps::<SkippingSaga>::new(Arc::clone(&saga_store), move |_components| {
-            SkippingSaga {
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-        .spawn(&ps)
-        .await;
+    let _proxy = SagaManagerProps::<SkippingSaga>::new(saga_store.clone(), move |_components| {
+        SkippingSaga {
+            handled: Arc::clone(&handled_for_producer),
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+    .spawn(&ps)
+    .await;
 
     let observed = wait_for_handled(&handled, 1).await;
     let events = load_saga_events(&saga_store, &saga_id).await;
@@ -362,24 +351,23 @@ async fn a_corrupt_upstream_record_is_skipped_and_writes_nothing() {
 async fn a_corrupt_upstream_record_is_attributed_to_no_instance() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new("decode-skip-manager-upstream");
     seed_upstream(&upstream_store, &upstream).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _manager =
-        SagaManagerProps::<SkippingSaga>::new(Arc::clone(&saga_store), move |_components| {
-            SkippingSaga {
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-        .spawn(&ps)
-        .await;
+    let _manager = SagaManagerProps::<SkippingSaga>::new(saga_store.clone(), move |_components| {
+        SkippingSaga {
+            handled: Arc::clone(&handled_for_producer),
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
+    .spawn(&ps)
+    .await;
 
     let observed = wait_for_handled(&handled, 1).await;
     let events = load_saga_events(&saga_store, &saga_id).await;

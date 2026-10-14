@@ -19,12 +19,11 @@
 //! Only the first two existed in the push-based model; the third is what carries
 //! a decision to its targets now, and what keeps the record of how far it got.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
@@ -57,18 +56,12 @@ async fn main() {
     // tenants of the one journal it supplies; the manager's subscription below
     // is what narrows it back down to the run's stream.
     //
-    // The saga-offset slot is the second thing the supplier owes: it is
-    // where the host records how far it has finished, and naming it is what
-    // makes `deliver` below exist at all.  A store without it is a compile
-    // error at the wiring rather than a failure at the first save.
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // `InMemoryStore` supplies every slot, the saga-offset one included: that
+    // is where the host records how far it has finished, and a supplier holding
+    // it is what makes `deliver` below exist at all.  A store without that slot
+    // is a compile error at the wiring rather than a failure at the first save.
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(store)
-                .saga_offsets(InMemoryOffsetStore::default())
-                .build(),
-        ))
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let run_id = AggregateId::new("payroll-run-april");

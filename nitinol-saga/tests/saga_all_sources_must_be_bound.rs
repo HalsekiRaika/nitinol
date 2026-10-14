@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -182,12 +182,7 @@ impl Saga for ThreeSourceSaga {
 
 // Helpers
 
-async fn append(
-    store: &Arc<dyn EventStore>,
-    stream: &AggregateId,
-    event_type: EventType,
-    order: &str,
-) {
+async fn append(store: &Journal, stream: &AggregateId, event_type: EventType, order: &str) {
     #[derive(Serialize)]
     struct Wire<'a> {
         order: &'a str,
@@ -239,7 +234,7 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<&'static st
 async fn binding_every_external_source_is_enough_even_with_a_deadline_declared() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let placed_stream = AggregateId::new("bind-all-placed");
     let reserved_stream = AggregateId::new("bind-all-reserved");
     let shipped_stream = AggregateId::new("bind-all-shipped");
@@ -253,22 +248,21 @@ async fn binding_every_external_source_is_enough_even_with_a_deadline_declared()
     .await;
     append(&upstream_store, &shipped_stream, Shipped::EVENT_TYPE, ORDER).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy =
-        SagaManagerProps::<ThreeSourceSaga>::new(Arc::clone(&saga_store), move |components| {
-            ThreeSourceSaga {
-                deadline: components.deadline(),
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .observing::<Placed>(Subscription::stream(&upstream_store, &placed_stream))
-        .observing::<Reserved>(Subscription::stream(&upstream_store, &reserved_stream))
-        .observing::<Shipped>(Subscription::stream(&upstream_store, &shipped_stream))
-        .spawn(&ps)
-        .await;
+    let _proxy = SagaManagerProps::<ThreeSourceSaga>::new(saga_store.clone(), move |components| {
+        ThreeSourceSaga {
+            deadline: components.deadline(),
+            handled: Arc::clone(&handled_for_producer),
+        }
+    })
+    .observing::<Placed>(Subscription::stream(&upstream_store, &placed_stream))
+    .observing::<Reserved>(Subscription::stream(&upstream_store, &reserved_stream))
+    .observing::<Shipped>(Subscription::stream(&upstream_store, &shipped_stream))
+    .spawn(&ps)
+    .await;
 
     let mut seen = wait_for_handled(&handled, 3).await;
     seen.sort();

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use nitinol_persistence::store::{OffsetScope, OffsetStore};
 
 /// The part name the suite's framework-owned keys are rendered under.
@@ -19,7 +17,7 @@ pub(crate) fn framework_owned(consumer: &str, partition: usize) -> OffsetScope {
 /// What the store holds for `scope`.
 pub(crate) async fn held<S: OffsetStore>(
     clause: &str,
-    backend: &Arc<S>,
+    backend: &S,
     scope: &OffsetScope,
 ) -> Option<u64> {
     backend.load(scope).await.unwrap_or_else(|failure| {
@@ -39,7 +37,7 @@ pub(crate) async fn held<S: OffsetStore>(
 /// contract leaves it to the backend, so the suite never makes one.
 pub(crate) async fn saved<S: OffsetStore>(
     clause: &str,
-    backend: &Arc<S>,
+    backend: &S,
     scope: &OffsetScope,
     sequence: u64,
 ) {

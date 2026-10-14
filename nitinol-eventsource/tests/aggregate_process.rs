@@ -2,11 +2,9 @@
 //
 // Tests verify the full request lifecycle: spawn → ask/tell/exec → persistence → state.
 //
-// AggregateProps holds Arc<dyn EventStore> directly: the
+// AggregateProps holds Journal directly: the
 // EventPersistor process was removed and the process now calls store.append /
 // store.load inline.
-
-use std::sync::Arc;
 
 use bytes::Bytes;
 
@@ -14,7 +12,7 @@ use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
     Query, TellError,
 };
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -120,40 +118,40 @@ impl Codec<Incremented> for TestCodec {
     }
 }
 
-// Helper: spawn a Counter process holding a fresh Arc<dyn EventStore>
+// Helper: spawn a Counter process holding a fresh Journal
 
 /// Creates a ProcessSystem and spawns a Counter AggregateProcess holding an
-/// `Arc<dyn EventStore>` directly.
+/// `Journal` directly.
 ///
 /// Returns (system, proxy).  Caller must keep `_system` alive.
 async fn spawn_counter(aggregate_id: AggregateId) -> (ProcessSystem, AggregateProxy<Counter>) {
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let proxy = AggregateProps::<Counter>::new(aggregate_id, store)
         .spawn(&system)
         .await;
     (system, proxy)
 }
 
-// ask<Increment>: events are persisted and replayable via shared Arc<dyn EventStore>
+// ask<Increment>: events are persisted and replayable via shared Journal
 
 /// After ask(Increment) on process 1, a second process sharing the same
-/// `Arc<dyn EventStore>` replays the stored event and restores the count to 1.
+/// `Journal` replays the stored event and restores the count to 1.
 #[tokio::test]
 async fn ask_persists_events_to_event_store() {
     // Given
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("agg-ask-persist");
 
-    let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
+    let proxy = AggregateProps::<Counter>::new(id.clone(), store.clone())
         .spawn(&system)
         .await;
 
     // When
     proxy.ask(Increment).await.expect("ask must succeed");
 
-    // Then: a fresh process for the same aggregate_id replays through the same Arc<dyn EventStore>.
+    // Then: a fresh process for the same aggregate_id replays through the same Journal.
     let proxy2 = AggregateProps::<Counter>::new(id, store)
         .spawn(&system)
         .await;
@@ -376,10 +374,10 @@ async fn aggregate_persist_stores_the_declared_event_type_for_every_arm() {
 
     // Given
     let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("agg-enum-identity-persist");
 
-    let proxy = AggregateProps::<CounterEnum>::new(id.clone(), Arc::clone(&store))
+    let proxy = AggregateProps::<CounterEnum>::new(id.clone(), store.clone())
         .spawn(&system)
         .await;
 

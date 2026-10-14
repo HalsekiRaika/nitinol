@@ -51,7 +51,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
-    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore,
+    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, Journal,
 };
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -359,7 +359,7 @@ async fn wait_until_reserved(proxy: &AggregateProxy<Inventory>) -> Vec<String> {
 }
 
 /// The saga's own stream, once it holds the fact settling an input.
-async fn wait_until_settled(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn wait_until_settled(store: &dyn EventStore, saga_id: &SagaId) -> Vec<LoadedEvent> {
     let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
     loop {
         let events = load_saga_events(store, saga_id).await;
@@ -386,14 +386,14 @@ fn describe(events: &[LoadedEvent]) -> Vec<String> {
 #[tokio::test]
 async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let ps = ProcessSystem::new().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
-                .eventstore(Arc::clone(&journal))
+                .eventstore(InMemoryEventStore::default())
                 .build(),
         ))
         .build();
+    let journal = system.persistence().event_store();
 
     let order_id = AggregateId::new("saga-e2e-order");
     let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
@@ -403,7 +403,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
         .spawn_aggregate::<Inventory>(inventory_id.clone())
         .await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = InMemoryEventStore::default();
     let saga_id = SagaId::new(RESERVATION_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -411,7 +411,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let captured_for_producer = Arc::clone(&captured);
 
     let _saga_proxy =
-        SagaManagerProps::<ReservationSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<ReservationSaga>::new(saga_store.clone(), move |_components| {
             ReservationSaga(ReservationWork {
                 inventory: inventory_key_for_producer.clone(),
                 captured: Arc::clone(&captured_for_producer),
@@ -427,7 +427,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     // — `Inventory` implements nothing of the host's.
     let saga_persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&saga_store))
+            .eventstore(saga_store.clone())
             .saga_offsets(InMemoryOffsetStore::default())
             .build(),
     );
@@ -502,12 +502,12 @@ async fn saga_skips_events_that_correlate_to_no_instance() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let publisher_id = AggregateId::new("publisher-A");
     append_order_placed(&upstream_store, &publisher_id, 1, "SKIP-001").await;
     append_order_placed(&upstream_store, &publisher_id, 2, "MATCH-001").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
     let captured_for_producer = Arc::clone(&captured);
 
@@ -541,12 +541,7 @@ async fn saga_skips_events_that_correlate_to_no_instance() {
     );
 }
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -566,7 +561,7 @@ async fn append_order_placed(
         .expect("append OrderPlaced must succeed");
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &dyn EventStore, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await

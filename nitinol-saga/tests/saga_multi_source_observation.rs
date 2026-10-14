@@ -60,7 +60,7 @@ use serde::{Deserialize, Serialize};
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -184,6 +184,7 @@ type Queries = Arc<Mutex<Vec<LoadQuery>>>;
 /// queries this records are where "one subscription per declared source" is
 /// observable: a single shared subscription can only carry one stream key, and
 /// could never have polled both.
+#[derive(Clone)]
 struct QueryRecordingStore {
     inner: InMemoryEventStore,
     queries: Queries,
@@ -210,12 +211,7 @@ impl EventStore for QueryRecordingStore {
 
 // Helpers
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    stream: &AggregateId,
-    sequence: u64,
-    order: &str,
-) {
+async fn append_order_placed(store: &Journal, stream: &AggregateId, sequence: u64, order: &str) {
     append_raw(
         store,
         stream,
@@ -230,12 +226,7 @@ async fn append_order_placed(
     .await;
 }
 
-async fn append_stock_reserved(
-    store: &Arc<dyn EventStore>,
-    stream: &AggregateId,
-    sequence: u64,
-    order: &str,
-) {
+async fn append_stock_reserved(store: &Journal, stream: &AggregateId, sequence: u64, order: &str) {
     append_raw(
         store,
         stream,
@@ -251,7 +242,7 @@ async fn append_stock_reserved(
 }
 
 async fn append_raw(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     stream: &AggregateId,
     sequence: u64,
     event_type: EventType,
@@ -271,7 +262,7 @@ async fn append_raw(
         .expect("appending an upstream record must succeed");
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -323,27 +314,26 @@ fn as_set(seen: &[Seen]) -> Vec<Seen> {
 async fn both_declared_sources_reach_the_same_instance_as_their_own_variant() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_stream = AggregateId::new("multi-source-orders");
     let stock_stream = AggregateId::new("multi-source-stock");
     append_order_placed(&upstream_store, &order_stream, 1, ORDER).await;
     append_stock_reserved(&upstream_store, &stock_stream, 1, ORDER).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = saga_id_of(ORDER);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy =
-        SagaManagerProps::<TranslatingSaga>::new(Arc::clone(&saga_store), move |_components| {
-            TranslatingSaga {
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_stream))
-        .observing::<StockReserved>(Subscription::stream(&upstream_store, &stock_stream))
-        .spawn(&ps)
-        .await;
+    let _proxy = SagaManagerProps::<TranslatingSaga>::new(saga_store.clone(), move |_components| {
+        TranslatingSaga {
+            handled: Arc::clone(&handled_for_producer),
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_stream))
+    .observing::<StockReserved>(Subscription::stream(&upstream_store, &stock_stream))
+    .spawn(&ps)
+    .await;
 
     let seen = wait_for_handled(&handled, 2).await;
 
@@ -395,7 +385,7 @@ async fn each_declared_source_is_polled_through_a_subscription_of_its_own() {
     let ps = ProcessSystem::new().await;
 
     let queries: Queries = Arc::new(Mutex::new(Vec::new()));
-    let upstream_store: Arc<dyn EventStore> = Arc::new(QueryRecordingStore {
+    let upstream_store = Journal::from(QueryRecordingStore {
         inner: InMemoryEventStore::default(),
         queries: Arc::clone(&queries),
     });
@@ -404,20 +394,19 @@ async fn each_declared_source_is_polled_through_a_subscription_of_its_own() {
     append_order_placed(&upstream_store, &order_stream, 1, ORDER).await;
     append_stock_reserved(&upstream_store, &stock_stream, 1, ORDER).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy =
-        SagaManagerProps::<TranslatingSaga>::new(Arc::clone(&saga_store), move |_components| {
-            TranslatingSaga {
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_stream))
-        .observing::<StockReserved>(Subscription::stream(&upstream_store, &stock_stream))
-        .spawn(&ps)
-        .await;
+    let _proxy = SagaManagerProps::<TranslatingSaga>::new(saga_store.clone(), move |_components| {
+        TranslatingSaga {
+            handled: Arc::clone(&handled_for_producer),
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_stream))
+    .observing::<StockReserved>(Subscription::stream(&upstream_store, &stock_stream))
+    .spawn(&ps)
+    .await;
 
     // Both records having been handled is the barrier: whatever polling it took
     // to deliver them has already been recorded.

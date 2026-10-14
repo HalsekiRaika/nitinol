@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use nitinol_eventsource::error::CodecError;
 use nitinol_eventsource::{Event, SequenceCursor};
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::EventType;
 
 use crate::components::DeadlineMessage;
@@ -256,7 +256,7 @@ pub struct SubscriptionSet(#[doc(hidden)] pub SourceBinding);
 /// the bound event type names.  It has no public constructor and no public
 /// field: a user can move one the builder handed out, and cannot invent one.
 pub struct SourceBinding {
-    pub(crate) upstream_store: Arc<dyn EventStore>,
+    pub(crate) upstream_store: Journal,
     pub(crate) cursor: SequenceCursor,
     /// The cadence the binding named, where it named one.
     ///

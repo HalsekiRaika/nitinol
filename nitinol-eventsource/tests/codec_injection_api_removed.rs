@@ -30,9 +30,7 @@
 //! Run with:
 //! `cargo test -p nitinol-eventsource --test codec_injection_api_removed`.
 
-use std::sync::Arc;
-
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -168,7 +166,7 @@ impl WithCodecProbe for EventSourceSystemBuilder<PersistenceUnset> {
 /// no inherent method of that name to take precedence.
 #[test]
 fn aggregate_props_has_no_inherent_with_codec() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let props = AggregateProps::<Counter>::new(AggregateId::new("probe-props"), store);
 
     assert_eq!(

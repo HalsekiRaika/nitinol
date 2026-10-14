@@ -52,11 +52,10 @@ use delivery::{
     RecordingEventStore, RecordingOffsetStore, PROBE_INTERVAL, PROBE_TIMEOUT, TEST_POLL_INTERVAL,
 };
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDeliveryExt, SagaId};
@@ -69,7 +68,7 @@ use nitinol_saga::{SagaDeliveryExt, SagaId};
 /// name: the host's subscription names the decision event type as a prefix, and
 /// an aggregate's replay names a single stream.
 async fn wait_until_journal_polls(
-    store: &Arc<RecordingEventStore>,
+    store: &RecordingEventStore,
     want: usize,
     label: &str,
 ) -> Vec<Option<u64>> {
@@ -98,7 +97,7 @@ async fn wait_until_journal_polls(
 async fn a_store_without_a_projection_slot_still_wires_a_delivery_host() {
     // Given: a store that supplies the event store and the saga slot, and
     // neither a projection slot nor a snapshot one.
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
 
     let ps = ProcessSystem::new().await;
@@ -148,10 +147,10 @@ async fn a_store_without_a_projection_slot_still_wires_a_delivery_host() {
 async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
     // Given: the durable state both incarnations share, and one incarnation
     // that has delivered a decision and recorded the position behind it.
-    let durable: Arc<InMemoryEventStore> = Arc::new(InMemoryEventStore::default());
+    let durable = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
 
-    let first_journal: Arc<dyn EventStore> = Arc::clone(&durable) as Arc<dyn EventStore>;
+    let first_journal = durable.clone();
     let first_system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(delivery_persistence(&first_journal, &offsets))
         .build();
@@ -185,8 +184,8 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
 
     // When: a second incarnation is wired over the same durable state, through
     // a handle of its own, and over the same saga slot.
-    let recording = RecordingEventStore::new(Arc::clone(&durable) as Arc<dyn EventStore>);
-    let second_journal: Arc<dyn EventStore> = Arc::clone(&recording) as Arc<dyn EventStore>;
+    let recording = RecordingEventStore::new(durable.clone());
+    let second_journal = recording.clone();
     let second_system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(delivery_persistence(&second_journal, &offsets))
         .build();

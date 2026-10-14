@@ -132,7 +132,7 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 
 /// Poll the offset store until it reaches the expected value or timeout.
 async fn wait_for_offset(
-    store: &Arc<InMemoryOffsetStore>,
+    store: &InMemoryOffsetStore,
     projection_id: &ProjectionId,
     expected: Option<u64>,
 ) {
@@ -162,8 +162,8 @@ async fn wait_for_offset(
 async fn at_most_once_offset_advanced_even_when_project_fails() {
     // Given
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("dm-amo-agg");
     let projection_id = ProjectionId::new("dm-amo");
 
@@ -179,8 +179,8 @@ async fn at_most_once_offset_advanced_even_when_project_fails() {
     // When: spawn with AtMostOnce
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -219,8 +219,8 @@ async fn at_most_once_offset_advanced_even_when_project_fails() {
 async fn at_most_once_offset_advanced_on_success() {
     // Given
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("dm-amo-ok-agg");
     let projection_id = ProjectionId::new("dm-amo-ok");
 
@@ -238,8 +238,8 @@ async fn at_most_once_offset_advanced_on_success() {
     // When
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -271,8 +271,8 @@ async fn at_most_once_offset_advanced_on_success() {
 async fn at_least_once_offset_not_saved_when_project_fails() {
     // Given
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("dm-alo-fail-agg");
     let projection_id = ProjectionId::new("dm-alo-fail");
 
@@ -288,8 +288,8 @@ async fn at_least_once_offset_not_saved_when_project_fails() {
     // When: spawn with AtLeastOnce (default)
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -330,8 +330,8 @@ async fn at_least_once_offset_not_saved_when_project_fails() {
 async fn at_least_once_offset_saved_after_successful_project() {
     // Given
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("dm-alo-ok-agg");
     let projection_id = ProjectionId::new("dm-alo-ok");
 
@@ -349,8 +349,8 @@ async fn at_least_once_offset_saved_after_successful_project() {
     // When: spawn with AtLeastOnce (default)
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -383,8 +383,8 @@ async fn at_least_once_offset_saved_after_successful_project() {
 async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     // Given
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("dm-alo-restart-agg");
     let projection_id = ProjectionId::new("dm-alo-restart");
 
@@ -402,8 +402,8 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
         let count_c = Arc::clone(&count);
         let notify_c = Arc::clone(&notify);
         let projection_id_c = projection_id.clone();
-        let event_store_c: Arc<dyn EventStore> = Arc::clone(&event_store) as Arc<dyn EventStore>;
-        let offset_store_c = Arc::clone(&offset_store);
+        let event_store_c = event_store.clone();
+        let offset_store_c = offset_store.clone();
         let agg_id_c = agg_id.clone();
 
         let persistence = PersistenceProvider::new(
@@ -476,8 +476,8 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
 
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy2 = ProjectorProps::new(projection_id.clone(), &persistence, move || {
@@ -512,8 +512,8 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
 async fn exactly_once_framework_does_not_save_offset() {
     // Given
     let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let offset_store = Arc::new(InMemoryOffsetStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("dm-eo-agg");
     let projection_id = ProjectionId::new("dm-eo");
 
@@ -529,8 +529,8 @@ async fn exactly_once_framework_does_not_save_offset() {
     // When: spawn with ExactlyOnce (framework skips offset saving)
     let persistence = PersistenceProvider::new(
         CustomStore::builder()
-            .eventstore(Arc::clone(&event_store) as Arc<dyn EventStore>)
-            .projection_offsets(Arc::clone(&offset_store))
+            .eventstore(event_store.clone())
+            .projection_offsets(offset_store.clone())
             .build(),
     );
     let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {

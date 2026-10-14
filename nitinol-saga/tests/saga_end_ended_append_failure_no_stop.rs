@@ -37,7 +37,9 @@ use tokio::sync::Notify;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryStore, Journal,
+};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
@@ -113,6 +115,7 @@ impl Saga for AlwaysEndSaga {
 // Saga store: always rejects appends; loads return an empty stream.
 // The saga therefore can never write the Ended marker (or any other event).
 
+#[derive(Clone)]
 struct AlwaysFailOnAppendStore;
 
 #[async_trait]
@@ -135,7 +138,7 @@ impl EventStore for AlwaysFailOnAppendStore {
 
 // Helpers
 
-async fn append_order(store: &Arc<dyn EventStore>, agg_id: &AggregateId, sequence: u64, key: &str) {
+async fn append_order(store: &Journal, agg_id: &AggregateId, sequence: u64, key: &str) {
     let payload = serde_json::to_vec(&OrderEvent {
         key: key.to_owned(),
     })
@@ -167,14 +170,14 @@ async fn saga_stays_alive_when_ended_append_fails() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("ended-fail-order");
 
     // Pre-seed two upstream events so both arrive before the saga starts.
     append_order(&upstream_store, &order_id, 1, "first").await;
     append_order(&upstream_store, &order_id, 2, "second").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(AlwaysFailOnAppendStore);
+    let saga_store = Journal::from(AlwaysFailOnAppendStore);
 
     let handle_count = Arc::new(AtomicUsize::new(0));
     let handled = Arc::new(Notify::new());
@@ -183,7 +186,7 @@ async fn saga_stays_alive_when_ended_append_fails() {
     let handled_clone = Arc::clone(&handled);
 
     let _saga_proxy =
-        SagaManagerProps::<AlwaysEndSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<AlwaysEndSaga>::new(saga_store.clone(), move |_components| {
             AlwaysEndSaga {
                 handle_count: Arc::clone(&handle_count_clone),
                 handled: Arc::clone(&handled_clone),

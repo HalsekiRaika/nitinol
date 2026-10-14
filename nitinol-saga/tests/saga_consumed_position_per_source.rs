@@ -55,7 +55,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -211,7 +211,7 @@ impl Saga for SharedStreamSaga {
 // Helpers
 
 async fn append_raw(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     stream_key: &str,
     sequence: u64,
     event_type: EventType,
@@ -231,12 +231,7 @@ async fn append_raw(
         .expect("appending a record must succeed");
 }
 
-async fn append_alpha(
-    store: &Arc<dyn EventStore>,
-    stream: &AggregateId,
-    sequence: u64,
-    note: &str,
-) {
+async fn append_alpha(store: &Journal, stream: &AggregateId, sequence: u64, note: &str) {
     append_raw(
         store,
         stream.as_str(),
@@ -251,7 +246,7 @@ async fn append_alpha(
     .await;
 }
 
-async fn append_beta(store: &Arc<dyn EventStore>, stream: &AggregateId, sequence: u64, note: &str) {
+async fn append_beta(store: &Journal, stream: &AggregateId, sequence: u64, note: &str) {
     append_raw(
         store,
         stream.as_str(),
@@ -268,7 +263,7 @@ async fn append_beta(store: &Arc<dyn EventStore>, stream: &AggregateId, sequence
 
 /// Stand in for a prior incarnation having recorded a position.
 async fn seed_position(
-    saga_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
     saga_id: &SagaId,
     row_sequence: u64,
     source: &AggregateId,
@@ -306,7 +301,7 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<Seen> {
     }
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -324,7 +319,7 @@ fn as_set(observed: &[Seen]) -> Vec<Seen> {
 
 /// Both declared sources read the one stream key `shared`, interleaved as
 /// Alpha@1, Beta@2, Alpha@3, Beta@4.
-async fn seed_shared_upstream(store: &Arc<dyn EventStore>, shared: &AggregateId) {
+async fn seed_shared_upstream(store: &Journal, shared: &AggregateId) {
     append_alpha(store, shared, 1, "a1").await;
     append_beta(store, shared, 2, "b2").await;
     append_alpha(store, shared, 3, "a3").await;
@@ -333,13 +328,13 @@ async fn seed_shared_upstream(store: &Arc<dyn EventStore>, shared: &AggregateId)
 
 async fn spawn_shared(
     ps: &ProcessSystem,
-    saga_store: &Arc<dyn EventStore>,
-    upstream_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
+    upstream_store: &Journal,
     shared: &AggregateId,
     handled: &Handled,
 ) -> nitinol_saga::SagaManagerProxy<SharedStreamSaga> {
     let handled = Arc::clone(handled);
-    SagaManagerProps::<SharedStreamSaga>::new(Arc::clone(saga_store), move |_components| {
+    SagaManagerProps::<SharedStreamSaga>::new(saga_store.clone(), move |_components| {
         SharedStreamSaga {
             handled: Arc::clone(&handled),
         }
@@ -363,11 +358,11 @@ async fn spawn_shared(
 async fn one_sources_position_does_not_cover_another_sources_record() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let shared = AggregateId::new("per-source-shared");
     seed_shared_upstream(&upstream_store, &shared).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_position(
         &saga_store,
@@ -410,11 +405,11 @@ async fn one_sources_position_does_not_cover_another_sources_record() {
 async fn the_position_a_decision_carries_names_its_own_source() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let shared = AggregateId::new("written-shared");
     append_beta(&upstream_store, &shared, 1, "b1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 

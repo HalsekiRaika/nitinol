@@ -12,11 +12,10 @@
 //! has a declaration of its own.
 
 use std::borrow::Borrow;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{reserved_event, EventType};
 
 use crate::consumed::{
@@ -108,7 +107,7 @@ impl nitinol_eventsource::DeclaresEventType for LifecycleEvent {
 /// Returns `false` (and does not advance `*sequence`) when the store rejects
 /// the append.
 pub(crate) async fn append_ended(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     sequence: &mut u64,
     input_position: Option<&ConsumedPositionEvent>,

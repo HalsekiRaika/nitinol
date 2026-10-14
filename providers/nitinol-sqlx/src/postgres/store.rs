@@ -1,4 +1,5 @@
 use nitinol_persistence::provider::{ProjectionOffsetSlot, SagaOffsetSlot, Store};
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::EventRegistryError;
 use sqlx::PgPool;
 
@@ -34,7 +35,7 @@ use crate::postgres::{PostgresEventStore, PostgresOffsetStore};
 /// [`SnapshotStore`]: nitinol_persistence::store::SnapshotStore
 #[derive(Clone)]
 pub struct PostgresStore {
-    events: PostgresEventStore,
+    events: Journal,
     offsets: PostgresOffsetStore,
 }
 
@@ -47,16 +48,14 @@ impl PostgresStore {
     /// restored wrongly.
     pub fn new(pool: PgPool) -> Result<Self, EventRegistryError> {
         Ok(Self {
-            events: PostgresEventStore::new(pool.clone())?,
+            events: Journal::from(PostgresEventStore::new(pool.clone())?),
             offsets: PostgresOffsetStore::new(pool),
         })
     }
 }
 
 impl Store for PostgresStore {
-    type Events = PostgresEventStore;
-
-    fn events(&self) -> PostgresEventStore {
+    fn events(&self) -> Journal {
         self.events.clone()
     }
 }

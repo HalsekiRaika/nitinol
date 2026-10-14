@@ -1,7 +1,5 @@
-use std::sync::Arc;
-
 use futures_core::future::BoxFuture;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 
 /// The backend a run of the suite is about.
 ///
@@ -14,7 +12,7 @@ use nitinol_persistence::store::EventStore;
 /// provider running the suite as an integration test may want to spawn it.
 pub trait StoreUnderTest: Send + Sync {
     /// Hand the suite a store holding nothing.
-    fn bring_up(&self) -> BoxFuture<'_, Arc<dyn EventStore>>;
+    fn bring_up(&self) -> BoxFuture<'_, Journal>;
 }
 
 /// The caller's runtime, lent to the suite for the clause that needs writers

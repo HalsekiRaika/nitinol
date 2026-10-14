@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-persistence`): the journal and the snapshot store a supplier hands
+  out are named types — `store::Journal` and `store::Album` — so a wiring point
+  holds the store a deployment registered rather than a handle the framework
+  made for it.
+
+  What is inside each is the registered backend's own clone with its type
+  erased: a `Box<dyn EventStore>` and a `Box<dyn SnapshotStore>` behind a
+  newtype that is `Clone`, `Debug` and `Send + Sync + 'static`. Erasing a
+  backend is `Journal::from(backend)` and cloning a journal is
+  `Journal::from(&journal)`; there is no third constructor. `append` and `load`
+  on a journal, and `save` and `load_latest` on an album, are inherent methods
+  handing the call to the registered store and its answer back, so a handle
+  reads the way the store it came from does.
+
+  Neither implements the trait it erases, and that is what makes two things
+  true at once. `impl<E: EventStore + 'static> From<E> for Journal` stands
+  beside `core`'s reflexive conversion rather than overlapping it, so one entry
+  point accepts a backend handle *and* a journal; and erasing an erased handle
+  is a type error instead of a `Box<Box<_>>`.
+
+  `impl Store for Journal` is the store that holds the journal alone, which is
+  what `nitinol_eventsource::system::SystemHandle` names. It implements no slot
+  beyond the journal, so wiring that needs a snapshot store or an offset store
+  is still refused while it is compiled (`PRV-3`) rather than at the first save.
+
+- (`nitinol-persistence`): `store::EventStoreClone` and
+  `store::SnapshotStoreClone` carry a store's own `Clone` through the erasure.
+
+  Each has one method, `clone_box`, implemented once by a blanket
+  `impl<T: EventStore + Clone + 'static>` and its snapshot counterpart, and used
+  by `impl Clone for Box<dyn EventStore>` and `impl Clone for Box<dyn
+  SnapshotStore>`. They are supertraits of `EventStore` and `SnapshotStore`, so
+  a backend author derives `Clone` and writes nothing else; they are public only
+  because a public trait's supertrait has to be. No `dyn-clone`-style dependency
+  is taken on for it — what such a crate generates is this.
+
 - (`nitinol-persistence`): one supplier hands out the stores a deployment runs
   on, so an operator names each logical destination once instead of handing the
   same store to every wiring point by hand.
@@ -565,6 +601,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indistinguishable here.
 
 ### Changed
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-eventsource`, `nitinol-saga`,
+  `nitinol-store-conformance`, `nitinol-conformance`, `nitinol-sqlx`,
+  `nitinol`): a store is distributed by its backend's own `Clone`, and no part
+  of the framework wraps a store handle in an `Arc`.
+
+  The contract already said where identity comes from: cloning the store that
+  was registered first must not lose the data region it names (`PRV-1`), and a
+  shared pointer or a shared connection is neither necessary nor sufficient for
+  that (`PRV-2`). The implementation said something else. A supplier boxed every
+  slot it handed out into an `Arc`, every part's constructor asked for
+  `Arc<dyn EventStore>`, and a caller holding an `InMemoryEventStore` — itself a
+  handle over an `Arc<Mutex<_>>` — wrapped it again to be allowed to name it. A
+  second layer that proves the property the first one already owes is withdrawn
+  rather than deprecated: no alias and no hidden shim answers for an old shape,
+  so a reference to one is a compile error.
+
+  | was | is |
+  |---|---|
+  | `Arc<dyn EventStore>` | `store::Journal` |
+  | `Arc<dyn SnapshotStore>` | `store::Album` |
+  | `Store::Events` (associated type) | gone; `Store::events` answers with `Journal` |
+  | `SnapshotSlot::Snapshots` (associated type) | gone; `SnapshotSlot::snapshots` answers with `Album` |
+  | `PersistenceProvider::event_store` → `Arc<dyn EventStore>` | → `Journal` |
+  | `PersistenceProvider::snapshot_store` → `Arc<dyn SnapshotStore>` | → `Album` |
+  | `PersistenceProvider::projection_offsets` → `Arc<S::ProjectionOffsets>` | → `S::ProjectionOffsets` |
+  | `PersistenceProvider::saga_offsets` → `Arc<S::SagaOffsets>` | → `S::SagaOffsets` |
+  | `provider::CustomStore<E, S, P, Sg>` | `provider::CustomStore<S, P, Sg>` |
+  | `CustomStoreBuilder::eventstore<E: EventStore + Clone + 'static>` | `<E: EventStore + 'static>` |
+  | `CustomStoreBuilder::snapshot<S: SnapshotStore + Clone + 'static>` | `<S: SnapshotStore + 'static>` |
+  | `AggregateProps::new(id, Arc<dyn EventStore>)` | `(id, impl Into<Journal>)` |
+  | `SagaManagerProps::new(Arc<dyn EventStore>, producer)` | `(impl Into<Journal>, producer)` |
+  | `Subscription::stream(Arc<dyn EventStore>, key)` | `(impl Into<Journal>, key)` |
+  | `Subscription::global(Arc<dyn EventStore>)` | `(impl Into<Journal>)` |
+  | `DurableStream::new(topic, Arc<dyn EventStore>, transform)` | `(topic, impl Into<Journal>, transform)` |
+  | `DurableSubscription::new(Arc<dyn EventStore>, transform)` | `(impl Into<Journal>, transform)` |
+  | `system::SystemHandle = EventSourceSystem<DynStore>` | `EventSourceSystem<Journal>` |
+  | `SagaDeliveryExt::SagaOffsets: OffsetStore + 'static` | `: OffsetStore + Clone + 'static` |
+  | `StoreUnderTest::bring_up` → `Arc<dyn EventStore>` | → `Journal` |
+  | `SnapshotStoreUnderTest::bring_up` → `Arc<dyn SnapshotStore>` | → `Album` |
+  | `OffsetStoreUnderTest::bring_up` → `Arc<Self::Store>` | → `Self::Store`, with `Store: OffsetStore + Clone + 'static` |
+  | `Interpretation::interpret(ledger, Arc<dyn EventStore>)` | `(ledger, Journal)` |
+
+  **A backend author derives `Clone` and writes nothing else.** `EventStore` and
+  `SnapshotStore` now have the clone supertraits listed under *Added*, which is
+  what the erasure calls. The requirement is the one `PRV-1` already stated — a
+  clone of the registered store reaches the records the original does — so a
+  backend whose handle was already cloneable, which is every backend here and
+  the shape a connection pool takes, has nothing to change. One whose `Clone`
+  would construct fresh state fails the conformance clause it always failed.
+
+  **A wiring point passes the handle it holds.**
+  `CustomStore::builder().eventstore(InMemoryEventStore::default())` is the
+  whole of naming a journal, and the six entry points above take
+  `impl Into<Journal>`, so a backend handle, a `Journal` and a `&Journal` are
+  all accepted and all reach the one set of records. Where the framework needs
+  a handle of its own — one per spawned process, one per poller, one per
+  delivery partition — it calls `Journal::clone`, which is the backend's clone
+  one level down.
+
+  **The offset slots keep their associated types.** `OffsetStore::Tx` is an
+  associated type of its own, so erasing an offset store would take a backend's
+  transaction type out of sight. `ProjectionOffsetSlot::ProjectionOffsets` and
+  `SagaOffsetSlot::SagaOffsets` are unchanged; what changed is that the supplier
+  answers with them by value, and that the parts holding one
+  (`ProjectorProps`, `SagaDeliveryProps` and the processes they start) hold the
+  backend's handle rather than a shared wrapper around it.
 
 - **BREAKING** (`nitinol-persistence`, `nitinol-eventsource`, `nitinol-saga`,
   `nitinol-store-conformance`, `nitinol-sqlx`, `nitinol`): the store that keeps
@@ -1217,6 +1320,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `type State = ...;` line; no other change is required.
 
 ### Removed
+
+- **BREAKING** (`nitinol-persistence`): `provider::DynStore` is withdrawn, and
+  the store that holds the journal alone is `store::Journal` itself.
+
+  It existed to give a name to "a store whose journal is all there is", which is
+  what wiring written before a deployment's store is known has to name — a
+  saga's dispatch mapping, and `nitinol_eventsource::system::SystemHandle`. It
+  held an `Arc<dyn EventStore>` and never called the backend's `Clone`, so it
+  was the erasure and the sharing layer at once. `impl Store for Journal` is the
+  same name with neither: `SystemHandle` is `EventSourceSystem<Journal>`, and
+  `EventSourceSystem::erase_store` builds it from
+  `PersistenceProvider::new(self.persistence.event_store())`.
+
+- **BREAKING** (`nitinol-persistence`): the three blanket implementations that
+  made a shared pointer a store — `impl<T: EventStore + ?Sized> EventStore for
+  Arc<T>` and the same for `SnapshotStore` and `OffsetStore` — are withdrawn.
+
+  Their stated motive was naming a store that is not `Clone`; what they became
+  was the ordinary route for naming one that is, which is how the second layer
+  of handle got everywhere. A backend is named by its own handle now, and
+  `Arc<SomeStore>` satisfies no store trait. Code that wrapped a handle to be
+  allowed to pass it drops the wrapper; code that wrapped one because its store
+  genuinely cannot be cloned derives `Clone` over the state it shares, which is
+  what `PRV-1` asks of it either way.
 
 - **BREAKING** (`nitinol-persistence`): the `store::CheckpointScope` trait is
   withdrawn, with no replacement trait.

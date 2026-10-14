@@ -67,7 +67,7 @@ use nitinol_persistence::provider::{
     CustomStore, PersistenceProvider, ProjectionOffsetSlot, Store,
 };
 use nitinol_persistence::store::{
-    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, OffsetScope, OffsetStore,
+    InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, Journal, OffsetScope, OffsetStore,
 };
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -158,7 +158,7 @@ impl Projector<Incremented> for CountingProjector {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Stream sequences stored under `id`, in ascending order.
-async fn stored_sequences(store: &dyn EventStore, id: &AggregateId) -> Vec<u64> {
+async fn stored_sequences(store: &Journal, id: &AggregateId) -> Vec<u64> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await
@@ -380,11 +380,11 @@ async fn projector_props_from_a_system_spawn_without_a_process_system() {
 async fn props_built_directly_start_on_the_process_system_they_are_given() {
     // Given
     let ps = ProcessSystem::new().await;
-    let events = InMemoryEventStore::default();
+    let events = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("unhosted-aggregate-props");
 
     // When
-    let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::new(events.clone()))
+    let proxy = AggregateProps::<Counter>::new(id.clone(), &events)
         .spawn(&ps)
         .await;
     proxy.ask(Increment).await.expect("ask must succeed");
@@ -403,15 +403,15 @@ async fn props_built_directly_start_on_the_process_system_they_are_given() {
 #[tokio::test]
 async fn hosted_props_work_over_an_assembled_store() {
     // Given
-    let events: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let offsets = Arc::new(InMemoryOffsetStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .offsets(InMemoryOffsetStore::default())
+            .build(),
+    );
+    let events = persistence.event_store();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(Arc::clone(&events))
-                .offsets(Arc::clone(&offsets))
-                .build(),
-        ))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("hosted-aggregate-props-assembled");
 
@@ -421,7 +421,7 @@ async fn hosted_props_work_over_an_assembled_store() {
 
     // Then
     assert_eq!(
-        stored_sequences(&*events, &id).await,
+        stored_sequences(&events, &id).await,
         vec![1],
         "a hosted spawn over an assembled store lands in the journal handle that \
          store was named with"

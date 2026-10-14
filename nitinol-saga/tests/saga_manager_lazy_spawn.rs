@@ -21,7 +21,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -117,7 +117,7 @@ impl Saga for TracingSaga {
 // Helpers
 
 async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     upstream_key: &AggregateId,
     sequence: u64,
     order: &str,
@@ -143,12 +143,7 @@ async fn append_order_placed(
 
 /// Seed one of the saga's *own* domain events so the instance the manager
 /// lazily spawns has something to replay before the upstream event reaches it.
-async fn seed_saga_domain_event(
-    store: &Arc<dyn EventStore>,
-    saga_id: &SagaId,
-    sequence: u64,
-    order: &str,
-) {
+async fn seed_saga_domain_event(store: &Journal, saga_id: &SagaId, sequence: u64, order: &str) {
     let payload = serde_json::to_vec(&ReservationRequested {
         order: order.to_owned(),
     })
@@ -210,10 +205,10 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-lazy-spawn-orders");
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let instance_id = SagaId::new(format!("{INSTANCE_PREFIX}A"));
     seed_saga_domain_event(&saga_store, &instance_id, 1, "A").await;
 
@@ -224,11 +219,9 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
     let notify_for_producer = Arc::clone(&notify);
 
     let _manager_proxy =
-        SagaManagerProps::<TracingSaga>::new(Arc::clone(&saga_store), move |_components| {
-            TracingSaga {
-                trace: Arc::clone(&trace_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
+        SagaManagerProps::<TracingSaga>::new(saga_store.clone(), move |_components| TracingSaga {
+            trace: Arc::clone(&trace_for_producer),
+            notify: Arc::clone(&notify_for_producer),
         })
         .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
         .spawn(system.process_system())
@@ -257,10 +250,10 @@ async fn known_correlation_id_reuses_the_running_instance() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-lazy-reuse-orders");
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
 
     let trace: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -271,7 +264,7 @@ async fn known_correlation_id_reuses_the_running_instance() {
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
     let _manager_proxy =
-        SagaManagerProps::<TracingSaga>::new(Arc::clone(&saga_store), move |_components| {
+        SagaManagerProps::<TracingSaga>::new(saga_store.clone(), move |_components| {
             spawned_for_producer.fetch_add(1, Ordering::SeqCst);
             TracingSaga {
                 trace: Arc::clone(&trace_for_producer),

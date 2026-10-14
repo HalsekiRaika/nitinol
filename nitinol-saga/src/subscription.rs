@@ -1,11 +1,10 @@
 //! Where one declared source of a saga is read from.
 
 use std::borrow::Borrow;
-use std::sync::Arc;
 use std::time::Duration;
 
 use nitinol_eventsource::SequenceCursor;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 
 use crate::subscribe::SourceBinding;
 
@@ -25,7 +24,7 @@ use crate::subscribe::SourceBinding;
 /// A source reads either one stream ([`stream`](Self::stream)) or the whole store
 /// in the order it accepted the records ([`global`](Self::global)).
 pub struct Subscription {
-    store: Arc<dyn EventStore>,
+    store: Journal,
     source: Source,
     after: u64,
     poll_interval: Option<Duration>,
@@ -53,12 +52,15 @@ impl Subscription {
     /// names as consumed, so the sweep reaches [`Saga::handle`](crate::Saga::handle)
     /// only with records that one has not decided from.
     /// [`with_after`](Self::with_after) names a position to start past instead.
-    pub fn stream<K>(store: &Arc<dyn EventStore>, key: &K) -> Self
+    ///
+    /// The journal arrives as whatever the deployment holds: a backend handle,
+    /// a [`Journal`] a supplier answered with, or a reference to one it keeps.
+    pub fn stream<K>(store: impl Into<Journal>, key: &K) -> Self
     where
         K: ?Sized + Borrow<str>,
     {
         Self {
-            store: Arc::clone(store),
+            store: store.into(),
             source: Source::Stream {
                 key: key.borrow().to_owned(),
             },
@@ -82,9 +84,11 @@ impl Subscription {
     /// has already consumed after a restart — which the per-source consumed
     /// positions still drop before they reach
     /// [`Saga::handle`](crate::Saga::handle).
-    pub fn global(store: &Arc<dyn EventStore>) -> Self {
+    /// The journal arrives in the same three forms
+    /// [`stream`](Self::stream) accepts.
+    pub fn global(store: impl Into<Journal>) -> Self {
         Self {
-            store: Arc::clone(store),
+            store: store.into(),
             source: Source::Global,
             after: 0,
             poll_interval: None,

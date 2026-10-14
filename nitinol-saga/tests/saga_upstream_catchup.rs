@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -136,12 +136,7 @@ impl Saga for MatchOnlySaga {
     }
 }
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -161,7 +156,7 @@ async fn append_order_placed(
         .expect("append OrderPlaced must succeed");
 }
 
-async fn append_unrelated(store: &Arc<dyn EventStore>, agg_id: &AggregateId, sequence: u64) {
+async fn append_unrelated(store: &Journal, agg_id: &AggregateId, sequence: u64) {
     let payload = serde_json::to_vec(&UnrelatedEvent)
         .map(Bytes::from)
         .expect("encode UnrelatedEvent must succeed");
@@ -216,14 +211,14 @@ async fn saga_catches_up_on_preexisting_upstream_events() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-catchup-order");
 
     append_order_placed(&upstream_store, &order_id, 1, "SKU-A").await;
     append_order_placed(&upstream_store, &order_id, 2, "SKU-B").await;
     append_order_placed(&upstream_store, &order_id, 3, "SKU-C").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -258,7 +253,7 @@ async fn saga_catchup_declines_events_that_correlate_elsewhere() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-route-order");
 
     append_order_placed(&upstream_store, &order_id, 1, "SKIP-1").await;
@@ -266,7 +261,7 @@ async fn saga_catchup_declines_events_that_correlate_elsewhere() {
     append_order_placed(&upstream_store, &order_id, 3, "SKIP-2").await;
     append_order_placed(&upstream_store, &order_id, 4, "MATCH-2").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -303,14 +298,14 @@ async fn saga_catchup_resumes_from_cursor_after_value() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-resume-order");
 
     for (seq, sku) in [(1u64, "SKU-1"), (2, "SKU-2"), (3, "SKU-3"), (4, "SKU-4")] {
         append_order_placed(&upstream_store, &order_id, seq, sku).await;
     }
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -346,12 +341,12 @@ async fn saga_receives_live_events_after_catchup_via_durable_stream() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-live-order");
 
     append_order_placed(&upstream_store, &order_id, 1, "CATCHUP").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -388,14 +383,14 @@ async fn saga_catchup_ignores_events_of_other_types() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-upstream-mixed-order");
 
     append_order_placed(&upstream_store, &order_id, 1, "ORDER-1").await;
     append_unrelated(&upstream_store, &order_id, 2).await;
     append_order_placed(&upstream_store, &order_id, 3, "ORDER-2").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
@@ -440,7 +435,7 @@ async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
 
     let agg_a = AggregateId::new("saga-upstream-global-a");
     let agg_b = AggregateId::new("saga-upstream-global-b");
@@ -450,7 +445,7 @@ async fn saga_catchup_with_global_cursor_orders_across_aggregates() {
     append_order_placed(&upstream_store, &agg_a, 2, "A2").await;
     append_order_placed(&upstream_store, &agg_b, 2, "B2").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 

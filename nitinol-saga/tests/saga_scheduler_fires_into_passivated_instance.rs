@@ -42,7 +42,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -200,7 +200,7 @@ impl ReminderSaga {
 
 // Helpers
 
-async fn append_ping(store: &Arc<dyn EventStore>, sequence: u64, note: &str) {
+async fn append_ping(store: &Journal, sequence: u64, note: &str) {
     let payload = serde_json::to_vec(&Ping {
         note: note.to_owned(),
     })
@@ -280,8 +280,8 @@ async fn scheduler_firing_activates_a_passivated_instance() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
 
     let steps: Arc<Mutex<Vec<Step>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -294,7 +294,7 @@ async fn scheduler_firing_activates_a_passivated_instance() {
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
     let _manager_proxy =
-        SagaManagerProps::<ReminderSaga>::new(Arc::clone(&saga_store), move |components| {
+        SagaManagerProps::<ReminderSaga>::new(saga_store.clone(), move |components| {
             spawned_for_producer.fetch_add(1, Ordering::SeqCst);
             ReminderSaga {
                 deadline: components.deadline(),

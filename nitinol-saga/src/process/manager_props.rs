@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use nitinol_eventsource::system::{Hosted, SystemHandle, Unhosted};
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_runtime::process::SupervisionStrategy;
 use nitinol_runtime::{IdleTimeout, ProcessSystem, Props};
 
@@ -46,7 +46,7 @@ use crate::subscription::Subscription;
 /// the host resolves the resident timer core from the saga's alphabet, so one
 /// instance gets its deadlines on exactly the same terms a thousand do.
 pub struct SagaManagerProps<S: Saga, B = SourceBindings<S>, H = Unhosted> {
-    store: Arc<dyn EventStore>,
+    store: Journal,
     producer: SagaProducer<S>,
     bindings: B,
     instance_idle_timeout: IdleTimeout,
@@ -69,12 +69,15 @@ impl<S: Saga> SagaManagerProps<S, SourceBindings<S>, Unhosted> {
     /// the framework resolved for it and is called once per spawned instance, so
     /// anything the saga captures (a reference it reads the world through, say)
     /// must be re-acquirable.
+    ///
+    /// The journal arrives as whatever the deployment holds: a backend handle,
+    /// a [`Journal`] a supplier answered with, or a reference to one it keeps.
     pub fn new(
-        store: Arc<dyn EventStore>,
+        store: impl Into<Journal>,
         producer: impl Fn(SagaComponents<S>) -> S + Send + Sync + 'static,
     ) -> Self {
         Self {
-            store,
+            store: store.into(),
             producer: Arc::new(producer),
             bindings: SourceBindings::<S>::default(),
             instance_idle_timeout: IdleTimeout::Inherit,
@@ -174,7 +177,7 @@ where
         let scheduler = scheduler::resolve_for::<S>(system).await;
 
         let props = Props::new(move || SagaManagerProcess::<S> {
-            store: Arc::clone(&store),
+            store: store.clone(),
             producer: Arc::clone(&producer),
             host: host.clone(),
             upstream: upstream.clone(),

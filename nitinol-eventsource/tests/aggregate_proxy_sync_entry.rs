@@ -10,8 +10,6 @@
 // below happens inside a non-async closure, which stops compiling the moment the
 // entry point becomes an `async fn`.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
@@ -19,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{codec::Codec, Aggregate, AggregateProxy, Decider, Decision, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -82,7 +80,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 // Helpers
 
 /// Stream sequences stored under `id`, in ascending order.
-async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<u64> {
+async fn stored_sequences(store: &Journal, id: &AggregateId) -> Vec<u64> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await
@@ -105,13 +103,14 @@ async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<
 async fn synchronously_built_reference_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .build(),
-        ))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("sync-entry-shared");
 

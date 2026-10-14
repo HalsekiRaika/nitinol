@@ -32,7 +32,6 @@
 //! The delivery host's hosted spawn is fixed where its recovery already is,
 //! in `persistence_delivery_without_projector.rs`.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -44,7 +43,7 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::{PersistenceProvider, Store};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryStore};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -133,12 +132,7 @@ impl Saga for NotingSaga {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_INTERVAL: Duration = Duration::from_millis(20);
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    key: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, key: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -159,7 +153,7 @@ async fn append_order_placed(
 }
 
 /// The SKUs on the saga's own stream, decoded with the codec `Noted` names.
-async fn noted_skus(store: &dyn EventStore, saga_id: &SagaId) -> Vec<String> {
+async fn noted_skus(store: &Journal, saga_id: &SagaId) -> Vec<String> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -181,7 +175,7 @@ async fn noted_skus(store: &dyn EventStore, saga_id: &SagaId) -> Vec<String> {
 /// Wait until the saga's own stream carries `want` of its events, then answer
 /// their SKUs.
 async fn wait_for_noted(
-    store: &dyn EventStore,
+    store: &Journal,
     saga_id: &SagaId,
     want: usize,
     label: &str,
@@ -212,7 +206,7 @@ async fn a_saga_hosted_from_a_system_runs_on_that_system() {
         .with_persistence(PersistenceProvider::new(store.clone()))
         .build();
     let saga_id = SagaId::new(SAGA_ID);
-    let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-hosted-props-order");
 
     // When: nothing but the host builder is named here
@@ -258,17 +252,16 @@ async fn a_saga_hosted_from_a_system_runs_on_that_system() {
 async fn manager_props_built_directly_start_on_the_process_system_they_are_given() {
     // Given
     let ps = ProcessSystem::new().await;
-    let journal: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
-    let upstream: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-unhosted-manager-order");
 
     // When
-    let manager =
-        SagaManagerProps::<NotingSaga>::new(Arc::clone(&journal), |_components| NotingSaga)
-            .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
-            .spawn(&ps)
-            .await;
+    let manager = SagaManagerProps::<NotingSaga>::new(journal.clone(), |_components| NotingSaga)
+        .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
+        .spawn(&ps)
+        .await;
 
     // Then
     assert!(
@@ -280,7 +273,7 @@ async fn manager_props_built_directly_start_on_the_process_system_they_are_given
     append_order_placed(&upstream, &order_id, 1, "SKU-UNHOSTED").await;
     assert_eq!(
         wait_for_noted(
-            &*journal,
+            &journal,
             &saga_id,
             1,
             "the instance must journal onto the store the props were built on"

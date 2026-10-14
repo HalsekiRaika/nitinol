@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -203,7 +203,7 @@ fn reminder() -> Reminder {
     }
 }
 
-async fn append_trigger(store: &Arc<dyn EventStore>, stream_key: &str, after_millis: u64) {
+async fn append_trigger(store: &Journal, stream_key: &str, after_millis: u64) {
     let message = reminder();
     let payload = serde_json::to_vec(&Trigger {
         note: message.note,
@@ -226,7 +226,7 @@ async fn append_trigger(store: &Arc<dyn EventStore>, stream_key: &str, after_mil
         .expect("append Trigger must succeed");
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -251,7 +251,7 @@ fn scheduled_payloads(events: &[LoadedEvent]) -> Vec<Vec<u8>> {
 const BARRIER_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-async fn wait_for_scheduled_payload(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<Vec<u8>> {
+async fn wait_for_scheduled_payload(store: &Journal, saga_id: &SagaId) -> Vec<Vec<u8>> {
     let deadline = Instant::now() + BARRIER_TIMEOUT;
     loop {
         let payloads = scheduled_payloads(&load_saga_events(store, saga_id).await);
@@ -283,13 +283,13 @@ async fn wait_for_fired(fired: &Arc<Mutex<Vec<Reminder>>>) -> Vec<Reminder> {
 
 async fn spawn_codec_saga(
     ps: &ProcessSystem,
-    saga_store: &Arc<dyn EventStore>,
-    upstream_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
+    upstream_store: &Journal,
     upstream_key: &str,
     fired: &Arc<Mutex<Vec<Reminder>>>,
 ) -> nitinol_saga::SagaManagerProxy<CodecSaga> {
     let fired = Arc::clone(fired);
-    SagaManagerProps::<CodecSaga>::new(Arc::clone(saga_store), move |components| CodecSaga {
+    SagaManagerProps::<CodecSaga>::new(saga_store.clone(), move |components| CodecSaga {
         deadline: components.deadline(),
         fired: Arc::clone(&fired),
     })
@@ -311,10 +311,10 @@ async fn spawn_codec_saga(
 /// reach `handle` would supersede the deadline under test rather than quietly
 /// reproduce it.
 async fn seed_an_inert_boot_record(
-    saga_store: &Arc<dyn EventStore>,
+    saga_store: &Journal,
     saga_id: &SagaId,
     saga_sequence: u64,
-    upstream_store: &Arc<dyn EventStore>,
+    upstream_store: &Journal,
     upstream_key: &str,
 ) {
     saga_store
@@ -343,10 +343,10 @@ async fn seed_an_inert_boot_record(
 async fn the_schedule_fact_carries_the_codec_the_message_type_names() {
     let ps = ProcessSystem::new().await;
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_trigger(&upstream_store, "deadline-codec-upstream-1", 5_000).await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<Reminder>::new()));
 
@@ -388,7 +388,7 @@ async fn the_schedule_fact_carries_the_codec_the_message_type_names() {
 async fn a_firing_is_read_back_through_the_codec_the_message_type_names() {
     let ps = ProcessSystem::new().await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let expected = reminder();
     let payload = <PipeCodec as Codec<Reminder>>::encode(&expected)
@@ -417,7 +417,7 @@ async fn a_firing_is_read_back_through_the_codec_the_message_type_names() {
 
     // One already-consumed upstream record, so the instance exists at all;
     // replay of the schedule fact is still the only way a deadline gets in.
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let upstream_store = Journal::from(InMemoryEventStore::default());
     seed_an_inert_boot_record(
         &saga_store,
         &saga_id,

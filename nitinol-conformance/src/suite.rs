@@ -1,10 +1,9 @@
 use std::fmt::Debug;
-use std::sync::Arc;
 
 use futures_util::TryStreamExt;
 use jiff::Timestamp;
 use nitinol_contract::{Aggregate, Decider, Decision, Event, Query};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery, LoadedEvent};
 
 use crate::counting_store::{AppendCount, CountingStore};
@@ -733,17 +732,17 @@ struct UnderTest<I: Interpretation> {
     /// Where the suite reads from. For a wedged clause this is the store
     /// *underneath* the wedge, so facts seeded before the wedge stay visible
     /// even though the interpreter can record nothing through it.
-    recorded_by: Arc<dyn EventStore>,
+    recorded_by: Journal,
 }
 
 impl<I: Interpretation> UnderTest<I> {
     /// Bring an interpreter up for a fresh stream that already holds `history`.
     async fn staged(interpretation: &I, ledger: &str, history: &[LedgerEvent]) -> Self {
-        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let store = Journal::from(InMemoryEventStore::default());
         let ledger = AggregateId::new(ledger);
         seed(&store, &ledger, history).await;
         let interpreter = interpretation
-            .interpret(ledger.clone(), Arc::clone(&store))
+            .interpret(ledger.clone(), store.clone())
             .await;
         Self {
             interpreter,
@@ -764,12 +763,13 @@ impl<I: Interpretation> UnderTest<I> {
         ledger: &str,
         history: &[LedgerEvent],
     ) -> (Self, AppendCount) {
-        let backing: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let backing = Journal::from(InMemoryEventStore::default());
         let ledger = AggregateId::new(ledger);
         seed(&backing, &ledger, history).await;
-        let (counting, appends) = CountingStore::over(Arc::clone(&backing));
-        let counting: Arc<dyn EventStore> = Arc::new(counting);
-        let interpreter = interpretation.interpret(ledger.clone(), counting).await;
+        let (counting, appends) = CountingStore::over(backing.clone());
+        let interpreter = interpretation
+            .interpret(ledger.clone(), Journal::from(counting))
+            .await;
         (
             Self {
                 interpreter,
@@ -783,10 +783,10 @@ impl<I: Interpretation> UnderTest<I> {
     /// Bring an interpreter up over a store that answers reads and records
     /// nothing, on a stream that already holds `history`.
     async fn wedged(interpretation: &I, ledger: &str, history: &[LedgerEvent]) -> Self {
-        let backing: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+        let backing = Journal::from(InMemoryEventStore::default());
         let ledger = AggregateId::new(ledger);
         seed(&backing, &ledger, history).await;
-        let wedged: Arc<dyn EventStore> = Arc::new(WedgedStore::over(Arc::clone(&backing)));
+        let wedged = Journal::from(WedgedStore::over(backing.clone()));
         let interpreter = interpretation.interpret(ledger.clone(), wedged).await;
         Self {
             interpreter,
@@ -817,7 +817,7 @@ impl<I: Interpretation> UnderTest<I> {
 ///
 /// Only ever called on a stream nothing has been written to yet, which is what
 /// makes numbering from one correct.
-async fn seed(store: &Arc<dyn EventStore>, ledger: &AggregateId, facts: &[LedgerEvent]) {
+async fn seed(store: &Journal, ledger: &AggregateId, facts: &[LedgerEvent]) {
     let appending: Vec<AppendingEvent> = facts
         .iter()
         .enumerate()

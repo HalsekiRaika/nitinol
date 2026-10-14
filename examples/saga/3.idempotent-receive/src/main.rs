@@ -7,7 +7,6 @@
 //! tests; this binary demonstrates it end to end with self-verifying
 //! assertions.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::TryStreamExt;
@@ -15,8 +14,8 @@ use futures_util::TryStreamExt;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
@@ -55,19 +54,17 @@ async fn main() {
     // How far the host has got is not a stream at all, so it is a slot of its
     // own: without it there is no `deliver` on this system to call, which is
     // the wiring being told so while it is compiled rather than when the host
-    // first tries to record something.
+    // first tries to record something. `InMemoryStore` supplies every slot,
+    // that one included.
     //
-    // The journal handle is kept here as well, because the streams are what this
-    // demonstration verifies itself against.
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // The journal is taken back off the supplier below, because the streams are
+    // what this demonstration verifies itself against — and what a supplier
+    // answers with is the store it was built on rather than a region of its
+    // own.
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(Arc::clone(&store))
-                .saga_offsets(InMemoryOffsetStore::default())
-                .build(),
-        ))
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
+    let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("order-cobalt-42");
     let order = system.spawn_aggregate::<Order>(order_id.clone()).await;
@@ -153,7 +150,7 @@ async fn main() {
 }
 
 /// Every record on the stream `key`, in stream order.
-async fn load_stream(store: &Arc<dyn EventStore>, key: &str) -> Vec<LoadedEvent> {
+async fn load_stream(store: &Journal, key: &str) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(key))
         .await
@@ -173,7 +170,7 @@ fn decode<E: Event>(event: &LoadedEvent) -> E {
 }
 
 /// The reservations the stock item's own stream records, in stream order.
-async fn reservations(store: &Arc<dyn EventStore>, stock_key: &str) -> Vec<StockReserved> {
+async fn reservations(store: &Journal, stock_key: &str) -> Vec<StockReserved> {
     load_stream(store, stock_key)
         .await
         .iter()
@@ -184,7 +181,7 @@ async fn reservations(store: &Arc<dyn EventStore>, stock_key: &str) -> Vec<Stock
 
 /// The fact event the order recorded — the upstream event the operation id is
 /// derived from.
-async fn order_fact(store: &Arc<dyn EventStore>, order_key: &str) -> OrderPlaced {
+async fn order_fact(store: &Journal, order_key: &str) -> OrderPlaced {
     let events = load_stream(store, order_key).await;
     let placed = events
         .iter()
@@ -199,7 +196,7 @@ async fn order_fact(store: &Arc<dyn EventStore>, order_key: &str) -> OrderPlaced
 /// subscription catching up, then the host's poll — and the stream is where the
 /// result becomes observable, so this waits on that fact rather than sleeping
 /// for a guessed duration.
-async fn wait_for_first_reservation(store: &Arc<dyn EventStore>, stock_key: &str) -> StockReserved {
+async fn wait_for_first_reservation(store: &Journal, stock_key: &str) -> StockReserved {
     let deadline = std::time::Instant::now() + DELIVERY_TIMEOUT;
     loop {
         if let Some(first) = reservations(store, stock_key).await.into_iter().next() {
