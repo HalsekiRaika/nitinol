@@ -10,11 +10,13 @@
 //! Delivery is at-least-once because a host's offset moves only after the
 //! deliveries a record implied have landed, and the two writes are to two stores.
 //! A repeat is not only a crash's doing, though, and the clause below uses the
-//! other documented way of producing one: a *second host over the same journal*,
-//! filing its progress under an identifier of its own.  That is the shape of a
-//! second deployment, or of a migration running beside the first, and it starts
-//! from nothing — so it reads the decision the first host already finished with
-//! and carries every one of its commands a second time.
+//! other documented way of producing one: the saga *hosted a second time over
+//! the same journal* — one more `host` declaration, so a second manager and a
+//! delivery host of its own, filing its progress under an identifier of its
+//! own.  That is the shape of a second deployment, or of a migration running
+//! beside the first, and it starts from nothing — so it reads the decision the
+//! first host already finished with and carries every one of its commands a
+//! second time.
 //!
 //! The fact event is redelivered too, because the manager's cursor is not
 //! durable, and it is *not* decided again: its position is on the saga's own
@@ -35,7 +37,7 @@
 mod common;
 use common::{
     decision_position, decisions, delivered_through, delivery_scope, drain_payslips, employee_ids,
-    fingerprint, fingerprints, issued, load_stream, payslip_keys, spawn_delivery_host, spawn_world,
+    fingerprint, fingerprints, issued, load_stream, payslip_keys, spawn_saga, spawn_world,
     wait_for_delivery_through, wait_for_issued, DECISION_BLOCK_LEN, EMPLOYEE_COUNT,
 };
 
@@ -189,11 +191,19 @@ async fn one_fact_event_records_the_approval_and_fans_out_to_thirty_two_payslips
 
 /// Every command carried a second time must leave the payslips untouched.
 ///
-/// A second delivery host over the same journal, filing its progress under an
-/// identifier of its own, starts from nothing and therefore reads the decision
-/// the first host already finished with.  It re-derives all 32 commands from it
-/// and carries them again — which is precisely what a host resuming from a
-/// offset a crash left behind does, with none of a crash's non-determinism.
+/// The saga hosted a second time over the same journal — a second manager, and
+/// a delivery host filing its progress under an identifier of its own — starts
+/// from nothing and therefore reads the decision the first host already
+/// finished with.  It re-derives all 32 commands from it and carries them
+/// again — which is precisely what a host resuming from a offset a crash left
+/// behind does, with none of a crash's non-determinism.
+///
+/// The deciding half of that second declaration reads its upstream from
+/// nothing too, so the fact event is delivered a second time as well, and the
+/// instance drops it against the position on its own stream.  What this clause
+/// waits on is the delivery half's progress, so the drop is not what it times
+/// itself against — that it happens at all is fixed where it is decided, by
+/// `nitinol-saga`'s consumed-position tests.
 ///
 /// The payslip processes stay resident across it, so the repeats are absorbed in
 /// their plain form — no aggregate replay involved.
@@ -247,7 +257,7 @@ async fn commands_carried_a_second_time_write_no_second_payslip() {
          reads is the whole journal — the decision included"
     );
 
-    let _second_delivery = spawn_delivery_host(&world.system, &second_host).await;
+    let _second_deployment = spawn_saga(&world.system, &run_id, &second_host).await;
 
     // The second host recording the same position is the observable point: it has
     // carried all 32 commands over again and had every one of them answered.

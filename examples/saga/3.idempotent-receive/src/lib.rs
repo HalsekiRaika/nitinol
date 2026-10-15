@@ -65,11 +65,14 @@
 //! is the receiver, and the reservation's operation id is derived from the
 //! order.
 //!
-//! Three wirings, each named where it is needed: the aggregates on the system,
-//! the saga manager subscribed to the order's stream
-//! ([`nitinol_saga::SagaSystemExt`]), and the delivery host over the saga's own
-//! decisions ([`nitinol_saga::SagaDeliveryExt`], or
-//! [`nitinol_saga::SagaDeliveryProps`] where the stores are named by hand).
+//! Two wirings, each named where it is needed: the aggregates on the system,
+//! and the saga ([`nitinol_saga::SagaSystemExt::host`]) — one declaration that
+//! starts both the manager subscribed to the order's stream and the delivery
+//! host over the saga's own decisions, because a decision nobody carries out
+//! reserves nothing.  It exists only on a system whose store holds the slot
+//! that host records its progress in; where the journal and that slot are named
+//! by hand instead, the host is [`nitinol_saga::SagaDeliveryProps`], which is
+//! what the tests here use to point one at an offset store of their own.
 //!
 //! `EventStore` is keyed by stream, so the order's stream, the stock item's
 //! stream and the saga's own journal are tenants of one store instance; the

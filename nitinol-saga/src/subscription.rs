@@ -107,9 +107,12 @@ impl Subscription {
 
     /// Ask this source's store no more often than every `interval`.
     ///
-    /// The observing side's counterpart of
-    /// [`SagaDeliveryProps::with_poll_interval`](crate::SagaDeliveryProps::with_poll_interval),
-    /// and a deployment's choice for the same reason: a pull consumer trades
+    /// The observing side's counterpart of the delivery side's cadence —
+    /// [`SagaManagerProps::with_delivery_poll_interval`](crate::SagaManagerProps::with_delivery_poll_interval)
+    /// on a hosted saga's builder, or
+    /// [`SagaDeliveryProps::with_poll_interval`](crate::SagaDeliveryProps::with_poll_interval)
+    /// on a host whose stores are named by hand — and a deployment's choice for
+    /// the same reason: a pull consumer trades
     /// latency for load on the store, and which way a deployment wants that is
     /// not something the framework can know.
     ///

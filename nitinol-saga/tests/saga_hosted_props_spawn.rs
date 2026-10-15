@@ -218,7 +218,11 @@ async fn a_saga_hosted_from_a_system_runs_on_that_system() {
 
     // Then: the process the proxy names is one this system is running
     assert!(
-        system.process_system().lookup(host.pid()).await.is_some(),
+        system
+            .process_system()
+            .lookup(host.manager().pid())
+            .await
+            .is_some(),
         "a saga hosted from a system runs on that system's process system, so \
          the system's own registry is where its process is found"
     );

@@ -32,7 +32,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -197,6 +197,7 @@ async fn host_uses_the_codecs_its_events_name() {
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
         .build();

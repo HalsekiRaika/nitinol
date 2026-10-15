@@ -45,11 +45,12 @@ use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSystemExt, Subscription,
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscriptionExt, SagaSystemExt,
+    Subscription,
 };
 
 // Domain
@@ -202,6 +203,7 @@ async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
         .build();

@@ -51,10 +51,12 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSystemExt};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSubscriptionExt, SagaSystemExt,
+};
 
 /// The single instance every upstream event correlates to.  Constant
 /// correlation is what makes the manager degenerate to one resident saga.
@@ -251,6 +253,7 @@ async fn single_constant_correlation_reproduces_the_resident_saga() {
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
         .build();

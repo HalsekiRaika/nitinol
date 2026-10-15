@@ -22,9 +22,7 @@ use nitinol_persistence::store::{
 };
 use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{
-    SagaDeliveryExt, SagaDeliveryId, SagaDeliveryProxy, SagaManagerProxy, SagaSystemExt,
-};
+use nitinol_saga::{SagaDeliveryId, SagaHostProxy, SagaSubscriptionExt, SagaSystemExt};
 
 use saga_fanout_pattern::payroll_run::{PayrollRun, PayrollRunApproved};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
@@ -34,12 +32,13 @@ use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
 /// by handing the backend handle over as itself, plus the saga-offset slot a
 /// host keeps its progress in.
 ///
-/// Those two slots are exactly what a delivery host needs, and naming the second
+/// Those two slots are exactly what hosting a saga needs, and naming the second
 /// one is what makes
-/// [`SagaDeliveryExt::deliver`](nitinol_saga::SagaDeliveryExt::deliver)
-/// exist on the system at all — a deployment that named no store for its hosts'
-/// progress would not compile.  The snapshot and projection slots are left
-/// unprovided rather than filled with stores nothing here reads.
+/// [`SagaSystemExt::host`](nitinol_saga::SagaSystemExt::host) exist on the
+/// system at all — hosting a saga starts the delivery host that carries out its
+/// decisions, so a deployment that named no store for that progress would not
+/// compile.  The snapshot and projection slots are left unprovided rather than
+/// filled with stores nothing here reads.
 ///
 /// The journal has no type parameter here: the backend's type is written once,
 /// in the builder call that names it, and erased from there on.
@@ -104,11 +103,15 @@ pub fn payslip_keys(payroll_run: &str, employees: &[String]) -> Vec<String> {
 /// `offsets` is kept because a delivery host's progress is the thing these
 /// tests observe it by, and it is read as an operator or a second consumer would
 /// read it — through the store, not through the host.
+///
+/// `host` is one handle rather than two because one declaration started both
+/// halves: the manager is reached through
+/// [`manager()`](SagaHostProxy::manager) and the delivery host through
+/// [`delivery()`](SagaHostProxy::delivery).
 pub struct FanOutWorld {
     pub system: ExampleSystem,
     pub payroll_run: AggregateProxy<PayrollRun>,
-    pub manager: SagaManagerProxy<FanOutSaga>,
-    pub delivery: SagaDeliveryProxy<FanOutSaga>,
+    pub host: SagaHostProxy<FanOutSaga>,
     pub offsets: InMemoryOffsetStore,
 }
 
@@ -150,19 +153,18 @@ pub async fn spawn_world(
 
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
-    let manager = spawn_manager(&system, run_id).await;
-    let delivery = spawn_delivery_host(&system, delivery_id).await;
+    let host = spawn_saga(&system, run_id, delivery_id).await;
 
     FanOutWorld {
         system,
         payroll_run,
-        manager,
-        delivery,
+        host,
         offsets,
     }
 }
 
-/// Spawn (or re-spawn) the saga manager over an existing system.
+/// Spawn (or re-spawn) the saga over an existing system: the manager, and the
+/// delivery host filing its progress under `delivery_id`.
 ///
 /// The cursor starts at `after: 0` and lives in memory, so a manager spawned a
 /// second time over the same store delivers the fact event again.  The saga
@@ -176,33 +178,30 @@ pub async fn spawn_world(
 ///
 /// The producer ignores the components it is handed: this saga holds nothing,
 /// because it sends nothing.
-pub async fn spawn_manager(
+///
+/// Nothing is named for the delivery half but its settings: the journal it
+/// reads, the slot it records in and the system it delivers through are all the
+/// system's.  The identifier is named explicitly rather than left to the default
+/// derived from the saga's event type, because it is half of the offset key
+/// these tests read — see [`delivery_scope`].
+///
+/// Calling this beside a host that is already running is the shape of a second
+/// deployment: one more declaration, so one more manager and one more delivery
+/// host.  The delivery half holds no progress under its own identifier, so it
+/// reads the journal from the beginning and carries the commands of a decision
+/// the first host already finished with a second time; the manager half
+/// redelivers the fact event and the instance drops it, as the paragraph above
+/// describes.
+pub async fn spawn_saga(
     system: &ExampleSystem,
     run_id: &AggregateId,
-) -> SagaManagerProxy<FanOutSaga> {
+    delivery_id: &SagaDeliveryId,
+) -> SagaHostProxy<FanOutSaga> {
     system
         .host::<FanOutSaga>(|_components| FanOutSaga)
         .observing::<PayrollRunApproved>(system.subscription(run_id))
-        .spawn()
-        .await
-}
-
-/// Spawn a delivery host for [`FanOutSaga`] over an existing system, filing its
-/// progress under `delivery_id`.
-///
-/// Nothing else is named: the journal it reads, the slot it records in and the
-/// system it delivers through are all the system's.  The identifier is named
-/// explicitly rather than left to the default derived from the saga's event
-/// type, because it is half of the offset key these tests read — see
-/// [`delivery_scope`].
-pub async fn spawn_delivery_host(
-    system: &ExampleSystem,
-    delivery_id: &SagaDeliveryId,
-) -> SagaDeliveryProxy<FanOutSaga> {
-    system
-        .deliver::<FanOutSaga>()
         .with_delivery_id(delivery_id.clone())
-        .with_poll_interval(DELIVERY_POLL_INTERVAL)
+        .with_delivery_poll_interval(DELIVERY_POLL_INTERVAL)
         .spawn()
         .await
 }

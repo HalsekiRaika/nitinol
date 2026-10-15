@@ -24,7 +24,7 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
+use nitinol_saga::{SagaSubscriptionExt, SagaSystemExt};
 
 use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment, Incremented};
 use eventsource_aggregate_communication::saga::RelaySaga;
@@ -70,21 +70,17 @@ async fn a_fact_of_one_aggregate_reaches_another_as_a_command() {
     let target = id_b.clone();
     // `host` is the one verb: it starts the saga's manager, and `RelaySaga`
     // correlates every input to the same id, so the single relay instance is
-    // spawned the moment A's first fact is delivered.
-    let _saga = system
+    // spawned the moment A's first fact is delivered.  The same declaration
+    // starts the host over the saga's decisions, which is the half that reaches
+    // B.  Its journal and its offset slot both come from the provider the
+    // system was built with, so nothing is named for it but how eagerly it
+    // polls.
+    let _host = system
         .host::<RelaySaga>(move |_components| RelaySaga {
             target: target.clone(),
         })
         .observing::<Incremented>(system.subscription(&id_a))
-        .spawn()
-        .await;
-
-    // The host over `RelaySaga`'s decisions.  Its journal and its offset
-    // slot both come from the provider the system was built with, so nothing is
-    // named here but how eagerly it polls.
-    let _delivery = system
-        .deliver::<RelaySaga>()
-        .with_poll_interval(POLL_INTERVAL)
+        .with_delivery_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;
 

@@ -22,7 +22,7 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
+use nitinol_saga::{SagaSubscriptionExt, SagaSystemExt};
 
 use saga_basic_saga::inventory::{GetReservedCount, Inventory};
 use saga_basic_saga::order::{Order, OrderPlaced, PlaceOrder};
@@ -76,6 +76,18 @@ async fn main() {
     // degenerate case rather than a different kind of spawn, which is why no
     // `SagaId` is named here.
     //
+    // It starts the delivery host too, on the same declaration: the manager
+    // only journals what it decided, and a decision nobody carries out reaches
+    // no inventory, so there is no wiring in which one runs without the other.
+    // That host subscribes to the decisions every instance has persisted — its
+    // input is the store, so it needs nothing of the saga process and keeps no
+    // saga resident — asks `ReservationSaga::dispatch` what each one implies,
+    // and `ask`s the addressed aggregate.  Its settings are named here as well:
+    // `with_delivery_poll_interval` is how often it asks the journal, which is
+    // this deployment's choice.  `InMemoryStore` supplies the saga-offset slot
+    // that host records its progress in — a store with no such slot has no
+    // `host` on it at all.
+    //
     // The factory is handed the capabilities the framework resolved for this
     // saga; this one needs none of them, so it ignores them.  It is called
     // again for every instance and whenever the runtime rebuilds one, so what
@@ -85,25 +97,17 @@ async fn main() {
     // One `observing` call per source the alphabet declares — here the order's
     // stream, read as `OrderPlaced` — and `spawn` exists only once every
     // declared source has one.
+    //
+    // The handle it answers with reaches both halves, `manager()` and
+    // `delivery()`, and is only how an operator reaches what is running:
+    // dropping it would stop neither.
     let saga_inventory = inventory_id.clone();
     let _saga_proxy = system
         .host::<ReservationSaga>(move |_components| ReservationSaga {
             inventory: saga_inventory.clone(),
         })
         .observing::<OrderPlaced>(system.subscription(&order_id))
-        .spawn()
-        .await;
-
-    // The delivery host, started by `deliver` — symmetric with `host`.  It
-    // subscribes to the decisions every instance of `ReservationSaga` has
-    // persisted — its input is the store, so it needs nothing of the saga
-    // process and keeps no saga resident — asks `ReservationSaga::dispatch`
-    // what each one implies, and `ask`s the addressed aggregate.  The handle is
-    // only how an operator reaches the running host; dropping it would not
-    // stop it.
-    let _delivery = system
-        .deliver::<ReservationSaga>()
-        .with_poll_interval(POLL_INTERVAL)
+        .with_delivery_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;
 

@@ -29,14 +29,14 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, SagaSystemExt,
-    Subscription,
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, SagaSubscriptionExt,
+    SagaSystemExt, Subscription,
 };
 
 // Fixtures
@@ -212,6 +212,7 @@ async fn host_journals_onto_the_providers_event_store() {
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
         .build();
@@ -251,11 +252,15 @@ async fn host_journals_onto_the_providers_event_store() {
 
 /// `system.subscription(&key)` must poll the store the system's provider
 /// supplies, so a saga fed by an aggregate living in that same store needs no
-/// `Arc` at the call site.
+/// `Arc` at the call site. It must do so on a journal-only provider — one with
+/// no saga-offset slot, so no `host` — because `SagaSubscriptionExt` reads the
+/// journal alone and carries no such bound.
 #[tokio::test]
 async fn system_subscription_polls_the_providers_event_store() {
-    // Given: the journal is named explicitly, so the provider's store is only
-    // reachable through the subscription under test
+    // Given: a journal-only provider — no saga-offset slot, so this system has
+    // no `host` — demonstrating that `subscription` does not need one. The
+    // journal is also named explicitly here, so the provider's store is only
+    // reachable through the subscription under test.
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(
@@ -370,6 +375,7 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_polled() {
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
         .build();
@@ -418,8 +424,9 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_polled() {
 
 // Compile-fail coverage
 //
-// Wiring a delivery host from a provider with no saga-offset slot must
-// be a COMPILE ERROR, and so must building a system with no provider at all. An
-// integration test cannot express a call that must not compile, so both are
-// verified via rustdoc compile_fail doctests on the entry points.
+// Hosting a saga on a provider with no saga-offset slot must be a COMPILE
+// ERROR — the delivery host `host` starts has nowhere to record its progress —
+// and so must building a system with no provider at all. An integration test
+// cannot express a call that must not compile, so both are verified via rustdoc
+// compile_fail doctests on the entry points.
 // See: nitinol-saga/src/system_ext.rs, nitinol-eventsource/src/system.rs

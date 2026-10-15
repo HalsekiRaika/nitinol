@@ -188,7 +188,8 @@ async fn a_restarted_delivery_host_completes_the_payslips_an_interrupted_fanout_
     // must reach payslips restored from the store, not ones that are still
     // resident with the first incarnation's state.
     first_run
-        .manager
+        .host
+        .manager()
         .stop()
         .await
         .expect("stopping the manager must succeed");

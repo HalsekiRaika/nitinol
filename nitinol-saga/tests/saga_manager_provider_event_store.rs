@@ -29,13 +29,14 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSystemExt, Subscription,
+    Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSubscriptionExt, SagaSystemExt,
+    Subscription,
 };
 
 // Fixtures
@@ -214,6 +215,7 @@ async fn the_host_uses_the_providers_event_store_for_upstream_and_journal() {
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
         .build();
@@ -270,6 +272,7 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls()
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
         .build();
@@ -318,8 +321,9 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls()
 
 // Compile-fail coverage
 //
-// Building a system with no provider at all, and wiring a delivery host from a
-// provider with no saga-offset slot, must both be COMPILE ERRORS. An
-// integration test cannot express a call that must not compile, so both are
-// verified via rustdoc compile_fail doctests on the entry points.
+// Building a system with no provider at all, and hosting a saga on a provider
+// with no saga-offset slot for the delivery host `host` starts, must both be
+// COMPILE ERRORS. An integration test cannot express a call that must not
+// compile, so both are verified via rustdoc compile_fail doctests on the entry
+// points.
 // See: nitinol-saga/src/system_ext.rs, nitinol-eventsource/src/system.rs

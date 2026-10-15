@@ -6,7 +6,9 @@
 //! emits [`SagaEffect`]s that the runtime interprets to persist the saga's own
 //! decisions and to set or cancel its own deadlines.  What a decision means for
 //! everybody else is the separate pure mapping [`Saga::dispatch`] answers, and
-//! carrying it out belongs to a delivery host ([`SagaDeliveryProps`]).
+//! carrying it out belongs to a delivery host, which
+//! [`host`](SagaSystemExt::host) starts beside the manager whose decisions it
+//! carries, on the contract [`SagaDeliveryProps`] states.
 //!
 //! # Mental model
 //!
@@ -16,20 +18,20 @@
 //! | Reactive context | [`SagaContext`] |
 //! | Effect ADT | [`SagaEffect`] |
 //! | Identifier | [`SagaId`] |
-//! | Spawn verb | [`SagaSystemExt::host`] |
+//! | Spawn verb | [`SagaSystemExt::host`] (starts the manager and the delivery host that carries out what it decides) |
 //! | Spawn builder | [`SagaManagerProps`] (what [`host`](SagaSystemExt::host) hands back, and what names a journal of its own) |
 //! | Upstream subscription value | [`Subscription`] |
-//! | Handle | [`SagaManagerProxy`] |
+//! | Handle | [`SagaHostProxy`], reaching [`SagaManagerProxy`] and [`SagaDeliveryProxy`] |
 //! | Delivery mapping | [`Saga::dispatch`] answering [`SagaDelivery`] |
-//! | Delivery-host spawn verb | [`SagaDeliveryExt::deliver`] |
-//! | Delivery-host spawn builder | [`SagaDeliveryProps`] |
+//! | Delivery-host spawn builder | [`SagaDeliveryProps`] (the explicit form, naming a journal and an offset store) |
 //! | Delivery-host handle | [`SagaDeliveryProxy`] |
 //! | Delivery-host identifier | [`SagaDeliveryId`] |
 //!
-//! There is one spawn builder and one handle because there is one kind of
-//! saga: [`host`](SagaSystemExt::host) always starts a manager, and a saga
-//! whose [`Saga::correlate`] always answers the same [`SagaId`] is that
-//! manager with a single instance rather than a second mechanism.
+//! There is one spawn verb, one spawn builder and one handle because there is
+//! one kind of saga: [`host`](SagaSystemExt::host) always starts a manager and
+//! the host that delivers what it decides, and a saga whose
+//! [`Saga::correlate`] always answers the same [`SagaId`] is that manager with
+//! a single instance rather than a second mechanism.
 //!
 //! The runtime `Process` trait is intentionally hidden — the user only
 //! implements [`Saga`].
@@ -79,19 +81,22 @@
 //!   which is why one verb is enough.
 //! - One supplier: a system is built with a
 //!   [`PersistenceProvider`](nitinol_persistence::provider::PersistenceProvider),
-//!   and [`SagaSystemExt`] resolves the journal from it —
-//!   [`host`](SagaSystemExt::host) for every instance's own stream, and
-//!   [`subscription`](SagaSystemExt::subscription) for an upstream it polls.
+//!   and [`SagaSystemExt`] / [`SagaSubscriptionExt`] resolve the journal from
+//!   it — [`host`](SagaSystemExt::host) for every instance's own stream, and
+//!   [`subscription`](SagaSubscriptionExt::subscription) for an upstream it
+//!   polls. The two are separate traits with separate bounds (the latter needs
+//!   no saga-offset slot), so a provider with a journal but no slot still has
+//!   `subscription`, even though it has no `host`.
 //!   `EventStore` is stream-keyed, so that one store holds the upstream stream
 //!   and every instance's own stream side by side.  Reaching a *different*
 //!   destination is written down rather than defaulted:
 //!   [`Subscription::stream`] names a source's store, and
 //!   [`SagaManagerProps::new`] names a journal.
-//! - Where delivery progress is kept: [`deliver`](SagaDeliveryExt::deliver)
-//!   resolves the journal and the saga-offset slot from the same
-//!   supplier, and exists only where that supplier's store holds the slot — so
-//!   a deployment with no store for a host's progress is told while the wiring
-//!   is compiled.
+//! - Where delivery progress is kept: [`host`](SagaSystemExt::host) resolves
+//!   the journal and the saga-offset slot from the same supplier, and exists
+//!   only where that supplier's store holds the slot — so a deployment with no
+//!   store for a host's progress is told while the wiring is compiled, rather
+//!   than hosting a saga whose decisions nobody could carry out.
 //! - Reaching the host from inside: a saga spawned through [`SagaSystemExt`]
 //!   is handed the hosting system by
 //!   [`SagaComponents::system`](crate::SagaComponents::system), so a producer
@@ -114,7 +119,8 @@
 //!   the degenerate case, not a mechanism of its own.
 //! - Delivery of what a saga decided: [`Saga::dispatch`] is a pure mapping from
 //!   one of the saga's own events to the commands it implies and whom each is
-//!   addressed to, and [`SagaDeliveryProps`] starts the host that carries them.
+//!   addressed to, and [`host`](SagaSystemExt::host) starts the host that
+//!   carries them, on the contract [`SagaDeliveryProps`] states.
 //!   The host subscribes across every instance of the saga type — it names the
 //!   declared event type to the store together with the position it has
 //!   finished with, so no row of another type is fetched to be discarded — and
@@ -238,8 +244,9 @@
 //!    [`SagaManagerProps`] manager subscribes to that fact and records its own
 //!    decision — one event naming every child the fan-out owes a command.
 //!    [`Saga::dispatch`] maps that decision to one creation command per child,
-//!    and a [`SagaDeliveryProps`] host carries them (at-least-once; see that
-//!    type for where the guarantee comes from).  The upstream subscription is
+//!    and the delivery host started alongside that manager carries them
+//!    (at-least-once; see [`SagaDeliveryProps`] for where the guarantee comes
+//!    from).  The upstream subscription is
 //!    at-least-once too, so the same fact can be *delivered* more than once;
 //!    whether it is decided again depends on whether the batch recording the
 //!    decision landed.  Until it does, the fact is unconsumed and a redelivery
@@ -334,7 +341,7 @@ pub use self::delivery::{
 };
 pub use self::effect::{SagaEffect, ScheduleSpec};
 pub use self::id::SagaId;
-pub use self::process::{SagaManagerProps, SagaManagerProxy};
+pub use self::process::{SagaHostProxy, SagaHosted, SagaManagerProps, SagaManagerProxy};
 pub use self::saga::Saga;
 pub use self::scheduler::{ScheduleToken, SchedulerProcess, TimerName};
 pub use self::subscribe::{
@@ -342,7 +349,7 @@ pub use self::subscribe::{
     SagaSubscribe, SourceBindings, SubscriptionSet, SubscriptionUnset,
 };
 pub use self::subscription::Subscription;
-pub use self::system_ext::{SagaDeliveryExt, SagaSystemExt};
+pub use self::system_ext::{SagaSubscriptionExt, SagaSystemExt};
 
 /// `#[derive(SagaSubscribe)]`, co-located with the [`SagaSubscribe`] trait so a
 /// single `use nitinol::saga::SagaSubscribe;` brings both into scope (trait in

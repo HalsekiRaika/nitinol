@@ -21,7 +21,8 @@ use nitinol_persistence::store::{
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    SagaDeliveryId, SagaDeliveryProps, SagaDeliveryProxy, SagaManagerProxy, SagaSystemExt,
+    SagaDeliveryId, SagaDeliveryProps, SagaDeliveryProxy, SagaManagerProps, SagaManagerProxy,
+    Subscription,
 };
 
 use saga_idempotent_receive::order::{Order, OrderPlaced};
@@ -41,6 +42,11 @@ use saga_idempotent_receive::stock_item::{StockItem, StockReserved};
 /// stock item a second activation, mixing "the receiver recognised the repeat"
 /// with "the receiver replayed first".  [`ExampleDeliveryStore`] is where the
 /// host's two slots are named instead.
+///
+/// That is also why the manager here is started through
+/// [`SagaManagerProps`] rather than through `host`: hosting a saga on a system
+/// starts the delivery host too, over the system's own saga-offset slot, and a
+/// slot is exactly what this one must not have.
 pub type ExampleSystem = EventSourceSystem<Journal>;
 
 /// The stock item every order in these tests reserves against.
@@ -120,7 +126,8 @@ pub struct ReservationWorld {
 ///
 /// No delivery host — the clauses that need one name its stores themselves,
 /// because which offset store a host is wired with is the whole subject of
-/// the redelivery tests.  See [`spawn_delivery_host`].
+/// the redelivery tests.  See [`spawn_delivery_host`], and [`ExampleSystem`]
+/// for why the manager is not started through `host` here.
 pub async fn spawn_world(order_id: &AggregateId, store: Journal) -> ReservationWorld {
     let system = spawn_system(store).await;
 
@@ -144,14 +151,19 @@ pub async fn spawn_world(order_id: &AggregateId, store: Journal) -> ReservationW
 /// decision — so a second incarnation decides nothing new.  What a second
 /// incarnation *does* re-do is delivery, which is the delivery host's business
 /// and not the manager's.
+///
+/// The journal and the observed stream are named by hand, which is the explicit
+/// counterpart of `host`: these clauses start the manager alone, because the
+/// host that carries its decisions is wired per clause over an offset store of
+/// its own — see [`spawn_delivery_host`].
 pub async fn spawn_manager(
     system: &ExampleSystem,
     order_id: &AggregateId,
 ) -> SagaManagerProxy<ReservationSaga> {
-    system
-        .host::<ReservationSaga>(|_| ReservationSaga)
-        .observing::<OrderPlaced>(system.subscription(order_id))
-        .spawn()
+    let journal = system.persistence().event_store();
+    SagaManagerProps::<ReservationSaga>::new(journal.clone(), |_| ReservationSaga)
+        .observing::<OrderPlaced>(Subscription::stream(journal, order_id))
+        .spawn(system.process_system())
         .await
 }
 

@@ -26,7 +26,7 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
+use nitinol_saga::{SagaSubscriptionExt, SagaSystemExt};
 
 use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun, PayrollRunApproved};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
@@ -78,22 +78,19 @@ async fn main() {
     // The factory ignores what it is handed: a saga that only persists its own
     // decisions needs no reference to anything, since addressing the children is
     // a pure function of the decision and resolving them is the host's work.
-    let _manager = system
-        .host::<FanOutSaga>(|_components| FanOutSaga)
-        .observing::<PayrollRunApproved>(system.subscription(&run_id))
-        .spawn()
-        .await;
-
-    // The delivery host, started by `deliver`.  It subscribes across *every*
+    //
+    // The same declaration starts the delivery host, because a fan-out nobody
+    // carries out issues no payslip.  That host subscribes across *every*
     // instance of `FanOutSaga` by the event type the saga declares — not to one
     // stream — because what it consumes is "the decisions of this saga type",
-    // wherever they were made and whichever incarnation made them.  Nothing is
-    // named here: the journal it reads, the slot it records progress in and the
-    // system it delivers through all come from the system these props were
-    // taken from.
-    let _delivery = system
-        .deliver::<FanOutSaga>()
-        .with_poll_interval(POLL_INTERVAL)
+    // wherever they were made and whichever incarnation made them.  No store is
+    // named for it either: the journal it reads and the slot it records progress
+    // in both come from the system's own supplier, and only its cadence is this
+    // deployment's to choose.
+    let _host = system
+        .host::<FanOutSaga>(|_components| FanOutSaga)
+        .observing::<PayrollRunApproved>(system.subscription(&run_id))
+        .with_delivery_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;
 

@@ -34,7 +34,7 @@ mod delivery;
 use delivery::{
     append_decided, delivery_id, operations_of, partition_count, scope_of, settle, stream_rows,
     wait_until_operations, wait_until_stored, Decided, DeliverySaga, Ledger, RecordingOffsetStore,
-    TEST_POLL_INTERVAL,
+    Triggered, TEST_POLL_INTERVAL,
 };
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -50,10 +50,17 @@ use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{InMemoryEventStore, OffsetScope};
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDeliveryExt, SagaId};
+use nitinol_saga::{SagaId, SagaSystemExt, Subscription};
 
 /// How long a clause waits for a projector to apply what it is catching up on.
 const PROJECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The fixture saga's one declared source, on a store of its own. Nothing is
+/// ever appended to it, so hosting the saga adds neither rows nor positions to
+/// the store this clause reads.
+fn quiet_source(key: &str) -> Subscription {
+    Subscription::stream(InMemoryEventStore::default(), &AggregateId::new(key))
+}
 
 /// A projection whose whole state is how many decisions it has applied.
 ///
@@ -148,10 +155,11 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         .await;
 
     let _first_host = first_system
-        .deliver::<DeliverySaga>()
+        .host::<DeliverySaga>(|_components| DeliverySaga)
+        .observing::<Triggered>(quiet_source("upstream-rebuild-first"))
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
-        .with_poll_interval(TEST_POLL_INTERVAL)
+        .with_delivery_poll_interval(TEST_POLL_INTERVAL)
         .spawn()
         .await;
 
@@ -219,10 +227,11 @@ async fn rebuilding_the_projection_slot_leaves_the_delivery_position_where_it_wa
         .await;
 
     let _rebuilt_host = rebuilt_system
-        .deliver::<DeliverySaga>()
+        .host::<DeliverySaga>(|_components| DeliverySaga)
+        .observing::<Triggered>(quiet_source("upstream-rebuild-second"))
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
-        .with_poll_interval(TEST_POLL_INTERVAL)
+        .with_delivery_poll_interval(TEST_POLL_INTERVAL)
         .spawn()
         .await;
 

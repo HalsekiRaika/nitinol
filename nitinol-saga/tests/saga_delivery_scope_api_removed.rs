@@ -46,7 +46,7 @@ use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::InMemoryStore;
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 /// What a downstream crate is free to define once the names are released.
@@ -195,10 +195,19 @@ fn the_delivery_scope_type_name_belongs_to_a_downstream_definition() {
 /// extension — what an operator moves on is the partition's offset.
 #[tokio::test]
 async fn the_withdrawn_advance_verb_belongs_to_a_downstream_definition() {
-    let host = system().await.deliver::<ProbeSaga>().spawn().await;
+    let system = system().await;
+    // The verb is probed on the delivery handle, which is where an inherent
+    // `advance_checkpoint` would have lived: a blanket trait is implemented for
+    // every type, so calling it on the handle the host declaration answers with
+    // would resolve whatever that outer type does or does not have.
+    let host = system
+        .host::<ProbeSaga>(|_components| ProbeSaga)
+        .observing::<Signal>(system.subscription(&AggregateId::new(PROBE_SAGA_ID)))
+        .spawn()
+        .await;
 
     assert_eq!(
-        host.advance_checkpoint(PROBE_LABEL).label,
+        host.delivery().advance_checkpoint(PROBE_LABEL).label,
         PROBE_LABEL,
         "a delivery handle must offer `advance_offset`: the position an \
          operator moves on is an offset in the journal's order, and the verb \

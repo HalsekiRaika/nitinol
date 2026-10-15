@@ -4,19 +4,22 @@
 //! ```gherkin
 //!   Scenario: a reference to a removed entry point is a compile error
 //!     Given user code naming SagaSpawn / SagaProps / SagaProxy /
-//!           spawn_saga / saga_manager_props / saga_delivery_props /
-//!           subscribed_to
+//!           SagaDeliveryExt / spawn_saga / saga_manager_props /
+//!           saga_delivery_props / deliver / subscribed_to
 //!     When it is compiled against this crate
 //!     Then compilation fails — nothing is deprecated and no hidden compatible
 //!          shim answers for the name
 //! ```
 //!
-//! `SagaSystemExt::host` is the one system-side verb, `SagaDeliveryExt::deliver`
-//! its delivery-host counterpart, and `SagaManagerProps::observing` the one way
-//! a declared source is bound. Those are pinned positively by
-//! `saga_host_entry_point.rs`, `saga_hosted_props_spawn.rs` and the
-//! `persistence_delivery_*.rs` tests; this file pins that the shapes they
-//! replace are gone rather than kept beside them.
+//! `SagaSystemExt::host` is the one system-side verb — it starts the manager
+//! and, over the same system, the delivery host that carries out what the
+//! manager decided — and `SagaManagerProps::observing` the one way a declared
+//! source is bound. Those are pinned positively by
+//! `saga_host_entry_point.rs`, `saga_hosted_props_spawn.rs`,
+//! `saga_host_starts_the_delivery_host.rs` and the `persistence_delivery_*.rs`
+//! tests; this file pins that the shapes they replace are gone rather than kept
+//! beside them — including the second declaration a delivery host used to need,
+//! whose trait and verb a wiring can no longer name at all.
 //!
 //! Two mechanisms, each the one that fits what is being settled, both taken
 //! from the `*_api_removed.rs` tests already in this directory:
@@ -27,17 +30,18 @@
 //!    resolve to the probe; while it still exports one the two globs collide
 //!    and this binary fails to build. Each probe type carries an `owner` field
 //!    the released types never had, so resolving the ambiguity in the crate's
-//!    favour does not rescue the build either.
+//!    favour does not rescue the build either. A trait name is settled the same
+//!    way, because a trait is named in the same namespace a type is.
 //! 2. **Released methods** — a blanket extension trait claims the name with a
 //!    signature the released method could never accept.
-//!    - For the three *trait* methods (`spawn_saga`, `saga_manager_props`,
-//!      `saga_delivery_props`) the probe claims the same receiver form the
-//!      released one took, so while the released trait item exists both
+//!    - For the four *trait* methods (`spawn_saga`, `saga_manager_props`,
+//!      `saga_delivery_props`, `deliver`) the probe claims the same receiver
+//!      form the released one took, so while the released trait item exists both
 //!      candidates are applicable at the same autoref step — the ambiguity
 //!      (E0034) that fails the build. The store below supplies a delivery
-//!      offset slot, which is what keeps the `saga_delivery_props`
-//!      candidate applicable: a store with no slot would leave the released
-//!      method out of scope and the probe resolving while it still existed.
+//!      offset slot, which is what keeps the two delivery-host candidates
+//!      applicable: a store with no slot would leave the released method out of
+//!      scope and the probe resolving while it still existed.
 //!    - For the *inherent* `subscribed_to` an inherent method wins method
 //!      resolution over a trait one, so while it exists the call below is
 //!      checked against *it* and fails on its argument. Once the name is
@@ -80,6 +84,11 @@ mod probe {
 
     released_type!(SagaSpawn, SagaProps, SagaProxy);
 
+    // A trait name, settled by the same collision: a trait is named in the
+    // namespace a type is, so a downstream definition of the name is what the
+    // crate's export collides with.
+    released_type!(SagaDeliveryExt);
+
     /// What a probed call answers with once the framework stops claiming the
     /// name.
     pub struct Declined {
@@ -105,15 +114,24 @@ mod probe {
 
     impl<T> NoStandaloneSystemEntry for T {}
 
-    /// Claims the withdrawn `SagaDeliveryExt` entry point, for the same reason
-    /// and in the same receiver form.
-    pub trait NoSagaDeliveryPropsEntry {
+    /// Claims both verbs a delivery host was ever started from a system with,
+    /// for the same reason and in the same receiver form.
+    ///
+    /// `deliver` is here rather than beside `host` because it is not a verb that
+    /// was renamed: a delivery host is started by `host`, along with the manager
+    /// whose decisions it carries out, so there is nothing left for a system to
+    /// offer a delivery host of its own.
+    pub trait NoDeliveryHostEntry {
         fn saga_delivery_props(&self, label: &'static str) -> Declined {
+            Declined { label }
+        }
+
+        fn deliver(&self, label: &'static str) -> Declined {
             Declined { label }
         }
     }
 
-    impl<T> NoSagaDeliveryPropsEntry for T {}
+    impl<T> NoDeliveryHostEntry for T {}
 
     /// Claims the withdrawn source-binding verb on the saga builders.
     pub trait NoSubscribedToVerb {
@@ -228,8 +246,8 @@ fn manager_props() -> SagaManagerProps<ProbeSaga> {
     SagaManagerProps::<ProbeSaga>::new(store(), |_components| ProbeSaga)
 }
 
-/// A system over a store that supplies every slot, including the delivery
-/// offset slot the withdrawn `saga_delivery_props` required.
+/// A system over a store that supplies every slot, including the saga-offset
+/// slot the withdrawn delivery-host verbs required.
 async fn system() -> EventSourceSystem<InMemoryStore> {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
@@ -277,21 +295,40 @@ async fn the_withdrawn_system_entry_names_belong_to_downstream_definitions() {
     );
 }
 
-/// Given a blanket extension trait that claims the withdrawn
-/// `saga_delivery_props` name, When it is called on a system whose store
-/// supplies the saga-offset slot, Then it resolves to the extension —
-/// `deliver` is the delivery host's verb.
+/// Given both namespaces are glob-imported, When the bare `SagaDeliveryExt`
+/// name is used, Then it denotes the downstream probe definition — there is no
+/// trait for starting a delivery host from a system.
+#[test]
+fn the_delivery_extension_trait_name_belongs_to_downstream_definitions() {
+    assert_eq!(
+        SagaDeliveryExt { owner: PROBE_OWNER }.owner,
+        PROBE_OWNER,
+        "`SagaDeliveryExt` must be released by `nitinol-saga`: a manager's \
+         decisions reach their targets only through a delivery host, so `host` \
+         starts both and there is no second trait left to name — and no \
+         compatible alias stands in for the one that was there"
+    );
+}
+
+/// Given a blanket extension trait that claims both withdrawn delivery-host
+/// verbs, When each is called on a system whose store supplies the saga-offset
+/// slot, Then both resolve to the extension — a delivery host is started by
+/// `host`, beside the manager, and by nothing else.
 #[tokio::test]
-async fn the_withdrawn_delivery_entry_name_belongs_to_downstream_definitions() {
+async fn the_withdrawn_delivery_entry_names_belong_to_downstream_definitions() {
     let system = system().await;
 
     assert_eq!(
-        system.saga_delivery_props(PROBE_LABEL).label,
-        PROBE_LABEL,
-        "`SagaDeliveryExt` must not name its entry point `saga_delivery_props` \
-         any more: the delivery host is started by `deliver`, symmetric with \
-         `host`, and the typestate that refuses a provider with no offset \
-         slot moves with it"
+        (
+            system.saga_delivery_props(PROBE_LABEL).label,
+            system.deliver(PROBE_LABEL).label,
+        ),
+        (PROBE_LABEL, PROBE_LABEL),
+        "a system must offer neither `saga_delivery_props` nor `deliver`: a \
+         saga whose decisions are not delivered is a half-finished wiring that \
+         neither the type system nor the runtime could report, so the delivery \
+         host is started by the one verb that starts the manager — and the \
+         saga-offset slot it needs is what `host` now requires"
     );
 }
 

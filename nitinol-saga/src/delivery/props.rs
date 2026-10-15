@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use nitinol_eventsource::system::{EventSourceSystem, Hosted, SystemHandle, Unhosted};
+use nitinol_eventsource::system::{EventSourceSystem, SystemHandle, Unhosted};
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::{PersistenceProvider, SagaOffsetSlot, Store};
 use nitinol_persistence::store::{Journal, OffsetStore};
@@ -126,19 +126,21 @@ const RESTART_WITHIN: Duration = Duration::from_secs(60);
 ///
 /// # Where it starts
 ///
-/// `H` is the same typestate the saga builder carries: wired from a store
-/// through [`new`](Self::new) these are [`Unhosted`] and
-/// [`spawn`](SagaDeliveryProps::spawn) names the system to deliver through,
-/// and taken from
-/// [`SagaDeliveryExt::deliver`](crate::SagaDeliveryExt::deliver) they are
-/// [`Hosted`] and `spawn` names nothing.
+/// This is the explicit form, for a journal and a progress slot named by hand:
+/// wired through [`new`](Self::new) these props are [`Unhosted`] and
+/// [`spawn`](SagaDeliveryProps::spawn) names the system to deliver through.
+///
+/// A host over the stores a system's own supplier distributes is not wired
+/// here at all — [`SagaSystemExt::host`](crate::SagaSystemExt::host) resolves
+/// both slots and starts that host beside the manager whose decisions it
+/// carries, with the settings below named on the same builder.
 pub struct SagaDeliveryProps<S: Saga, Cs: OffsetStore, H = Unhosted> {
     journal: Journal,
     offsets: Cs,
     delivery_id: Option<SagaDeliveryId>,
     partitions: NonZeroUsize,
     poll_interval: Duration,
-    host: H,
+    _host: PhantomData<fn() -> H>,
     _saga: PhantomData<fn() -> S>,
 }
 
@@ -158,8 +160,8 @@ where
     ///
     /// A provider supplying no saga slot is refused here rather than when
     /// the host first tries to record where it got to; the typestate doctest on
-    /// [`SagaDeliveryExt::deliver`](crate::SagaDeliveryExt::deliver) fixes
-    /// that, and a deployment with a system reaches this wiring through it.
+    /// [`SagaSystemExt::host`](crate::SagaSystemExt::host) fixes that for a
+    /// deployment whose system resolves both slots from one supplier.
     pub fn new<St>(persistence: &PersistenceProvider<St>) -> Self
     where
         St: SagaOffsetSlot<SagaOffsets = Cs>,
@@ -170,21 +172,7 @@ where
             delivery_id: None,
             partitions: DEFAULT_PARTITIONS,
             poll_interval: DEFAULT_POLL_INTERVAL,
-            host: Unhosted,
-            _saga: PhantomData,
-        }
-    }
-
-    /// Carry `host` as the system these partitions start on and deliver
-    /// through.
-    pub(crate) fn hosted(self, host: SystemHandle) -> SagaDeliveryProps<S, Cs, Hosted> {
-        SagaDeliveryProps {
-            journal: self.journal,
-            offsets: self.offsets,
-            delivery_id: self.delivery_id,
-            partitions: self.partitions,
-            poll_interval: self.poll_interval,
-            host: Hosted::new(host),
+            _host: PhantomData,
             _saga: PhantomData,
         }
     }
@@ -236,7 +224,7 @@ where
     /// they deliver through it: a target is reached by the same reference any
     /// other caller would resolve it with, so a receiving aggregate needs
     /// nothing of the host's on it.
-    async fn start_on(self, host: SystemHandle) -> SagaDeliveryProxy<S> {
+    pub(crate) async fn start_on(self, host: SystemHandle) -> SagaDeliveryProxy<S> {
         let delivery_id = self.delivery_id.unwrap_or_else(|| {
             // The key is persisted, so what it is derived from has to be
             // something the type itself fixes. The declared event type is: one
@@ -304,21 +292,6 @@ where
     /// stay one type whatever a deployment assembled.
     pub async fn spawn<St: Store>(self, system: &EventSourceSystem<St>) -> SagaDeliveryProxy<S> {
         let host = system.erase_store();
-        self.start_on(host).await
-    }
-}
-
-impl<S, Cs> SagaDeliveryProps<S, Cs, Hosted>
-where
-    S: Saga,
-    Cs: OffsetStore + Clone + 'static,
-{
-    /// Start the host on the system these props came from.
-    ///
-    /// Nothing is named here: the journal, the saga slot and the system
-    /// the deliveries are carried out on are all that system's.
-    pub async fn spawn(self) -> SagaDeliveryProxy<S> {
-        let host = self.host.system().clone();
         self.start_on(host).await
     }
 }

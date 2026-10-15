@@ -48,9 +48,9 @@ impl Hosted {
     ///
     /// Public because the saga entry points that produce hosted props live in
     /// `nitinol-saga` — the dependency arrow points `saga -> eventsource`, so
-    /// `host` and `deliver` are an extension trait there rather than inherent
-    /// methods here, and they need the same state this crate's own entry
-    /// points put their props in.
+    /// `host` is an extension trait there rather than an inherent method here,
+    /// and it needs the same state this crate's own entry points put their
+    /// props in.
     pub fn new(host: SystemHandle) -> Self {
         Self(host)
     }

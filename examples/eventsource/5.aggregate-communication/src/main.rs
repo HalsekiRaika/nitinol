@@ -50,7 +50,7 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
+use nitinol_saga::{SagaSubscriptionExt, SagaSystemExt};
 
 use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment, Incremented};
 use eventsource_aggregate_communication::saga::RelaySaga;
@@ -103,24 +103,21 @@ async fn main() {
     // One `observing` call per source the alphabet declares: A's stream, read
     // as `Incremented`.  `spawn` exists only once every declared source has
     // one.
+    //
+    // The same declaration starts the delivery host — the half that actually
+    // reaches B.  Its whole input is the store, the decisions every instance of
+    // `RelaySaga` has persisted, so it holds no saga and needs nothing of the
+    // saga process; and it reaches B through the same reference `proxy_b` is,
+    // which is why B implements nothing of the host's.  There is no wiring that
+    // leaves it out: without it the saga would still decide, still journal, and
+    // B would never be touched.  Only its cadence is named here.
     let target = id_b.clone();
-    let _saga_proxy = system
+    let _host = system
         .host::<RelaySaga>(move |_components| RelaySaga {
             target: target.clone(),
         })
         .observing::<Incremented>(system.subscription(&id_a))
-        .spawn()
-        .await;
-
-    // The delivery host: the half that actually reaches B.  Its whole input is
-    // the store — the decisions every instance of `RelaySaga` has persisted —
-    // so it holds no saga and needs nothing of the saga process; and it reaches
-    // B through the same reference `proxy_b` is, which is why B implements
-    // nothing of the host's.  Omit this spawn and the saga still decides, still
-    // journals, and B is never touched.
-    let _delivery = system
-        .deliver::<RelaySaga>()
-        .with_poll_interval(POLL_INTERVAL)
+        .with_delivery_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;
 

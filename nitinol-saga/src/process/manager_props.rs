@@ -1,22 +1,37 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
 use nitinol_eventsource::system::{Hosted, SystemHandle, Unhosted};
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::Journal;
+use nitinol_persistence::store::{Journal, OffsetStore};
 use nitinol_runtime::process::SupervisionStrategy;
 use nitinol_runtime::{IdleTimeout, ProcessSystem, Props};
 
 use crate::components::SagaComponents;
+use crate::delivery::{SagaDeliveryId, SagaDeliveryProps};
 use crate::process::instance::SagaProducer;
 use crate::process::manager::SagaManagerProcess;
-use crate::process::proxy::SagaManagerProxy;
+use crate::process::proxy::{SagaHostProxy, SagaManagerProxy};
 use crate::process::saga_process;
 use crate::saga::Saga;
 use crate::scheduler;
 use crate::subscribe::{AllSourcesSubscribed, BindSource, SourceBindings};
 use crate::subscription::Subscription;
+
+/// Where a hosted saga's props start: the system they came from, and the
+/// delivery host wiring resolved from the same supplier.
+///
+/// A saga whose decisions nobody carries out is not a saga, so the two are one
+/// state rather than two wirings — which is why the delivery host's settings
+/// are named on this builder and there is no second declaration to forget.
+/// `Cs` is the offset store the supplier's saga slot is configured with, which
+/// the partitions name statically.
+pub struct SagaHosted<S: Saga, Cs: OffsetStore> {
+    system: Hosted,
+    delivery: SagaDeliveryProps<S, Cs, Unhosted>,
+}
 
 /// The builder every saga is started from.
 ///
@@ -29,8 +44,9 @@ use crate::subscription::Subscription;
 /// `B` is the binding typestate: one slot per declared source,
 /// [`observing`](Self::observing) moves one, and [`spawn`](Self::spawn) exists
 /// only once every slot is filled.  `H` is where the props start —
-/// [`SagaSystemExt::host`](crate::SagaSystemExt::host) hands back a [`Hosted`]
-/// one, journalling onto the store the system's provider supplies, and
+/// [`SagaSystemExt::host`](crate::SagaSystemExt::host) hands back a
+/// [`SagaHosted`] one, journalling onto the store the system's provider
+/// supplies and carrying the delivery host wiring resolved from it, and
 /// [`new`](Self::new) builds an [`Unhosted`] one on a store named outright.
 ///
 /// # A single resident saga
@@ -87,16 +103,65 @@ impl<S: Saga> SagaManagerProps<S, SourceBindings<S>, Unhosted> {
 }
 
 impl<S: Saga, B> SagaManagerProps<S, B, Unhosted> {
-    /// Carry `host` as where these props start, and as what the instances they
-    /// spawn are handed through [`SagaComponents::system`].
-    pub(crate) fn hosted(self, host: SystemHandle) -> SagaManagerProps<S, B, Hosted> {
+    /// Carry `host` as where these props start — as what the instances they
+    /// spawn are handed through [`SagaComponents::system`], and as the system
+    /// `delivery` starts its partitions on.
+    pub(crate) fn hosted<Cs>(
+        self,
+        host: SystemHandle,
+        delivery: SagaDeliveryProps<S, Cs, Unhosted>,
+    ) -> SagaManagerProps<S, B, SagaHosted<S, Cs>>
+    where
+        Cs: OffsetStore,
+    {
         SagaManagerProps {
             store: self.store,
             producer: self.producer,
             bindings: self.bindings,
             instance_idle_timeout: self.instance_idle_timeout,
-            host: Hosted::new(host),
+            host: SagaHosted {
+                system: Hosted::new(host),
+                delivery,
+            },
         }
+    }
+}
+
+impl<S, B, Cs> SagaManagerProps<S, B, SagaHosted<S, Cs>>
+where
+    S: Saga,
+    Cs: OffsetStore + Clone + 'static,
+{
+    /// Name the delivery host this saga starts, so its recorded progress is
+    /// filed under `id`.
+    ///
+    /// What the identifier is for, and what it defaults to, is stated on
+    /// [`SagaDeliveryProps::with_delivery_id`].
+    pub fn with_delivery_id(mut self, id: SagaDeliveryId) -> Self {
+        self.host.delivery = self.host.delivery.with_delivery_id(id);
+        self
+    }
+
+    /// Spread this saga's delivery host over `partitions` independent
+    /// processes.
+    ///
+    /// What a partition bounds, and what changing the count costs, is stated on
+    /// [`SagaDeliveryProps::with_partitions`] and on [`SagaDeliveryProps`].
+    pub fn with_partitions(mut self, partitions: NonZeroUsize) -> Self {
+        self.host.delivery = self.host.delivery.with_partitions(partitions);
+        self
+    }
+
+    /// Have this saga's delivery host ask the journal no more often than every
+    /// `interval` — see [`SagaDeliveryProps::with_poll_interval`].
+    ///
+    /// This is the *delivery* side's cadence, on the saga's own decisions. How
+    /// often an observed source is asked is that source's own
+    /// [`Subscription::with_poll_interval`], named per source on
+    /// [`observing`](Self::observing).
+    pub fn with_delivery_poll_interval(mut self, interval: Duration) -> Self {
+        self.host.delivery = self.host.delivery.with_poll_interval(interval);
+        self
     }
 }
 
@@ -224,15 +289,21 @@ where
     }
 }
 
-impl<S: Saga, B> SagaManagerProps<S, B, Hosted>
+impl<S, B, Cs> SagaManagerProps<S, B, SagaHosted<S, Cs>>
 where
+    S: Saga,
     B: AllSourcesSubscribed<S::Subscribe>,
+    Cs: OffsetStore + Clone + 'static,
 {
-    /// Spawn the manager process on the system these props came from.
+    /// Spawn the manager process, and the delivery host that carries out what
+    /// it decides, on the system these props came from.
     ///
     /// Nothing is named here, and every instance the manager spawns is handed
     /// that system through
-    /// [`SagaComponents::system`](crate::SagaComponents::system).
+    /// [`SagaComponents::system`](crate::SagaComponents::system).  The manager
+    /// starts first: a delivery host reads what is already journalled, so the
+    /// order costs nothing either way, and the handle answers for both halves
+    /// only once both are running.
     ///
     /// Spawning before every declared source is bound is a **compile error** —
     /// including the degenerate case of binding nothing at all:
@@ -306,7 +377,7 @@ where
     /// # use nitinol_persistence::store::InMemoryStore;
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
-    /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt};
+    /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscriptionExt, SagaSystemExt};
     /// # struct DocCodec;
     /// # #[derive(Clone)] struct OrderPlaced;
     /// # #[derive(Clone)] struct StockReserved;
@@ -378,7 +449,7 @@ where
     /// # use nitinol_persistence::store::InMemoryStore;
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
-    /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt};
+    /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscriptionExt, SagaSystemExt};
     /// # struct DocCodec;
     /// # #[derive(Clone)] struct OrderPlaced;
     /// # #[derive(Clone)] struct ReservationRequested;
@@ -439,7 +510,7 @@ where
     /// # use nitinol_persistence::store::InMemoryStore;
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
-    /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt};
+    /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscriptionExt, SagaSystemExt};
     /// # struct DocCodec;
     /// # #[derive(Clone)] struct OrderPlaced;
     /// # #[derive(Clone)] struct Undeclared;
@@ -496,9 +567,28 @@ where
     ///     .await;
     /// # }
     /// ```
-    pub async fn spawn(self) -> SagaManagerProxy<S> {
-        let host = self.host.system().clone();
+    pub async fn spawn(self) -> SagaHostProxy<S> {
+        let SagaManagerProps {
+            store,
+            producer,
+            bindings,
+            instance_idle_timeout,
+            host: SagaHosted { system, delivery },
+        } = self;
+
+        let host = system.system().clone();
         let ps = host.process_system().clone();
-        self.start_on(&ps, Some(host)).await
+
+        let manager = SagaManagerProps {
+            store,
+            producer,
+            bindings,
+            instance_idle_timeout,
+            host: Unhosted,
+        }
+        .start_on(&ps, Some(host.clone()))
+        .await;
+
+        SagaHostProxy::new(manager, delivery.start_on(host).await)
     }
 }

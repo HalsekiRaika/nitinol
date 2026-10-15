@@ -18,7 +18,7 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDeliveryExt, SagaSystemExt};
+use nitinol_saga::{SagaSubscriptionExt, SagaSystemExt};
 
 use saga_idempotent_receive::order::{Order, OrderPlaced, PlaceOrder};
 use saga_idempotent_receive::saga::ReservationSaga;
@@ -76,22 +76,18 @@ async fn main() {
     // The saga holds nothing, because it sends nothing: its only effect is the
     // decision it persists, so the factory needs none of the capabilities it is
     // handed.
-    let _manager = system
+    //
+    // The same declaration starts the delivery host, which is what carries a
+    // decision anywhere.  Its whole input is the store: it subscribes to the
+    // decision event type `ReservationSaga` declares, wherever an instance of it
+    // wrote one, so nothing about which instances exist is named for it — only
+    // how often it asks the store.  Without it the saga would still decide and
+    // still journal, and no stock item would ever hear about it, which is why
+    // hosting a saga is not something a wiring can do half of.
+    let _host = system
         .host::<ReservationSaga>(|_| ReservationSaga)
         .observing::<OrderPlaced>(system.subscription(&order_id))
-        .spawn()
-        .await;
-
-    // The delivery host, which is what carries a decision anywhere. Its whole
-    // input is the store: it subscribes to the decision event type
-    // `ReservationSaga` declares, wherever an instance of it wrote one, so
-    // nothing about which instances exist is named here.
-    //
-    // Without this the saga would still decide and still journal, and no stock
-    // item would ever hear about it.
-    let _delivery = system
-        .deliver::<ReservationSaga>()
-        .with_poll_interval(DELIVERY_POLL_INTERVAL)
+        .with_delivery_poll_interval(DELIVERY_POLL_INTERVAL)
         .spawn()
         .await;
 

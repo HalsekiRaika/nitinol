@@ -3,7 +3,8 @@
 //! ```gherkin
 //!   Scenario: a delivery host over a store with no projector wired
 //!     Given a store supplying an event store and saga offsets only
-//!     When a delivery host is the only thing wired on it
+//!     When a saga is hosted on it, so a delivery host is wired from those two
+//!          slots and nothing else
 //!     Then it delivers every decision in the journal
 //!     And it records its progress in the store's saga slot
 //!
@@ -20,11 +21,14 @@
 //! be wired on this store at all, so what the first clause fixes is that a
 //! deployment with no projector in it is a deployment the supplier can express.
 //!
-//! The host is wired through the system's own entry point — `deliver`, the
-//! delivery-host counterpart of the one saga-hosting verb `host` — and started
-//! with nothing re-injected, so what the first clause also fixes is that the
-//! delivery-only shape reaches the argument-free spawn the other hosted props
-//! have.
+//! The host is wired through the system's own entry point — `host`, the one
+//! saga-hosting verb, which starts the delivery host beside the manager whose
+//! decisions it carries — and started with nothing re-injected, so what the
+//! first clause also fixes is that this shape reaches the argument-free spawn
+//! the hosted props have. The manager is inert here: the fixture saga's
+//! `correlate` answers `None`, and its one declared source is bound to a store
+//! of its own with nothing ever appended to it, so every row the clauses read
+//! on the supplier's journal is the delivery host's.
 //!
 //! The journal and the receiving aggregates are tenants of the one event store
 //! the supplier distributes, under keys of their own. That is what a single
@@ -49,7 +53,8 @@ mod delivery;
 use delivery::{
     append_decided, delivery_id, delivery_persistence, operations_of, partition_count, scope_of,
     settle, stream_rows, wait_until_operations, wait_until_stored, DeliverySaga, Ledger,
-    RecordingEventStore, RecordingOffsetStore, PROBE_INTERVAL, PROBE_TIMEOUT, TEST_POLL_INTERVAL,
+    RecordingEventStore, RecordingOffsetStore, Triggered, PROBE_INTERVAL, PROBE_TIMEOUT,
+    TEST_POLL_INTERVAL,
 };
 
 use std::time::Instant;
@@ -58,7 +63,7 @@ use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDeliveryExt, SagaId};
+use nitinol_saga::{SagaId, SagaSystemExt, Subscription};
 
 /// Wait until the host has polled the journal `want` times, then answer the
 /// positions those polls asked for.
@@ -93,6 +98,13 @@ async fn wait_until_journal_polls(
     }
 }
 
+/// The fixture saga's one declared source, on a store of its own. Nothing is
+/// ever appended to it, so the manager this binding belongs to adds no load to
+/// the journal the clauses read.
+fn quiet_source(key: &str) -> Subscription {
+    Subscription::stream(InMemoryEventStore::default(), &AggregateId::new(key))
+}
+
 #[tokio::test]
 async fn a_store_without_a_projection_slot_still_wires_a_delivery_host() {
     // Given: a store that supplies the event store and the saga slot, and
@@ -114,10 +126,11 @@ async fn a_store_without_a_projection_slot_still_wires_a_delivery_host() {
     // When: the host is wired from the system alone — neither the journal, the
     // offset slot, nor the process system is named here.
     let _host = system
-        .deliver::<DeliverySaga>()
+        .host::<DeliverySaga>(|_components| DeliverySaga)
+        .observing::<Triggered>(quiet_source("upstream-delivery-only"))
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
-        .with_poll_interval(TEST_POLL_INTERVAL)
+        .with_delivery_poll_interval(TEST_POLL_INTERVAL)
         .spawn()
         .await;
 
@@ -160,10 +173,11 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
     let delivered = append_decided(&first_journal, &saga_id, 1, target.as_str(), "op-1").await;
 
     let _first_host = first_system
-        .deliver::<DeliverySaga>()
+        .host::<DeliverySaga>(|_components| DeliverySaga)
+        .observing::<Triggered>(quiet_source("upstream-delivery-restart-first"))
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
-        .with_poll_interval(TEST_POLL_INTERVAL)
+        .with_delivery_poll_interval(TEST_POLL_INTERVAL)
         .spawn()
         .await;
     let first_ledger = first_system.aggregate_proxy::<Ledger>(target.clone());
@@ -190,10 +204,11 @@ async fn a_second_incarnation_resumes_above_the_position_the_first_recorded() {
         .with_persistence(delivery_persistence(&second_journal, &offsets))
         .build();
     let _second_host = second_system
-        .deliver::<DeliverySaga>()
+        .host::<DeliverySaga>(|_components| DeliverySaga)
+        .observing::<Triggered>(quiet_source("upstream-delivery-restart-second"))
         .with_delivery_id(delivery_id())
         .with_partitions(partition_count(1))
-        .with_poll_interval(TEST_POLL_INTERVAL)
+        .with_delivery_poll_interval(TEST_POLL_INTERVAL)
         .spawn()
         .await;
 

@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-saga`): `SagaHostProxy<S>` is the handle one hosted saga
+  declaration answers with, and reaches both halves it started:
+  `manager() -> &SagaManagerProxy<S>` and `delivery() -> &SagaDeliveryProxy<S>`,
+  which is where the operator entries `delivery_id` and `advance_offset` are.
+
+  Stopping is asked for half by half, because the halves outlive each other for
+  a reason: `manager().stop()` takes the deciding side down — its upstream
+  pollers and its resident instances with it — and leaves the delivery host
+  running, since a decision that was journalled is owed to its target whether or
+  not the instance that made it is still resident. A delivery host has no stop
+  at all, which is the contract `SagaDeliveryProxy` already carried. Dropping
+  the handle stops nothing.
+
+- (`nitinol-saga`): the delivery host's settings are named on the builder
+  `SagaSystemExt::host` hands back —
+  `SagaManagerProps::with_delivery_id(SagaDeliveryId)`,
+  `with_partitions(NonZeroUsize)` and
+  `with_delivery_poll_interval(Duration)` — with the same defaults
+  `SagaDeliveryProps` has, which is still where each one's contract is written
+  down.
+
+  `with_delivery_poll_interval` is the delivery side's cadence, on the saga's
+  own decisions. How often an observed *source* is asked is that source's own
+  `Subscription::with_poll_interval`, named per source on `observing`.
+
+- (`nitinol-saga`): `SagaSystemExt::SagaOffsets` is the backend's own offset
+  store as the provider's saga slot is configured with it, and
+  `SagaHosted<S, Cs>` is the typestate the hosted builder starts in — it carries
+  the system the manager runs on and the delivery host wiring resolved from the
+  same supplier, which is why both are public and re-exported.
+
+- (`nitinol-saga`): `SagaSubscriptionExt::subscription` is split out of
+  `SagaSystemExt` into its own trait, `impl<St: Store> …`, because it reads the
+  provider's journal back and needs no saga-offset slot — unlike `host`, which
+  does. A provider with a journal but no saga slot therefore still has
+  `subscription`, even though it has no `host`.
+
 - (`nitinol-persistence`): the journal and the snapshot store a supplier hands
   out are named types — `store::Journal` and `store::Album` — so a wiring point
   holds the store a deployment registered rather than a handle the framework
@@ -601,6 +638,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indistinguishable here.
 
 ### Changed
+
+- **BREAKING** (`nitinol-saga`): `host::<S>` starts the delivery host too, and
+  requires a provider that supplies the saga-offset slot it records in.
+
+  A manager journals what it decided and nothing more: the commands a decision
+  implies reach their targets only because a delivery host reads that journal.
+  Declaring the two separately meant a saga took two declarations, and a wiring
+  that wrote the first and forgot the second ran, looked alive, and did nothing
+  — which neither the type system nor the runtime could report. There is no
+  wiring in which a hosted saga wants no delivery, so the host is not opt-in on
+  the builder either: it is what hosting a saga is.
+
+  Requiring the slot follows from that. A store with no saga slot is a store a
+  delivery host cannot record progress in, so a saga cannot be hosted on it, and
+  the refusal is at the wiring rather than at the host's first save — the same
+  way `EventSourceSystem::projector_props` refuses a provider with no projection
+  slot. Keeping the progress somewhere a restart cannot find it would weaken
+  at-least-once without saying so, so it is not offered.
+
+  | was | is |
+  |---|---|
+  | `system.deliver::<S>().with_poll_interval(d).spawn()` | `system.host::<S>(f)…with_delivery_poll_interval(d).spawn()` |
+  | `system.deliver::<S>().with_delivery_id(id).spawn()` | `system.host::<S>(f)…with_delivery_id(id).spawn()` |
+  | `system.deliver::<S>().with_partitions(n).spawn()` | `system.host::<S>(f)…with_partitions(n).spawn()` |
+  | `host(..)…spawn()` answers `SagaManagerProxy<S>` | answers `SagaHostProxy<S>`; `pid` and `stop` are `.manager()`'s |
+  | `host(..)` has type `SagaManagerProps<S, SourceBindings<S>, Hosted>` | `SagaManagerProps<S, SourceBindings<S>, SagaHosted<S, St::SagaOffsets>>` |
+  | `impl<St: Store> SagaSystemExt for EventSourceSystem<St>` | `impl<St: SagaOffsetSlot> …` — a journal-only store has no `host` |
+  | `subscription` lived on `SagaSystemExt` | moved to the new `SagaSubscriptionExt`, `impl<St: Store> …` — a journal-only store still has `subscription`, since reading it back needs no saga-offset slot |
+
+  Migrating: delete the `deliver` declaration and move its settings onto the
+  `host` chain, renaming `with_poll_interval` to `with_delivery_poll_interval`
+  there; reach the manager's `pid`/`stop` through `.manager()` and the
+  operator entries through `.delivery()`; and name a saga-offset store on the
+  provider — `CustomStore::builder().eventstore(..).saga_offsets(..)`, or
+  `InMemoryStore`, which supplies every slot.
+
+  A host over stores named by hand is unchanged: `SagaDeliveryProps::new(&persistence)`
+  with `spawn(&system)` still starts a delivery host alone, which is what a
+  second host beside a running one, or a host over a different destination's
+  stores, is wired with.
 
 - **BREAKING** (`nitinol-persistence`, `nitinol-eventsource`, `nitinol-saga`,
   `nitinol-store-conformance`, `nitinol-conformance`, `nitinol-sqlx`,
@@ -1320,6 +1397,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `type State = ...;` line; no other change is required.
 
 ### Removed
+
+- **BREAKING** (`nitinol-saga`): `SagaDeliveryExt` and `system.deliver::<S>()`
+  are withdrawn, and so is `SagaDeliveryProps<S, Cs, Hosted>` with its
+  argument-free `spawn()`.
+
+  They were the second half of a two-declaration saga. `deliver` was a trait of
+  its own only because the delivery host needed the saga-offset slot and `host`
+  did not; now that hosting a saga starts the host that carries out its
+  decisions, `host` needs the slot too and there is nothing left for a separate
+  trait to say. No public path starts a delivery host from a system alone.
+
+  No alias and no deprecated shim answers for either name, so a reference to one
+  is a compile error. The explicit form — `SagaDeliveryProps::new(&persistence)`
+  naming a journal and an offset store, started with `spawn(&system)` — is
+  unchanged and is what a second host beside a running one is wired with.
 
 - **BREAKING** (`nitinol-persistence`): `provider::DynStore` is withdrawn, and
   the store that holds the journal alone is `store::Journal` itself.
