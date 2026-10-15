@@ -47,10 +47,15 @@ pub struct AggregateProxy<A: Aggregate> {
     /// [`AggregateTellTarget::aggregate_id`](crate::AggregateTellTarget::aggregate_id)
     /// can answer without resolving anything.
     aggregate_id: AggregateId,
-    binding: Arc<Binding<A>>,
+    binding: Binding<A>,
 }
 
 /// How a reference reaches an activation.
+///
+/// Both arms are another name for what they reach rather than a copy of it, so
+/// a reference is shared by cloning it: the pinned arm carries the process
+/// handle the lifecycle started, and the resolved arm carries the one
+/// [`Resolution`] its clones answer from.
 enum Binding<A: Aggregate> {
     /// The one activation an explicit `AggregateProps::spawn` started.
     ///
@@ -58,20 +63,86 @@ enum Binding<A: Aggregate> {
     /// reference stays with what it started and does not replace it.
     Pinned(Incarnation<A>),
     /// An identity, resolved on demand.
-    ///
-    /// The cache is an optimisation, not the reference's meaning: emptying it
-    /// costs a resolve, never a lost dispatch.
-    Resolved {
-        resolver: AggregateResolver<A>,
-        cached: Mutex<Option<Incarnation<A>>>,
-    },
+    Resolved(Resolution<A>),
+}
+
+impl<A: Aggregate> Clone for Binding<A> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Pinned(incarnation) => Self::Pinned(incarnation.clone()),
+            Self::Resolved(resolution) => Self::Resolved(resolution.clone()),
+        }
+    }
+}
+
+/// One identity's resolver and the activation it last resolved to.
+///
+/// The cache is an optimisation, not the reference's meaning: emptying it costs
+/// a resolve, never a lost dispatch.
+///
+/// Cheap-clone, and a clone names the same resolver and the same cache: the
+/// death one clone of a reference observes is a death every clone is spared
+/// dispatching into, which is the whole of what the cache is for.
+struct Resolution<A: Aggregate> {
+    inner: Arc<ResolutionInner<A>>,
+}
+
+struct ResolutionInner<A: Aggregate> {
+    resolver: AggregateResolver<A>,
+    cached: Mutex<Option<Incarnation<A>>>,
+}
+
+impl<A: Aggregate> Clone for Resolution<A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<A: Aggregate> Resolution<A> {
+    fn new(resolver: AggregateResolver<A>) -> Self {
+        Self {
+            inner: Arc::new(ResolutionInner {
+                resolver,
+                cached: Mutex::new(None),
+            }),
+        }
+    }
+
+    /// The live activation of this identity, resolving one when the cache is
+    /// empty.
+    async fn incarnation(&self) -> Incarnation<A> {
+        let hit = self.inner.cached.lock().expect(CACHE_LOCK).clone();
+        if let Some(incarnation) = hit {
+            return incarnation;
+        }
+        // Two dispatches racing here both resolve, and the registry's single
+        // flight hands them the same activation.
+        let incarnation = self.inner.resolver.resolve().await;
+        *self.inner.cached.lock().expect(CACHE_LOCK) = Some(incarnation.clone());
+        incarnation
+    }
+
+    /// Report `dead` as gone, emptying the cache only while it is still the
+    /// activation the cache names.
+    fn invalidate(&self, dead: &Incarnation<A>) {
+        {
+            let mut cached = self.inner.cached.lock().expect(CACHE_LOCK);
+            if cached.as_ref().map(|live| live.pid()) == Some(dead.pid()) {
+                *cached = None;
+            }
+        }
+
+        self.inner.resolver.evict(dead.pid());
+    }
 }
 
 impl<A: Aggregate> Clone for AggregateProxy<A> {
     fn clone(&self) -> Self {
         Self {
             aggregate_id: self.aggregate_id.clone(),
-            binding: Arc::clone(&self.binding),
+            binding: self.binding.clone(),
         }
     }
 }
@@ -82,7 +153,7 @@ impl<A: Aggregate> AggregateProxy<A> {
     pub(crate) fn pinned(aggregate_id: AggregateId, incarnation: Incarnation<A>) -> Self {
         Self {
             aggregate_id,
-            binding: Arc::new(Binding::Pinned(incarnation)),
+            binding: Binding::Pinned(incarnation),
         }
     }
 
@@ -93,10 +164,7 @@ impl<A: Aggregate> AggregateProxy<A> {
     pub(crate) fn resolved(aggregate_id: AggregateId, resolver: AggregateResolver<A>) -> Self {
         Self {
             aggregate_id,
-            binding: Arc::new(Binding::Resolved {
-                resolver,
-                cached: Mutex::new(None),
-            }),
+            binding: Binding::Resolved(Resolution::new(resolver)),
         }
     }
 
@@ -189,19 +257,9 @@ impl<A: Aggregate> AggregateProxy<A> {
 
     /// The activation this dispatch goes to.
     async fn incarnation(&self) -> Incarnation<A> {
-        match &*self.binding {
+        match &self.binding {
             Binding::Pinned(incarnation) => incarnation.clone(),
-            Binding::Resolved { resolver, cached } => {
-                let hit = cached.lock().expect(CACHE_LOCK).clone();
-                if let Some(incarnation) = hit {
-                    return incarnation;
-                }
-                // Two dispatches racing here both resolve, and the registry's
-                // single flight hands them the same activation.
-                let incarnation = resolver.resolve().await;
-                *cached.lock().expect(CACHE_LOCK) = Some(incarnation.clone());
-                incarnation
-            }
+            Binding::Resolved(resolution) => resolution.incarnation().await,
         }
     }
 
@@ -215,18 +273,11 @@ impl<A: Aggregate> AggregateProxy<A> {
     /// learns the dispatch failed, and [`AskError::retryability`] tells it that
     /// retrying is worthwhile.
     fn invalidate(&self, dead: &Incarnation<A>) {
-        let Binding::Resolved { resolver, cached } = &*self.binding else {
+        let Binding::Resolved(resolution) = &self.binding else {
             return;
         };
 
-        {
-            let mut cached = cached.lock().expect(CACHE_LOCK);
-            if cached.as_ref().map(|live| live.pid()) == Some(dead.pid()) {
-                *cached = None;
-            }
-        }
-
-        resolver.evict(dead.pid());
+        resolution.invalidate(dead);
     }
 }
 

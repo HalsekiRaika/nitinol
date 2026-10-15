@@ -18,6 +18,68 @@ use crate::durable_stream::cursor::SequenceCursor;
 
 pub(crate) type TransformFn<T> = Arc<dyn Fn(LoadedEvent) -> Option<T> + Send + Sync + 'static>;
 
+/// What a shared poller and the handle onto its stream both read: the transform
+/// each loaded event goes through, and whether the stream has been subscribed
+/// to yet.
+///
+/// # Why the gate is here rather than in the poller
+///
+/// A poller that published before anyone subscribed would advance its cursor
+/// over events it dropped, so the first subscriber would read an empty stream
+/// rather than the rows that were there all along. The gate closes that window:
+/// the poller publishes nothing until a `subscribe` opens it, and the `Release`
+/// store there is what makes the subscription visible to the `Acquire` load the
+/// poller gates on.
+///
+/// # Why it is one cheap-clone value
+///
+/// The poller's declaration is rebuilt on every supervised restart, so a
+/// restarted poller has to find the gate its stream's handle already opened —
+/// which it does because a clone of this names the one state rather than a copy
+/// of it.
+pub(crate) struct SharedPollState<T> {
+    inner: Arc<SharedPollStateInner<T>>,
+}
+
+struct SharedPollStateInner<T> {
+    transform: TransformFn<T>,
+    start_open: AtomicBool,
+}
+
+impl<T> Clone for SharedPollState<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T> SharedPollState<T> {
+    pub(crate) fn new(transform: TransformFn<T>) -> Self {
+        Self {
+            inner: Arc::new(SharedPollStateInner {
+                transform,
+                start_open: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    pub(crate) fn transform(&self) -> &TransformFn<T> {
+        &self.inner.transform
+    }
+
+    /// Whether the stream has been subscribed to, and so whether the poller may
+    /// publish.
+    pub(crate) fn is_open(&self) -> bool {
+        self.inner.start_open.load(Ordering::Acquire)
+    }
+
+    /// Report the first subscription, releasing the poller to publish.
+    pub(crate) fn open(&self) {
+        self.inner.start_open.store(true, Ordering::Release);
+    }
+}
+
 pub(crate) trait Poll: Process {
     fn poll_tick(
         &mut self,
@@ -78,9 +140,8 @@ where
 pub(crate) struct DurablePollerProcess<T> {
     pub(crate) store: Journal,
     pub(crate) publisher: ProcessProxy<Stream<T>>,
-    pub(crate) transform: TransformFn<T>,
+    pub(crate) shared: SharedPollState<T>,
     pub(crate) cursor: SequenceCursor,
-    pub(crate) start_open: Arc<AtomicBool>,
 }
 
 impl<T> Process for DurablePollerProcess<T> where T: 'static + Send + Sync + Clone {}
@@ -90,13 +151,13 @@ where
     T: 'static + Send + Sync + Clone,
 {
     async fn poll_tick(&mut self, _ctx: &mut ProcessContext<Self>) -> Result<(), HandlerError> {
-        if !self.start_open.load(Ordering::Acquire) {
+        if !self.shared.is_open() {
             return Ok(());
         }
         poll_once(
             &self.store,
             &self.publisher,
-            &self.transform,
+            self.shared.transform(),
             &mut self.cursor,
         )
         .await

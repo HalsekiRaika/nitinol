@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -7,7 +6,7 @@ use nitinol_persistence::store::Journal;
 use nitinol_persistence::{AggregateId, LoadedEvent};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
-use crate::components::{deadline, PendingDeadlineCell};
+use crate::components::{deadline, PendingDeadlines};
 use crate::consumed::{self, ConsumedPositionEvent, ConsumedPositions, PositionSource};
 use crate::context::SagaContext;
 use crate::error::SagaUpstreamHandlerError;
@@ -160,7 +159,7 @@ pub struct SagaProcess<S: Saga> {
     /// What the journal says is still pending, shared with the saga's own
     /// [`Deadline`](crate::Deadline) component so it reads the stream rather
     /// than its own intent.
-    pub(crate) pending_deadlines: PendingDeadlineCell,
+    pub(crate) pending_deadlines: PendingDeadlines,
     /// Where a deadline's firing is addressed, and so whether this instance's
     /// deadlines survive it stopping.
     pub(crate) delivery: ScheduleDelivery<S>,
@@ -203,15 +202,12 @@ impl<S: Saga> SagaProcess<S> {
         // A fresh incarnation knows nothing of what it set, so the journal is
         // the whole of the answer — which is why this replaces the view rather
         // than adding to it.
-        deadline::restore_pending(
-            &self.pending_deadlines,
-            active.iter().map(|sched| {
-                (
-                    sched.name.clone(),
-                    deadline::due_at(sched.scheduled_at_unix_millis, sched.after),
-                )
-            }),
-        );
+        self.pending_deadlines.restore(active.iter().map(|sched| {
+            (
+                sched.name.clone(),
+                deadline::due_at(sched.scheduled_at_unix_millis, sched.after),
+            )
+        }));
 
         let Some(timers) = self.timers() else {
             if !active.is_empty() {
@@ -273,7 +269,7 @@ impl<S: Saga> SagaProcess<S> {
             process_ctx,
             lifecycle: &mut self.lifecycle,
             scheduler: self.scheduler.clone(),
-            pending_deadlines: Arc::clone(&self.pending_deadlines),
+            pending_deadlines: self.pending_deadlines.clone(),
             landed_schedules: Vec::new(),
             delivery: &self.delivery,
             consumed: &mut self.consumed,
@@ -316,7 +312,7 @@ impl<S: Saga> SagaProcess<S> {
         {
             // The view follows the journal: the deadline leaves it when its
             // `fired` marker is durable, and not when the firing arrived.
-            deadline::forget_pending(&self.pending_deadlines, name);
+            self.pending_deadlines.forget(name);
             return;
         }
         tracing::error!(

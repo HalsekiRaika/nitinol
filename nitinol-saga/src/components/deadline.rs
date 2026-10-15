@@ -1,11 +1,12 @@
 //! `Deadline<M>` — a saga's own time, as two effect constructors and one view.
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
 use std::time::Duration;
 
 use nitinol_eventsource::codec::Codec;
 
-use crate::components::PendingDeadlineCell;
 use crate::effect::{SagaEffect, ScheduleSpec};
 use crate::scheduler::TimerName;
 
@@ -48,6 +49,86 @@ pub struct PendingDeadline {
     pub name: TimerName,
     /// When it is due: the schedule fact's wall-clock anchor plus its delay.
     pub due_at: jiff::Timestamp,
+}
+
+/// The pending deadlines of one saga instance, by the instant each is due.
+///
+/// Read by the saga's [`Deadline`] component and written by the saga process as
+/// the journal says so — replay's unfired schedules, then each `Scheduled` /
+/// `Cancelled` / `Fired` marker that becomes durable.  A view fed by intent
+/// instead would disagree with the stream exactly where it matters: after a
+/// crash between asking for a deadline and the fact landing.
+///
+/// Cheap-clone, and a clone is another name for the one view: that is what lets
+/// the process and the component it hands to the saga each hold one by value
+/// and still be writing and reading the same entries.  One of these per
+/// incarnation — a restarted incarnation starts from an empty one, which replay
+/// then fills.
+#[derive(Clone)]
+pub(crate) struct PendingDeadlines {
+    inner: Arc<RwLock<HashMap<TimerName, jiff::Timestamp>>>,
+}
+
+impl PendingDeadlines {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Fold what the journal says about one timer into the view.
+    ///
+    /// Called only after the marker that says it has actually landed, so the
+    /// view follows the stream rather than the intent.
+    pub(crate) fn record(&self, name: TimerName, due_at: jiff::Timestamp) {
+        self.write().insert(name, due_at);
+    }
+
+    /// Drop a timer from the view: its `cancelled` or `fired` marker is
+    /// durable.
+    pub(crate) fn forget(&self, name: &TimerName) {
+        self.write().remove(name);
+    }
+
+    /// Replace the view with what replay found on the stream.
+    ///
+    /// A fresh incarnation knows nothing of what it set, so the journal is the
+    /// whole of the answer — which is also why this replaces rather than
+    /// merges.
+    pub(crate) fn restore(&self, pending: impl IntoIterator<Item = (TimerName, jiff::Timestamp)>) {
+        let mut held = self.write();
+        held.clear();
+        held.extend(pending);
+    }
+
+    /// What the view holds, in due order.
+    pub(crate) fn pending(&self) -> Vec<PendingDeadline> {
+        let held = self
+            .inner
+            .read()
+            .expect("the pending-deadline view is never held across a panic");
+        let mut pending: Vec<PendingDeadline> = held
+            .iter()
+            .map(|(name, due_at)| PendingDeadline {
+                name: name.clone(),
+                due_at: *due_at,
+            })
+            .collect();
+        // A map has no order of its own, and a caller comparing two reads of the
+        // same journal state must get the same answer twice.
+        pending.sort_by(|left, right| {
+            left.due_at
+                .cmp(&right.due_at)
+                .then_with(|| left.name.as_str().cmp(right.name.as_str()))
+        });
+        pending
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, HashMap<TimerName, jiff::Timestamp>> {
+        self.inner
+            .write()
+            .expect("the pending-deadline view is never held across a panic")
+    }
 }
 
 /// A saga's own time.
@@ -144,14 +225,14 @@ pub struct PendingDeadline {
 ///     deadline.set(TimerName::new("reminder"), Duration::from_secs(1), Reminder);
 /// ```
 pub struct Deadline<M> {
-    pending: PendingDeadlineCell,
+    pending: PendingDeadlines,
     /// `fn() -> M` rather than `M`, so the component is `Send + Sync` whatever
     /// the message is and holds no claim on owning one.
     _message: PhantomData<fn() -> M>,
 }
 
 impl<M> Deadline<M> {
-    pub(crate) fn new(pending: PendingDeadlineCell) -> Self {
+    pub(crate) fn new(pending: PendingDeadlines) -> Self {
         Self {
             pending,
             _message: PhantomData,
@@ -214,25 +295,7 @@ impl<M: DeadlineMessage> Deadline<M> {
     /// persisted leaves it right here, which is also what replay would read off
     /// the stream.  So the view and the stream cannot disagree.
     pub fn pending(&self) -> Vec<PendingDeadline> {
-        let held = self
-            .pending
-            .read()
-            .expect("the pending-deadline view is never held across a panic");
-        let mut pending: Vec<PendingDeadline> = held
-            .iter()
-            .map(|(name, due_at)| PendingDeadline {
-                name: name.clone(),
-                due_at: *due_at,
-            })
-            .collect();
-        // A map has no order of its own, and a caller comparing two reads of the
-        // same journal state must get the same answer twice.
-        pending.sort_by(|left, right| {
-            left.due_at
-                .cmp(&right.due_at)
-                .then_with(|| left.name.as_str().cmp(right.name.as_str()))
-        });
-        pending
+        self.pending.pending()
     }
 }
 
@@ -254,44 +317,8 @@ pub(crate) fn due_at(anchor_unix_millis: i64, after: Duration) -> jiff::Timestam
     jiff::Timestamp::from_millisecond(due).unwrap_or(jiff::Timestamp::MAX)
 }
 
-/// Fold what the journal says about one timer into the pending view.
-///
-/// Called only after the marker that says it has actually landed, so the view
-/// follows the stream rather than the intent.
-pub(crate) fn record_pending(cell: &PendingDeadlineCell, name: TimerName, due_at: jiff::Timestamp) {
-    cell.write()
-        .expect("the pending-deadline view is never held across a panic")
-        .insert(name, due_at);
-}
-
-/// Drop a timer from the pending view: its `cancelled` or `fired` marker is
-/// durable.
-pub(crate) fn forget_pending(cell: &PendingDeadlineCell, name: &TimerName) {
-    cell.write()
-        .expect("the pending-deadline view is never held across a panic")
-        .remove(name);
-}
-
-/// Replace the pending view with what replay found on the stream.
-///
-/// A fresh incarnation knows nothing of what it set, so the journal is the whole
-/// of the answer — which is also why this replaces rather than merges.
-pub(crate) fn restore_pending(
-    cell: &PendingDeadlineCell,
-    pending: impl IntoIterator<Item = (TimerName, jiff::Timestamp)>,
-) {
-    let mut held = cell
-        .write()
-        .expect("the pending-deadline view is never held across a panic");
-    held.clear();
-    held.extend(pending);
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::{Arc, RwLock};
-
     use bytes::Bytes;
 
     use super::*;
@@ -333,7 +360,7 @@ mod tests {
     /// The constructors under test read none of it — which is itself part of the
     /// contract: what `set` builds is a decision, not a record of one.
     fn component() -> Deadline<Reminder> {
-        Deadline::new(Arc::new(RwLock::new(HashMap::new())))
+        Deadline::new(PendingDeadlines::new())
     }
 
     fn schedules<E>(effect: &SagaEffect<E>) -> &[ScheduleSpec] {

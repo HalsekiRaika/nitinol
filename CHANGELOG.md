@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-saga`): `SagaDeliveryProxy<S>: Clone` and `SagaHostProxy<S>: Clone`,
+  so both halves of the handle a hosted declaration answers with are shared by
+  cloning rather than by being wrapped.
+
+  A clone names the host it was taken from: the same manager process, so
+  `manager().stop()` through any clone stops the one manager, and the same
+  running partitions, so a position moved with `delivery().advance_offset`
+  through one clone is the position every other clone reads. Nothing is
+  re-spawned, and dropping a clone still stops nothing.
+
 - (`nitinol-saga`): `SagaHostProxy<S>` is the handle one hosted saga
   declaration answers with, and reaches both halves it started:
   `manager() -> &SagaManagerProxy<S>` and `delivery() -> &SagaDeliveryProxy<S>`,

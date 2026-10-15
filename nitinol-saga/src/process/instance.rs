@@ -9,7 +9,7 @@ use nitinol_persistence::store::Journal;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::Props;
 
-use crate::components::SagaComponents;
+use crate::components::{PendingDeadlines, SagaComponents};
 use crate::consumed::ConsumedPositions;
 use crate::id::SagaId;
 use crate::process::manager::{DeliverScheduled, SagaManagerProcess};
@@ -135,13 +135,13 @@ impl<S: Saga> SagaInstanceSpec<S> {
     /// every supervised restart.
     pub(crate) fn into_props(self) -> Props<SagaProcess<S>> {
         Props::new(move || {
-            // One cell per incarnation, shared between the saga's own `Deadline`
+            // One view per incarnation, shared between the saga's own `Deadline`
             // and the process that writes it: the saga reads the journal's
             // answer, and only the process can put one there.
-            let pending_deadlines = crate::components::PendingDeadlineCell::default();
+            let pending_deadlines = PendingDeadlines::new();
             SagaProcess::<S> {
                 state: (self.producer)(SagaComponents::new(
-                    Arc::clone(&pending_deadlines),
+                    pending_deadlines.clone(),
                     self.host.clone(),
                 )),
                 saga_id: self.saga_id.clone(),

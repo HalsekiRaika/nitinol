@@ -69,9 +69,23 @@ impl<S: Saga> SagaManagerProxy<S> {
 /// deciding side down and leaves the delivering side running (stated on
 /// [`SagaManagerProxy::stop`]), and a delivery host has no stop at all, which
 /// is the contract [`SagaDeliveryProxy`] already carries.
+///
+/// Shared by cloning rather than by being wrapped: a clone reaches the same
+/// manager process and the same running partitions, so `manager().stop()`
+/// through any clone stops the one manager, and a position moved through one
+/// clone's `delivery()` is the position the others read.
 pub struct SagaHostProxy<S: Saga> {
     manager: SagaManagerProxy<S>,
     delivery: SagaDeliveryProxy<S>,
+}
+
+impl<S: Saga> Clone for SagaHostProxy<S> {
+    fn clone(&self) -> Self {
+        Self {
+            manager: self.manager.clone(),
+            delivery: self.delivery.clone(),
+        }
+    }
 }
 
 impl<S: Saga> SagaHostProxy<S> {

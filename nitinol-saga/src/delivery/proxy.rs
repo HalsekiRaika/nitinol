@@ -18,8 +18,15 @@ use crate::saga::Saga;
 /// A handle names a running partition of this host, and which store that
 /// partition records to is the wiring's business rather than the handle
 /// holder's.
+///
+/// `clone_box` is how the erasure stays cloneable: the handle underneath is a
+/// process proxy and already cheap to clone, so a clone names the partition
+/// that is running rather than a second one — and nothing has to share one
+/// behind an `Arc` to say so.
 pub(crate) trait PartitionHandle: Send + Sync {
     fn advance(&self, partition: usize, to: u64) -> BoxFuture<'_, Result<(), SagaDeliveryError>>;
+
+    fn clone_box(&self) -> Box<dyn PartitionHandle>;
 }
 
 impl<S, Cs> PartitionHandle for ProcessProxy<SagaDeliveryPartition<S, Cs>>
@@ -36,16 +43,38 @@ where
             }
         })
     }
+
+    fn clone_box(&self) -> Box<dyn PartitionHandle> {
+        Box::new(self.clone())
+    }
 }
 
 /// A running delivery host for `S`.
 ///
 /// Dropping this does not stop the host: the partitions are processes of the
 /// system they were spawned on, and this is how an operator reaches them.
+///
+/// Shared by cloning rather than by being wrapped: a clone names the one
+/// host's running partitions, so a position moved through one handle is the
+/// position every other handle reads.
 pub struct SagaDeliveryProxy<S: Saga> {
     delivery_id: SagaDeliveryId,
     partitions: Vec<Box<dyn PartitionHandle>>,
     _saga: PhantomData<fn() -> S>,
+}
+
+impl<S: Saga> Clone for SagaDeliveryProxy<S> {
+    fn clone(&self) -> Self {
+        Self {
+            delivery_id: self.delivery_id.clone(),
+            partitions: self
+                .partitions
+                .iter()
+                .map(|partition| partition.clone_box())
+                .collect(),
+            _saga: PhantomData,
+        }
+    }
 }
 
 impl<S: Saga> SagaDeliveryProxy<S> {

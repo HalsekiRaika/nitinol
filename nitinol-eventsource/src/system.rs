@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::projection::ProjectionId;
 use nitinol_contract::Aggregate;
@@ -135,10 +135,11 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
     /// Finalize construction and return the configured [`EventSourceSystem`].
     pub fn build(self) -> EventSourceSystem<St> {
         EventSourceSystem {
-            ps: self.ps,
-            registry: AggregateRegistry::new(),
-            persistence: Arc::new(self.persistence),
-            snapshot_persistor: Arc::new(OnceCell::new()),
+            inner: Arc::new(Inner {
+                persistence: self.persistence,
+                node: Node::new(self.ps),
+                erased: OnceLock::new(),
+            }),
         }
     }
 }
@@ -208,38 +209,113 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
 ///
 /// # What holds what
 ///
-/// A system holds its process system, its registry, its supplier and the cell
-/// the snapshot persistor process lands in — and nothing on the other side of
-/// those holds a system back. The registry keeps process proxies, a process
-/// proxy keeps a pid and a channel, and a persistor keeps a snapshot store, so
-/// there is no strong cycle to leak: a handle lives as long as the processes
-/// holding it, and is released when they stop.
+/// A system holds the one instance behind it: the supplier it was built with,
+/// the node state every handle onto it shares, and — once asked for — the
+/// erased handle it answers with. Nothing on the other side of those holds a
+/// system back. The registry keeps process proxies, a process proxy keeps a pid
+/// and a channel, and a persistor keeps a snapshot store, so there is no strong
+/// cycle to leak: a handle lives as long as the processes holding it, and is
+/// released when they stop.
 pub struct EventSourceSystem<St = PersistenceUnset> {
+    inner: Arc<Inner<St>>,
+}
+
+/// The instance every handle onto one system shares.
+struct Inner<St> {
+    /// Held by value: a [`Store`] is distributed by being cloned and owes the
+    /// identity of the records its clones reach, so a supplier over one is
+    /// already another name for the same store. Wrapping it here would prove
+    /// that property a second time and leave the sharing in the holder rather
+    /// than in the store.
+    persistence: PersistenceProvider<St>,
+    node: Node,
+    /// The handle this system erases to, built on the first
+    /// [`erase_store`][EventSourceSystem::erase_store] and named by every call
+    /// after it.
+    ///
+    /// Erasing is on the hosted spawn path — every entry point carries one into
+    /// the props it hands back — so the journal is taken out of the supplier
+    /// once per system rather than once per spawn.
+    erased: OnceLock<SystemHandle>,
+}
+
+/// The node state a system shares with its clones and with the handle its store
+/// type is erased from.
+///
+/// Cheap-clone for the reason [`ProcessSystem`] is, and separate from
+/// [`Inner`] for one reason: none of it depends on the store type, so the
+/// erased handle is a second [`Inner`] over the same node rather than a second
+/// node. That is what makes the activation registry one table for the typed
+/// system and the erased handle both — and the snapshot persistor one process.
+#[derive(Clone)]
+struct Node {
+    inner: Arc<NodeInner>,
+}
+
+struct NodeInner {
     /// A handle rather than an owned instance: a reference re-resolves its
     /// aggregate long after the entry point that produced it returned, and needs
     /// a system to activate on.
     ps: ProcessSystem,
-    registry: Arc<AggregateRegistry>,
-    persistence: Arc<PersistenceProvider<St>>,
-    /// The one snapshot persistor process this system distributes.
+    registry: AggregateRegistry,
+    /// The one snapshot persistor process a system distributes.
     ///
     /// Shared across clones and across the erased handle, because the snapshot
     /// contract is written for a single consumer serialising its calls: a second
     /// process over one store would be two.
-    snapshot_persistor: Arc<OnceCell<SnapshotPersistorProxy>>,
+    snapshot_persistor: OnceCell<SnapshotPersistorProxy>,
 }
 
-/// Written out rather than derived: a clone names the same instance whether or
-/// not the store type itself is `Clone`, and requiring `St: Clone` would make
-/// an assembly's choice of handle types decide whether its system can be
-/// shared.
+impl Node {
+    fn new(ps: ProcessSystem) -> Self {
+        Self {
+            inner: Arc::new(NodeInner {
+                ps,
+                registry: AggregateRegistry::new(),
+                snapshot_persistor: OnceCell::new(),
+            }),
+        }
+    }
+
+    fn process_system(&self) -> &ProcessSystem {
+        &self.inner.ps
+    }
+
+    /// What a reference needs to resolve, and re-resolve, an aggregate on this
+    /// node.
+    fn resolve_handle(&self) -> ResolveHandle {
+        ResolveHandle::new(self.inner.registry.clone(), self.inner.ps.clone())
+    }
+
+    /// This node's snapshot persistor, starting it on the first call.
+    ///
+    /// `persistence` is the asking system's own supplier, and it is the same one
+    /// every time: a node is built with one supplier, clones carry it, and the
+    /// erased handle has no snapshot slot to ask through. So the process the
+    /// first caller starts is over the store every later caller would have
+    /// named.
+    async fn snapshot_persistor<St: SnapshotSlot>(
+        &self,
+        persistence: &PersistenceProvider<St>,
+    ) -> SnapshotPersistorProxy {
+        self.inner
+            .snapshot_persistor
+            .get_or_init(|| async { SnapshotPersistor::spawn(&self.inner.ps, persistence).await })
+            .await
+            .clone()
+    }
+}
+
+/// Written out rather than derived: `derive` would require `St: Clone`, and a
+/// builder's marker is not a store and has no clone to offer — so an assembly's
+/// choice of handle types would decide whether its system can be shared.
+///
+/// A clone is another name for the one instance: the same supplier, the same
+/// node, and the same erased handle.
 impl<St> Clone for EventSourceSystem<St> {
     fn clone(&self) -> Self {
         Self {
-            ps: self.ps.clone(),
-            registry: Arc::clone(&self.registry),
-            persistence: Arc::clone(&self.persistence),
-            snapshot_persistor: Arc::clone(&self.snapshot_persistor),
+            inner: Arc::clone(&self.inner),
         }
     }
 }
@@ -254,21 +330,21 @@ impl EventSourceSystem<PersistenceUnset> {
 impl<St> EventSourceSystem<St> {
     /// Returns a reference to the underlying [`ProcessSystem`].
     pub fn process_system(&self) -> &ProcessSystem {
-        &self.ps
+        self.inner.node.process_system()
     }
 
     /// The supplier this system was built with.
     ///
     /// Wiring that takes a store as a value — an upstream subscription, a saga's
-    /// own journal — resolves it from here rather than keeping a second `Arc`
+    /// own journal — resolves it from here rather than keeping a second handle
     /// alongside the system.
     pub fn persistence(&self) -> &PersistenceProvider<St> {
-        &self.persistence
+        &self.inner.persistence
     }
 
     /// What a reference needs to resolve, and re-resolve, its aggregate here.
     pub(crate) fn resolve_handle(&self) -> ResolveHandle {
-        ResolveHandle::new(Arc::clone(&self.registry), self.ps.clone())
+        self.inner.node.resolve_handle()
     }
 }
 
@@ -321,7 +397,8 @@ impl<St: Store> EventSourceSystem<St> {
     /// needed before spawning.  Its `spawn` takes no argument and resolves
     /// exactly as [`spawn_aggregate`][Self::spawn_aggregate] does.
     pub fn aggregate_props<A: Aggregate>(&self, id: AggregateId) -> AggregateProps<A, Hosted> {
-        AggregateProps::<A>::new(id, self.persistence.event_store()).hosted(self.erase_store())
+        AggregateProps::<A>::new(id, self.inner.persistence.event_store())
+            .hosted(self.erase_store())
     }
 
     /// A reference to the aggregate `id`, built without awaiting and without
@@ -347,6 +424,10 @@ impl<St: Store> EventSourceSystem<St> {
     /// identity through the erased handle reaches the activation the original
     /// would.
     ///
+    /// One handle per system, built here on the first call and cloned by every
+    /// call after it — including the ones the hosted entry points make on the
+    /// caller's behalf, so a spawn takes nothing out of the supplier.
+    ///
     /// Only the journal survives the erasure — a [`Journal`] *is* the store
     /// holding the journal alone, and it holds no other slot — so a slot a
     /// deployment did not supply stays a compile error rather than becoming
@@ -368,12 +449,16 @@ impl<St: Store> EventSourceSystem<St> {
     /// # }
     /// ```
     pub fn erase_store(&self) -> SystemHandle {
-        EventSourceSystem {
-            ps: self.ps.clone(),
-            registry: Arc::clone(&self.registry),
-            persistence: Arc::new(PersistenceProvider::new(self.persistence.event_store())),
-            snapshot_persistor: Arc::clone(&self.snapshot_persistor),
-        }
+        self.inner
+            .erased
+            .get_or_init(|| EventSourceSystem {
+                inner: Arc::new(Inner {
+                    persistence: PersistenceProvider::new(self.inner.persistence.event_store()),
+                    node: self.inner.node.clone(),
+                    erased: OnceLock::new(),
+                }),
+            })
+            .clone()
     }
 }
 
@@ -406,10 +491,10 @@ impl<St: SnapshotSlot> EventSourceSystem<St> {
     /// # }
     /// ```
     pub async fn snapshot_persistor(&self) -> SnapshotPersistorProxy {
-        self.snapshot_persistor
-            .get_or_init(|| async { SnapshotPersistor::spawn(&self.ps, &self.persistence).await })
+        self.inner
+            .node
+            .snapshot_persistor(&self.inner.persistence)
             .await
-            .clone()
     }
 }
 
@@ -457,6 +542,7 @@ impl<St: ProjectionOffsetSlot> EventSourceSystem<St> {
     where
         Proj: Send + Sync + 'static,
     {
-        ProjectorProps::new(projection_id, &self.persistence, producer).hosted(self.erase_store())
+        ProjectorProps::new(projection_id, &self.inner.persistence, producer)
+            .hosted(self.erase_store())
     }
 }

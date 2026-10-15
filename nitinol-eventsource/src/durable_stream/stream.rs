@@ -1,5 +1,4 @@
 use std::marker::PhantomData;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +10,9 @@ use nitinol_runtime::process::{Props, StreamProps, SupervisionStrategy};
 use nitinol_runtime::ProcessSystem;
 
 use crate::durable_stream::cursor::SequenceCursor;
-use crate::durable_stream::poller::{DurablePollerProcess, IntervalDriver, TransformFn};
+use crate::durable_stream::poller::{
+    DurablePollerProcess, IntervalDriver, SharedPollState, TransformFn,
+};
 use crate::durable_stream::proxy::{self, DurableStreamProxy};
 
 const POLLER_RESTART_MAX_RETRIES: u32 = 5;
@@ -130,13 +131,11 @@ where
         } = self;
 
         let proxy_store = store.clone();
-        let proxy_transform = Arc::clone(&transform);
 
-        let start_open = Arc::new(AtomicBool::new(false));
+        let shared = SharedPollState::new(transform);
         let producer_store = store;
-        let producer_transform = Arc::clone(&transform);
+        let producer_shared = shared.clone();
         let producer_publisher = publisher.clone();
-        let producer_start_open = Arc::clone(&start_open);
         let producer_cursor = initial_cursor;
 
         let restart_strategy =
@@ -148,9 +147,8 @@ where
         let props = Props::new(move || DurablePollerProcess {
             store: producer_store.clone(),
             publisher: producer_publisher.clone(),
-            transform: Arc::clone(&producer_transform),
+            shared: producer_shared.clone(),
             cursor: producer_cursor.clone(),
-            start_open: Arc::clone(&producer_start_open),
         })
         .with_supervision_strategy(restart_strategy)
         .with_name(poller_name)
@@ -160,9 +158,8 @@ where
         Ok(DurableStreamProxy::new(
             stream_proxy,
             shared_poller,
-            start_open,
+            shared,
             proxy_store,
-            proxy_transform,
             poll_interval,
         ))
     }

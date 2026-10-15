@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +12,7 @@ use nitinol_runtime::{ProcessSystem, Props, Stream};
 
 use crate::durable_stream::cursor::SequenceCursor;
 use crate::durable_stream::poller::{
-    DirectPollerProcess, DurablePollerProcess, IntervalDriver, TransformFn,
+    DirectPollerProcess, DurablePollerProcess, IntervalDriver, SharedPollState, TransformFn,
 };
 
 const POLLER_RESTART_MAX_RETRIES: u32 = 5;
@@ -189,10 +188,12 @@ pub(crate) fn direct_poller_name(subscriber_pid: Pid) -> ProcessName {
 pub struct DurableStreamProxy<T> {
     stream_proxy: ProcessProxy<Stream<T>>,
     store: Journal,
-    transform: TransformFn<T>,
+    /// The state this handle and the shared poller both read: the transform a
+    /// direct subscription is spawned with, and the gate
+    /// [`subscribe`][Self::subscribe] opens.
+    shared: SharedPollState<T>,
     poll_interval: Duration,
     shared_poller: ProcessProxy<DurablePollerProcess<T>>,
-    start_open: Arc<AtomicBool>,
 }
 
 impl<T> Drop for DurableStreamProxy<T> {
@@ -208,18 +209,16 @@ where
     pub(crate) fn new(
         stream_proxy: ProcessProxy<Stream<T>>,
         shared_poller: ProcessProxy<DurablePollerProcess<T>>,
-        start_open: Arc<AtomicBool>,
+        shared: SharedPollState<T>,
         store: Journal,
-        transform: TransformFn<T>,
         poll_interval: Duration,
     ) -> Self {
         Self {
             stream_proxy,
             store,
-            transform,
+            shared,
             poll_interval,
             shared_poller,
-            start_open,
         }
     }
 
@@ -232,7 +231,7 @@ where
         P: Process + Receive<T, Response = ()>,
     {
         self.stream_proxy.subscribe(proxy).await?;
-        self.start_open.store(true, Ordering::Release);
+        self.shared.open();
         Ok(())
     }
 
@@ -253,7 +252,7 @@ where
 
         let config = DurableSubscription {
             store: self.store.clone(),
-            transform: Arc::clone(&self.transform),
+            transform: Arc::clone(self.shared.transform()),
             poll_interval: self.poll_interval,
         };
         let props = config.make_direct_poller_props(proxy, cursor, Some(direct_poller_name(pid)));

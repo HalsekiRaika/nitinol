@@ -21,27 +21,15 @@
 
 pub(crate) mod deadline;
 
-use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::{Arc, RwLock};
 
 use nitinol_eventsource::system::SystemHandle;
 
 use crate::saga::Saga;
-use crate::scheduler::TimerName;
 use crate::subscribe::{HasDeadline, SagaSubscribe};
 
+pub(crate) use self::deadline::PendingDeadlines;
 pub use self::deadline::{Deadline, DeadlineMessage, PendingDeadline};
-
-/// The pending deadlines of one saga instance, by the instant each is due.
-///
-/// Shared between the saga's [`Deadline`] component, which reads it, and the
-/// saga process, which writes it as the journal says so — replay's unfired
-/// schedules, then each `Scheduled` / `Cancelled` / `Fired` marker that becomes
-/// durable.  A view fed by intent instead would disagree with the stream
-/// exactly where it matters: after a crash between asking for a deadline and
-/// the fact landing.
-pub(crate) type PendingDeadlineCell = Arc<RwLock<HashMap<TimerName, jiff::Timestamp>>>;
 
 /// What the framework owns and a saga may ask for.
 ///
@@ -56,7 +44,7 @@ pub(crate) type PendingDeadlineCell = Arc<RwLock<HashMap<TimerName, jiff::Timest
 /// out the shape where a schedule fact is persisted and no timer core was
 /// ever resolved to arm it.
 pub struct SagaComponents<S: Saga> {
-    pending_deadlines: PendingDeadlineCell,
+    pending_deadlines: PendingDeadlines,
     host: Option<SystemHandle>,
     _saga: PhantomData<fn() -> S>,
 }
@@ -67,7 +55,7 @@ impl<S: Saga> SagaComponents<S> {
     /// Called once per incarnation, so the cell the process writes and the one
     /// the saga's [`Deadline`] reads are the same cell — and a restarted
     /// incarnation starts from an empty one, which replay then fills.
-    pub(crate) fn new(pending_deadlines: PendingDeadlineCell, host: Option<SystemHandle>) -> Self {
+    pub(crate) fn new(pending_deadlines: PendingDeadlines, host: Option<SystemHandle>) -> Self {
         Self {
             pending_deadlines,
             host,
@@ -180,6 +168,6 @@ impl<S: Saga> SagaComponents<S> {
     where
         S::Subscribe: SagaSubscribe<Deadline = HasDeadline<M>>,
     {
-        Deadline::new(Arc::clone(&self.pending_deadlines))
+        Deadline::new(self.pending_deadlines.clone())
     }
 }

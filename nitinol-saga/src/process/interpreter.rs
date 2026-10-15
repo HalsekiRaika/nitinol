@@ -8,7 +8,7 @@ use nitinol_persistence::store::Journal;
 use nitinol_persistence::AppendingEvent;
 use nitinol_runtime::process::ProcessContext;
 
-use crate::components::{deadline, PendingDeadlineCell};
+use crate::components::{deadline, PendingDeadlines};
 use crate::consumed::{
     append_consumed_position, finalize_consumed_position, ConsumedPositionEvent, ConsumedPositions,
 };
@@ -36,7 +36,7 @@ pub(crate) struct InterpreterCtx<'a, S: Saga> {
     /// What the journal says is still pending, moved here as each schedule
     /// marker becomes durable so the saga's own `Deadline` view never reports a
     /// deadline whose fact did not land.
-    pub(crate) pending_deadlines: PendingDeadlineCell,
+    pub(crate) pending_deadlines: PendingDeadlines,
     /// The timers whose `Scheduled` marker became durable while this effect was
     /// interpreted.
     ///
@@ -261,7 +261,7 @@ async fn cancel_schedule<S: Saga>(
     }
     // The marker is durable, so the deadline is no longer pending by the only
     // account that matters — the journal's.
-    deadline::forget_pending(&ictx.pending_deadlines, &name);
+    ictx.pending_deadlines.forget(&name);
     if let Some(timers) = ictx.timers() {
         timers.cancel(name).await;
     }
@@ -370,8 +370,7 @@ async fn persist_batch<S: Saga>(
     // that never landed must leave both exactly as they were. The timers
     // themselves are registered further below, after every marker has landed.
     for reg in &registrations {
-        deadline::record_pending(
-            &ictx.pending_deadlines,
+        ictx.pending_deadlines.record(
             reg.name.clone(),
             deadline::due_at(reg.scheduled_at_unix_millis, reg.after),
         );
