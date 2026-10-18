@@ -15,7 +15,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use bytes::Bytes;
-use nitinol_contract::{Aggregate, Codec, Decider, Decision, Event, Query};
+use nitinol_contract::{Aggregate, Codec, Decider, Decision, Event, Never, Query};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 // Fixture: a wallet that holds a balance and an optional label.
@@ -108,6 +108,7 @@ struct Wallet {
 
 impl Aggregate for Wallet {
     type Event = WalletEvent;
+    type Recover = Never;
 
     fn apply(&mut self, event: WalletEvent) {
         match event {

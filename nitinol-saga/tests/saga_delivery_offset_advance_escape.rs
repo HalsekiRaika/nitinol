@@ -27,9 +27,9 @@
 #[path = "common/delivery.rs"]
 mod delivery;
 use delivery::{
-    append_decided, in_memory_system, operations_of, scope_of, settle, spawn_host, stream_rows,
-    wait_until_loads, wait_until_operations, wait_until_stored, Ledger, RecordingEventStore,
-    RecordingOffsetStore, SelectiveSaga, REFUSED_SUFFIX,
+    append_decided, delivery_system, in_memory_system, operations_of, scope_of, settle, spawn_host,
+    stream_rows, wait_until_loads, wait_until_operations, wait_until_stored, Ledger,
+    RecordingEventStore, RecordingOffsetStore, SelectiveSaga, REFUSED_SUFFIX,
 };
 
 use nitinol_persistence::store::InMemoryEventStore;
@@ -39,19 +39,18 @@ use nitinol_saga::SagaId;
 #[tokio::test]
 async fn an_operator_moves_a_held_partition_past_the_hold() {
     // Given: a held partition, and a decision behind it that cannot be reached.
-    let (system, aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(InMemoryEventStore::default());
-    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
+    let system = delivery_system(&recording, &offsets).await;
     let saga_id = SagaId::new("instance-1");
 
     let refused_target = format!("escape-target{REFUSED_SUFFIX}");
     let live_target = AggregateId::new("ledger-escape");
 
-    let held = append_decided(&journal, &saga_id, 1, &refused_target, "op-refused").await;
-    let behind = append_decided(&journal, &saga_id, 2, live_target.as_str(), "op-behind").await;
+    let held = append_decided(&recording, &saga_id, 1, &refused_target, "op-refused").await;
+    let behind = append_decided(&recording, &saga_id, 2, live_target.as_str(), "op-behind").await;
 
-    let host = spawn_host::<SelectiveSaga, _>(&system, &journal, &offsets, 1).await;
+    let host = spawn_host::<SelectiveSaga>(&system, 1).await;
     wait_until_loads(&recording, 3, "the host must reach the held record").await;
     settle().await;
 
@@ -91,7 +90,7 @@ async fn an_operator_moves_a_held_partition_past_the_hold() {
 
     settle().await;
     assert!(
-        stream_rows(&aggregates, &refused_target).await.is_empty(),
+        stream_rows(&recording, &refused_target).await.is_empty(),
         "the delivery in the stretch that was passed over is omitted rather \
          than retried later"
     );
@@ -100,14 +99,13 @@ async fn an_operator_moves_a_held_partition_past_the_hold() {
 #[tokio::test]
 async fn moving_a_partition_backwards_is_refused() {
     // Given: a partition that has finished a record.
-    let (system, _aggregates) = in_memory_system().await;
-    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
+    let (system, journal) = in_memory_system(&offsets).await;
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-escape-backwards");
 
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
-    let host = spawn_host::<SelectiveSaga, _>(&system, &journal, &offsets, 1).await;
+    let host = spawn_host::<SelectiveSaga>(&system, 1).await;
     wait_until_stored(
         &offsets,
         &scope_of(0),

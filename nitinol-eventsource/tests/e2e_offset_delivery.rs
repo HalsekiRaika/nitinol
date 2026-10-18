@@ -19,6 +19,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{Event, ProjectionContext, ProjectionId, Projector, ProjectorProps};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
@@ -188,17 +189,18 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_at_least_once_failed_projection_retried_on_restart() {
     // Given
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("e2e-ckpt-alo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-alo");
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
 
     // Only append seq=1 initially; seq=2 is appended after the failure flag is set
     // to eliminate the race where the projector processes seq=2 before the flag is tripped.
@@ -214,7 +216,7 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
         let count_c = Arc::clone(&count);
         let notify_c = Arc::clone(&notify);
 
-        ProjectorProps::new(projection_id.clone(), &persistence, move || {
+        ProjectorProps::new(projection_id.clone(), move || {
             ConditionallyFailingProjector {
                 should_fail: Arc::clone(&sf_c),
                 count: Arc::clone(&count_c),
@@ -244,7 +246,7 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
     proxy.stop().await.expect("first projector stop");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if system.lookup(proxy_pid).await.is_none() {
+        if system.process_system().lookup(proxy_pid).await.is_none() {
             break;
         }
         assert!(
@@ -274,7 +276,7 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
     let count2 = Arc::clone(&count);
     let notify2 = Arc::clone(&notify);
 
-    let _proxy2 = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+    let _proxy2 = ProjectorProps::new(projection_id.clone(), move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf2),
             count: Arc::clone(&count2),
@@ -303,17 +305,18 @@ async fn e2e_at_least_once_failed_projection_retried_on_restart() {
 #[tokio::test]
 async fn e2e_exactly_once_user_saves_offset_prevents_reprocessing() {
     // Given
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("e2e-ckpt-eo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-eo");
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
 
     append_evt(&event_store, &agg_id, 1).await;
     append_evt(&event_store, &agg_id, 2).await;
@@ -328,13 +331,11 @@ async fn e2e_exactly_once_user_saves_offset_prevents_reprocessing() {
         let ckpt_c = offset_store.clone();
         let proj_id_c = projection_id.clone();
 
-        let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-            ExactlyOnceProjector {
-                offset_store: ckpt_c.clone(),
-                projection_id: proj_id_c.clone(),
-                count: Arc::clone(&count_c),
-                notify: Arc::clone(&notify_c),
-            }
+        let _proxy = ProjectorProps::new(projection_id.clone(), move || ExactlyOnceProjector {
+            offset_store: ckpt_c.clone(),
+            projection_id: proj_id_c.clone(),
+            count: Arc::clone(&count_c),
+            notify: Arc::clone(&notify_c),
         })
         .with_event::<Evt>()
         .delivery_mode(DeliveryMode::ExactlyOnce)
@@ -364,13 +365,11 @@ async fn e2e_exactly_once_user_saves_offset_prevents_reprocessing() {
     let ckpt_c2 = offset_store.clone();
     let proj_id_c2 = projection_id.clone();
 
-    let _proxy2 = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        ExactlyOnceProjector {
-            offset_store: ckpt_c2.clone(),
-            projection_id: proj_id_c2.clone(),
-            count: Arc::clone(&count_c2),
-            notify: Arc::clone(&notify_c2),
-        }
+    let _proxy2 = ProjectorProps::new(projection_id.clone(), move || ExactlyOnceProjector {
+        offset_store: ckpt_c2.clone(),
+        projection_id: proj_id_c2.clone(),
+        count: Arc::clone(&count_c2),
+        notify: Arc::clone(&notify_c2),
     })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::ExactlyOnce)
@@ -397,17 +396,18 @@ async fn e2e_exactly_once_user_saves_offset_prevents_reprocessing() {
 #[tokio::test]
 async fn e2e_at_most_once_failed_event_not_retried_on_restart() {
     // Given
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("e2e-ckpt-amo-agg");
     let projection_id = ProjectionId::new("e2e-ckpt-amo");
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
 
     append_evt(&event_store, &agg_id, 1).await;
 
@@ -421,7 +421,7 @@ async fn e2e_at_most_once_failed_event_not_retried_on_restart() {
         let count_c = Arc::clone(&count);
         let notify_c = Arc::clone(&notify);
 
-        let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+        let _proxy = ProjectorProps::new(projection_id.clone(), move || {
             ConditionallyFailingProjector {
                 should_fail: Arc::clone(&sf_c),
                 count: Arc::clone(&count_c),
@@ -458,12 +458,10 @@ async fn e2e_at_most_once_failed_event_not_retried_on_restart() {
     let count2 = Arc::clone(&count);
     let notify2 = Arc::clone(&notify);
 
-    let _proxy2 = ProjectorProps::new(projection_id, &persistence, move || {
-        ConditionallyFailingProjector {
-            should_fail: Arc::clone(&sf2),
-            count: Arc::clone(&count2),
-            notify: Arc::clone(&notify2),
-        }
+    let _proxy2 = ProjectorProps::new(projection_id, move || ConditionallyFailingProjector {
+        should_fail: Arc::clone(&sf2),
+        count: Arc::clone(&count2),
+        notify: Arc::clone(&notify2),
     })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtMostOnce)

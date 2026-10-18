@@ -14,40 +14,51 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::error::OffsetError;
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Store, Unprovided};
 use nitinol_persistence::store::{
     InMemoryEventStore, InMemoryOffsetStore, Journal, OffsetScope, OffsetStore,
 };
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{
-    SagaDeliveryId, SagaDeliveryProps, SagaDeliveryProxy, SagaManagerProps, SagaManagerProxy,
-    Subscription,
-};
+use nitinol_saga::{SagaDeliveryId, SagaHostProxy, SagaManagerProps, Subscription};
 
 use saga_idempotent_receive::order::{Order, OrderPlaced};
 use saga_idempotent_receive::saga::{ReservationRequested, ReservationSaga};
 use saga_idempotent_receive::stock_item::{StockItem, StockReserved};
 
-/// The system an incarnation of this example assembles: one in-memory journal
-/// and no other slot.
+/// The store an incarnation of this example is assembled over: one in-memory
+/// journal and the slot the framework's saga attachments record their progress
+/// in, with no other slot named.
 ///
-/// A store holding the journal alone *is* the journal, so the system is named
-/// over a [`Journal`] rather than over an assembly wrapping one.
+/// `EventStore` is stream-keyed, so a single journal holds the order's stream,
+/// the stock item's stream and the saga's own stream side by side; splitting
+/// them across instances is a deployment choice, not something the pattern
+/// needs.  The snapshot and projection slots are left [`Unprovided`] rather
+/// than named with stores no clause here reads.
 ///
-/// Where a delivery host keeps its progress is deliberately **not** on this
-/// store.  The restart clauses below hand two successive hosts two different
-/// offset stores over one journal, which a slot on the system would make
-/// impossible without a second system — and a second system would also give the
-/// stock item a second activation, mixing "the receiver recognised the repeat"
-/// with "the receiver replayed first".  [`ExampleDeliveryStore`] is where the
-/// host's two slots are named instead.
+/// The offset slot keeps the backend's own type, because *which* offset store an
+/// incarnation was wired with is the whole subject of the redelivery clauses:
+/// one incarnation is given a store whose saves never land, the next is given
+/// the store underneath it, and a test reads the recorded position back through
+/// the handle it supplied.
+pub type ExampleStore<Cs> = CustomStore<Unprovided, Unprovided, Cs>;
+
+/// The system an incarnation of this example assembles.
 ///
-/// That is also why the manager here is started through
-/// [`SagaManagerProps`] rather than through `host`: hosting a saga on a system
-/// starts the delivery host too, over the system's own saga-offset slot, and a
-/// slot is exactly what this one must not have.
-pub type ExampleSystem = EventSourceSystem<Journal>;
+/// Every store a spawn needs comes from here: the journal the aggregates and the
+/// saga are tenants of, and the saga-offset slot the delivery host records in.
+/// Two successive incarnations with two different offset stores are therefore
+/// two systems over the one journal — which also means the second one's stock
+/// item is a fresh activation that has to replay its own stream, and the pattern
+/// has to hold across that too.
+pub type ExampleSystem<Cs> = EventSourceSystem<ExampleStore<Cs>>;
+
+/// The system the direct-dispatch clause assembles: the journal alone, with no
+/// saga and no delivery host on it.
+///
+/// A store holding the journal alone *is* the journal, so it is named over a
+/// [`Journal`] rather than over an assembly wrapping one.
+pub type PlainSystem = EventSourceSystem<Journal>;
 
 /// The stock item every order in these tests reserves against.
 pub const SKU: &str = "sku-cobalt-ingot";
@@ -88,11 +99,11 @@ pub const DECISION_BLOCK_LEN: usize = 2;
 /// them across instances is a deployment choice, not something the pattern
 /// needs.
 ///
-/// Both handles are kept because a delivery host below is wired from a store of
-/// its own over this same journal, and naming a slot is what erases a backend —
-/// so the host's assembly is named with the backend handle while everything
-/// else takes the erased one.  They are one store either way: erasing a backend
-/// takes that backend's own clone.
+/// Both handles are kept because a system below is assembled from the backend
+/// handle, and naming a slot is what erases a backend — so the assembly is named
+/// with the backend handle while the clauses read the streams through the erased
+/// one.  They are one store either way: erasing a backend takes that backend's
+/// own clone.
 pub fn single_store() -> (InMemoryEventStore, Journal) {
     let backend = InMemoryEventStore::default();
     let journal = Journal::from(backend.clone());
@@ -103,7 +114,7 @@ pub fn single_store() -> (InMemoryEventStore, Journal) {
 ///
 /// The direct-dispatch clause drives the receiving aggregate itself, so it needs
 /// the aggregates without the machinery that would also address them.
-pub async fn spawn_system(store: Journal) -> ExampleSystem {
+pub async fn spawn_system(store: Journal) -> PlainSystem {
     let ps = ProcessSystem::new().await;
     EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(store))
@@ -113,58 +124,55 @@ pub async fn spawn_system(store: Journal) -> ExampleSystem {
 /// Everything one incarnation of the example owns.
 ///
 /// `system` is kept because it is the handle to the `ProcessSystem` the
-/// aggregates, the manager and the delivery hosts run on; dropping the last
+/// aggregates, the manager and the delivery host run on; dropping the last
 /// handle early would take the incarnation down.
-pub struct ReservationWorld {
-    pub system: ExampleSystem,
+pub struct ReservationWorld<Cs> {
+    pub system: ExampleSystem<Cs>,
     pub order: AggregateProxy<Order>,
-    pub manager: SagaManagerProxy<ReservationSaga>,
+    pub host: SagaHostProxy<ReservationSaga>,
 }
 
-/// Spawn a complete incarnation: a fresh `ProcessSystem`, the order aggregate,
-/// and the saga manager observing the order's stream.
+/// Spawn a complete incarnation: a fresh `ProcessSystem` over `journal` and
+/// `offsets`, the order aggregate, and the saga hosted on it.
 ///
-/// No delivery host — the clauses that need one name its stores themselves,
-/// because which offset store a host is wired with is the whole subject of
-/// the redelivery tests.  See [`spawn_delivery_host`], and [`ExampleSystem`]
-/// for why the manager is not started through `host` here.
-pub async fn spawn_world(order_id: &AggregateId, store: Journal) -> ReservationWorld {
-    let system = spawn_system(store).await;
+/// One spawn starts both halves — the manager that decides and the delivery host
+/// that carries the decision out — because a saga whose decisions nobody carries
+/// out is not a saga.  Which offset store the host records in is the whole
+/// subject of the redelivery clauses, and it is named here, as the slot of the
+/// system the saga is spawned on.
+///
+/// The manager's cursor starts at `after: 0` and lives in memory, so a second
+/// incarnation over the same journal delivers the order's fact event again.  The
+/// saga instance it addresses drops that delivery — the position of the fact is
+/// on the instance's own stream, committed by the append that carried the
+/// decision — so a second incarnation decides nothing new.  What a second
+/// incarnation *does* re-do is delivery.
+pub async fn spawn_world<Cs>(
+    order_id: &AggregateId,
+    journal: &InMemoryEventStore,
+    offsets: &Cs,
+) -> ReservationWorld<Cs>
+where
+    Cs: OffsetStore + Clone + 'static,
+{
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(example_persistence(journal, offsets))
+        .build();
 
     let order = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
-    let manager = spawn_manager(&system, order_id).await;
+    let host = SagaManagerProps::<ReservationSaga>::new(|_| ReservationSaga)
+        .observing::<OrderPlaced>(Subscription::stream(order_id))
+        .with_delivery_id(delivery_id())
+        .with_delivery_poll_interval(POLL_INTERVAL)
+        .spawn(&system)
+        .await;
 
     ReservationWorld {
         system,
         order,
-        manager,
+        host,
     }
-}
-
-/// Spawn (or re-spawn) the saga manager over an existing system.
-///
-/// The cursor starts at `after: 0` and lives in memory, so a manager spawned a
-/// second time over the same store delivers the order's fact event again.  The
-/// saga instance it addresses drops that delivery — the position of the fact is
-/// on the instance's own stream, committed by the append that carried the
-/// decision — so a second incarnation decides nothing new.  What a second
-/// incarnation *does* re-do is delivery, which is the delivery host's business
-/// and not the manager's.
-///
-/// The journal and the observed stream are named by hand, which is the explicit
-/// counterpart of `host`: these clauses start the manager alone, because the
-/// host that carries its decisions is wired per clause over an offset store of
-/// its own — see [`spawn_delivery_host`].
-pub async fn spawn_manager(
-    system: &ExampleSystem,
-    order_id: &AggregateId,
-) -> SagaManagerProxy<ReservationSaga> {
-    let journal = system.persistence().event_store();
-    SagaManagerProps::<ReservationSaga>::new(journal.clone(), |_| ReservationSaga)
-        .observing::<OrderPlaced>(Subscription::stream(journal, order_id))
-        .spawn(system.process_system())
-        .await
 }
 
 // Delivery host wiring
@@ -188,25 +196,15 @@ pub fn delivery_scope() -> OffsetScope {
     delivery_id().offset_scope(0)
 }
 
-/// The store a delivery host is wired from: `journal` as the store the saga's
-/// decisions are on, `offsets` as the slot its progress is recorded in, and
-/// no other slot named.
-///
-/// A host needs exactly those two, so nothing else is filled in — the snapshot
-/// and projection slots are left [`Unprovided`] rather than named with stores no
-/// clause here reads.  The journal has no parameter of its own: the backend's
-/// type is written once, in the builder call that names it.
-pub type ExampleDeliveryStore<Cs> = CustomStore<Unprovided, Unprovided, Cs>;
-
-/// The supplier a host is wired from, over the two slots it needs.
+/// The supplier an incarnation is assembled from, over the two slots it needs.
 ///
 /// Both handles are named as the backends themselves and the caller keeps its
 /// own: a store's slots are logical destinations, so naming one twice is
 /// cloning the handle rather than sharing it from outside.
-pub fn delivery_persistence<Cs>(
+pub fn example_persistence<Cs>(
     journal: &InMemoryEventStore,
     offsets: &Cs,
-) -> PersistenceProvider<ExampleDeliveryStore<Cs>>
+) -> PersistenceProvider<ExampleStore<Cs>>
 where
     Cs: OffsetStore + Clone + 'static,
 {
@@ -216,28 +214,6 @@ where
             .saga_offsets(offsets.clone())
             .build(),
     )
-}
-
-/// Start a delivery host for the reservation saga: reading `journal`, recording
-/// progress in `offsets`, and delivering through `system`.
-///
-/// The host is wired from a supplier of its own and delivers through whichever
-/// system the receiving aggregates resolve on — which is what lets two
-/// successive hosts with two different offset stores both reach the one
-/// resident stock item.
-pub async fn spawn_delivery_host<Cs>(
-    system: &ExampleSystem,
-    journal: &InMemoryEventStore,
-    offsets: &Cs,
-) -> SagaDeliveryProxy<ReservationSaga>
-where
-    Cs: OffsetStore + Clone + 'static,
-{
-    SagaDeliveryProps::<ReservationSaga, Cs>::new(&delivery_persistence(journal, offsets))
-        .with_delivery_id(delivery_id())
-        .with_poll_interval(POLL_INTERVAL)
-        .spawn(system)
-        .await
 }
 
 /// A [`OffsetStore`] whose saves never land.
@@ -447,7 +423,10 @@ pub async fn wait_for_progress(offsets: &InMemoryOffsetStore, want: u64, label: 
 
 // Aggregate observation
 
-/// A reference to the stock item that owns the stream `key`.
-pub fn stock_ref(system: &ExampleSystem, key: &str) -> AggregateProxy<StockItem> {
+/// A reference to the stock item that owns the stream `key`, on `system`.
+pub fn stock_ref<St: Store>(
+    system: &EventSourceSystem<St>,
+    key: &str,
+) -> AggregateProxy<StockItem> {
     system.aggregate_proxy::<StockItem>(AggregateId::new(key))
 }

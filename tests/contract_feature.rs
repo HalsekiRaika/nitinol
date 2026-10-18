@@ -14,7 +14,7 @@
 
 use bytes::Bytes;
 use nitinol::contract::{
-    Accepting, Aggregate, Codec, Decider, Decision, Event, Query, Snapshotable,
+    Accepting, Aggregate, Codec, Decider, Decision, Event, Latest, Query, Snapshotable,
 };
 use nitinol::persistence::{EventType, Family, TypeName};
 
@@ -82,6 +82,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = CounterEvent;
+    type Recover = Latest;
 
     fn apply(&mut self, event: CounterEvent) {
         match event {
@@ -99,7 +100,7 @@ impl Snapshotable for Counter {
         self.value
     }
 
-    fn restore(snapshot: i64) -> Self {
+    fn recover(snapshot: i64) -> Self {
         Counter { value: snapshot }
     }
 }
@@ -186,7 +187,7 @@ fn snapshot_capture_and_restore_round_trips() {
     let snapshot = counter.capture();
     assert_eq!(snapshot, 2);
 
-    let mut restored = Counter::restore(snapshot);
+    let mut restored = Counter::recover(snapshot);
     assert_eq!(restored.value, 2);
 
     restored.apply(CounterEvent::Decremented);

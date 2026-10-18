@@ -6,7 +6,7 @@
 //! registering a timer would still pass it.  This file is the deadline
 //! counterpart, mirroring
 //! `saga_deadline_scheduler.rs::a_deadline_fires_into_the_deadline_arm_of_handle`
-//! on a store-bound `SagaManagerProps` rather than on a hosted one.
+//! on a `SagaManagerProps` spawned on a system rather than on a hosted one.
 //!
 //! There is no scheduler to wire anywhere: a saga whose alphabet declares a
 //! `#[subscribe(deadline)]` variant has the system's resident
@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -201,9 +201,11 @@ async fn manager_fires_the_degenerate_instances_timer() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the trigger stream the instance observes and the instance's
+    // own stream are tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     append_trigger(
-        &upstream_store,
+        &journal,
         1,
         Trigger {
             note: "hello".to_owned(),
@@ -211,18 +213,16 @@ async fn manager_fires_the_degenerate_instances_timer() {
     )
     .await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
     let fired_producer = Arc::clone(&fired);
 
-    let _manager_proxy =
-        SagaManagerProps::<TimerSaga>::new(saga_store.clone(), move |components| TimerSaga {
-            deadline: components.deadline(),
-            fired: Arc::clone(&fired_producer),
-        })
-        .observing::<Trigger>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<TimerSaga>::new(move |components| TimerSaga {
+        deadline: components.deadline(),
+        fired: Arc::clone(&fired_producer),
+    })
+    .observing::<Trigger>(Subscription::stream(UPSTREAM_KEY))
+    .spawn(&system)
+    .await;
 
     let fired_check = Arc::clone(&fired);
     let ok = wait_until(Duration::from_secs(5), || {

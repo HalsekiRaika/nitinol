@@ -60,7 +60,8 @@ use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::ProcessSystem;
@@ -268,28 +269,31 @@ async fn wait_for_reports(reports: &Reports, expected: usize) -> Vec<Vec<String>
 async fn a_pending_view_is_restored_by_replay_after_passivation() {
     // Given: a saga whose instance passivates while idle, and a probe that sets
     // a deadline
-    let ps = ProcessSystem::new().await;
-    let saga_store = Journal::from(InMemoryEventStore::default());
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    // One journal: the probes the saga observes and the saga's own stream are
+    // tenants of the store the system distributes, kept apart by key.
+    let journal = system.persistence().event_store();
 
     let reports: Reports = Arc::new(Mutex::new(Vec::new()));
     let incarnations = Arc::new(AtomicUsize::new(0));
 
     let reports_for_producer = Arc::clone(&reports);
     let incarnations_for_producer = Arc::clone(&incarnations);
-    let _manager = SagaManagerProps::<ViewSaga>::new(saga_store.clone(), move |components| {
+    let _manager = SagaManagerProps::<ViewSaga>::new(move |components| {
         incarnations_for_producer.fetch_add(1, Ordering::SeqCst);
         ViewSaga {
             deadline: components.deadline(),
             reports: Arc::clone(&reports_for_producer),
         }
     })
-    .observing::<Probe>(Subscription::stream(&upstream_store, UPSTREAM))
+    .observing::<Probe>(Subscription::stream(UPSTREAM))
     .with_instance_passivation(PASSIVATE_AFTER)
-    .spawn(&ps)
+    .spawn(&system)
     .await;
 
-    append_probe(&upstream_store, 1, Some(TIMER)).await;
+    append_probe(&journal, 1, Some(TIMER)).await;
     assert_eq!(
         wait_for_reports(&reports, 1).await,
         vec![Vec::<String>::new()],
@@ -303,7 +307,7 @@ async fn a_pending_view_is_restored_by_replay_after_passivation() {
     // so it is waited out rather than synchronised around. The multiplier keeps
     // the wait well clear of the runtime's idle-timer granularity.
     tokio::time::sleep(PASSIVATE_AFTER * 4).await;
-    append_probe(&upstream_store, 2, None).await;
+    append_probe(&journal, 2, None).await;
     let observed = wait_for_reports(&reports, 2).await;
 
     // Then
@@ -342,13 +346,10 @@ fn _saga_host_handles_are_clone() {
     assert_clone::<SagaHostProxy<SelectiveSaga>>();
 }
 
-/// A declared source on a store of its own, so a clause reading the system's
-/// journal reads the delivery host's loads and no others.
+/// A declared source nothing ever writes to, so what a clause reads off the
+/// journal is the delivery host's doing and no one else's.
 fn quiet_source() -> Subscription {
-    Subscription::stream(
-        InMemoryEventStore::default(),
-        &AggregateId::new(DELIVERY_UPSTREAM),
-    )
+    Subscription::stream(&AggregateId::new(DELIVERY_UPSTREAM))
 }
 
 /// Wait until the delivery host has polled `store` at least `want` times.

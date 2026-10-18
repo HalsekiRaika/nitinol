@@ -50,7 +50,7 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaSubscriptionExt, SagaSystemExt};
+use nitinol_saga::{SagaSystemExt, Subscription};
 
 use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment, Incremented};
 use eventsource_aggregate_communication::saga::RelaySaga;
@@ -78,8 +78,8 @@ async fn main() {
     // are tenants of the one journal the provider supplies, each under its own
     // key.  `InMemoryStore` also supplies a saga-offset slot, which is
     // the second store a delivery host needs — one that supplied none would
-    // make the `deliver` call below a compile error rather than a host unable
-    // to record where it got to.
+    // make the `spawn` below a compile error rather than a host unable to
+    // record where it got to.
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
@@ -116,7 +116,7 @@ async fn main() {
         .host::<RelaySaga>(move |_components| RelaySaga {
             target: target.clone(),
         })
-        .observing::<Incremented>(system.subscription(&id_a))
+        .observing::<Incremented>(Subscription::stream(&id_a))
         .with_delivery_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;

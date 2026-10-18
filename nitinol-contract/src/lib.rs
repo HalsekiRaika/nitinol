@@ -6,6 +6,7 @@
 //! | [`Codec`] | The format a domain value is written to and read back from |
 //! | [`Aggregate`] | Domain state holder; evolves state by applying events |
 //! | [`Snapshotable`] | Opt-in snapshot support for faster replay |
+//! | [`Recovery`] | What [`Aggregate::Recover`] may name: [`Never`] or [`Latest`] |
 //! | [`Decider`] | Decides what a command means for the current state |
 //! | [`Decision`] | A decider's conclusion: facts and an answer, or a refusal |
 //! | [`Query`] | Asks the current state a question |
@@ -116,6 +117,7 @@ mod decider;
 mod decision;
 mod event;
 mod query;
+mod recover;
 
 pub use self::aggregate::{Aggregate, Snapshotable};
 pub use self::codec::Codec;
@@ -128,3 +130,4 @@ pub use self::event::Event;
 #[doc(hidden)]
 pub use self::event::{DeclaresEventType, MatchesEventType};
 pub use self::query::Query;
+pub use self::recover::{Latest, Never, RecoverPolicy, Recovery};

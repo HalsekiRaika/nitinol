@@ -31,9 +31,9 @@
 //!
 //! - No `with_scheduler` anywhere — its absence is pinned in
 //!   `saga_with_scheduler_api_removed.rs`.
-//! - `SagaManagerProps::new(store, Fn(SagaComponents<S>) -> S)`,
-//!   `observing::<E>(Subscription)`, `spawn(&ProcessSystem)` — the whole of the
-//!   wiring these sagas get, and not one argument of it is a scheduler.
+//! - `SagaManagerProps::new(Fn(SagaComponents<S>) -> S)`,
+//!   `observing::<E>(Subscription)`, `spawn(&EventSourceSystem)` — the whole of
+//!   the wiring these sagas get, and not one argument of it is a scheduler.
 //! - `SchedulerProcess` stays the type key
 //!   `ProcessSystem::spawn_resident::<SchedulerProcess>()` resolves.
 //! - `DeadlineMessage`, `SagaComponents::deadline`, `Deadline::set`, and
@@ -50,8 +50,10 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -215,28 +217,42 @@ async fn wait_for_fired(fired: &Arc<Mutex<Vec<String>>>, expected: usize) -> Vec
     }
 }
 
-/// Host a deadline-declaring saga with nothing but its store, its producer and
-/// its one observed source.  There is no scheduler argument to pass.
+/// Host a deadline-declaring saga with nothing but its producer and its one
+/// observed source.  There is no scheduler argument to pass, and no store
+/// either: the journal its instances persist to and the one its source is read
+/// from are both the system's.
+///
+/// The manager half of what the spawn started is what these clauses keep: the
+/// delivery host beside it carries nothing, because this saga declares no
+/// mapping, and dropping its handle stops nothing.
 async fn spawn_hosted(
-    ps: &ProcessSystem,
+    system: &EventSourceSystem<InMemoryStore>,
     label: &str,
-    upstream_store: &Journal,
     upstream_key: &str,
     fired: &Arc<Mutex<Vec<String>>>,
 ) -> nitinol_saga::SagaManagerProxy<HostedSaga> {
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let fired = Arc::clone(fired);
     // The label is the correlation rule, so it is also the id of the one
     // instance this host ever spawns.
     let id_for_producer = SagaId::new(label);
-    SagaManagerProps::<HostedSaga>::new(saga_store, move |components| HostedSaga {
+    SagaManagerProps::<HostedSaga>::new(move |components| HostedSaga {
         deadline: components.deadline(),
         fired: Arc::clone(&fired),
         saga_id: id_for_producer.clone(),
     })
-    .observing::<Start>(Subscription::stream(upstream_store, upstream_key))
-    .spawn(ps)
+    .observing::<Start>(Subscription::stream(upstream_key))
+    .spawn(system)
     .await
+    .manager()
+    .clone()
+}
+
+/// A system over a store that supplies every slot, the saga-offset one a
+/// delivery host records in included.
+async fn system() -> EventSourceSystem<InMemoryStore> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build()
 }
 
 // Tests
@@ -247,20 +263,13 @@ async fn spawn_hosted(
 /// Then the firing arrives: there is no wiring left to forget.
 #[tokio::test]
 async fn a_deadline_fires_without_any_scheduler_wiring() {
-    let ps = ProcessSystem::new().await;
+    let system = system().await;
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    append_start(&upstream_store, "host-upstream-1", "host-saga-1").await;
+    let journal = system.persistence().event_store();
+    append_start(&journal, "host-upstream-1", "host-saga-1").await;
 
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
-    let _proxy = spawn_hosted(
-        &ps,
-        "host-saga-1",
-        &upstream_store,
-        "host-upstream-1",
-        &fired,
-    )
-    .await;
+    let _proxy = spawn_hosted(&system, "host-saga-1", "host-upstream-1", &fired).await;
 
     assert_eq!(
         wait_for_fired(&fired, 1).await,
@@ -277,33 +286,20 @@ async fn a_deadline_fires_without_any_scheduler_wiring() {
 /// saga.
 #[tokio::test]
 async fn several_sagas_converge_on_one_resident_timer_core() {
-    let ps = ProcessSystem::new().await;
+    let system = system().await;
+    let ps = system.process_system();
 
     // Asked before any saga exists, so the comparison below is against the core
     // the system already held.
     let before = ps.spawn_resident::<SchedulerProcess>().await;
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    append_start(&upstream_store, "host-upstream-a", "host-saga-a").await;
-    append_start(&upstream_store, "host-upstream-b", "host-saga-b").await;
+    let journal = system.persistence().event_store();
+    append_start(&journal, "host-upstream-a", "host-saga-a").await;
+    append_start(&journal, "host-upstream-b", "host-saga-b").await;
 
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
-    let _first = spawn_hosted(
-        &ps,
-        "host-saga-a",
-        &upstream_store,
-        "host-upstream-a",
-        &fired,
-    )
-    .await;
-    let _second = spawn_hosted(
-        &ps,
-        "host-saga-b",
-        &upstream_store,
-        "host-upstream-b",
-        &fired,
-    )
-    .await;
+    let _first = spawn_hosted(&system, "host-saga-a", "host-upstream-a", &fired).await;
+    let _second = spawn_hosted(&system, "host-saga-b", "host-upstream-b", &fired).await;
 
     let mut seen = wait_for_fired(&fired, 2).await;
     seen.sort();

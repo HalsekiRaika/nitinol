@@ -90,17 +90,21 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, Journal,
+};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
-    SagaSubscribe, Subscription, TimerName,
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaHostProxy, SagaId,
+    SagaManagerProps, SagaSubscribe, Subscription, TimerName,
 };
 
 // Domain
@@ -401,8 +405,14 @@ struct RecordedEvent {
 
 type Batches = Arc<Mutex<Vec<Vec<RecordedEvent>>>>;
 
-/// Records one entry per successful `append`, preserving the batch boundary —
-/// the only place the atomicity of "decision + position" is observable.
+/// Records one entry per successful `append` **to the saga's own stream**,
+/// preserving the batch boundary — the only place the atomicity of
+/// "decision + position" is observable.
+///
+/// A system distributes one journal, so the upstream stream a test seeds and
+/// the saga's own stream are tenants of it; the batches a clause reads are the
+/// ones addressed to [`SAGA_ID`], which is what keeps a seeded upstream row out
+/// of the count.
 #[derive(Clone)]
 struct RecordingStore {
     inner: InMemoryEventStore,
@@ -425,12 +435,15 @@ impl EventStore for RecordingStore {
                 occurred_at: e.occurred_at,
             })
             .collect();
+        let on_the_sagas_own_stream = key == SAGA_ID;
         // Only a committed append produced a batch boundary in the stream.
         let outcome = self.inner.append(key, events).await?;
-        self.batches
-            .lock()
-            .expect("recorded batches must not be poisoned")
-            .push(recorded);
+        if on_the_sagas_own_stream {
+            self.batches
+                .lock()
+                .expect("recorded batches must not be poisoned")
+                .push(recorded);
+        }
         Ok(outcome)
     }
 
@@ -461,15 +474,18 @@ struct FailFirstAppendsStore {
 }
 
 impl FailFirstAppendsStore {
-    /// A saga store that refuses the first `budget` appends `reject` answers
-    /// `true` for.  Handed back as the erased journal a saga is spawned with,
-    /// because that is the only shape a test ever needs it in.
-    fn refusing(reject: fn(&[AppendingEvent]) -> bool, budget: u64) -> Journal {
-        Journal::from(Self {
+    /// A journal that refuses the first `budget` appends `reject` answers
+    /// `true` for.
+    ///
+    /// Every `reject` in this file names a row only the saga itself writes, so
+    /// the upstream records a test seeds through the same journal are served
+    /// normally however small the budget.
+    fn refusing(reject: fn(&[AppendingEvent]) -> bool, budget: u64) -> Self {
+        Self {
             inner: InMemoryEventStore::default(),
             reject,
             budget: Arc::new(AtomicU64::new(budget)),
-        })
+        }
     }
 
     /// Answers whether this append is refused, spending one unit of the budget
@@ -537,15 +553,22 @@ fn carries_a_schedule_marker(events: &[AppendingEvent]) -> bool {
     events.iter().any(|e| e.event_type == SCHEDULE_MARKER)
 }
 
-/// Yields every stored record twice in one load.
+/// Yields every record of one named stream twice in one load.
 ///
 /// At-least-once delivery lets the same upstream record reach a *running*
 /// saga more than once; this reproduces that deterministically, without the
 /// restart the other tests use, so the position the interpreter holds in
 /// memory is what the second delivery is judged against.
+///
+/// Scoped to the upstream stream because the journal the source is read from is
+/// also the one the instance replays its own stream from: doubling that one too
+/// would be doubling the rows the clauses count, rather than the deliveries the
+/// clause is about.
 #[derive(Clone)]
 struct DuplicatingStore {
     inner: InMemoryEventStore,
+    /// Stream key whose records are served twice.
+    duplicated: String,
 }
 
 #[async_trait]
@@ -559,6 +582,9 @@ impl EventStore for DuplicatingStore {
     }
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        if query.stream_key.as_deref() != Some(self.duplicated.as_str()) {
+            return self.inner.load(query).await;
+        }
         let loaded: Vec<LoadedEvent> = self.inner.load(query).await?.try_collect().await?;
         let doubled: Vec<Result<LoadedEvent, LoadError>> = loaded
             .into_iter()
@@ -570,9 +596,16 @@ impl EventStore for DuplicatingStore {
 
 type Queries = Arc<Mutex<Vec<LoadQuery>>>;
 
-/// Records the [`LoadQuery`] of every poll, so the position a fresh
+/// Records the [`LoadQuery`] of every store-wide poll, so the position a fresh
 /// incarnation *asks upstream from* — not merely what it does with what
 /// arrives — is observable.
+///
+/// Only the store-wide polls: one journal serves the observed source, the
+/// instances replaying their own streams and the delivery host one spawn always
+/// starts, and the three are told apart by what they ask for.  A source bound
+/// with [`Subscription::global`] names neither a stream key nor an event type,
+/// an instance's replay names its stream, and a host names its saga's decision
+/// type — so a query naming neither is that source's and nothing else.
 #[derive(Clone)]
 struct QueryRecordingStore {
     inner: InMemoryEventStore,
@@ -590,10 +623,12 @@ impl EventStore for QueryRecordingStore {
     }
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        self.queries
-            .lock()
-            .expect("recorded queries must not be poisoned")
-            .push(query.clone());
+        if query.stream_key.is_none() && query.event_type_prefix.is_none() {
+            self.queries
+                .lock()
+                .expect("recorded queries must not be poisoned")
+                .push(query.clone());
+        }
         self.inner.load(query).await
     }
 }
@@ -604,6 +639,42 @@ fn take_queries(queries: &Queries) -> Vec<LoadQuery> {
             .lock()
             .expect("recorded queries must not be poisoned"),
     )
+}
+
+// The system every test here runs on
+
+/// The store a test's system is built over: the journal the test named, plus
+/// the saga-offset slot the delivery host every saga spawn starts records its
+/// progress in.
+///
+/// The journal's own backend does not appear here — it is erased where the
+/// builder takes it — so one type names the system however a test decorated
+/// its journal.
+type TestStore = CustomStore<Unprovided, Unprovided, InMemoryOffsetStore>;
+
+/// The system a saga in this file is spawned on.
+type TestSystem = EventSourceSystem<TestStore>;
+
+/// A system of its own over `journal`.
+///
+/// Every store a saga reaches comes from here: the journal its instances
+/// persist to, the journal its sources are observed on, and the slot its
+/// delivery host records in.  So the upstream records a test seeds and the
+/// rows its saga writes are tenants of one journal, kept apart by stream key.
+async fn system_over<E: EventStore + 'static>(journal: E) -> TestSystem {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(journal)
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build()
+}
+
+/// A system over a plain in-memory journal.
+async fn in_memory_system() -> TestSystem {
+    system_over(InMemoryEventStore::default()).await
 }
 
 // Store helpers
@@ -775,7 +846,7 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<Seen> {
     }
 }
 
-/// Stop the host `proxy` addresses and wait until it has left the runtime's
+/// Stop the manager `host` fronts and wait until it has left the runtime's
 /// registry.
 ///
 /// An append a saga could not make does *not* take its instance down — staying
@@ -783,18 +854,18 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<Seen> {
 /// incarnation is finished with this record" has to be made true rather than
 /// waited for.  A stop is delivered on the instance's own mailbox and the loop
 /// is already inside the delivery, so the signal is not looked at until `recv`
-/// returns: the host's pid leaving the registry therefore proves the whole
+/// returns: the manager's pid leaving the registry therefore proves the whole
 /// interpretation is over, every staged retry of the refused batch included —
-/// a process is unregistered only after its children are, so the host is the
-/// last of the fan-out to go.
+/// a process is unregistered only after its children are, so the manager is
+/// the last of the fan-out to go.
 ///
 /// Every failure test below goes through this before reading the stream or
 /// spawning a successor.  Without it a retry still in flight could land a row
 /// between the read and the assertion, or race the successor's own appends for
 /// the same stream sequence.
-async fn stop_and_wait<S: Saga>(ps: &ProcessSystem, proxy: &nitinol_saga::SagaManagerProxy<S>) {
-    proxy.stop().await.expect("stop must succeed");
-    wait_until_gone(ps, proxy.pid()).await;
+async fn stop_and_wait<S: Saga>(system: &TestSystem, host: &SagaHostProxy<S>) {
+    host.manager().stop().await.expect("stop must succeed");
+    wait_until_gone(system.process_system(), host.manager().pid()).await;
 }
 
 /// The registry is what says a process is gone: it is unregistered as the last
@@ -839,68 +910,63 @@ async fn wait_for_saga_rows(
 }
 
 async fn spawn_deciding(
-    ps: &ProcessSystem,
-    saga_store: &Journal,
+    system: &TestSystem,
     subscription: Subscription,
     handled: &Handled,
-) -> nitinol_saga::SagaManagerProxy<DecidingSaga> {
+) -> SagaHostProxy<DecidingSaga> {
     let handled = Arc::clone(handled);
-    SagaManagerProps::<DecidingSaga>::new(saga_store.clone(), move |_components| DecidingSaga {
+    SagaManagerProps::<DecidingSaga>::new(move |_components| DecidingSaga {
         handled: Arc::clone(&handled),
     })
     .observing::<OrderPlaced>(subscription)
-    .spawn(ps)
+    .spawn(system)
     .await
 }
 
 async fn spawn_two_batch(
-    ps: &ProcessSystem,
-    saga_store: &Journal,
+    system: &TestSystem,
     subscription: Subscription,
     handled: &Handled,
-) -> nitinol_saga::SagaManagerProxy<TwoBatchSaga> {
+) -> SagaHostProxy<TwoBatchSaga> {
     let handled = Arc::clone(handled);
-    SagaManagerProps::<TwoBatchSaga>::new(saga_store.clone(), move |_components| TwoBatchSaga {
+    SagaManagerProps::<TwoBatchSaga>::new(move |_components| TwoBatchSaga {
         handled: Arc::clone(&handled),
     })
     .observing::<OrderPlaced>(subscription)
-    .spawn(ps)
+    .spawn(system)
     .await
 }
 
 async fn spawn_persist_then_end(
-    ps: &ProcessSystem,
-    saga_store: &Journal,
+    system: &TestSystem,
     subscription: Subscription,
     handled: &Handled,
-) -> nitinol_saga::SagaManagerProxy<PersistThenEndSaga> {
+) -> SagaHostProxy<PersistThenEndSaga> {
     let handled = Arc::clone(handled);
-    SagaManagerProps::<PersistThenEndSaga>::new(saga_store.clone(), move |_components| {
-        PersistThenEndSaga {
-            handled: Arc::clone(&handled),
-        }
+    SagaManagerProps::<PersistThenEndSaga>::new(move |_components| PersistThenEndSaga {
+        handled: Arc::clone(&handled),
     })
     .observing::<OrderPlaced>(subscription)
-    .spawn(ps)
+    .spawn(system)
     .await
 }
 
 /// The one declared source of every saga in this file, read from the `source`
-/// stream of `upstream_store` from the beginning.
-fn from_source(upstream_store: &Journal, source: &AggregateId) -> Subscription {
-    Subscription::stream(upstream_store, source)
+/// stream of the system's journal from the beginning.
+fn from_source(source: &AggregateId) -> Subscription {
+    Subscription::stream(source)
 }
 
-/// The same source, read from every stream of `upstream_store` at once in the
-/// store's own global order.
+/// The same source, read from every stream of the system's journal at once in
+/// the store's own global order.
 ///
 /// A store-wide cursor cannot be read as a per-stream position at all, so a
 /// source bound this way cannot even in principle be nudged forward by what the
 /// saga's own stream records — which makes it the sharpest shape for the tests
 /// below, where what has to be observed is the framework's skip rather than a
 /// cursor that never offered the record in the first place.
-fn from_every_source(upstream_store: &Journal) -> Subscription {
-    Subscription::global(upstream_store)
+fn from_every_source() -> Subscription {
+    Subscription::global()
 }
 
 // CP-ATOMIC — the decision and the position reach the store as one append
@@ -912,29 +978,22 @@ fn from_every_source(upstream_store: &Journal) -> Subscription {
 /// batch.
 #[tokio::test]
 async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    let source = AggregateId::new("atomic-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
-
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store = Journal::from(RecordingStore {
+    let system = system_over(RecordingStore {
         inner: InMemoryEventStore::default(),
         batches: Arc::clone(&batches),
-    });
+    })
+    .await;
+    let journal = system.persistence().event_store();
+    let source = AggregateId::new("atomic-order");
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
+
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
-    let _proxy = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let _proxy = spawn_deciding(&system, from_source(&source), &handled).await;
 
     let saga_id = SagaId::new(SAGA_ID);
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
+    let events = wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
 
     let recorded = batches
         .lock()
@@ -989,30 +1048,22 @@ async fn the_decision_and_the_consumed_position_reach_the_store_in_one_append() 
 /// committed with.
 #[tokio::test]
 async fn a_batch_that_never_landed_writes_no_consumed_position() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(FailFirstAppendsStore::refusing(carries_a_decision, NEVER)).await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("failed-batch-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
-    let saga_store = FailFirstAppendsStore::refusing(carries_a_decision, NEVER);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
-    let proxy = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let proxy = spawn_deciding(&system, from_source(&source), &handled).await;
 
     // Stopping the incarnation is the barrier: the signal waits behind the
     // delivery it is already inside, so once the pid is gone every staged
     // retry of the refused batch has been made and nothing else can land.
     let saga_id = SagaId::new(SAGA_ID);
     let barrier = wait_for_handled(&handled, 1).await;
-    stop_and_wait(&ps, &proxy).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    stop_and_wait(&system, &proxy).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         barrier,
@@ -1055,28 +1106,24 @@ async fn a_batch_that_never_landed_writes_no_consumed_position() {
 /// again and the decision would be lost for good.
 #[tokio::test]
 async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(FailFirstAppendsStore::refusing(
+        carries_a_decision,
+        STAGED_RETRIES,
+    ))
+    .await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("at-least-once-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
-    let saga_store = FailFirstAppendsStore::refusing(carries_a_decision, STAGED_RETRIES);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let first = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let first = spawn_deciding(&system, from_source(&source), &handled).await;
     wait_for_handled(&handled, 1).await;
-    stop_and_wait(&ps, &first).await;
+    stop_and_wait(&system, &first).await;
     drop(first);
 
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
     assert!(
         events.is_empty(),
         "the first attempt's batch never landed, so it left neither a decision \
@@ -1084,15 +1131,9 @@ async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
         describe(&events)
     );
 
-    let _second = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let _second = spawn_deciding(&system, from_source(&source), &handled).await;
 
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
+    let events = wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
 
     assert_eq!(
         times_handled(&handled, &source, 1),
@@ -1128,38 +1169,24 @@ async fn an_input_whose_batch_never_landed_is_handled_again_after_restart() {
 /// has been handled a second delivery of seq 1 can no longer be pending.
 #[tokio::test]
 async fn a_consumed_input_never_reaches_handle_after_a_restart() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("skip-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let first = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
-    first.stop().await.expect("stop must succeed");
+    let first = spawn_deciding(&system, from_source(&source), &handled).await;
+    wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
+    first.manager().stop().await.expect("stop must succeed");
     drop(first);
 
-    let _second = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
-    append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
+    let _second = spawn_deciding(&system, from_source(&source), &handled).await;
+    append_order_placed(&journal, &source, 2, "SKU-2").await;
 
     let barrier = wait_for_handled(&handled, 2).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
@@ -1186,38 +1213,24 @@ async fn a_consumed_input_never_reaches_handle_after_a_restart() {
 /// Then the redelivered record is dropped before `handle`.
 #[tokio::test]
 async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("global-skip-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let first = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_every_source(&upstream_store),
-        &handled,
-    )
-    .await;
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
-    first.stop().await.expect("stop must succeed");
+    let first = spawn_deciding(&system, from_every_source(), &handled).await;
+    wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
+    first.manager().stop().await.expect("stop must succeed");
     drop(first);
 
-    let _second = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_every_source(&upstream_store),
-        &handled,
-    )
-    .await;
-    append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
+    let _second = spawn_deciding(&system, from_every_source(), &handled).await;
+    append_order_placed(&journal, &source, 2, "SKU-2").await;
 
     let barrier = wait_for_handled(&handled, 2).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
@@ -1248,34 +1261,26 @@ async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it
 /// (see the decode-failure paragraph on `Saga::handle`).
 #[tokio::test]
 async fn a_corrupt_record_redelivered_over_a_global_cursor_writes_nothing() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("decode-skip-order");
-    append_corrupt_order_placed(&upstream_store, &source, 1).await;
-    append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
+    append_corrupt_order_placed(&journal, &source, 1).await;
+    append_order_placed(&journal, &source, 2, "SKU-2").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     // A position row already naming the corrupt record's upstream position, so
     // the count below distinguishes "no row was added for it" from "no row
     // mentions it at all".
-    seed_consumed_position(&saga_store, &saga_id, 1, &source, 1).await;
+    seed_consumed_position(&journal, &saga_id, 1, &source, 1).await;
 
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_every_source(&upstream_store),
-        &handled,
-    )
-    .await;
+    let _proxy = spawn_deciding(&system, from_every_source(), &handled).await;
 
     // Seq 2 is the barrier: the poller delivers ascending and `ask`s one
     // record at a time, so once it has been handled the corrupt seq 1's fate
     // is already decided.
     let barrier = wait_for_handled(&handled, 1).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
@@ -1304,30 +1309,25 @@ async fn a_corrupt_record_redelivered_over_a_global_cursor_writes_nothing() {
 /// for the running incarnation too, not only for what replay restored.
 #[tokio::test]
 async fn the_same_input_delivered_twice_in_one_incarnation_reaches_handle_once() {
-    let ps = ProcessSystem::new().await;
-
-    let inner = InMemoryEventStore::default();
-    let upstream_store = Journal::from(DuplicatingStore { inner });
     let source = AggregateId::new("duplicate-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    let system = system_over(DuplicatingStore {
+        inner: InMemoryEventStore::default(),
+        duplicated: source.as_str().to_owned(),
+    })
+    .await;
+    let journal = system.persistence().event_store();
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let _proxy = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let _proxy = spawn_deciding(&system, from_source(&source), &handled).await;
 
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
-    append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
+    wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
+    append_order_placed(&journal, &source, 2, "SKU-2").await;
 
     let barrier = wait_for_handled(&handled, 2).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
@@ -1353,28 +1353,20 @@ async fn the_same_input_delivered_twice_in_one_incarnation_reaches_handle_once()
 /// consumed — no cursor, no in-memory state, no prior incarnation.
 #[tokio::test]
 async fn replay_restores_the_consumed_position_from_the_journal_alone() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("fold-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
-    append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 2, "SKU-2").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
-    seed_consumed_position(&saga_store, &saga_id, 1, &source, 1).await;
+    seed_consumed_position(&journal, &saga_id, 1, &source, 1).await;
 
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_every_source(&upstream_store),
-        &handled,
-    )
-    .await;
+    let _proxy = spawn_deciding(&system, from_every_source(), &handled).await;
 
     let barrier = wait_for_handled(&handled, 1).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
@@ -1391,30 +1383,22 @@ async fn replay_restores_the_consumed_position_from_the_journal_alone() {
 /// re-open inputs whose decisions are already durable.
 #[tokio::test]
 async fn a_later_lower_position_does_not_move_the_position_backwards() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("fold-max-order");
     for (sequence, sku) in [(1u64, "SKU-1"), (2, "SKU-2"), (3, "SKU-3")] {
-        append_order_placed(&upstream_store, &source, sequence, sku).await;
+        append_order_placed(&journal, &source, sequence, sku).await;
     }
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
-    seed_consumed_position(&saga_store, &saga_id, 1, &source, 2).await;
-    seed_consumed_position(&saga_store, &saga_id, 2, &source, 1).await;
+    seed_consumed_position(&journal, &saga_id, 1, &source, 2).await;
+    seed_consumed_position(&journal, &saga_id, 2, &source, 1).await;
 
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_every_source(&upstream_store),
-        &handled,
-    )
-    .await;
+    let _proxy = spawn_deciding(&system, from_every_source(), &handled).await;
 
     let barrier = wait_for_handled(&handled, 1).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
@@ -1433,29 +1417,21 @@ async fn a_later_lower_position_does_not_move_the_position_backwards() {
 /// nothing else, which is what a subscription over several sources needs.
 #[tokio::test]
 async fn a_position_of_one_source_does_not_cover_another() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
     let source_a = AggregateId::new("per-source-a");
     let source_b = AggregateId::new("per-source-b");
-    append_order_placed(&upstream_store, &source_a, 1, "SKU-A1").await;
-    append_order_placed(&upstream_store, &source_b, 1, "SKU-B1").await;
+    append_order_placed(&journal, &source_a, 1, "SKU-A1").await;
+    append_order_placed(&journal, &source_b, 1, "SKU-B1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
-    seed_consumed_position(&saga_store, &saga_id, 1, &source_a, 1).await;
+    seed_consumed_position(&journal, &saga_id, 1, &source_a, 1).await;
 
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_every_source(&upstream_store),
-        &handled,
-    )
-    .await;
+    let _proxy = spawn_deciding(&system, from_every_source(), &handled).await;
 
     let barrier = wait_for_handled(&handled, 1).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         barrier,
@@ -1486,42 +1462,28 @@ async fn a_position_of_one_source_does_not_cover_another() {
 /// to start delivering.
 #[tokio::test]
 async fn the_configured_floor_survives_a_lower_consumed_position() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("floor-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let first = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
-    first.stop().await.expect("stop must succeed");
+    let first = spawn_deciding(&system, from_source(&source), &handled).await;
+    wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
+    first.manager().stop().await.expect("stop must succeed");
     drop(first);
 
     for (sequence, sku) in [(2u64, "SKU-2"), (3, "SKU-3"), (4, "SKU-4")] {
-        append_order_placed(&upstream_store, &source, sequence, sku).await;
+        append_order_placed(&journal, &source, sequence, sku).await;
     }
 
     // Consumed is 1; the operator asks for records after 3.
-    let _second = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source).with_after(3),
-        &handled,
-    )
-    .await;
+    let _second = spawn_deciding(&system, from_source(&source).with_after(3), &handled).await;
 
     let barrier = wait_for_handled(&handled, 2).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
@@ -1541,41 +1503,28 @@ async fn the_configured_floor_survives_a_lower_consumed_position() {
 /// a per-source one would skip records nobody consumed.
 #[tokio::test]
 async fn a_global_subscription_keeps_its_configured_cursor() {
-    let ps = ProcessSystem::new().await;
-
     let queries: Queries = Arc::new(Mutex::new(Vec::new()));
-    let upstream_store = Journal::from(QueryRecordingStore {
+    let system = system_over(QueryRecordingStore {
         inner: InMemoryEventStore::default(),
         queries: Arc::clone(&queries),
-    });
+    })
+    .await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("global-resume-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let first = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_every_source(&upstream_store),
-        &handled,
-    )
-    .await;
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
-    first.stop().await.expect("stop must succeed");
+    let first = spawn_deciding(&system, from_every_source(), &handled).await;
+    wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
+    first.manager().stop().await.expect("stop must succeed");
     drop(first);
 
     take_queries(&queries);
 
-    let _second = spawn_deciding(
-        &ps,
-        &saga_store,
-        from_every_source(&upstream_store),
-        &handled,
-    )
-    .await;
-    append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
+    let _second = spawn_deciding(&system, from_every_source(), &handled).await;
+    append_order_placed(&journal, &source, 2, "SKU-2").await;
 
     let barrier = wait_for_handled(&handled, 2).await;
     let asked_from: Vec<Option<u64>> = take_queries(&queries)
@@ -1613,28 +1562,19 @@ async fn a_global_subscription_keeps_its_configured_cursor() {
 /// the stream says one input was consumed.
 #[tokio::test]
 async fn an_input_whose_effect_takes_two_appends_is_recorded_as_consumed_once() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("two-batch-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let _proxy = spawn_two_batch(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let _proxy = spawn_two_batch(&system, from_source(&source), &handled).await;
 
     // The second decision is the barrier: it belongs to the later append, so
     // once it is on the stream both batches are over.
-    let events =
-        wait_for_saga_rows(&saga_store, &saga_id, ReservationRequested::EVENT_TYPE, 2).await;
+    let events = wait_for_saga_rows(&journal, &saga_id, ReservationRequested::EVENT_TYPE, 2).await;
 
     assert_eq!(
         seen(&handled).len(),
@@ -1662,28 +1602,20 @@ async fn an_input_whose_effect_takes_two_appends_is_recorded_as_consumed_once() 
 /// never runs.
 #[tokio::test]
 async fn an_input_closed_out_by_end_mid_sequence_is_recorded_as_consumed() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("persist-then-end-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let _proxy = spawn_persist_then_end(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let _proxy = spawn_persist_then_end(&system, from_source(&source), &handled).await;
 
     // The consumed position is the barrier: it only ever lands on the `Ended`
     // append, so waiting for it also waits for `End` to have been
     // interpreted.
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
+    let events = wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
 
     assert_eq!(
         seen(&handled).len(),
@@ -1716,32 +1648,28 @@ async fn an_input_closed_out_by_end_mid_sequence_is_recorded_as_consumed() {
 /// finally committed once, by the append that closes the input out.
 #[tokio::test]
 async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(FailFirstAppendsStore::refusing(
+        carries_a_position,
+        STAGED_RETRIES,
+    ))
+    .await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("two-batch-crash-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
     // Only the closing append of a `Sequence` carries a position, so a budget
     // spent on position-carrying appends refuses exactly that one, for exactly
     // one batch's staged retries.
-    let saga_store = FailFirstAppendsStore::refusing(carries_a_position, STAGED_RETRIES);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let first = spawn_two_batch(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let first = spawn_two_batch(&system, from_source(&source), &handled).await;
 
     wait_for_handled(&handled, 1).await;
-    stop_and_wait(&ps, &first).await;
+    stop_and_wait(&system, &first).await;
     drop(first);
 
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
     assert_eq!(
         decisions(&events).len(),
         1,
@@ -1756,15 +1684,9 @@ async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
         describe(&events)
     );
 
-    let _second = spawn_two_batch(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let _second = spawn_two_batch(&system, from_source(&source), &handled).await;
 
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
+    let events = wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
 
     assert_eq!(
         times_handled(&handled, &source, 1),
@@ -1800,33 +1722,29 @@ async fn a_closing_batch_that_never_landed_is_recovered_by_redelivery() {
 /// forever by a position the closing batch had already committed.
 #[tokio::test]
 async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(FailFirstAppendsStore::refusing(
+        carries_a_decision,
+        STAGED_RETRIES,
+    ))
+    .await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("two-batch-opening-crash-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
     // The opening `Persist` is the first append carrying a decision, and its
     // staged retries spend the whole budget — so the closing one, which the
     // position would have ridden, is accepted.  That is the one shape where a
     // position could outlive the decision it was supposed to be as durable as.
-    let saga_store = FailFirstAppendsStore::refusing(carries_a_decision, STAGED_RETRIES);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let first = spawn_two_batch(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let first = spawn_two_batch(&system, from_source(&source), &handled).await;
 
     wait_for_handled(&handled, 1).await;
-    stop_and_wait(&ps, &first).await;
+    stop_and_wait(&system, &first).await;
     drop(first);
 
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
     assert_eq!(
         decisions(&events).len(),
         1,
@@ -1843,15 +1761,9 @@ async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed()
         describe(&events)
     );
 
-    let _second = spawn_two_batch(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let _second = spawn_two_batch(&system, from_source(&source), &handled).await;
 
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
+    let events = wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
 
     assert_eq!(
         times_handled(&handled, &source, 1),
@@ -1889,32 +1801,28 @@ async fn an_input_whose_opening_batch_never_landed_is_not_recorded_as_consumed()
 /// riding the same append as `Ended`.
 #[tokio::test]
 async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritten() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(FailFirstAppendsStore::refusing(
+        carries_a_decision,
+        STAGED_RETRIES,
+    ))
+    .await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("opening-crash-then-end-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
     // Only the opening `Persist` carries a decision; the closing `End` does
     // not, so the store would have accepted that append had the interpreter
     // attempted it.  Whether it did is exactly what is under test.
-    let saga_store = FailFirstAppendsStore::refusing(carries_a_decision, STAGED_RETRIES);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let first = spawn_persist_then_end(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let first = spawn_persist_then_end(&system, from_source(&source), &handled).await;
 
     wait_for_handled(&handled, 1).await;
-    stop_and_wait(&ps, &first).await;
+    stop_and_wait(&system, &first).await;
     drop(first);
 
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
     assert!(
         decisions(&events).is_empty(),
         "the opening batch never landed, so no decision may be on the stream; \
@@ -1937,15 +1845,9 @@ async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritte
         describe(&events)
     );
 
-    let _second = spawn_persist_then_end(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let _second = spawn_persist_then_end(&system, from_source(&source), &handled).await;
 
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
+    let events = wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
 
     assert_eq!(
         times_handled(&handled, &source, 1),
@@ -2002,31 +1904,27 @@ async fn an_input_whose_opening_batch_never_landed_leaves_a_closing_end_unwritte
 /// good.
 #[tokio::test]
 async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(FailFirstAppendsStore::refusing(
+        carries_a_schedule_marker,
+        1,
+    ))
+    .await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("middle-append-crash-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
     // One refusal is one attempt's worth here: unlike a persist batch, the
     // cancellation marker's append is never retried.
-    let saga_store = FailFirstAppendsStore::refusing(carries_a_schedule_marker, 1);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
-    let first = spawn_two_batch(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let first = spawn_two_batch(&system, from_source(&source), &handled).await;
 
     wait_for_handled(&handled, 1).await;
-    stop_and_wait(&ps, &first).await;
+    stop_and_wait(&system, &first).await;
     drop(first);
 
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
     assert!(
         !events.iter().any(|e| e.event_type == SCHEDULE_MARKER),
         "the middle append must have been the one that failed; stream held {:?}",
@@ -2047,15 +1945,9 @@ async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed()
         describe(&events)
     );
 
-    let _second = spawn_two_batch(
-        &ps,
-        &saga_store,
-        from_source(&upstream_store, &source),
-        &handled,
-    )
-    .await;
+    let _second = spawn_two_batch(&system, from_source(&source), &handled).await;
 
-    let events = wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
+    let events = wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
 
     assert_eq!(
         times_handled(&handled, &source, 1),
@@ -2104,41 +1996,37 @@ async fn an_input_whose_middle_append_never_landed_is_not_recorded_as_consumed()
 /// has been handled a second delivery of seq 1 can no longer be pending.
 #[tokio::test]
 async fn an_input_that_wrote_nothing_is_still_consumed() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
     let source = AggregateId::new("empty-persist-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
     let saga_id = SagaId::new(SAGA_ID);
 
     let handled_for_first = Arc::clone(&handled);
-    let first =
-        SagaManagerProps::<EmptyPersistSaga>::new(saga_store.clone(), move |_| EmptyPersistSaga {
-            handled: Arc::clone(&handled_for_first),
-        })
-        .observing::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
+    let first = SagaManagerProps::<EmptyPersistSaga>::new(move |_| EmptyPersistSaga {
+        handled: Arc::clone(&handled_for_first),
+    })
+    .observing::<OrderPlaced>(from_source(&source))
+    .spawn(&system)
+    .await;
 
-    wait_for_saga_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
-    first.stop().await.expect("stop must succeed");
+    wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
+    first.manager().stop().await.expect("stop must succeed");
     drop(first);
 
     let handled_for_second = Arc::clone(&handled);
-    let _second =
-        SagaManagerProps::<EmptyPersistSaga>::new(saga_store.clone(), move |_| EmptyPersistSaga {
-            handled: Arc::clone(&handled_for_second),
-        })
-        .observing::<OrderPlaced>(from_source(&upstream_store, &source))
-        .spawn(&ps)
-        .await;
-    append_order_placed(&upstream_store, &source, 2, "SKU-2").await;
+    let _second = SagaManagerProps::<EmptyPersistSaga>::new(move |_| EmptyPersistSaga {
+        handled: Arc::clone(&handled_for_second),
+    })
+    .observing::<OrderPlaced>(from_source(&source))
+    .spawn(&system)
+    .await;
+    append_order_placed(&journal, &source, 2, "SKU-2").await;
 
     let barrier = wait_for_handled(&handled, 2).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
@@ -2182,35 +2070,31 @@ async fn an_input_that_wrote_nothing_is_still_consumed() {
 /// before the deadline arm ran and its append committed.
 #[tokio::test]
 async fn a_timer_firing_writes_no_consumed_position() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    let source = AggregateId::new("timer-order");
-    append_order_placed(&upstream_store, &source, 1, "SKU-1").await;
-
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store = Journal::from(RecordingStore {
+    let system = system_over(RecordingStore {
         inner: InMemoryEventStore::default(),
         batches: Arc::clone(&batches),
-    });
+    })
+    .await;
+    let journal = system.persistence().event_store();
+    let source = AggregateId::new("timer-order");
+    append_order_placed(&journal, &source, 1, "SKU-1").await;
+
     let fired = Arc::new(AtomicU64::new(0));
     let saga_id = SagaId::new(SAGA_ID);
 
     let fired_for_producer = Arc::clone(&fired);
-    let _proxy = SagaManagerProps::<SchedulingSaga>::new(saga_store.clone(), move |components| {
-        SchedulingSaga {
-            deadline: components.deadline(),
-            fired: Arc::clone(&fired_for_producer),
-        }
+    let _host = SagaManagerProps::<SchedulingSaga>::new(move |components| SchedulingSaga {
+        deadline: components.deadline(),
+        fired: Arc::clone(&fired_for_producer),
     })
     // No scheduler wiring: the alphabet declaring a deadline is the whole
     // declaration, and the host resolves the resident timer core from it.
-    .observing::<OrderPlaced>(from_source(&upstream_store, &source))
-    .spawn(&ps)
+    .observing::<OrderPlaced>(from_source(&source))
+    .spawn(&system)
     .await;
 
-    let events =
-        wait_for_saga_rows(&saga_store, &saga_id, ReservationRequested::EVENT_TYPE, 1).await;
+    let events = wait_for_saga_rows(&journal, &saga_id, ReservationRequested::EVENT_TYPE, 1).await;
 
     assert!(
         fired.load(Ordering::SeqCst) >= 1,

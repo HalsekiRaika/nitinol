@@ -4,9 +4,8 @@ use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use nitinol_eventsource::system::{EventSourceSystem, SystemHandle, Unhosted};
+use nitinol_eventsource::system::SystemHandle;
 use nitinol_eventsource::Event;
-use nitinol_persistence::provider::{PersistenceProvider, SagaOffsetSlot, Store};
 use nitinol_persistence::store::{Journal, OffsetStore};
 use nitinol_runtime::process::SupervisionStrategy;
 use nitinol_runtime::{IdleTimeout, Props};
@@ -126,63 +125,48 @@ const RESTART_WITHIN: Duration = Duration::from_secs(60);
 ///
 /// # Where it starts
 ///
-/// This is the explicit form, for a journal and a progress slot named by hand:
-/// wired through [`new`](Self::new) these props are [`Unhosted`] and
-/// [`spawn`](SagaDeliveryProps::spawn) names the system to deliver through.
+/// Nowhere on its own. A delivery host is started by the saga whose decisions
+/// it carries — [`SagaManagerProps`](crate::SagaManagerProps) starts both
+/// halves, from either entry point — and the settings below are named on that
+/// same builder. A saga whose decisions nobody carries out is not a half-wired
+/// saga but a system that runs, looks alive and does nothing, so there is no
+/// public way to start one half without the other:
 ///
-/// A host over the stores a system's own supplier distributes is not wired
-/// here at all — [`SagaSystemExt::host`](crate::SagaSystemExt::host) resolves
-/// both slots and starts that host beside the manager whose decisions it
-/// carries, with the settings below named on the same builder.
-pub struct SagaDeliveryProps<S: Saga, Cs: OffsetStore, H = Unhosted> {
-    journal: Journal,
-    offsets: Cs,
+/// ```compile_fail
+/// # use nitinol_saga::SagaDeliveryProps;
+/// # use nitinol_persistence::provider::PersistenceProvider;
+/// # use nitinol_persistence::store::InMemoryStore;
+/// # struct ReservationSaga;
+/// # fn wiring() {
+/// let persistence = PersistenceProvider::new(InMemoryStore::default());
+/// // neither `new` nor `spawn` is public: a host is started with its manager
+/// SagaDeliveryProps::<ReservationSaga, _>::new(&persistence);
+/// # }
+/// ```
+///
+/// The journal it reads and the saga-offset slot it records in are the system's,
+/// resolved at that spawn. A supplier may have configured the saga slot with the
+/// same store a projection records to: the keys cannot collide, so the table is
+/// shared — and replacing the store the projection slot is configured with still
+/// leaves this one alone.
+pub struct SagaDeliveryProps<S: Saga> {
     delivery_id: Option<SagaDeliveryId>,
     partitions: NonZeroUsize,
     poll_interval: Duration,
-    _host: PhantomData<fn() -> H>,
     _saga: PhantomData<fn() -> S>,
 }
 
-impl<S, Cs> SagaDeliveryProps<S, Cs, Unhosted>
-where
-    S: Saga,
-    Cs: OffsetStore + Clone + 'static,
-{
-    /// Begin wiring a host over the two slots `persistence` distributes.
-    ///
-    /// The journal is the store the saga's own decisions were persisted to,
-    /// which is the host's whole input, and the saga-offset slot is
-    /// where its progress is recorded. A provider may have configured that slot
-    /// with the same store a projection records to: the keys cannot collide, so
-    /// the table is shared — and replacing the store the projection slot is
-    /// configured with still leaves this one alone.
-    ///
-    /// A provider supplying no saga slot is refused here rather than when
-    /// the host first tries to record where it got to; the typestate doctest on
-    /// [`SagaSystemExt::host`](crate::SagaSystemExt::host) fixes that for a
-    /// deployment whose system resolves both slots from one supplier.
-    pub fn new<St>(persistence: &PersistenceProvider<St>) -> Self
-    where
-        St: SagaOffsetSlot<SagaOffsets = Cs>,
-    {
+impl<S: Saga> SagaDeliveryProps<S> {
+    /// The settings a host starts with when the saga's builder names none.
+    pub(crate) fn new() -> Self {
         Self {
-            journal: persistence.event_store(),
-            offsets: persistence.saga_offsets(),
             delivery_id: None,
             partitions: DEFAULT_PARTITIONS,
             poll_interval: DEFAULT_POLL_INTERVAL,
-            _host: PhantomData,
             _saga: PhantomData,
         }
     }
-}
 
-impl<S, Cs, H> SagaDeliveryProps<S, Cs, H>
-where
-    S: Saga,
-    Cs: OffsetStore + Clone + 'static,
-{
     /// Name this host, so its recorded progress is filed under `id`.
     ///
     /// Without it the identifier is derived from the event type `S` declares.
@@ -217,14 +201,26 @@ where
         self
     }
 
-    /// Start the host on `host`, and answer the handle an operator reaches it
-    /// through.
+    /// Start the host over `journal` and `offsets`, delivering through `host`,
+    /// and answer the handle an operator reaches it through.
+    ///
+    /// The two stores arrive as values from the saga's own spawn, which resolved
+    /// them from the system's supplier: this is the only way a host is started,
+    /// so there is no second place a destination could be named.
     ///
     /// The partitions are top-level processes of `host`'s process system, and
     /// they deliver through it: a target is reached by the same reference any
     /// other caller would resolve it with, so a receiving aggregate needs
     /// nothing of the host's on it.
-    pub(crate) async fn start_on(self, host: SystemHandle) -> SagaDeliveryProxy<S> {
+    pub(crate) async fn start_on<Cs>(
+        self,
+        journal: Journal,
+        offsets: Cs,
+        host: SystemHandle,
+    ) -> SagaDeliveryProxy<S>
+    where
+        Cs: OffsetStore + Clone + 'static,
+    {
         let delivery_id = self.delivery_id.unwrap_or_else(|| {
             // The key is persisted, so what it is derived from has to be
             // something the type itself fixes. The declared event type is: one
@@ -236,8 +232,8 @@ where
 
         for partition in 0..self.partitions.get() {
             let delivery_id = delivery_id.clone();
-            let journal = self.journal.clone();
-            let offsets = self.offsets.clone();
+            let journal = journal.clone();
+            let offsets = offsets.clone();
             let system_for_partition = host.clone();
             let partitions = self.partitions;
             let poll_interval = self.poll_interval;
@@ -273,25 +269,5 @@ where
         }
 
         SagaDeliveryProxy::new(delivery_id, handles)
-    }
-}
-
-impl<S, Cs> SagaDeliveryProps<S, Cs, Unhosted>
-where
-    S: Saga,
-    Cs: OffsetStore + Clone + 'static,
-{
-    /// Start the host, delivering through `system`, and answer the handle an
-    /// operator reaches it through.
-    ///
-    /// `system` is any system, whatever slots its store holds — a host is
-    /// wired from the supplier that holds its journal and its progress, and
-    /// delivers through whichever system the receiving aggregates resolve on.
-    /// The handle the partitions keep has the store's type erased, so the
-    /// mapping a saga author wrote names one system type and the partitions
-    /// stay one type whatever a deployment assembled.
-    pub async fn spawn<St: Store>(self, system: &EventSourceSystem<St>) -> SagaDeliveryProxy<S> {
-        let host = system.erase_store();
-        self.start_on(host).await
     }
 }

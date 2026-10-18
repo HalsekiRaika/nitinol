@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nitinol_persistence::store::{DeliveryMode, OffsetScope, OffsetStore};
+use nitinol_persistence::store::{DeliveryMode, Journal, OffsetScope, OffsetStore};
 use nitinol_persistence::{AggregateId, LoadedEvent};
 
 use crate::projection::ProjectionId;
@@ -27,6 +27,12 @@ pub struct ProjectorProcess<P, Cs, Tx = ()> {
     /// Built once, when this projector is spawned: the key its position is
     /// filed under never changes while it runs.
     pub(crate) offset_scope: OffsetScope,
+    /// The journal this projection follows, as the system it was spawned on
+    /// distributes it.
+    ///
+    /// Held so the poller started in `on_start` is handed the destination the
+    /// spawn resolved, rather than one the subscription carries.
+    pub(crate) store: Journal,
     pub(crate) offset_store: Cs,
     pub(crate) delivery_mode: DeliveryMode,
     pub(crate) catchup_origin: CatchupOrigin,
@@ -45,7 +51,7 @@ where
 {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         self.upstream_config
-            .spawn_child(ctx, self.upstream_cursor.clone())
+            .spawn_child(ctx, self.store.clone(), self.upstream_cursor.clone())
             .await;
     }
 }

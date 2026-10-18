@@ -2,16 +2,18 @@
 //
 // Tests verify the full request lifecycle: spawn → ask/tell/exec → persistence → state.
 //
-// AggregateProps holds Journal directly: the
-// EventPersistor process was removed and the process now calls store.append /
-// store.load inline.
+// The activation holds the Journal the system it was spawned on distributes:
+// the EventPersistor process was removed and the process now calls store.append
+// / store.load inline.
 
 use bytes::Bytes;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
-    Query, TellError,
+    Never, Query, TellError,
 };
+use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -37,6 +39,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -118,16 +121,28 @@ impl Codec<Incremented> for TestCodec {
     }
 }
 
-// Helper: spawn a Counter process holding a fresh Journal
+// Helper: spawn a Counter process on a system over a fresh Journal
 
-/// Creates a ProcessSystem and spawns a Counter AggregateProcess holding an
-/// `Journal` directly.
+/// A system over `store`, on a process system of its own.
+///
+/// A second activation of one aggregate is a second system over the same
+/// journal: one system resolves an identity to one activation, so asking the
+/// same system again would reach the resident state rather than replay the
+/// stream.
+async fn system_over(store: Journal) -> EventSourceSystem<Journal> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store))
+        .build()
+}
+
+/// Spawns a Counter AggregateProcess on a system over a fresh `Journal`.
 ///
 /// Returns (system, proxy).  Caller must keep `_system` alive.
-async fn spawn_counter(aggregate_id: AggregateId) -> (ProcessSystem, AggregateProxy<Counter>) {
-    let system = ProcessSystem::new().await;
-    let store = Journal::from(InMemoryEventStore::default());
-    let proxy = AggregateProps::<Counter>::new(aggregate_id, store)
+async fn spawn_counter(
+    aggregate_id: AggregateId,
+) -> (EventSourceSystem<Journal>, AggregateProxy<Counter>) {
+    let system = system_over(Journal::from(InMemoryEventStore::default())).await;
+    let proxy = AggregateProps::<Counter>::new(aggregate_id)
         .spawn(&system)
         .await;
     (system, proxy)
@@ -140,21 +155,20 @@ async fn spawn_counter(aggregate_id: AggregateId) -> (ProcessSystem, AggregatePr
 #[tokio::test]
 async fn ask_persists_events_to_event_store() {
     // Given
-    let system = ProcessSystem::new().await;
     let store = Journal::from(InMemoryEventStore::default());
+    let writing = system_over(store.clone()).await;
     let id = AggregateId::new("agg-ask-persist");
 
-    let proxy = AggregateProps::<Counter>::new(id.clone(), store.clone())
-        .spawn(&system)
+    let proxy = AggregateProps::<Counter>::new(id.clone())
+        .spawn(&writing)
         .await;
 
     // When
     proxy.ask(Increment).await.expect("ask must succeed");
 
     // Then: a fresh process for the same aggregate_id replays through the same Journal.
-    let proxy2 = AggregateProps::<Counter>::new(id, store)
-        .spawn(&system)
-        .await;
+    let restarted = system_over(store).await;
+    let proxy2 = AggregateProps::<Counter>::new(id).spawn(&restarted).await;
 
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
     assert_eq!(
@@ -325,6 +339,7 @@ struct CounterEnum {
 
 impl Aggregate for CounterEnum {
     type Event = CounterOp;
+    type Recover = Never;
 
     fn apply(&mut self, event: CounterOp) {
         match event {
@@ -373,11 +388,11 @@ async fn aggregate_persist_stores_the_declared_event_type_for_every_arm() {
     use nitinol_persistence::LoadQuery;
 
     // Given
-    let system = ProcessSystem::new().await;
     let store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(store.clone()).await;
     let id = AggregateId::new("agg-enum-identity-persist");
 
-    let proxy = AggregateProps::<CounterEnum>::new(id.clone(), store.clone())
+    let proxy = AggregateProps::<CounterEnum>::new(id.clone())
         .spawn(&system)
         .await;
 

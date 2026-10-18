@@ -6,12 +6,13 @@
 //      created.  No decision was reached, so the caller is told exactly that
 //      and is handed no answer; the activation lives on.
 //
-// Both cases are produced without a test double.  The raw `AggregateProps` path
-// activates per call, so two writers can be put on one stream and the in-memory
-// store rejects whichever one falls behind.  Which of the two branches
-// a writer takes is decided by when it was activated: a writer spawned before
-// anything was stored still addresses the genesis sequence, one spawned after
-// replays past it.
+// Both cases are produced without a test double.  Two systems over one store
+// are what put two writers on one stream: each system resolves an identity
+// through a registry of its own, so each activates the aggregate once, and the
+// in-memory store rejects whichever writer falls behind.  Which of the two
+// branches a writer takes is decided by when it was activated: a writer spawned
+// before anything was stored still addresses the genesis sequence, one spawned
+// after replays past it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -26,10 +27,10 @@ use nitinol_eventsource::error::PersistError;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
-    ExecError, Query, TellError,
+    ExecError, Never, Query, TellError,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
@@ -57,6 +58,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -107,17 +109,23 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 
 // Helpers
 
-/// Activate one writer for `id` on `store` through the raw props path.
+/// A system distributing `store`, with an aggregate registry of its own.
 ///
-/// The raw path spawns per call, which is what lets a test put two writers on
-/// one stream.
+/// One registry resolves an identity to one activation, so a second writer of
+/// one stream is a second system over the same store.
+async fn system_over(store: &Journal) -> EventSourceSystem<Journal> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store.clone()))
+        .build()
+}
+
+/// Activate one writer for `id` on `system`.
 async fn spawn_writer(
-    ps: &ProcessSystem,
+    system: &EventSourceSystem<Journal>,
     id: &AggregateId,
-    store: &Journal,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id.clone(), store.clone())
-        .spawn(ps)
+    AggregateProps::<Counter>::new(id.clone())
+        .spawn(system)
         .await
 }
 
@@ -138,6 +146,29 @@ async fn pin_replayed_state(proxy: &AggregateProxy<Counter>, expected: u64) {
         count, expected,
         "the writer must be parked after {expected} event(s) before the test proceeds"
     );
+}
+
+/// A second reference to `id` on `system`, left addressing the activation that
+/// is running now.
+///
+/// A reference treats the death of the activation it reached as an invalidation
+/// signal and resolves again, so the reference a conflict is reported to cannot
+/// be used to observe the writer it addressed stopping: its next dispatch
+/// starts a fresh activation.  A second reference to the same identity holds
+/// the activation it first reached until a dispatch of its own fails, so it is
+/// still addressing the one that stopped — which is what makes the stop
+/// observable at all.
+///
+/// The dispatch here is what makes it hold that activation, and it reports
+/// `expected` for the same reason [`pin_replayed_state`] does.
+async fn reference_to_the_live_activation(
+    system: &EventSourceSystem<Journal>,
+    id: &AggregateId,
+    expected: u64,
+) -> AggregateProxy<Counter> {
+    let proxy = system.aggregate_proxy::<Counter>(id.clone());
+    pin_replayed_state(&proxy, expected).await;
+    proxy
 }
 
 /// Stream sequences stored under `id`, in ascending order.
@@ -180,15 +211,17 @@ async fn await_stopped(proxy: &AggregateProxy<Counter>) {
 #[tokio::test]
 async fn non_genesis_conflict_stops_the_losing_writer() {
     // Given
-    let ps = ProcessSystem::new().await;
     let store = Journal::from(InMemoryEventStore::default());
+    let winning_system = system_over(&store).await;
+    let losing_system = system_over(&store).await;
     let id = AggregateId::new("conflict-non-genesis");
 
-    let winner = spawn_writer(&ps, &id, &store).await;
+    let winner = spawn_writer(&winning_system, &id).await;
     winner.ask(Increment).await.expect("genesis append");
 
-    let loser = spawn_writer(&ps, &id, &store).await;
+    let loser = spawn_writer(&losing_system, &id).await;
     pin_replayed_state(&loser, 1).await;
+    let stopped = reference_to_the_live_activation(&losing_system, &id, 1).await;
 
     winner
         .ask(Increment)
@@ -209,7 +242,7 @@ async fn non_genesis_conflict_stops_the_losing_writer() {
         ),
         "the store's OCC rejection must reach the caller unchanged, got {err:?}"
     );
-    await_stopped(&loser).await;
+    await_stopped(&stopped).await;
     assert_eq!(
         stored_sequences(&store, &id).await,
         vec![1, 2],
@@ -231,15 +264,18 @@ async fn non_genesis_conflict_stops_the_losing_writer() {
 #[tokio::test]
 async fn a_tell_to_a_writer_stopped_by_a_conflict_is_refused() {
     // Given: the loser of the same race C-1 stops
-    let ps = ProcessSystem::new().await;
     let store = Journal::from(InMemoryEventStore::default());
+    let winning_system = system_over(&store).await;
+    let losing_system = system_over(&store).await;
     let id = AggregateId::new("conflict-non-genesis-tell");
 
-    let winner = spawn_writer(&ps, &id, &store).await;
+    let winner = spawn_writer(&winning_system, &id).await;
     winner.ask(Increment).await.expect("genesis append");
 
-    let loser = spawn_writer(&ps, &id, &store).await;
+    let loser = spawn_writer(&losing_system, &id).await;
     pin_replayed_state(&loser, 1).await;
+    let stopped = reference_to_the_live_activation(&losing_system, &id, 1).await;
+    let telling = reference_to_the_live_activation(&losing_system, &id, 1).await;
 
     winner
         .ask(Increment)
@@ -249,10 +285,10 @@ async fn a_tell_to_a_writer_stopped_by_a_conflict_is_refused() {
         .ask(Increment)
         .await
         .expect_err("the writer that fell behind must lose the stream");
-    await_stopped(&loser).await;
+    await_stopped(&stopped).await;
 
     // When: a command is told to the writer that just stopped
-    let outcome = loser.tell(Increment).await;
+    let outcome = telling.tell(Increment).await;
 
     // Then
     assert!(
@@ -275,12 +311,13 @@ async fn a_tell_to_a_writer_stopped_by_a_conflict_is_refused() {
 async fn genesis_conflict_is_answered_as_already_created() {
     // Given: both writers exist before anything is stored, so both address the
     // genesis sequence.
-    let ps = ProcessSystem::new().await;
     let store = Journal::from(InMemoryEventStore::default());
+    let creating_system = system_over(&store).await;
+    let redelivering_system = system_over(&store).await;
     let id = AggregateId::new("conflict-genesis-answer");
 
-    let creator = spawn_writer(&ps, &id, &store).await;
-    let redelivered = spawn_writer(&ps, &id, &store).await;
+    let creator = spawn_writer(&creating_system, &id).await;
+    let redelivered = spawn_writer(&redelivering_system, &id).await;
     pin_replayed_state(&redelivered, 0).await;
 
     creator.ask(Increment).await.expect("genesis append");
@@ -309,12 +346,13 @@ async fn genesis_conflict_is_answered_as_already_created() {
 #[tokio::test]
 async fn genesis_conflict_leaves_the_writer_alive_and_unchanged() {
     // Given
-    let ps = ProcessSystem::new().await;
     let store = Journal::from(InMemoryEventStore::default());
+    let creating_system = system_over(&store).await;
+    let redelivering_system = system_over(&store).await;
     let id = AggregateId::new("conflict-genesis-alive");
 
-    let creator = spawn_writer(&ps, &id, &store).await;
-    let redelivered = spawn_writer(&ps, &id, &store).await;
+    let creator = spawn_writer(&creating_system, &id).await;
+    let redelivered = spawn_writer(&redelivering_system, &id).await;
     pin_replayed_state(&redelivered, 0).await;
 
     creator.ask(Increment).await.expect("genesis append");
@@ -345,12 +383,13 @@ async fn genesis_conflict_leaves_the_writer_alive_and_unchanged() {
 #[tokio::test]
 async fn genesis_conflict_does_not_advance_the_writer_sequence() {
     // Given
-    let ps = ProcessSystem::new().await;
     let store = Journal::from(InMemoryEventStore::default());
+    let creating_system = system_over(&store).await;
+    let redelivering_system = system_over(&store).await;
     let id = AggregateId::new("conflict-genesis-sequence");
 
-    let creator = spawn_writer(&ps, &id, &store).await;
-    let redelivered = spawn_writer(&ps, &id, &store).await;
+    let creator = spawn_writer(&creating_system, &id).await;
+    let redelivered = spawn_writer(&redelivering_system, &id).await;
     pin_replayed_state(&redelivered, 0).await;
 
     creator.ask(Increment).await.expect("genesis append");
@@ -390,25 +429,17 @@ async fn genesis_conflict_does_not_advance_the_writer_sequence() {
 #[tokio::test]
 async fn genesis_conflict_keeps_the_reference_on_its_activation() {
     // Given: a resolved reference parked at the genesis sequence
-    let ps = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(InMemoryEventStore::default())
-            .build(),
-    );
-    let store = persistence.event_store();
-    let system = EventSourceSystem::builder(ps)
-        .with_persistence(persistence)
-        .build();
+    let store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(&store).await;
     let id = AggregateId::new("conflict-genesis-reference");
 
     let resolved = system.spawn_aggregate::<Counter>(id.clone()).await;
     pin_replayed_state(&resolved, 0).await;
 
-    // And: someone else creates the aggregate first
-    let creator = AggregateProps::<Counter>::new(id.clone(), store.clone())
-        .spawn(system.process_system())
-        .await;
+    // And: someone else — a second system over the same store, so a second
+    // activation of this stream — creates the aggregate first
+    let creating_system = system_over(&store).await;
+    let creator = spawn_writer(&creating_system, &id).await;
     creator.ask(Increment).await.expect("genesis append");
 
     // When
@@ -487,15 +518,21 @@ impl EventStore for FailFirstLoadStore {
 #[tokio::test]
 async fn replay_failure_does_not_masquerade_as_a_genesis_conflict() {
     // Given: the writer's own replay fails before anything is stored.
-    let ps = ProcessSystem::new().await;
     let store = Journal::from(FailFirstLoadStore::new());
+    let unreplayed_system = system_over(&store).await;
+    let creating_system = system_over(&store).await;
     let id = AggregateId::new("conflict-genesis-replay-failure");
 
-    let unreplayed = spawn_writer(&ps, &id, &store).await;
-    await_stopped(&unreplayed).await;
+    let unreplayed = spawn_writer(&unreplayed_system, &id).await;
+    // The stop is awaited on a reference of its own: a writer whose replay
+    // failed never answers a user message, so the activation cannot be reached
+    // through `reference_to_the_live_activation`, and awaiting it on
+    // `unreplayed` would leave that reference resolving a fresh activation
+    // instead of the one that failed.
+    await_stopped(&unreplayed_system.aggregate_proxy::<Counter>(id.clone())).await;
 
     // And: another writer later creates the aggregate for real.
-    let creator = spawn_writer(&ps, &id, &store).await;
+    let creator = spawn_writer(&creating_system, &id).await;
     creator.ask(Increment).await.expect("genesis append");
 
     // Then: the writer that failed to replay must already be gone — it must
@@ -526,8 +563,8 @@ async fn replay_failure_does_not_masquerade_as_a_genesis_conflict() {
 async fn replay_decode_failure_does_not_masquerade_as_a_genesis_conflict() {
     // Given: the stream already holds an event this writer's codec cannot
     // decode.
-    let ps = ProcessSystem::new().await;
     let store = Journal::from(InMemoryEventStore::default());
+    let unreplayed_system = system_over(&store).await;
     let id = AggregateId::new("conflict-genesis-decode-failure");
     store
         .append(
@@ -543,8 +580,11 @@ async fn replay_decode_failure_does_not_masquerade_as_a_genesis_conflict() {
         .expect("seeding the undecodable event must succeed");
 
     // When: a writer is activated against that stream.
-    let unreplayed = spawn_writer(&ps, &id, &store).await;
-    await_stopped(&unreplayed).await;
+    let unreplayed = spawn_writer(&unreplayed_system, &id).await;
+    // Awaited on a reference of its own for the reason the load-failure case
+    // above states: the reference the spawn handed back is left addressing the
+    // activation that could not decode the stream.
+    await_stopped(&unreplayed_system.aggregate_proxy::<Counter>(id.clone())).await;
 
     // Then: it must already be gone rather than still answering as though it
     // replayed to `sequence == 0` and can treat the next append conflict on

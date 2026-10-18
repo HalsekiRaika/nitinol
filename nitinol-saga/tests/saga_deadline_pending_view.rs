@@ -54,9 +54,13 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, SagaOffsetSlot};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, Journal,
+};
 use nitinol_persistence::{AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -347,22 +351,28 @@ async fn wait_for_fires(fires: &Fires, expected: usize) -> Vec<String> {
     }
 }
 
-async fn spawn_view_saga(
-    ps: &ProcessSystem,
-    saga_store: &Journal,
-    upstream_store: &Journal,
+/// A system over one in-memory journal: the saga's own stream and the upstream
+/// probe stream are tenants of it, kept apart by stream key.
+async fn in_memory_system() -> EventSourceSystem<InMemoryStore> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build()
+}
+
+async fn spawn_view_saga<St: SagaOffsetSlot>(
+    system: &EventSourceSystem<St>,
     reports: &Reports,
     fires: &Fires,
-) -> nitinol_saga::SagaManagerProxy<ViewSaga> {
+) -> nitinol_saga::SagaHostProxy<ViewSaga> {
     let reports = Arc::clone(reports);
     let fires = Arc::clone(fires);
-    SagaManagerProps::<ViewSaga>::new(saga_store.clone(), move |components| ViewSaga {
+    SagaManagerProps::<ViewSaga>::new(move |components| ViewSaga {
         deadline: components.deadline(),
         reports: Arc::clone(&reports),
         fires: Arc::clone(&fires),
     })
-    .observing::<Probe>(Subscription::stream(upstream_store, UPSTREAM))
-    .spawn(ps)
+    .observing::<Probe>(Subscription::stream(UPSTREAM))
+    .spawn(system)
     .await
 }
 
@@ -374,13 +384,8 @@ async fn spawn_view_saga(
 /// record to arrive.  Its position is already on the stream, so it is dropped
 /// before `Saga::handle` — which is what keeps the reports below counting only
 /// the probes the test asks about.
-async fn seed_an_inert_boot_probe(
-    saga_store: &Journal,
-    saga_id: &SagaId,
-    saga_sequence: u64,
-    upstream_store: &Journal,
-) {
-    saga_store
+async fn seed_an_inert_boot_probe(journal: &Journal, saga_id: &SagaId, saga_sequence: u64) {
+    journal
         .append(
             saga_id.as_str(),
             vec![AppendingEvent {
@@ -393,7 +398,7 @@ async fn seed_an_inert_boot_probe(
         .await
         .expect("seeding a consumed position must succeed");
 
-    append_probe(upstream_store, 1, None).await;
+    append_probe(journal, 1, None).await;
 }
 
 fn due(anchor_unix_millis: i64, after: Duration) -> jiff::Timestamp {
@@ -410,20 +415,19 @@ fn due(anchor_unix_millis: i64, after: Duration) -> jiff::Timestamp {
 /// restored from the journal, with no prior incarnation in memory.
 #[tokio::test]
 async fn replay_restores_the_pending_deadline_view_from_the_journal() {
-    let ps = ProcessSystem::new().await;
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let anchor = jiff::Timestamp::now().as_millisecond();
     let after = Duration::from_secs(10);
-    seed_scheduled(&saga_store, &saga_id, 1, "far-off", after, anchor).await;
+    seed_scheduled(&journal, &saga_id, 1, "far-off", after, anchor).await;
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    append_probe(&upstream_store, 1, None).await;
+    append_probe(&journal, 1, None).await;
 
     let reports: Reports = Arc::new(Mutex::new(Vec::new()));
     let fires: Fires = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_view_saga(&ps, &saga_store, &upstream_store, &reports, &fires).await;
+    let _host = spawn_view_saga(&system, &reports, &fires).await;
 
     let observed = wait_for_reports(&reports, 1).await;
 
@@ -440,13 +444,13 @@ async fn replay_restores_the_pending_deadline_view_from_the_journal() {
 /// Then `pending()` no longer holds it.
 #[tokio::test]
 async fn a_fired_deadline_leaves_the_pending_view() {
-    let ps = ProcessSystem::new().await;
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let anchor = jiff::Timestamp::now().as_millisecond();
     seed_scheduled(
-        &saga_store,
+        &journal,
         &saga_id,
         1,
         "soon",
@@ -458,12 +462,11 @@ async fn a_fired_deadline_leaves_the_pending_view() {
     // One already-consumed probe, so the instance this host fronts exists and
     // replays; it is dropped before `handle`, so the only report below is the
     // one the test asks for.
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    seed_an_inert_boot_probe(&saga_store, &saga_id, 2, &upstream_store).await;
+    seed_an_inert_boot_probe(&journal, &saga_id, 2).await;
     let reports: Reports = Arc::new(Mutex::new(Vec::new()));
     let fires: Fires = Arc::new(Mutex::new(Vec::new()));
 
-    let _proxy = spawn_view_saga(&ps, &saga_store, &upstream_store, &reports, &fires).await;
+    let _host = spawn_view_saga(&system, &reports, &fires).await;
 
     // The firing is the barrier for the probe that follows it.
     assert_eq!(
@@ -472,7 +475,7 @@ async fn a_fired_deadline_leaves_the_pending_view() {
         "the re-armed deadline must fire before the view is probed"
     );
 
-    append_probe(&upstream_store, 2, None).await;
+    append_probe(&journal, 2, None).await;
     let observed = wait_for_reports(&reports, 1).await;
 
     assert_eq!(
@@ -488,24 +491,32 @@ async fn a_fired_deadline_leaves_the_pending_view() {
 /// asked for.
 #[tokio::test]
 async fn an_append_that_never_landed_leaves_the_pending_view_empty() {
-    let ps = ProcessSystem::new().await;
+    // The one journal of this system refuses the schedule fact's append and
+    // accepts everything else, so the upstream probes still land.  The saga
+    // offset slot is named because starting a saga starts its delivery host.
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(FailScheduleAppendStore {
+                    inner: InMemoryEventStore::default(),
+                    failing: Arc::new(AtomicBool::new(true)),
+                })
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build();
+    let journal = system.persistence().event_store();
 
-    let saga_store = Journal::from(FailScheduleAppendStore {
-        inner: InMemoryEventStore::default(),
-        failing: Arc::new(AtomicBool::new(true)),
-    });
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     // The first probe sets a deadline whose fact cannot land; the second reads
     // the view back.
-    append_probe(&upstream_store, 1, Some(("never-landed", 10_000))).await;
+    append_probe(&journal, 1, Some(("never-landed", 10_000))).await;
 
     let reports: Reports = Arc::new(Mutex::new(Vec::new()));
     let fires: Fires = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_view_saga(&ps, &saga_store, &upstream_store, &reports, &fires).await;
+    let _host = spawn_view_saga(&system, &reports, &fires).await;
 
     wait_for_reports(&reports, 1).await;
-    append_probe(&upstream_store, 2, None).await;
+    append_probe(&journal, 2, None).await;
     let observed = wait_for_reports(&reports, 2).await;
 
     assert_eq!(

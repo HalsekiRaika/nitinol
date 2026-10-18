@@ -41,7 +41,7 @@ fn persistence_feature_exposes_id_types() {
 fn eventsource_feature_exposes_aggregate_and_projection() {
     // These types come from nitinol::eventsource re-export
     use nitinol::contract::Codec;
-    use nitinol::eventsource::{Aggregate, AggregateProps, Event, ProjectorProps};
+    use nitinol::eventsource::{Aggregate, AggregateProps, Event, Never, ProjectorProps};
     // EventType lives in nitinol-persistence; the eventsource feature transitively
     // enables the persistence feature, so nitinol::persistence is re-exported.
     use nitinol::persistence::{EventType, Family, TypeName};
@@ -73,6 +73,7 @@ fn eventsource_feature_exposes_aggregate_and_projection() {
     struct DummyAggregate;
     impl Aggregate for DummyAggregate {
         type Event = DummyEvent;
+        type Recover = Never;
         fn apply(&mut self, _event: DummyEvent) {}
     }
 

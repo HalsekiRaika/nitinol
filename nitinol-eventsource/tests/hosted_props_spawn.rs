@@ -20,10 +20,10 @@
 //!     And it applies the records in the store that system was built on
 //!     And it records its position in that store's projection slot
 //!
-//!   Scenario: props built directly still name where they start
-//!     Given props built from a store rather than from a system
-//!     When the caller spawns them
-//!     Then the process system they are given is where they start
+//!   Scenario: props built directly take the store of the system they are given
+//!     Given props built on their own rather than taken from a system
+//!     When the caller spawns them on a system
+//!     Then their events are in the store that system was built on
 //! ```
 //!
 //! What is observed is mostly the *store the system was built on*, read
@@ -45,9 +45,10 @@
 //! exactly one writer. A hosted spawn that activated on a process system of its
 //! own — or through a registry of its own — would be that second writer.
 //!
-//! The last clause is here because the low-level entry point is kept: props
-//! built directly start a lifecycle on the process system they are handed, and
-//! nothing about the hosted form takes that away.
+//! The last clause is here because the props-first entry point is kept: props
+//! assembled on their own name no store either, so the system they are handed
+//! at the spawn is what settles where they write — the same store the hosted
+//! form takes from the system that produced the props.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -61,7 +62,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     codec::Codec, system::EventSourceSystem, Aggregate, AggregateProps, Decider, Decision, Event,
-    ProjectionContext, ProjectionId, Projector, Query,
+    Never, ProjectionContext, ProjectionId, Projector, Query,
 };
 use nitinol_persistence::provider::{
     CustomStore, PersistenceProvider, ProjectionOffsetSlot, Store,
@@ -105,6 +106,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -370,22 +372,25 @@ async fn projector_props_from_a_system_spawn_without_a_process_system() {
 
 // The entry point built directly
 
-/// Props built from a store rather than from a system start on the process
-/// system they are handed.
+/// Props built on their own write to the store of the system they are spawned
+/// on.
 ///
-/// A lifecycle pinned to one aggregate is started this way, so the argument
-/// stays where there is no system to take it from. What the hosted form
-/// replaces is the call that took an argument and ignored it.
+/// Wiring assembled before the deployment's store is known is written this way,
+/// so the argument stays where there is no system to take it from. It is the
+/// system that answers with the store either way: props carry none of their
+/// own, so there is nothing for a spawn to disagree with.
 #[tokio::test]
-async fn props_built_directly_start_on_the_process_system_they_are_given() {
-    // Given
-    let ps = ProcessSystem::new().await;
+async fn props_built_directly_write_to_the_store_of_the_system_they_are_given() {
+    // Given: a journal this clause holds, and a system built over it
     let events = Journal::from(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(events.clone()))
+        .build();
     let id = AggregateId::new("unhosted-aggregate-props");
 
     // When
-    let proxy = AggregateProps::<Counter>::new(id.clone(), &events)
-        .spawn(&ps)
+    let proxy = AggregateProps::<Counter>::new(id.clone())
+        .spawn(&system)
         .await;
     proxy.ask(Increment).await.expect("ask must succeed");
 
@@ -393,8 +398,8 @@ async fn props_built_directly_start_on_the_process_system_they_are_given() {
     assert_eq!(
         stored_sequences(&events, &id).await,
         vec![1],
-        "props built directly keep the low-level form: the process system is \
-         named at the spawn, and the store is the one they were built on"
+        "props built directly keep the props-first form: the system is named at \
+         the spawn, and the store it was built on is where the appends land"
     );
 }
 

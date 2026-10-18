@@ -43,9 +43,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, Journal,
+};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
@@ -130,17 +134,26 @@ struct RecordedEvent {
 type Batches = Arc<Mutex<Vec<Vec<RecordedEvent>>>>;
 
 /// `EventStore` decorator that appends one entry to `batches` per successful
-/// `append` call, preserving the events of that call as a group.
+/// `append` call to one named stream, preserving the events of that call as a
+/// group.
+///
+/// The stream is named because a system distributes one journal: the upstream
+/// row a scenario seeds is a tenant of the very store the saga's own decisions
+/// land on, and a batch boundary the fixture wrote is not one the interpreter
+/// produced.
 #[derive(Clone)]
 struct RecordingStore {
     inner: InMemoryEventStore,
+    /// Stream key whose appends are recorded — the saga's own.
+    watched: String,
     batches: Batches,
 }
 
 impl RecordingStore {
-    fn new(batches: Batches) -> Self {
+    fn watching(saga_id: &str, batches: Batches) -> Self {
         Self {
             inner: InMemoryEventStore::default(),
+            watched: saga_id.to_owned(),
             batches,
         }
     }
@@ -160,13 +173,16 @@ impl EventStore for RecordingStore {
                 payload: e.payload.clone(),
             })
             .collect();
+        let watched = key == self.watched;
         // Record only after the append durably succeeds: a failed attempt never
         // produced a batch boundary in the stream.
         let outcome = self.inner.append(key, events).await?;
-        self.batches
-            .lock()
-            .expect("recording store batch buffer must not be poisoned")
-            .push(recorded);
+        if watched {
+            self.batches
+                .lock()
+                .expect("recording store batch buffer must not be poisoned")
+                .push(recorded);
+        }
         Ok(outcome)
     }
 
@@ -765,37 +781,47 @@ fn assert_single_atomic_batch(recorded: &[Vec<RecordedEvent>], shape: &str) {
     );
 }
 
-/// Everything every scenario in this file needs: a runtime, a one-event
-/// upstream stream, and a saga store that records the boundary of each append.
+/// The store every scenario in this file is spawned over: the journal whose
+/// append boundaries are recorded, plus the saga-offset slot the delivery host
+/// a saga spawn starts records its progress in, and no other slot — nothing
+/// here snapshots or projects.
+type CombineStore = CustomStore<Unprovided, Unprovided, InMemoryOffsetStore>;
+
+/// Everything every scenario in this file needs: a system over a journal that
+/// records the boundary of each append to the saga's own stream, and the
+/// one-event upstream stream on that same journal.
 ///
 /// The scenarios differ only in the effect `handle` returns, so the wiring is
 /// shared while the spawn — which names the saga type and its producer — and
 /// the assertions stay in each test.
 struct Fixture {
-    ps: ProcessSystem,
-    upstream_store: Journal,
+    system: EventSourceSystem<CombineStore>,
     order_id: AggregateId,
     batches: Batches,
-    saga_store: Journal,
     handled: Arc<Notify>,
 }
 
-async fn fixture(stream: &str, sku: &str) -> Fixture {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    let order_id = AggregateId::new(stream);
-    append_order_placed(&upstream_store, &order_id, 1, sku).await;
-
+/// Wire a scenario: `stream` is the upstream key the one order is appended to,
+/// and `saga_id` is the stream whose appends the recorder keeps — the
+/// correlation the saga under test answers with.
+async fn fixture(stream: &str, sku: &str, saga_id: &str) -> Fixture {
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store = Journal::from(RecordingStore::new(Arc::clone(&batches)));
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(RecordingStore::watching(saga_id, Arc::clone(&batches)))
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build();
+
+    let order_id = AggregateId::new(stream);
+    append_order_placed(&system.persistence().event_store(), &order_id, 1, sku).await;
 
     Fixture {
-        ps,
-        upstream_store,
+        system,
         order_id,
         batches,
-        saga_store,
         handled: Arc::new(Notify::new()),
     }
 }
@@ -821,18 +847,22 @@ impl Fixture {
 /// justifies it survives, or the other way round.
 #[tokio::test]
 async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
-    let f = fixture("combine-schedule-order", "SKU-1").await;
+    let f = fixture(
+        "combine-schedule-order",
+        "SKU-1",
+        PERSIST_COMBINE_SCHEDULE_SAGA_ID,
+    )
+    .await;
 
     let handled = Arc::clone(&f.handled);
-    let _manager_proxy = SagaManagerProps::<PersistCombineScheduleSaga>::new(
-        f.saga_store.clone(),
-        move |components| PersistCombineScheduleSaga {
+    let _manager_proxy = SagaManagerProps::<PersistCombineScheduleSaga>::new(move |components| {
+        PersistCombineScheduleSaga {
             deadline: components.deadline(),
             handled: Arc::clone(&handled),
-        },
-    )
-    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
-    .spawn(&f.ps)
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&f.order_id))
+    .spawn(&f.system)
     .await;
 
     // domain event + the `scheduled` fact + the consumed position; the timer
@@ -852,19 +882,24 @@ async fn persist_combined_with_schedule_is_written_in_one_append_batch() {
 /// unmerged and reopening the window `combine`'s junction fold exists to close.
 #[tokio::test]
 async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
-    let f = fixture("sequence-single-order", "SKU-SEQ").await;
+    let f = fixture(
+        "sequence-single-order",
+        "SKU-SEQ",
+        PERSIST_SEQUENCED_WITH_SCHEDULE_SAGA_ID,
+    )
+    .await;
 
     let handled = Arc::clone(&f.handled);
-    let _manager_proxy = SagaManagerProps::<PersistSequencedWithScheduleSaga>::new(
-        f.saga_store.clone(),
-        move |components| PersistSequencedWithScheduleSaga {
-            deadline: components.deadline(),
-            handled: Arc::clone(&handled),
-        },
-    )
-    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
-    .spawn(&f.ps)
-    .await;
+    let _manager_proxy =
+        SagaManagerProps::<PersistSequencedWithScheduleSaga>::new(move |components| {
+            PersistSequencedWithScheduleSaga {
+                deadline: components.deadline(),
+                handled: Arc::clone(&handled),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&f.order_id))
+        .spawn(&f.system)
+        .await;
 
     let recorded = f.observe(3).await;
 
@@ -881,19 +916,24 @@ async fn hand_built_sequence_of_two_persists_is_written_in_one_append_batch() {
 /// otherwise-adjacent `Persist × Persist` junction.
 #[tokio::test]
 async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append_batch() {
-    let f = fixture("sequence-empty-nested-order", "SKU-SEQ-EMPTY").await;
+    let f = fixture(
+        "sequence-empty-nested-order",
+        "SKU-SEQ-EMPTY",
+        PERSIST_SEQUENCED_WITH_EMPTY_NESTED_SEQUENCE_SAGA_ID,
+    )
+    .await;
 
     let handled = Arc::clone(&f.handled);
-    let _manager_proxy = SagaManagerProps::<PersistSequencedWithEmptyNestedSequenceSaga>::new(
-        f.saga_store.clone(),
-        move |components| PersistSequencedWithEmptyNestedSequenceSaga {
-            deadline: components.deadline(),
-            handled: Arc::clone(&handled),
-        },
-    )
-    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
-    .spawn(&f.ps)
-    .await;
+    let _manager_proxy =
+        SagaManagerProps::<PersistSequencedWithEmptyNestedSequenceSaga>::new(move |components| {
+            PersistSequencedWithEmptyNestedSequenceSaga {
+                deadline: components.deadline(),
+                handled: Arc::clone(&handled),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&f.order_id))
+        .spawn(&f.system)
+        .await;
 
     let recorded = f.observe(3).await;
 
@@ -913,19 +953,24 @@ async fn hand_built_sequence_with_empty_nested_sequence_is_written_in_one_append
 /// whether a timer is armed against a durable decision.
 #[tokio::test]
 async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
-    let f = fixture("sequence-none-leaf-order", "SKU-SEQ-NONE").await;
+    let f = fixture(
+        "sequence-none-leaf-order",
+        "SKU-SEQ-NONE",
+        PERSIST_SEQUENCED_WITH_NONE_LEAF_SAGA_ID,
+    )
+    .await;
 
     let handled = Arc::clone(&f.handled);
-    let _manager_proxy = SagaManagerProps::<PersistSequencedWithNoneLeafSaga>::new(
-        f.saga_store.clone(),
-        move |components| PersistSequencedWithNoneLeafSaga {
-            deadline: components.deadline(),
-            handled: Arc::clone(&handled),
-        },
-    )
-    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
-    .spawn(&f.ps)
-    .await;
+    let _manager_proxy =
+        SagaManagerProps::<PersistSequencedWithNoneLeafSaga>::new(move |components| {
+            PersistSequencedWithNoneLeafSaga {
+                deadline: components.deadline(),
+                handled: Arc::clone(&handled),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&f.order_id))
+        .spawn(&f.system)
+        .await;
 
     let recorded = f.observe(3).await;
 
@@ -943,19 +988,24 @@ async fn hand_built_sequence_with_none_leaf_is_written_in_one_append_batch() {
 /// `Shape` can only compare the specs a single effect value holds.
 #[tokio::test]
 async fn combined_schedules_keep_left_to_right_order_inside_the_single_batch() {
-    let f = fixture("combine-order-order", "SKU-2").await;
+    let f = fixture(
+        "combine-order-order",
+        "SKU-2",
+        PERSIST_COMBINE_TWO_SCHEDULES_SAGA_ID,
+    )
+    .await;
 
     let handled = Arc::clone(&f.handled);
-    let _manager_proxy = SagaManagerProps::<PersistCombineTwoSchedulesSaga>::new(
-        f.saga_store.clone(),
-        move |components| PersistCombineTwoSchedulesSaga {
-            deadline: components.deadline(),
-            handled: Arc::clone(&handled),
-        },
-    )
-    .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
-    .spawn(&f.ps)
-    .await;
+    let _manager_proxy =
+        SagaManagerProps::<PersistCombineTwoSchedulesSaga>::new(move |components| {
+            PersistCombineTwoSchedulesSaga {
+                deadline: components.deadline(),
+                handled: Arc::clone(&handled),
+            }
+        })
+        .observing::<OrderPlaced>(Subscription::stream(&f.order_id))
+        .spawn(&f.system)
+        .await;
 
     // domain event + 2 `scheduled` facts + the consumed position.
     let recorded = f.observe(4).await;
@@ -1002,18 +1052,16 @@ async fn combined_schedules_keep_left_to_right_order_inside_the_single_batch() {
 /// durable while the cancellation it also owes is not.
 #[tokio::test]
 async fn a_cancellation_is_a_hard_boundary_the_fold_does_not_cross() {
-    let f = fixture("combine-cancel-order", "SKU-CANCEL").await;
+    let f = fixture("combine-cancel-order", "SKU-CANCEL", PERSIST_CANCEL_SAGA_ID).await;
 
     let handled = Arc::clone(&f.handled);
     let _manager_proxy =
-        SagaManagerProps::<PersistCancelSaga>::new(f.saga_store.clone(), move |components| {
-            PersistCancelSaga {
-                deadline: components.deadline(),
-                handled: Arc::clone(&handled),
-            }
+        SagaManagerProps::<PersistCancelSaga>::new(move |components| PersistCancelSaga {
+            deadline: components.deadline(),
+            handled: Arc::clone(&handled),
         })
-        .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
-        .spawn(&f.ps)
+        .observing::<OrderPlaced>(Subscription::stream(&f.order_id))
+        .spawn(&f.system)
         .await;
 
     // domain event + the `cancelled` fact + the consumed position.
@@ -1067,17 +1115,15 @@ async fn a_cancellation_is_a_hard_boundary_the_fold_does_not_cross() {
 /// into the preceding decision.
 #[tokio::test]
 async fn end_is_a_hard_boundary_the_fold_does_not_cross() {
-    let f = fixture("combine-end-order", "SKU-END").await;
+    let f = fixture("combine-end-order", "SKU-END", PERSIST_THEN_END_SAGA_ID).await;
 
     let handled = Arc::clone(&f.handled);
     let _manager_proxy =
-        SagaManagerProps::<PersistThenEndSaga>::new(f.saga_store.clone(), move |_components| {
-            PersistThenEndSaga {
-                handled: Arc::clone(&handled),
-            }
+        SagaManagerProps::<PersistThenEndSaga>::new(move |_components| PersistThenEndSaga {
+            handled: Arc::clone(&handled),
         })
-        .observing::<OrderPlaced>(Subscription::stream(&f.upstream_store, &f.order_id))
-        .spawn(&f.ps)
+        .observing::<OrderPlaced>(Subscription::stream(&f.order_id))
+        .spawn(&f.system)
         .await;
 
     // domain event + the `Ended` lifecycle fact + the consumed position.

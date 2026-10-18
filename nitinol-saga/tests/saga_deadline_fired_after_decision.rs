@@ -88,9 +88,13 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, Journal,
+};
 use nitinol_persistence::{
     AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -607,16 +611,24 @@ async fn wait_for_ended(store: &Journal, saga_id: &SagaId) {
     }
 }
 
-/// One live incarnation of the saga: the upstream it answers probes from, and
+/// The store every incarnation here is wired from: the journal under test, plus
+/// the saga-offset slot a spawn requires because it starts a delivery host.
+///
+/// The journal keeps no type of its own — the builder erases it — so one alias
+/// names the store whichever backend a test hands over.
+type SettleStore = CustomStore<Unprovided, Unprovided, InMemoryOffsetStore>;
+
+/// One live incarnation of the saga: the journal it answers probes from, and
 /// what it recorded.
 ///
-/// Held whole by each test — dropping the system or the proxy would take the
-/// process down — and started on a `ProcessSystem` of its own, so the resident
-/// scheduler a restart arms its deadlines with is as empty as a fresh process's:
-/// nothing an earlier incarnation registered can fire into this one.
+/// Held whole by each test — dropping the system or the host would take the
+/// process down — and started on an `EventSourceSystem` whose `ProcessSystem` is
+/// its own, so the resident scheduler a restart arms its deadlines with is as
+/// empty as a fresh process's: nothing an earlier incarnation registered can
+/// fire into this one.
 struct Incarnation {
-    _system: ProcessSystem,
-    _proxy: nitinol_saga::SagaManagerProxy<FiringSaga>,
+    _system: EventSourceSystem<SettleStore>,
+    _host: nitinol_saga::SagaHostProxy<FiringSaga>,
     upstream: Journal,
     upstream_key: &'static str,
     probes_sent: AtomicU64,
@@ -644,15 +656,28 @@ async fn next_sequence(store: &Journal, saga_id: &SagaId) -> u64 {
 }
 
 impl Incarnation {
-    async fn start(saga_store: &Journal, saga_id: &SagaId, upstream_key: &'static str) -> Self {
-        let system = ProcessSystem::new().await;
-        // An upstream of its own: a position this incarnation records is
-        // keyed by the stream it read, so sharing one key with an earlier
-        // incarnation would make its probes look already consumed.
-        let upstream = Journal::from(InMemoryEventStore::default());
+    /// Start one incarnation over `backend` — the journal the saga's own stream
+    /// and every upstream here are tenants of.
+    async fn start<E>(backend: &E, saga_id: &SagaId, upstream_key: &'static str) -> Self
+    where
+        E: EventStore + Clone + 'static,
+    {
+        let system = EventSourceSystem::builder(ProcessSystem::new().await)
+            .with_persistence(PersistenceProvider::new(
+                CustomStore::builder()
+                    .eventstore(backend.clone())
+                    .saga_offsets(InMemoryOffsetStore::default())
+                    .build(),
+            ))
+            .build();
+        // One journal, and an upstream stream key of its own: a position this
+        // incarnation records is keyed by the stream it read, so sharing one key
+        // with an earlier incarnation would make its probes look already
+        // consumed.
+        let upstream = system.persistence().event_store();
 
-        let boot_row = next_sequence(saga_store, saga_id).await;
-        saga_store
+        let boot_row = next_sequence(&upstream, saga_id).await;
+        upstream
             .append(
                 saga_id.as_str(),
                 vec![AppendingEvent {
@@ -688,18 +713,17 @@ impl Incarnation {
         let reports: Reports = Arc::new(Mutex::new(Vec::new()));
         let fires_for_saga = Arc::clone(&fires);
         let reports_for_saga = Arc::clone(&reports);
-        let proxy =
-            SagaManagerProps::<FiringSaga>::new(saga_store.clone(), move |components| FiringSaga {
-                deadline: components.deadline(),
-                fires: Arc::clone(&fires_for_saga),
-                reports: Arc::clone(&reports_for_saga),
-            })
-            .observing::<Probe>(Subscription::stream(&upstream, upstream_key))
-            .spawn(&system)
-            .await;
+        let host = SagaManagerProps::<FiringSaga>::new(move |components| FiringSaga {
+            deadline: components.deadline(),
+            fires: Arc::clone(&fires_for_saga),
+            reports: Arc::clone(&reports_for_saga),
+        })
+        .observing::<Probe>(Subscription::stream(upstream_key))
+        .spawn(&system)
+        .await;
         Self {
             _system: system,
-            _proxy: proxy,
+            _host: host,
             upstream,
             upstream_key,
             probes_sent: AtomicU64::new(0),
@@ -779,7 +803,11 @@ impl Incarnation {
 /// finds the deadline neither pending nor re-armed.
 #[tokio::test]
 async fn a_firing_whose_decision_landed_writes_its_fired_marker_after_the_decision() {
-    let saga_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the saga's own stream and the upstream this test probes
+    // through are tenants of it, kept apart by stream key.  The backend handle
+    // is what each incarnation's system is wired from.
+    let backing = InMemoryEventStore::default();
+    let saga_store = Journal::from(backing.clone());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -792,7 +820,7 @@ async fn a_firing_whose_decision_landed_writes_its_fired_marker_after_the_decisi
     )
     .await;
 
-    let first = Incarnation::start(&saga_store, &saga_id, "settle-up-1a").await;
+    let first = Incarnation::start(&backing, &saga_id, "settle-up-1a").await;
     assert_eq!(
         first.wait_for_fires(1).await,
         vec!["decided".to_owned()],
@@ -819,7 +847,7 @@ async fn a_firing_whose_decision_landed_writes_its_fired_marker_after_the_decisi
 
     // Restart: a second incarnation over the same store, with a scheduler of
     // its own that holds nothing.
-    let second = Incarnation::start(&saga_store, &saga_id, "settle-up-1b").await;
+    let second = Incarnation::start(&backing, &saga_id, "settle-up-1b").await;
     let replayed = second.probe().await;
     assert!(
         replayed.is_empty(),
@@ -844,11 +872,12 @@ async fn a_firing_whose_decision_landed_writes_its_fired_marker_after_the_decisi
 #[tokio::test]
 async fn a_firing_whose_decision_never_landed_is_re_armed_and_re_delivered_after_a_restart() {
     let refusing = Arc::new(AtomicBool::new(false));
-    let saga_store = Journal::from(RejectingStore {
+    let backing = RejectingStore {
         inner: InMemoryEventStore::default(),
         reject: Reject::Decision,
         armed: Arc::clone(&refusing),
-    });
+    };
+    let saga_store = Journal::from(backing.clone());
     let saga_id = SagaId::new(SAGA_ID);
     let anchor = seed_firing(
         &saga_store,
@@ -864,7 +893,7 @@ async fn a_firing_whose_decision_never_landed_is_re_armed_and_re_delivered_after
     // From here the saga's own decision cannot be persisted.
     refusing.store(true, Ordering::SeqCst);
 
-    let first = Incarnation::start(&saga_store, &saga_id, "settle-up-2a").await;
+    let first = Incarnation::start(&backing, &saga_id, "settle-up-2a").await;
     assert_eq!(
         first.wait_for_fires(1).await,
         vec!["retried".to_owned()],
@@ -890,7 +919,7 @@ async fn a_firing_whose_decision_never_landed_is_re_armed_and_re_delivered_after
     // Restart with the store accepting again: the unfired schedule fact is the
     // whole of what the second incarnation has to go on.
     refusing.store(false, Ordering::SeqCst);
-    let second = Incarnation::start(&saga_store, &saga_id, "settle-up-2b").await;
+    let second = Incarnation::start(&backing, &saga_id, "settle-up-2b").await;
     assert_eq!(
         second.wait_for_fires(1).await,
         vec!["retried".to_owned()],
@@ -928,7 +957,11 @@ async fn a_firing_whose_decision_never_landed_is_re_armed_and_re_delivered_after
 /// saga re-arms nothing, so there is nothing for a settlement to prevent.
 #[tokio::test]
 async fn a_firing_that_ends_the_saga_writes_no_fired_marker() {
-    let saga_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the saga's own stream and the upstream this test probes
+    // through are tenants of it, kept apart by stream key.  The backend handle
+    // is what each incarnation's system is wired from.
+    let backing = InMemoryEventStore::default();
+    let saga_store = Journal::from(backing.clone());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -941,7 +974,7 @@ async fn a_firing_that_ends_the_saga_writes_no_fired_marker() {
     )
     .await;
 
-    let only = Incarnation::start(&saga_store, &saga_id, "settle-up-3").await;
+    let only = Incarnation::start(&backing, &saga_id, "settle-up-3").await;
     assert_eq!(
         only.wait_for_fires(1).await,
         vec!["finished".to_owned()],
@@ -973,7 +1006,11 @@ async fn a_firing_that_ends_the_saga_writes_no_fired_marker() {
 /// not re-armed, and `handle` is not called again.
 #[tokio::test]
 async fn a_refused_firing_is_settled_by_its_fired_marker_alone() {
-    let saga_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the saga's own stream and the upstream this test probes
+    // through are tenants of it, kept apart by stream key.  The backend handle
+    // is what each incarnation's system is wired from.
+    let backing = InMemoryEventStore::default();
+    let saga_store = Journal::from(backing.clone());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -986,7 +1023,7 @@ async fn a_refused_firing_is_settled_by_its_fired_marker_alone() {
     )
     .await;
 
-    let first = Incarnation::start(&saga_store, &saga_id, "settle-up-4a").await;
+    let first = Incarnation::start(&backing, &saga_id, "settle-up-4a").await;
     assert_eq!(
         first.wait_for_fires(1).await,
         vec!["refused".to_owned()],
@@ -1003,7 +1040,7 @@ async fn a_refused_firing_is_settled_by_its_fired_marker_alone() {
          `consumed` row is the boot record's, seeded before the host started"
     );
 
-    let second = Incarnation::start(&saga_store, &saga_id, "settle-up-4b").await;
+    let second = Incarnation::start(&backing, &saga_id, "settle-up-4b").await;
     let replayed = second.probe().await;
     assert!(
         replayed.is_empty(),
@@ -1032,7 +1069,11 @@ const STALE_MESSAGE_TYPE: &str = "settle-reminder-v0";
 /// skipped by.
 #[tokio::test]
 async fn an_unreadable_firing_is_settled_by_its_fired_marker_alone() {
-    let saga_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the saga's own stream and the upstream this test probes
+    // through are tenants of it, kept apart by stream key.  The backend handle
+    // is what each incarnation's system is wired from.
+    let backing = InMemoryEventStore::default();
+    let saga_store = Journal::from(backing.clone());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -1045,7 +1086,7 @@ async fn an_unreadable_firing_is_settled_by_its_fired_marker_alone() {
     )
     .await;
 
-    let first = Incarnation::start(&saga_store, &saga_id, "settle-up-5a").await;
+    let first = Incarnation::start(&backing, &saga_id, "settle-up-5a").await;
     let events = wait_for_transition(&saga_store, &saga_id, "fired", 1).await;
     assert_eq!(
         stream_facts(&events),
@@ -1060,7 +1101,7 @@ async fn an_unreadable_firing_is_settled_by_its_fired_marker_alone() {
          so the firing must never have been handed to `handle`"
     );
 
-    let second = Incarnation::start(&saga_store, &saga_id, "settle-up-5b").await;
+    let second = Incarnation::start(&backing, &saga_id, "settle-up-5b").await;
     let replayed = second.probe().await;
     assert!(
         replayed.is_empty(),
@@ -1090,7 +1131,11 @@ async fn an_unreadable_firing_is_settled_by_its_fired_marker_alone() {
 /// re-armed.
 #[tokio::test]
 async fn a_firing_that_decides_nothing_is_settled_by_its_fired_marker_alone() {
-    let saga_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the saga's own stream and the upstream this test probes
+    // through are tenants of it, kept apart by stream key.  The backend handle
+    // is what each incarnation's system is wired from.
+    let backing = InMemoryEventStore::default();
+    let saga_store = Journal::from(backing.clone());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -1103,7 +1148,7 @@ async fn a_firing_that_decides_nothing_is_settled_by_its_fired_marker_alone() {
     )
     .await;
 
-    let first = Incarnation::start(&saga_store, &saga_id, "settle-up-6a").await;
+    let first = Incarnation::start(&backing, &saga_id, "settle-up-6a").await;
     assert_eq!(
         first.wait_for_fires(1).await,
         vec!["quiet".to_owned()],
@@ -1119,7 +1164,7 @@ async fn a_firing_that_decides_nothing_is_settled_by_its_fired_marker_alone() {
          `consumed` row is the boot record's, seeded before the host started"
     );
 
-    let second = Incarnation::start(&saga_store, &saga_id, "settle-up-6b").await;
+    let second = Incarnation::start(&backing, &saga_id, "settle-up-6b").await;
     let replayed = second.probe().await;
     assert!(
         replayed.is_empty(),
@@ -1147,11 +1192,12 @@ async fn a_firing_that_decides_nothing_is_settled_by_its_fired_marker_alone() {
 #[tokio::test]
 async fn a_firing_whose_fired_marker_never_landed_is_re_delivered_after_a_restart() {
     let refusing = Arc::new(AtomicBool::new(false));
-    let saga_store = Journal::from(RejectingStore {
+    let backing = RejectingStore {
         inner: InMemoryEventStore::default(),
         reject: Reject::FiredMarker,
         armed: Arc::clone(&refusing),
-    });
+    };
+    let saga_store = Journal::from(backing.clone());
     let saga_id = SagaId::new(SAGA_ID);
     let anchor = seed_firing(
         &saga_store,
@@ -1167,7 +1213,7 @@ async fn a_firing_whose_fired_marker_never_landed_is_re_delivered_after_a_restar
     // From here the row that would settle the firing cannot be persisted.
     refusing.store(true, Ordering::SeqCst);
 
-    let first = Incarnation::start(&saga_store, &saga_id, "settle-up-7a").await;
+    let first = Incarnation::start(&backing, &saga_id, "settle-up-7a").await;
     assert_eq!(
         first.wait_for_fires(1).await,
         vec!["unsettled".to_owned()],
@@ -1190,7 +1236,7 @@ async fn a_firing_whose_fired_marker_never_landed_is_re_delivered_after_a_restar
     );
 
     refusing.store(false, Ordering::SeqCst);
-    let second = Incarnation::start(&saga_store, &saga_id, "settle-up-7b").await;
+    let second = Incarnation::start(&backing, &saga_id, "settle-up-7b").await;
     assert_eq!(
         second.wait_for_fires(1).await,
         vec!["unsettled".to_owned()],
@@ -1223,11 +1269,12 @@ async fn a_firing_whose_fired_marker_never_landed_is_re_delivered_after_a_restar
 #[tokio::test]
 async fn a_reset_whose_schedule_fact_never_landed_leaves_the_original_deadline_to_re_fire() {
     let refusing = Arc::new(AtomicBool::new(false));
-    let saga_store = Journal::from(RejectingStore {
+    let backing = RejectingStore {
         inner: InMemoryEventStore::default(),
         reject: Reject::ScheduledMarker,
         armed: Arc::clone(&refusing),
-    });
+    };
+    let saga_store = Journal::from(backing.clone());
     let saga_id = SagaId::new(SAGA_ID);
     let anchor = seed_firing(
         &saga_store,
@@ -1244,7 +1291,7 @@ async fn a_reset_whose_schedule_fact_never_landed_leaves_the_original_deadline_t
     // fact can be persisted.
     refusing.store(true, Ordering::SeqCst);
 
-    let first = Incarnation::start(&saga_store, &saga_id, "settle-up-8a").await;
+    let first = Incarnation::start(&backing, &saga_id, "settle-up-8a").await;
     assert_eq!(
         first.wait_for_fires(1).await,
         vec!["original".to_owned()],
@@ -1269,7 +1316,7 @@ async fn a_reset_whose_schedule_fact_never_landed_leaves_the_original_deadline_t
     );
 
     refusing.store(false, Ordering::SeqCst);
-    let second = Incarnation::start(&saga_store, &saga_id, "settle-up-8b").await;
+    let second = Incarnation::start(&backing, &saga_id, "settle-up-8b").await;
     assert_eq!(
         second.wait_for_fires(1).await,
         vec!["original".to_owned()],
@@ -1302,7 +1349,11 @@ async fn a_reset_whose_schedule_fact_never_landed_leaves_the_original_deadline_t
 /// early does.
 #[tokio::test]
 async fn a_firing_that_sets_a_differently_named_deadline_still_writes_its_fired_marker() {
-    let saga_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the saga's own stream and the upstream this test probes
+    // through are tenants of it, kept apart by stream key.  The backend handle
+    // is what each incarnation's system is wired from.
+    let backing = InMemoryEventStore::default();
+    let saga_store = Journal::from(backing.clone());
     let saga_id = SagaId::new(SAGA_ID);
     seed_firing(
         &saga_store,
@@ -1315,7 +1366,7 @@ async fn a_firing_that_sets_a_differently_named_deadline_still_writes_its_fired_
     )
     .await;
 
-    let only = Incarnation::start(&saga_store, &saga_id, "settle-up-9").await;
+    let only = Incarnation::start(&backing, &saga_id, "settle-up-9").await;
     assert_eq!(
         only.wait_for_fires(1).await,
         vec!["separate".to_owned()],

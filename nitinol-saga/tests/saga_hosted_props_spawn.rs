@@ -8,10 +8,11 @@
 //!     And the instances it spawns journal onto the store that system was built
 //!         on
 //!
-//!   Scenario: props built directly still name where they start
-//!     Given manager props built from a store rather than from a system
-//!     When the caller spawns them
-//!     Then the process system they are given is where they start
+//!   Scenario: props built directly name the system they start on
+//!     Given manager props built from nothing but a producer
+//!     When the caller spawns them on a system
+//!     Then that system's process system is where they start
+//!     And the instances they spawn journal onto the store it was built on
 //! ```
 //!
 //! There is one hosted entry point and so one hosted clause: `host` always
@@ -43,7 +44,7 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::{PersistenceProvider, Store};
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -206,13 +207,15 @@ async fn a_saga_hosted_from_a_system_runs_on_that_system() {
         .with_persistence(PersistenceProvider::new(store.clone()))
         .build();
     let saga_id = SagaId::new(SAGA_ID);
-    let upstream = Journal::from(InMemoryEventStore::default());
+    // One journal: the order stream the saga observes and the saga's own stream
+    // are tenants of the store the system was built on, kept apart by key.
+    let upstream = store.events();
     let order_id = AggregateId::new("saga-hosted-props-order");
 
     // When: nothing but the host builder is named here
     let host = system
         .host::<NotingSaga>(|_components| NotingSaga)
-        .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
         .spawn()
         .await;
 
@@ -245,45 +248,51 @@ async fn a_saga_hosted_from_a_system_runs_on_that_system() {
 
 // The entry point built directly
 
-/// Manager props built from a store start on the process system they are
-/// handed.
+/// Manager props built from nothing but a producer start on the system they are
+/// spawned on.
 ///
-/// A manager whose instances journal into another destination is built this
-/// way, so the argument stays where there is no system to take it from. What
-/// the hosted form replaces is the call that had a system beside it and asked
-/// for the process system anyway.
+/// The props-first form names no store of its own, so the system handed to
+/// `spawn` is both where the manager runs and where its instances journal —
+/// which is what the hosted form carries already rather than taking as an
+/// argument.
 #[tokio::test]
-async fn manager_props_built_directly_start_on_the_process_system_they_are_given() {
+async fn manager_props_built_directly_start_on_the_system_they_are_given() {
     // Given
-    let ps = ProcessSystem::new().await;
-    let journal = Journal::from(InMemoryEventStore::default());
+    let store = InMemoryStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store.clone()))
+        .build();
     let saga_id = SagaId::new(SAGA_ID);
-    let upstream = Journal::from(InMemoryEventStore::default());
+    let journal = store.events();
     let order_id = AggregateId::new("saga-unhosted-manager-order");
 
     // When
-    let manager = SagaManagerProps::<NotingSaga>::new(journal.clone(), |_components| NotingSaga)
-        .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
-        .spawn(&ps)
+    let manager = SagaManagerProps::<NotingSaga>::new(|_components| NotingSaga)
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
+        .spawn(&system)
         .await;
 
     // Then
     assert!(
-        ps.lookup(manager.pid()).await.is_some(),
-        "props built directly keep the low-level form: the process system is \
-         named at the spawn, and that is where the manager runs"
+        system
+            .process_system()
+            .lookup(manager.manager().pid())
+            .await
+            .is_some(),
+        "props built directly name the system at the spawn, and its process \
+         system is where the manager runs"
     );
 
-    append_order_placed(&upstream, &order_id, 1, "SKU-UNHOSTED").await;
+    append_order_placed(&journal, &order_id, 1, "SKU-UNHOSTED").await;
     assert_eq!(
         wait_for_noted(
             &journal,
             &saga_id,
             1,
-            "the instance must journal onto the store the props were built on"
+            "the instance must journal onto the store the system was built on"
         )
         .await,
         vec!["SKU-UNHOSTED".to_owned()],
-        "and the store the props were built on is where its instances journal"
+        "and the store the system was built on is where its instances journal"
     );
 }

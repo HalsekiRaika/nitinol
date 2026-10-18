@@ -29,12 +29,12 @@ use crate::scheduler::SchedulerProxy;
 pub(crate) struct SagaManagerProcess<S: Saga> {
     pub(crate) store: Journal,
     pub(crate) producer: SagaProducer<S>,
-    /// The system this manager was wired from, where it was wired from one.
+    /// The system this manager was wired from.
     ///
     /// Handed to every instance it spawns, so an instance reaches the host's
     /// resources without a reference to the system being captured outside the
     /// spawn.
-    pub(crate) host: Option<SystemHandle>,
+    pub(crate) host: SystemHandle,
     /// One subscription per declared source, shared by every instance the
     /// manager fronts.
     ///
@@ -112,7 +112,10 @@ impl<S: Saga> Process for SagaManagerProcess<S> {
         // position, so a source whose upstream has stalled holds up only
         // itself.
         for source in self.upstream.clone() {
-            source.config.spawn_child(ctx, source.cursor).await;
+            source
+                .config
+                .spawn_child(ctx, self.store.clone(), source.cursor)
+                .await;
         }
     }
 

@@ -24,7 +24,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -192,14 +192,14 @@ async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the upstream stream and every instance's own stream are
+    // tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-single-orders");
     for (index, order) in UPSTREAM_ORDERS.iter().enumerate() {
         let sequence = u64::try_from(index + 1).expect("test sequence fits in u64");
-        append_order_placed(&upstream_store, &upstream_key, sequence, order).await;
+        append_order_placed(&journal, &upstream_key, sequence, order).await;
     }
-
-    let saga_store = Journal::from(InMemoryEventStore::default());
 
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -209,17 +209,16 @@ async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
     let notify_for_producer = Arc::clone(&notify);
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let _manager_proxy =
-        SagaManagerProps::<RecordingSaga>::new(saga_store.clone(), move |_components| {
-            spawned_for_producer.fetch_add(1, Ordering::SeqCst);
-            RecordingSaga {
-                handled: Arc::clone(&handled_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<RecordingSaga>::new(move |_components| {
+        spawned_for_producer.fetch_add(1, Ordering::SeqCst);
+        RecordingSaga {
+            handled: Arc::clone(&handled_for_producer),
+            notify: Arc::clone(&notify_for_producer),
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
+    .spawn(&system)
+    .await;
 
     wait_for_handled(&handled, &notify, UPSTREAM_ORDERS.len()).await;
     // A per-instance poller would keep decoding after the last delivery, so

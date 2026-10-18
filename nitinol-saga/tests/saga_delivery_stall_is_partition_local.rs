@@ -27,7 +27,6 @@ use delivery::{
     REFUSED_SUFFIX,
 };
 
-use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::{partition_of, SagaId};
 
@@ -52,9 +51,8 @@ fn the_two_instances_are_in_different_partitions() {
 #[tokio::test]
 async fn a_refusal_in_one_partition_leaves_the_other_delivering() {
     // Given
-    let (system, aggregates) = in_memory_system().await;
-    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
+    let (system, journal) = in_memory_system(&offsets).await;
 
     let held_target = format!("stall-target{REFUSED_SUFFIX}");
     let live_target = AggregateId::new("ledger-stall-local");
@@ -77,7 +75,7 @@ async fn a_refusal_in_one_partition_leaves_the_other_delivering() {
     .await;
 
     // When
-    let _host = spawn_host::<SelectiveSaga, _>(&system, &journal, &offsets, 2).await;
+    let _host = spawn_host::<SelectiveSaga>(&system, 2).await;
 
     // Then: the partition that can deliver does.
     let ledger = system.aggregate_proxy::<Ledger>(live_target);
@@ -116,7 +114,7 @@ async fn a_refusal_in_one_partition_leaves_the_other_delivering() {
     );
 
     assert!(
-        stream_rows(&aggregates, &held_target).await.is_empty(),
+        stream_rows(&journal, &held_target).await.is_empty(),
         "nothing was ever accepted at the refusing receiver"
     );
     assert_eq!(

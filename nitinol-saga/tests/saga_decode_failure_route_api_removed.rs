@@ -34,7 +34,6 @@ use bytes::Bytes;
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
 
@@ -134,10 +133,6 @@ impl Saga for ProbeSaga {
     }
 }
 
-fn store() -> Journal {
-    Journal::from(InMemoryEventStore::default())
-}
-
 /// Given a blanket extension trait that claims the
 /// `with_decode_failure_route` name,
 /// When it is called on the saga builder,
@@ -145,7 +140,7 @@ fn store() -> Journal {
 /// that name to win resolution.
 #[test]
 fn the_decode_failure_route_name_belongs_to_downstream_definitions() {
-    let manager_props = SagaManagerProps::<ProbeSaga>::new(store(), |_components| ProbeSaga);
+    let manager_props = SagaManagerProps::<ProbeSaga>::new(|_components| ProbeSaga);
 
     assert_eq!(
         manager_props.with_decode_failure_route(PROBE_LABEL).label,

@@ -5,13 +5,15 @@ use nitinol_contract::Aggregate;
 use nitinol_persistence::provider::{
     PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
 };
-use nitinol_persistence::store::Journal;
-use nitinol_persistence::AggregateId;
+use nitinol_persistence::store::{Album, Journal};
+use nitinol_persistence::{AggregateId, LoadedEvent};
+use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::ProcessSystem;
 use tokio::sync::OnceCell;
 
+use crate::durable_stream::{CursorUnset, DurableStream};
 use crate::process::resolve::{AggregateRegistry, ResolveHandle};
-use crate::process::{SnapshotPersistor, SnapshotPersistorProxy};
+use crate::process::{RecoverOn, SnapshotPersistor, SnapshotPersistorProxy};
 use crate::projection::ProjectorProps;
 use crate::{AggregateProps, AggregateProxy};
 
@@ -30,20 +32,24 @@ pub struct PersistenceUnset;
 /// it was erased from does.
 pub type SystemHandle = EventSourceSystem<Journal>;
 
-/// Props that carry no system, so the caller names the process system at the
-/// spawn.
+/// Props that have not named the system they start on yet, so `spawn` takes
+/// one.
 ///
-/// This is the low-level form: a lifecycle pinned to one aggregate, or a
-/// component started where there is no system to take one from.
+/// This is the props-first form of every entry point: the wiring is assembled
+/// on its own and the system it is spawned on supplies the stores. The
+/// system-first form is [`Hosted`], which carries that system already.
 pub struct Unhosted;
 
 /// Props that carry the system they came from, so the spawn needs nothing
 /// re-injected.
 ///
 /// Every entry point on [`EventSourceSystem`] produces props in this state.
-pub struct Hosted(SystemHandle);
+/// `St` is the system's own store type and is carried rather than erased, so a
+/// slot the store does not hold is refused at the `spawn` of these props the
+/// same way it is refused at the `spawn` of an [`Unhosted`] one.
+pub struct Hosted<St>(EventSourceSystem<St>);
 
-impl Hosted {
+impl<St> Hosted<St> {
     /// Carry `host` as where the props holding this start.
     ///
     /// Public because the saga entry points that produce hosted props live in
@@ -51,12 +57,12 @@ impl Hosted {
     /// `host` is an extension trait there rather than an inherent method here,
     /// and it needs the same state this crate's own entry points put their
     /// props in.
-    pub fn new(host: SystemHandle) -> Self {
+    pub fn new(host: EventSourceSystem<St>) -> Self {
         Self(host)
     }
 
     /// The system these props were taken from.
-    pub fn system(&self) -> &SystemHandle {
+    pub fn system(&self) -> &EventSourceSystem<St> {
         &self.0
     }
 }
@@ -110,11 +116,12 @@ impl EventSourceSystemBuilder<PersistenceUnset> {
     /// supplier sufficient rather than a registry of named stores.
     ///
     /// Placing one aggregate's stream in a different destination is therefore a
-    /// second supplier, assembled and named as such, with
-    /// [`AggregateProps::new`] built on the store it distributes. There is no
-    /// per-spawn override: the entry points below all resolve the one supplier
-    /// this system carries, so a deployment cannot half-move a stream and leave
-    /// two activations writing to two worlds.
+    /// second supplier, assembled and named as such, and a second system built
+    /// on it. There is no per-spawn override and no props that carry a store of
+    /// their own: every entry point below, and every `spawn` that takes a
+    /// system, resolves the one supplier that system carries — so a deployment
+    /// cannot half-move a stream and leave two activations writing to two
+    /// worlds.
     ///
     /// # What a supplier does not promise
     ///
@@ -152,13 +159,22 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
 ///
 /// | The store holds | Entry points |
 /// |---|---|
-/// | the journal ([`Store`]) | [`spawn_aggregate`][Self::spawn_aggregate] / [`aggregate_props`][Self::aggregate_props] / [`aggregate_proxy`][Self::aggregate_proxy] |
-/// | a snapshot store ([`SnapshotSlot`]) | [`snapshot_persistor`][Self::snapshot_persistor] |
+/// | the journal ([`Store`]) | [`spawn_aggregate`][Self::spawn_aggregate] / [`aggregate_props`][Self::aggregate_props] / [`aggregate_proxy`][Self::aggregate_proxy] / [`durable_stream`][Self::durable_stream] |
+/// | a snapshot store ([`SnapshotSlot`]) | [`snapshot_persistor`][Self::snapshot_persistor], and spawning an aggregate whose [`Recover`](Aggregate::Recover) is [`Latest`](nitinol_contract::Latest) |
 /// | projection offsets ([`ProjectionOffsetSlot`]) | [`projector_props`][Self::projector_props] |
 ///
 /// A slot the store does not hold is a **compile error** at the wiring that
 /// needs it, rather than a failure at the first save — which is the whole of
 /// why the store is a type parameter here.
+///
+/// # Two ways to say one wiring
+///
+/// Every entry point above has a props-first twin that names no store either —
+/// [`AggregateProps::new`], [`ProjectorProps::new`], [`DurableStream::new`] —
+/// whose `spawn` takes a system and resolves the very same slots. The two forms
+/// meet on one private path per props, so which one a deployment writes is a
+/// matter of where the wiring reads better and nothing else: the registry, the
+/// journal and the activation are the same either way.
 ///
 /// The wire format is not among the things a system settles: an aggregate's
 /// events name the codec that writes them, so two aggregates spawned from one
@@ -189,8 +205,9 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
 ///   carried by a delivery host — so that some stream's own OCC decides whether
 ///   it happened at all.
 ///
-/// Starting a lifecycle explicitly, rather than resolving one, is
-/// [`AggregateProps::spawn`] on props built directly.
+/// There is no second kind of start to reach for: props built directly resolve
+/// through this same registry when they are spawned on a system, so one
+/// identity has one activation however its wiring was written.
 ///
 /// # A handle, not an instance
 ///
@@ -289,20 +306,42 @@ impl Node {
 
     /// This node's snapshot persistor, starting it on the first call.
     ///
-    /// `persistence` is the asking system's own supplier, and it is the same one
-    /// every time: a node is built with one supplier, clones carry it, and the
-    /// erased handle has no snapshot slot to ask through. So the process the
+    /// `snapshots` is the asking system's own snapshot store, and it is the same
+    /// one every time: a node is built with one supplier, clones carry it, and
+    /// the erased handle has no snapshot slot to ask through. So the process the
     /// first caller starts is over the store every later caller would have
     /// named.
-    async fn snapshot_persistor<St: SnapshotSlot>(
-        &self,
-        persistence: &PersistenceProvider<St>,
-    ) -> SnapshotPersistorProxy {
+    async fn snapshot_persistor(&self, snapshots: Album) -> SnapshotPersistorProxy {
         self.inner
             .snapshot_persistor
-            .get_or_init(|| async { SnapshotPersistor::spawn(&self.inner.ps, persistence).await })
+            .get_or_init(|| async { SnapshotPersistor::spawn(&self.inner.ps, snapshots).await })
             .await
             .clone()
+    }
+}
+
+/// What an activation that recovers from a snapshot resolves its persistor
+/// through.
+///
+/// An activation is built synchronously — [`EventSourceSystem::aggregate_proxy`]
+/// hands back a reference without awaiting anything — while starting the
+/// persistor is not, so the ingredients travel and the resolve happens in
+/// `on_start`. It is the node's own memoised cell either way, so an activation
+/// and a caller of
+/// [`snapshot_persistor`][EventSourceSystem::snapshot_persistor] reach one
+/// process.
+///
+/// The store type is already gone here: a snapshot store is an [`Album`], so
+/// nothing an activation holds depends on which deployment assembled it.
+#[derive(Clone)]
+pub(crate) struct SnapshotSource {
+    node: Node,
+    snapshots: Album,
+}
+
+impl SnapshotSource {
+    pub(crate) async fn resolve(&self) -> SnapshotPersistorProxy {
+        self.node.snapshot_persistor(self.snapshots.clone()).await
     }
 }
 
@@ -386,19 +425,94 @@ impl<St: Store> EventSourceSystem<St> {
     /// let system = EventSourceSystem::builder(ps).with_event_store(store).build();
     /// # }
     /// ```
-    pub async fn spawn_aggregate<A: Aggregate>(&self, id: AggregateId) -> AggregateProxy<A> {
+    ///
+    /// An aggregate whose type says it recovers from the newest snapshot asks
+    /// this system for a snapshot store, so one whose store holds none is a
+    /// **compile error** here rather than an activation that silently replays
+    /// from the beginning:
+    ///
+    /// ```compile_fail
+    /// # use bytes::Bytes;
+    /// # use nitinol_eventsource::codec::Codec;
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_eventsource::{Aggregate, Event, Latest, Snapshotable};
+    /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+    /// # use nitinol_persistence::store::InMemoryEventStore;
+    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # struct DocCodec;
+    /// # #[derive(Clone)] struct Counted;
+    /// # impl Codec<Counted> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &Counted) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<Counted, Self::Error> { Ok(Counted) }
+    /// # }
+    /// # impl Codec<u64> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &u64) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<u64, Self::Error> { Ok(0) }
+    /// # }
+    /// # impl Event for Counted {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("Counted"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # #[derive(Default)] struct Counter { value: u64 }
+    /// # impl Aggregate for Counter {
+    /// #     type Event = Counted;
+    /// #     type Recover = Latest;
+    /// #     fn apply(&mut self, _: Counted) { self.value += 1; }
+    /// # }
+    /// # impl Snapshotable for Counter {
+    /// #     type Snapshot = u64;
+    /// #     type Codec = DocCodec;
+    /// #     fn capture(&self) -> u64 { self.value }
+    /// #     fn recover(snapshot: u64) -> Self { Self { value: snapshot } }
+    /// # }
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// // no `snapshot` — this store has no snapshot slot
+    /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
+    /// let system = EventSourceSystem::builder(ps)
+    ///     .with_persistence(PersistenceProvider::new(store))
+    ///     .build();
+    /// system.spawn_aggregate::<Counter>(AggregateId::new("counter")).await;
+    /// # }
+    /// ```
+    pub async fn spawn_aggregate<A>(&self, id: AggregateId) -> AggregateProxy<A>
+    where
+        A: Aggregate,
+        A::Recover: RecoverOn<A, St>,
+    {
         self.aggregate_props::<A>(id).spawn().await
     }
 
-    /// Return an [`AggregateProps`] on the journal the store holds, carrying
+    /// Return an [`AggregateProps`] carrying this system as where it starts.
+    ///
+    /// Nothing is handed over here and nothing is left to configure: the
+    /// journal, the registry and — for an aggregate that recovers from one —
+    /// the snapshot persistor are all taken from this system at the spawn. Its
+    /// `spawn` takes no argument and resolves exactly as
+    /// [`spawn_aggregate`][Self::spawn_aggregate] does.
+    pub fn aggregate_props<A: Aggregate>(&self, id: AggregateId) -> AggregateProps<A, Hosted<St>> {
+        AggregateProps::<A>::new(id).hosted(self.clone())
+    }
+
+    /// Return a [`DurableStream`] over the journal the store holds, carrying
     /// this system as where it starts.
     ///
-    /// Use this when additional configuration (e.g., a snapshot persistor) is
-    /// needed before spawning.  Its `spawn` takes no argument and resolves
-    /// exactly as [`spawn_aggregate`][Self::spawn_aggregate] does.
-    pub fn aggregate_props<A: Aggregate>(&self, id: AggregateId) -> AggregateProps<A, Hosted> {
-        AggregateProps::<A>::new(id, self.inner.persistence.event_store())
-            .hosted(self.erase_store())
+    /// The props-first form of the same wiring is
+    /// [`DurableStream::new`], which names no journal either and takes this
+    /// system at its `spawn`.
+    pub fn durable_stream<T, F>(
+        &self,
+        topic: ProcessName,
+        transform: F,
+    ) -> DurableStream<T, CursorUnset, Hosted<St>>
+    where
+        T: Send + Sync + 'static,
+        F: Fn(LoadedEvent) -> Option<T> + Send + Sync + 'static,
+    {
+        DurableStream::<T>::new(topic, transform).hosted(self.clone())
     }
 
     /// A reference to the aggregate `id`, built without awaiting and without
@@ -413,7 +527,11 @@ impl<St: Store> EventSourceSystem<St> {
     /// Deferring the activation is what makes that sound.  A reference names the
     /// aggregate, not a process, so building one commits to nothing that could
     /// have become stale by the time it is used.
-    pub fn aggregate_proxy<A: Aggregate>(&self, id: AggregateId) -> AggregateProxy<A> {
+    pub fn aggregate_proxy<A>(&self, id: AggregateId) -> AggregateProxy<A>
+    where
+        A: Aggregate,
+        A::Recover: RecoverOn<A, St>,
+    {
         self.aggregate_props::<A>(id).into_reference()
     }
 
@@ -448,6 +566,13 @@ impl<St: Store> EventSourceSystem<St> {
     /// system.erase_store().snapshot_persistor().await;
     /// # }
     /// ```
+    ///
+    /// The same applies to an aggregate whose [`Recover`](Aggregate::Recover) is
+    /// [`Latest`](nitinol_contract::Latest): it asks its system for a snapshot
+    /// store, and a handle that lost the type saying there is one cannot answer.
+    /// Such an aggregate is resolved through the typed system it was built on;
+    /// wiring written against the erased handle — a saga's dispatch mapping,
+    /// say — addresses aggregates that replay their streams.
     pub fn erase_store(&self) -> SystemHandle {
         self.inner
             .erased
@@ -491,10 +616,16 @@ impl<St: SnapshotSlot> EventSourceSystem<St> {
     /// # }
     /// ```
     pub async fn snapshot_persistor(&self) -> SnapshotPersistorProxy {
-        self.inner
-            .node
-            .snapshot_persistor(&self.inner.persistence)
-            .await
+        self.snapshot_source().resolve().await
+    }
+
+    /// What an activation of a `Recover = Latest` aggregate resolves this
+    /// system's one persistor through, once it is running.
+    pub(crate) fn snapshot_source(&self) -> SnapshotSource {
+        SnapshotSource {
+            node: self.inner.node.clone(),
+            snapshots: self.inner.persistence.snapshot_store(),
+        }
     }
 }
 
@@ -533,16 +664,14 @@ impl<St: ProjectionOffsetSlot> EventSourceSystem<St> {
         producer: impl Fn() -> Proj + Send + Sync + 'static,
     ) -> ProjectorProps<
         Proj,
-        St::ProjectionOffsets,
         (),
         crate::projection::EventUnset,
         crate::projection::OriginUnset,
-        Hosted,
+        Hosted<St>,
     >
     where
         Proj: Send + Sync + 'static,
     {
-        ProjectorProps::new(projection_id, &self.inner.persistence, producer)
-            .hosted(self.erase_store())
+        ProjectorProps::new(projection_id, producer).hosted(self.clone())
     }
 }

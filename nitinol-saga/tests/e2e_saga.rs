@@ -3,8 +3,8 @@
 //!
 //! ```gherkin
 //!   Scenario: an order reaches inventory through a saga
-//!     Given an Order aggregate, a reservation saga observing it, and a
-//!       delivery host over the saga's own store
+//!     Given an Order aggregate and a reservation saga observing it, spawned on
+//!       the system whose journal both are tenants of
 //!     When an order is placed
 //!     Then the saga persists exactly one decision and settles the input it
 //!       was decided from, and nothing else
@@ -20,10 +20,11 @@
 //! end-to-end test is that they meet.  `Saga::handle` decides and persists;
 //! `Saga::dispatch` says, as a pure function of the decision, what that decision
 //! means for everybody else; and a delivery host is the thing that carries it
-//! out.  No part of the saga reaches the Inventory aggregate itself, so the
-//! first scenario below spawns a host over the saga's own store and then asks
-//! Inventory what it was asked to do — if the mapping, the host and the
-//! receiving aggregate did not line up, the command would never arrive.
+//! out.  No part of the saga reaches the Inventory aggregate itself, and one
+//! spawn starts both halves — a saga whose decisions nobody carries out is not
+//! a saga — so the first scenario below spawns the saga and then asks Inventory
+//! what it was asked to do: if the mapping, the host and the receiving
+//! aggregate did not line up, the command would never arrive.
 //!
 //! What the saga writes down is checked in full rather than by counting one row
 //! type: a saga persists its decisions and the positions of the inputs it read,
@@ -47,19 +48,17 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, Query,
+    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, Never, Query,
 };
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{
-    EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, Journal,
-};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaDelivery, SagaDeliveryProps, SagaEffect, SagaId, SagaManagerProps,
-    SagaSubscribe, Subscription,
+    Saga, SagaContext, SagaDelivery, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe,
+    Subscription,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,6 +113,7 @@ struct Order;
 
 impl Aggregate for Order {
     type Event = OrderPlaced;
+    type Recover = Never;
 
     fn apply(&mut self, _event: OrderPlaced) {}
 }
@@ -138,6 +138,7 @@ struct Inventory {
 
 impl Aggregate for Inventory {
     type Event = Reserved;
+    type Recover = Never;
 
     fn apply(&mut self, event: Reserved) {
         self.reserved.push(event.sku);
@@ -359,7 +360,7 @@ async fn wait_until_reserved(proxy: &AggregateProxy<Inventory>) -> Vec<String> {
 }
 
 /// The saga's own stream, once it holds the fact settling an input.
-async fn wait_until_settled(store: &dyn EventStore, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn wait_until_settled(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
     loop {
         let events = load_saga_events(store, saga_id).await;
@@ -387,12 +388,10 @@ fn describe(events: &[LoadedEvent]) -> Vec<String> {
 async fn aggregate_event_drives_saga_to_command_target_aggregate() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(InMemoryEventStore::default())
-                .build(),
-        ))
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
+    // One journal: the order stream, the saga's own stream and the inventory's
+    // are all tenants of the store the system distributes.
     let journal = system.persistence().event_store();
 
     let order_id = AggregateId::new("saga-e2e-order");
@@ -403,39 +402,27 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
         .spawn_aggregate::<Inventory>(inventory_id.clone())
         .await;
 
-    let saga_store = InMemoryEventStore::default();
     let saga_id = SagaId::new(RESERVATION_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
 
     let inventory_key_for_producer = inventory_id.as_str().to_owned();
     let captured_for_producer = Arc::clone(&captured);
 
-    let _saga_proxy =
-        SagaManagerProps::<ReservationSaga>::new(saga_store.clone(), move |_components| {
-            ReservationSaga(ReservationWork {
-                inventory: inventory_key_for_producer.clone(),
-                captured: Arc::clone(&captured_for_producer),
-            })
+    // One spawn starts the manager and the delivery host that carries out what
+    // it decides, both over the stores the system distributes. The host
+    // delivers through that system, which is how a receiving aggregate is
+    // reached by the same reference any other caller would resolve —
+    // `Inventory` implements nothing of the host's.
+    let _saga_host = SagaManagerProps::<ReservationSaga>::new(move |_components| {
+        ReservationSaga(ReservationWork {
+            inventory: inventory_key_for_producer.clone(),
+            captured: Arc::clone(&captured_for_producer),
         })
-        .observing::<OrderPlaced>(Subscription::stream(&journal, &order_id))
-        .spawn(system.process_system())
-        .await;
-
-    // The host's whole input is the saga's own store, plus the slot it records
-    // its progress in.  It delivers through `system`, which is how a receiving
-    // aggregate is reached by the same reference any other caller would resolve
-    // — `Inventory` implements nothing of the host's.
-    let saga_persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(saga_store.clone())
-            .saga_offsets(InMemoryOffsetStore::default())
-            .build(),
-    );
-    let _delivery_host =
-        SagaDeliveryProps::<ReservationSaga, InMemoryOffsetStore>::new(&saga_persistence)
-            .with_poll_interval(PROBE_INTERVAL)
-            .spawn(&system)
-            .await;
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .with_delivery_poll_interval(PROBE_INTERVAL)
+    .spawn(&system)
+    .await;
 
     order_proxy
         .ask(PlaceOrder {
@@ -465,7 +452,7 @@ async fn aggregate_event_drives_saga_to_command_target_aggregate() {
          Saga::dispatch answered"
     );
 
-    let saga_events = wait_until_settled(&saga_store, &saga_id).await;
+    let saga_events = wait_until_settled(&journal, &saga_id).await;
 
     assert_eq!(
         describe(&saga_events),
@@ -502,25 +489,23 @@ async fn saga_skips_events_that_correlate_to_no_instance() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let publisher_id = AggregateId::new("publisher-A");
-    append_order_placed(&upstream_store, &publisher_id, 1, "SKIP-001").await;
-    append_order_placed(&upstream_store, &publisher_id, 2, "MATCH-001").await;
+    append_order_placed(&journal, &publisher_id, 1, "SKIP-001").await;
+    append_order_placed(&journal, &publisher_id, 2, "MATCH-001").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
     let captured_for_producer = Arc::clone(&captured);
 
-    let _saga_proxy =
-        SagaManagerProps::<MatchOnlyReservationSaga>::new(saga_store, move |_components| {
-            MatchOnlyReservationSaga(ReservationWork {
-                inventory: "saga-route-inventory".to_owned(),
-                captured: Arc::clone(&captured_for_producer),
-            })
+    let _saga_host = SagaManagerProps::<MatchOnlyReservationSaga>::new(move |_components| {
+        MatchOnlyReservationSaga(ReservationWork {
+            inventory: "saga-route-inventory".to_owned(),
+            captured: Arc::clone(&captured_for_producer),
         })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &publisher_id))
-        .spawn(system.process_system())
-        .await;
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&publisher_id))
+    .spawn(&system)
+    .await;
 
     // `MATCH-001` is the barrier rather than a sleep: the poller delivers a
     // stream in ascending order and `ask`s one record at a time, so once seq 2
@@ -561,7 +546,7 @@ async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u6
         .expect("append OrderPlaced must succeed");
 }
 
-async fn load_saga_events(store: &dyn EventStore, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await

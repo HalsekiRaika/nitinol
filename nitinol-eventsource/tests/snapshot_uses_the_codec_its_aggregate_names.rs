@@ -3,14 +3,15 @@
 //!
 //! This is the acceptance scenario "snapshots too run on the type-level
 //! binding". The
-//! framework itself only ever *restores* a snapshot — capturing and saving one
-//! is the caller's decision and the caller's call — so the two directions are
-//! observed at the two places they actually happen:
+//! framework itself only ever *recovers* from a snapshot — capturing and
+//! saving one is the caller's decision and the caller's call — so the two
+//! directions are observed at the two places they actually happen:
 //!
 //! - the save side, where the caller reaches the format through
 //!   `<Counter as Snapshotable>::Codec` rather than through an injected handle;
-//! - the restore side, where `with_snapshot_persistor` takes a persistor and
-//!   nothing else, and the activation still decodes what was saved.
+//! - the recover side, where the wiring declares nothing at all — `Counter`'s
+//!   own `Recover = Latest` is what asks for the newest snapshot, and the
+//!   activation still decodes what was saved.
 //!
 //! The snapshot codec and the event codec use deliberately incompatible
 //! formats, and the snapshot claims a value the event stream alone could never
@@ -24,12 +25,13 @@
 use bytes::Bytes;
 
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Query, SnapshotPersistor,
-    SnapshotPersistorProxy, Snapshotable,
+    Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Latest, Query,
+    Snapshotable,
 };
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore, Journal};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, SnapshotSlot, Store};
+use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, EventType, Family, PersistedSnapshot, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -107,6 +109,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Latest;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -121,7 +124,7 @@ impl Snapshotable for Counter {
         self.value
     }
 
-    fn restore(snapshot: u64) -> Self {
+    fn recover(snapshot: u64) -> Self {
         Self { value: snapshot }
     }
 }
@@ -149,17 +152,26 @@ impl Query<GetCount> for Counter {
 
 // Helpers
 
-/// Props with neither a codec step nor a snapshot codec argument.
-async fn spawn_counter(
-    system: &ProcessSystem,
+/// A system over `store`, on a process system of its own.
+///
+/// A second activation of one aggregate is a second system over the same store:
+/// one system resolves an identity to one activation, so asking the same system
+/// again would reach the resident state instead of recovering from the
+/// snapshot.
+async fn system_over<St: Store>(store: St) -> EventSourceSystem<St> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store))
+        .build()
+}
+
+/// Props with neither a codec step nor a snapshot codec argument, and no
+/// persistor to hand over: `Counter`'s own `Recover = Latest` is what asks the
+/// system for the one it distributes.
+async fn spawn_counter<St: SnapshotSlot>(
+    system: &EventSourceSystem<St>,
     id: AggregateId,
-    store: Journal,
-    snapshot_ref: SnapshotPersistorProxy,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id, store)
-        .with_snapshot_persistor(snapshot_ref)
-        .spawn(system)
-        .await
+    AggregateProps::<Counter>::new(id).spawn(system).await
 }
 
 /// The save side as a caller performs it: capture a domain value, then reach
@@ -191,33 +203,33 @@ fn a_caller_reaches_the_snapshot_format_through_the_aggregates_codec() {
     );
 }
 
-// The restore side
+// The recover side
 
 /// Given a snapshot claiming a value the two persisted events could never
-/// produce, When a new activation starts with only a persistor wired, Then it
-/// restores that value — the named snapshot codec decoded it.
+/// produce, When a new activation starts with nothing wired by hand, Then it
+/// recovers that value — the named snapshot codec decoded it.
 #[tokio::test]
 async fn an_activation_restores_through_the_codec_the_aggregate_names() {
-    let system = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(InMemoryEventStore::default())
-            .snapshot(InMemorySnapshotStore::default())
-            .build(),
-    );
-    let store = persistence.event_store();
-    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
+    let store = CustomStore::builder()
+        .eventstore(InMemoryEventStore::default())
+        .snapshot(InMemorySnapshotStore::default())
+        .build();
+    let writing = system_over(store.clone()).await;
     let id = AggregateId::new("named-snapshot-restore");
 
     {
-        let writer = spawn_counter(&system, id.clone(), store.clone(), snapshot_ref.clone()).await;
+        let writer = spawn_counter(&writing, id.clone()).await;
         writer.ask(Increment).await.expect("first ask");
         writer.ask(Increment).await.expect("second ask");
     }
 
     // 100 is unreachable by replaying the two events above, so the number the
-    // next activation answers with says which path it took.
-    snapshot_ref
+    // next activation answers with says which path it took.  The persistor is
+    // the one the system distributes — the same process the activation below
+    // loads through.
+    writing
+        .snapshot_persistor()
+        .await
         .save(PersistedSnapshot {
             aggregate_id: id.clone(),
             sequence: 2,
@@ -227,7 +239,8 @@ async fn an_activation_restores_through_the_codec_the_aggregate_names() {
         .await
         .expect("saving the snapshot must succeed");
 
-    let restored = spawn_counter(&system, id, store, snapshot_ref).await;
+    let restarted = system_over(store).await;
+    let restored = spawn_counter(&restarted, id).await;
     let value = restored.exec(GetCount).await.expect("exec must succeed");
 
     assert_eq!(
@@ -238,28 +251,26 @@ async fn an_activation_restores_through_the_codec_the_aggregate_names() {
 }
 
 /// Given a snapshot followed by a further event, When a new activation starts,
-/// Then it restores the snapshot through the named codec and replays only the
-/// delta through the event's own codec — the two formats are read by the two
-/// codecs that own them.
+/// Then it recovers from the snapshot through the named codec and replays only
+/// the delta through the event's own codec — the two formats are read by the
+/// two codecs that own them.
 #[tokio::test]
 async fn a_restore_and_a_delta_replay_use_their_own_codecs() {
-    let system = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(InMemoryEventStore::default())
-            .snapshot(InMemorySnapshotStore::default())
-            .build(),
-    );
-    let store = persistence.event_store();
-    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
+    let store = CustomStore::builder()
+        .eventstore(InMemoryEventStore::default())
+        .snapshot(InMemorySnapshotStore::default())
+        .build();
+    let writing = system_over(store.clone()).await;
     let id = AggregateId::new("named-snapshot-delta");
 
     {
-        let writer = spawn_counter(&system, id.clone(), store.clone(), snapshot_ref.clone()).await;
+        let writer = spawn_counter(&writing, id.clone()).await;
         writer.ask(Increment).await.expect("first ask");
         writer.ask(Increment).await.expect("second ask");
 
-        snapshot_ref
+        writing
+            .snapshot_persistor()
+            .await
             .save(PersistedSnapshot {
                 aggregate_id: id.clone(),
                 sequence: 2,
@@ -272,7 +283,8 @@ async fn a_restore_and_a_delta_replay_use_their_own_codecs() {
         writer.ask(Increment).await.expect("third ask");
     }
 
-    let restored = spawn_counter(&system, id, store, snapshot_ref).await;
+    let restarted = system_over(store).await;
+    let restored = spawn_counter(&restarted, id).await;
     let value = restored.exec(GetCount).await.expect("exec must succeed");
 
     assert_eq!(

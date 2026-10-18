@@ -24,7 +24,7 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaSubscriptionExt, SagaSystemExt};
+use nitinol_saga::{SagaSystemExt, Subscription};
 
 use eventsource_aggregate_communication::counter::{Counter, GetCount, Increment, Incremented};
 use eventsource_aggregate_communication::saga::RelaySaga;
@@ -79,7 +79,7 @@ async fn a_fact_of_one_aggregate_reaches_another_as_a_command() {
         .host::<RelaySaga>(move |_components| RelaySaga {
             target: target.clone(),
         })
-        .observing::<Incremented>(system.subscription(&id_a))
+        .observing::<Incremented>(Subscription::stream(&id_a))
         .with_delivery_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;

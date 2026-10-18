@@ -22,6 +22,7 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{Event, ProjectionContext, ProjectionId, Projector, ProjectorProps};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemoryOffsetStore};
@@ -233,9 +234,16 @@ async fn seed(
 /// argument, Then each event arrives decoded by the codec its own type names.
 #[tokio::test]
 async fn each_subscribed_event_is_decoded_by_the_codec_it_names() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("named-projection-source");
 
     seed(
@@ -262,17 +270,9 @@ async fn each_subscribed_event_is_decoded_by_the_codec_it_names() {
     let recorded = Recorded::default();
     let produced = recorded.clone();
 
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("named-projection"),
-        &persistence,
-        move || produced.clone(),
-    )
+    let _proxy = ProjectorProps::new(ProjectionId::new("named-projection"), move || {
+        produced.clone()
+    })
     .with_event::<Counted>()
     .with_event::<Labelled>()
     .catchup_from_aggregate(agg_id)

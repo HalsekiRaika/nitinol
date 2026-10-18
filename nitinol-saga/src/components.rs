@@ -45,7 +45,7 @@ pub use self::deadline::{Deadline, DeadlineMessage, PendingDeadline};
 /// ever resolved to arm it.
 pub struct SagaComponents<S: Saga> {
     pending_deadlines: PendingDeadlines,
-    host: Option<SystemHandle>,
+    host: SystemHandle,
     _saga: PhantomData<fn() -> S>,
 }
 
@@ -55,7 +55,7 @@ impl<S: Saga> SagaComponents<S> {
     /// Called once per incarnation, so the cell the process writes and the one
     /// the saga's [`Deadline`] reads are the same cell — and a restarted
     /// incarnation starts from an empty one, which replay then fills.
-    pub(crate) fn new(pending_deadlines: PendingDeadlines, host: Option<SystemHandle>) -> Self {
+    pub(crate) fn new(pending_deadlines: PendingDeadlines, host: SystemHandle) -> Self {
         Self {
             pending_deadlines,
             host,
@@ -63,21 +63,21 @@ impl<S: Saga> SagaComponents<S> {
         }
     }
 
-    /// The system hosting this saga, where one is.
+    /// The system hosting this saga.
     ///
-    /// `Some` for every instance of a saga the hosting machinery started from
-    /// a system — [`SagaSystemExt::host`](crate::SagaSystemExt::host). The
-    /// handle reaches the host's process system, its aggregate registry and the
-    /// journal its supplier distributes — so a saga that has to tell an
+    /// Not an `Option`: every saga is started on a system — whether its wiring
+    /// was written props-first as
+    /// [`SagaManagerProps::new`](crate::SagaManagerProps::new)`(..).spawn(&system)`
+    /// or system-first as
+    /// [`SagaSystemExt::host`](crate::SagaSystemExt::host) — so there is always
+    /// one to answer with.
+    ///
+    /// The handle reaches the host's process system, its aggregate registry and
+    /// the journal its supplier distributes — so a saga that has to tell an
     /// aggregate resolves the reference from here rather than from a clone of
     /// the system captured outside the spawn.
-    ///
-    /// `None` for an incarnation built from props the caller assembled on a
-    /// store — [`SagaManagerProps::new`](crate::SagaManagerProps::new). That
-    /// path needs no system to run on, so there is no system to answer with,
-    /// and saying so is what keeps the answer truthful.
-    pub fn system(&self) -> Option<&SystemHandle> {
-        self.host.as_ref()
+    pub fn system(&self) -> &SystemHandle {
+        &self.host
     }
 
     /// Ask for this saga's own time.
@@ -106,7 +106,6 @@ impl<S: Saga> SagaComponents<S> {
     /// # use bytes::Bytes;
     /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::Event;
-    /// # use nitinol_persistence::store::InMemoryEventStore;
     /// # use nitinol_persistence::{EventType, Family, TypeName};
     /// # use nitinol_saga::{
     /// #     Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
@@ -157,10 +156,9 @@ impl<S: Saga> SagaComponents<S> {
     /// #     async fn handle(&mut self, _: Observed, _: &mut SagaContext)
     /// #         -> Result<SagaEffect<Noted>, Self::Error> { Ok(SagaEffect::None) }
     /// # }
-    /// # let store = InMemoryEventStore::default();
     /// // `Observed`'s `Deadline` is `NoDeadline`, not `HasDeadline<Reminder>`,
     /// // so the `where` clause below has nothing to satisfy this call with.
-    /// SagaManagerProps::<Undeclared>::new(store, |components| Undeclared {
+    /// SagaManagerProps::<Undeclared>::new(|components| Undeclared {
     ///     deadline: components.deadline(),
     /// });
     /// ```

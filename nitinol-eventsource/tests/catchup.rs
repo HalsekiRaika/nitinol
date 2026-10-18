@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps,
 };
@@ -95,16 +96,17 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 
 #[tokio::test]
 async fn catchup_all_events_processed_from_empty_offset() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("cu-all-agg");
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
 
     for seq in 1..=3 {
         append_evt(&event_store, &agg_id, seq).await;
@@ -117,7 +119,7 @@ async fn catchup_all_events_processed_from_empty_offset() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(ProjectionId::new("cu-all"), &persistence, move || {
+    let _proxy = ProjectorProps::new(ProjectionId::new("cu-all"), move || {
         SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
             count: Arc::clone(&count_c),
@@ -144,17 +146,18 @@ async fn catchup_all_events_processed_from_empty_offset() {
 
 #[tokio::test]
 async fn catchup_skips_events_before_offset() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("cu-skip-agg");
     let projection_id = ProjectionId::new("cu-skip");
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
 
     for seq in 1..=3 {
         append_evt(&event_store, &agg_id, seq).await;
@@ -172,12 +175,10 @@ async fn catchup_skips_events_before_offset() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(projection_id, &persistence, move || {
-        SequenceRecordingProjector {
-            sequences: Arc::clone(&seq_c),
-            count: Arc::clone(&count_c),
-            notify: Arc::clone(&notify_c),
-        }
+    let _proxy = ProjectorProps::new(projection_id, move || SequenceRecordingProjector {
+        sequences: Arc::clone(&seq_c),
+        count: Arc::clone(&count_c),
+        notify: Arc::clone(&notify_c),
     })
     .with_event::<Evt>()
     .catchup_from_aggregate(agg_id)
@@ -200,20 +201,21 @@ async fn catchup_skips_events_before_offset() {
 
 #[tokio::test]
 async fn catchup_empty_store_project_never_called() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
 
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store)
-            .projection_offsets(offset_store)
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store)
+                .projection_offsets(offset_store)
+                .build(),
+        ))
+        .build();
 
     let count = Arc::new(AtomicUsize::new(0));
 
-    let _proxy = ProjectorProps::new(ProjectionId::new("cu-empty"), &persistence, {
+    let _proxy = ProjectorProps::new(ProjectionId::new("cu-empty"), {
         let count_c = Arc::clone(&count);
         move || SequenceRecordingProjector {
             sequences: Arc::new(Mutex::new(Vec::new())),
@@ -237,17 +239,18 @@ async fn catchup_empty_store_project_never_called() {
 
 #[tokio::test]
 async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
     let agg_a = AggregateId::new("cu-multi-a");
     let agg_b = AggregateId::new("cu-multi-b");
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
 
     append_evt(&event_store, &agg_a, 1).await;
     append_evt(&event_store, &agg_b, 1).await;
@@ -261,7 +264,7 @@ async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(ProjectionId::new("cu-multi"), &persistence, move || {
+    let _proxy = ProjectorProps::new(ProjectionId::new("cu-multi"), move || {
         SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
             count: Arc::clone(&count_c),
@@ -284,16 +287,17 @@ async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
 
 #[tokio::test]
 async fn catchup_then_live_append_is_projected_via_durable_stream() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("cu-then-live-agg");
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
 
     for seq in 1..=2 {
         append_evt(&event_store, &agg_id, seq).await;
@@ -306,7 +310,7 @@ async fn catchup_then_live_append_is_projected_via_durable_stream() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(ProjectionId::new("cu-then-live"), &persistence, move || {
+    let _proxy = ProjectorProps::new(ProjectionId::new("cu-then-live"), move || {
         SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
             count: Arc::clone(&count_c),

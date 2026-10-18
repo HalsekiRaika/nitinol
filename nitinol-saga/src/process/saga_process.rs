@@ -76,11 +76,10 @@ where
     let position_source = PositionSource::of(event_type);
     let (decode, binding) = source.into_parts();
     let SourceBinding {
-        upstream_store,
         cursor,
         poll_interval,
     } = binding;
-    let config = DurableSubscription::new(upstream_store, move |loaded: LoadedEvent| {
+    let config = DurableSubscription::new(move |loaded: LoadedEvent| {
         // This source claims the rows of its own event type and no others,
         // which is what lets several sources read one stream key without
         // reading each other's records.
@@ -202,7 +201,7 @@ impl<S: Saga> SagaProcess<S> {
         // A fresh incarnation knows nothing of what it set, so the journal is
         // the whole of the answer — which is why this replaces the view rather
         // than adding to it.
-        self.pending_deadlines.restore(active.iter().map(|sched| {
+        self.pending_deadlines.replay(active.iter().map(|sched| {
             (
                 sched.name.clone(),
                 deadline::due_at(sched.scheduled_at_unix_millis, sched.after),

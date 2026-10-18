@@ -30,16 +30,14 @@ use delivery::{
     RecordingOffsetStore,
 };
 
-use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
 #[tokio::test]
 async fn a_host_resumes_above_the_recorded_position() {
     // Given
-    let (system, _aggregates) = in_memory_system().await;
-    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
+    let (system, journal) = in_memory_system(&offsets).await;
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-resumes");
 
@@ -48,7 +46,7 @@ async fn a_host_resumes_above_the_recorded_position() {
     offsets.put(&scope_of(0), first);
 
     // When
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, 1).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target);
@@ -82,14 +80,13 @@ async fn a_host_resumes_above_the_recorded_position() {
 async fn a_lost_position_redelivers_without_doubling_the_effect() {
     // Given: the state a crash between a delivery and its recording leaves —
     // the receiver has the operation, the host has no position.
-    let (system, aggregates) = in_memory_system().await;
-    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
+    let (system, journal) = in_memory_system(&offsets).await;
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-lost-position");
 
     append_row(
-        &aggregates,
+        &journal,
         target.as_str(),
         1,
         &Recorded {
@@ -107,7 +104,7 @@ async fn a_lost_position_redelivers_without_doubling_the_effect() {
     );
 
     // When
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, 1).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target.clone());
@@ -135,7 +132,7 @@ async fn a_lost_position_redelivers_without_doubling_the_effect() {
 
     settle().await;
     assert_eq!(
-        stream_rows(&aggregates, target.as_str()).await.len(),
+        stream_rows(&journal, target.as_str()).await.len(),
         2,
         "the redelivered command wrote nothing: one row for the operation the \
          crash left behind, one for the operation that followed it"

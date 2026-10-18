@@ -21,7 +21,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -205,12 +205,13 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the upstream stream and each instance's own stream are
+    // tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-lazy-spawn-orders");
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let instance_id = SagaId::new(format!("{INSTANCE_PREFIX}A"));
-    seed_saga_domain_event(&saga_store, &instance_id, 1, "A").await;
+    seed_saga_domain_event(&journal, &instance_id, 1, "A").await;
 
     let trace: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -218,16 +219,15 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
     let trace_for_producer = Arc::clone(&trace);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _manager_proxy =
-        SagaManagerProps::<TracingSaga>::new(saga_store.clone(), move |_components| TracingSaga {
-            trace: Arc::clone(&trace_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<TracingSaga>::new(move |_components| TracingSaga {
+        trace: Arc::clone(&trace_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
+    .spawn(&system)
+    .await;
 
-    append_order_placed(&upstream_store, &upstream_key, 1, "A").await;
+    append_order_placed(&journal, &upstream_key, 1, "A").await;
 
     wait_for_trace_len(&trace, &notify, 2).await;
 
@@ -250,10 +250,8 @@ async fn known_correlation_id_reuses_the_running_instance() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-lazy-reuse-orders");
-
-    let saga_store = Journal::from(InMemoryEventStore::default());
 
     let trace: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -263,20 +261,19 @@ async fn known_correlation_id_reuses_the_running_instance() {
     let notify_for_producer = Arc::clone(&notify);
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let _manager_proxy =
-        SagaManagerProps::<TracingSaga>::new(saga_store.clone(), move |_components| {
-            spawned_for_producer.fetch_add(1, Ordering::SeqCst);
-            TracingSaga {
-                trace: Arc::clone(&trace_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<TracingSaga>::new(move |_components| {
+        spawned_for_producer.fetch_add(1, Ordering::SeqCst);
+        TracingSaga {
+            trace: Arc::clone(&trace_for_producer),
+            notify: Arc::clone(&notify_for_producer),
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
+    .spawn(&system)
+    .await;
 
-    append_order_placed(&upstream_store, &upstream_key, 1, "B").await;
-    append_order_placed(&upstream_store, &upstream_key, 2, "B").await;
+    append_order_placed(&journal, &upstream_key, 1, "B").await;
+    append_order_placed(&journal, &upstream_key, 2, "B").await;
 
     wait_for_trace_len(&trace, &notify, 2).await;
     // A per-event respawn would land after the second handle, so settle past one

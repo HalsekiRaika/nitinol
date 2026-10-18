@@ -36,11 +36,13 @@ use tracing::span::{Attributes, Id, Record};
 use tracing::{Metadata, Subscriber};
 
 use nitinol_eventsource::error::PersistError;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
-    Query,
+    Never, Query,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
@@ -78,6 +80,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -295,17 +298,22 @@ fn observations_of(reported: &Mutex<Vec<Reported>>, aggregate_id: &str) -> Vec<R
 
 // Helpers
 
-/// Activate one writer for `id` on `store` through the raw props path.
+/// Activate one writer for `id` on a system of its own over `store`.
 ///
-/// The raw path spawns per call, which is what lets a phase put two writers on
-/// one stream.
+/// One system resolves one activation per identity, so a phase that needs two
+/// writers of one stream asks twice and gets two systems over the same store —
+/// which is the shape a second node writing that stream has, and the only way
+/// to reach two writers at all.
 async fn spawn_writer(
     ps: &ProcessSystem,
     id: &AggregateId,
     store: &Journal,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id.clone(), store.clone())
-        .spawn(ps)
+    let system = EventSourceSystem::builder(ps.clone())
+        .with_persistence(PersistenceProvider::new(store.clone()))
+        .build();
+    AggregateProps::<Counter>::new(id.clone())
+        .spawn(&system)
         .await
 }
 

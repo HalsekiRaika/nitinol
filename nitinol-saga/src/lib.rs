@@ -19,11 +19,11 @@
 //! | Effect ADT | [`SagaEffect`] |
 //! | Identifier | [`SagaId`] |
 //! | Spawn verb | [`SagaSystemExt::host`] (starts the manager and the delivery host that carries out what it decides) |
-//! | Spawn builder | [`SagaManagerProps`] (what [`host`](SagaSystemExt::host) hands back, and what names a journal of its own) |
+//! | Spawn builder | [`SagaManagerProps`] (what [`host`](SagaSystemExt::host) hands back, and what the props-first form starts from) |
 //! | Upstream subscription value | [`Subscription`] |
 //! | Handle | [`SagaHostProxy`], reaching [`SagaManagerProxy`] and [`SagaDeliveryProxy`] |
 //! | Delivery mapping | [`Saga::dispatch`] answering [`SagaDelivery`] |
-//! | Delivery-host spawn builder | [`SagaDeliveryProps`] (the explicit form, naming a journal and an offset store) |
+//! | Delivery-host settings | [`SagaDeliveryProps`] (where each setting the saga's builder names states its contract) |
 //! | Delivery-host handle | [`SagaDeliveryProxy`] |
 //! | Delivery-host identifier | [`SagaDeliveryId`] |
 //!
@@ -39,7 +39,7 @@
 //! # Capabilities
 //!
 //! - Subscription-driven: each source the saga's alphabet declares is observed
-//!   through its own upstream [`nitinol_persistence::store::EventStore`], via a
+//!   on the journal the system the saga was spawned on distributes, via a
 //!   runtime child `DirectPollerProcess` of its own (catchup + live, at-least-once
 //!   delivery), with its own cursor. Every poller's lifetime is bound to the
 //!   manager process that owns it; when the manager stops the runtime
@@ -69,36 +69,33 @@
 //!   instance, so nothing durable is written for it and a restart repeats the
 //!   same report instead of resuming past it — detailed under "Correlation and
 //!   routing" below.
-//! - Symmetric spawn: [`SagaSystemExt`] extends
-//!   [`nitinol_eventsource::system::EventSourceSystem`] with
-//!   [`host`](SagaSystemExt::host), the counterpart of
-//!   `EventSourceSystem::spawn_aggregate` — the `ProcessSystem` and the journal
-//!   both come from the system, and the formats are settled already by the
-//!   event types themselves.  What a wiring site still says is the binding of
-//!   each declared source ([`observing`](SagaManagerProps::observing)) and the
-//!   instances' residency
+//! - Symmetric spawn: a saga is started in one of two forms and no more —
+//!   props-first, [`SagaManagerProps::new`]`(producer)…spawn(&system)`, or
+//!   system-first, [`SagaSystemExt::host`]`(producer)…spawn()`. The second is
+//!   the counterpart of `EventSourceSystem::spawn_aggregate`; both take the
+//!   `ProcessSystem` and every store from the system, meet on one private path,
+//!   and have the formats settled already by the event types themselves.  What
+//!   a wiring site still says is the binding of each declared source
+//!   ([`observing`](SagaManagerProps::observing)) and the instances' residency
 //!   ([`with_instance_passivation`](SagaManagerProps::with_instance_passivation)),
 //!   which is why one verb is enough.
 //! - One supplier: a system is built with a
 //!   [`PersistenceProvider`](nitinol_persistence::provider::PersistenceProvider),
-//!   and [`SagaSystemExt`] / [`SagaSubscriptionExt`] resolve the journal from
-//!   it — [`host`](SagaSystemExt::host) for every instance's own stream, and
-//!   [`subscription`](SagaSubscriptionExt::subscription) for an upstream it
-//!   polls. The two are separate traits with separate bounds (the latter needs
-//!   no saga-offset slot), so a provider with a journal but no slot still has
-//!   `subscription`, even though it has no `host`.
-//!   `EventStore` is stream-keyed, so that one store holds the upstream stream
-//!   and every instance's own stream side by side.  Reaching a *different*
-//!   destination is written down rather than defaulted:
-//!   [`Subscription::stream`] names a source's store, and
-//!   [`SagaManagerProps::new`] names a journal.
-//! - Where delivery progress is kept: [`host`](SagaSystemExt::host) resolves
-//!   the journal and the saga-offset slot from the same supplier, and exists
-//!   only where that supplier's store holds the slot — so a deployment with no
-//!   store for a host's progress is told while the wiring is compiled, rather
-//!   than hosting a saga whose decisions nobody could carry out.
-//! - Reaching the host from inside: a saga spawned through [`SagaSystemExt`]
-//!   is handed the hosting system by
+//!   and the spawn resolves every store from it — the journal every instance's
+//!   own stream lands on, the journal each declared source is polled from, and
+//!   the saga-offset slot the delivery host records in.  `EventStore` is
+//!   stream-keyed, so that one store holds the upstream stream and every
+//!   instance's own stream side by side, which is why a
+//!   [`Subscription`] names a stream key and a position and no store at all.
+//!   Reaching a *different* destination is a saga hosted on a second system
+//!   over the supplier that holds it, which is written down rather than
+//!   defaulted.
+//! - Where delivery progress is kept: the spawn resolves the journal and the
+//!   saga-offset slot from the same supplier, and exists only where that
+//!   supplier's store holds the slot — so a deployment with no store for a
+//!   host's progress is told while the wiring is compiled, rather than hosting
+//!   a saga whose decisions nobody could carry out.
+//! - Reaching the host from inside: every saga is handed the hosting system by
 //!   [`SagaComponents::system`](crate::SagaComponents::system), so a producer
 //!   that needs a reference into the host resolves it there rather than from a
 //!   clone of the system captured outside the spawn.
@@ -349,7 +346,7 @@ pub use self::subscribe::{
     SagaSubscribe, SourceBindings, SubscriptionSet, SubscriptionUnset,
 };
 pub use self::subscription::Subscription;
-pub use self::system_ext::{SagaSubscriptionExt, SagaSystemExt};
+pub use self::system_ext::SagaSystemExt;
 
 /// `#[derive(SagaSubscribe)]`, co-located with the [`SagaSubscribe`] trait so a
 /// single `use nitinol::saga::SagaSubscribe;` brings both into scope (trait in

@@ -8,7 +8,7 @@
 //! |----------------|---------|
 //! | `runtime`      | `runtime` — process runtime (`ProcessSystem`, `Process`, …) |
 //! | `persistence`  | `persistence` — persistence abstractions (`EventStore`, IDs, …) |
-//! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Decider`, `Decision`, `Query`, `Event`, `Codec`, `Snapshotable`, `#[derive(Event)]`) |
+//! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Decider`, `Decision`, `Query`, `Event`, `Codec`, `Snapshotable`, `Recovery` / `Never` / `Latest`, `#[derive(Event)]`) |
 //! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
 //! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
 //! | `full`         | All of the above |
@@ -41,7 +41,8 @@ pub use nitinol_persistence as persistence;
 #[cfg(feature = "contract")]
 pub mod contract {
     pub use nitinol_contract::{
-        Accepting, Aggregate, Codec, Decider, Decision, Event, Query, Snapshotable,
+        Accepting, Aggregate, Codec, Decider, Decision, Event, Latest, Never, Query, RecoverPolicy,
+        Recovery, Snapshotable,
     };
 
     /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
@@ -93,6 +94,7 @@ pub mod eventsource {
     pub use nitinol_eventsource::Event;
     pub use nitinol_eventsource::{Accepting, Decider, Decision};
     pub use nitinol_eventsource::{Aggregate, Snapshotable};
+    pub use nitinol_eventsource::{Latest, Never, RecoverOn, RecoverPolicy, Recovery};
 
     /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
     /// `use nitinol::eventsource::Event;` brings both into scope (trait in the

@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, ProjectionContext,
+    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, Never, ProjectionContext,
     ProjectionId, Projector, ProjectorProps,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
@@ -26,6 +27,7 @@ impl Event for Incremented {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
     fn apply(&mut self, _event: Incremented) {}
 }
 
@@ -82,11 +84,14 @@ impl Projector<Incremented> for NoopProjector {
 #[tokio::test]
 async fn aggregate_props_correct_chain_compiles_and_spawns() {
     // Given
-    let system = ProcessSystem::new().await;
-    let store = Journal::from(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(Journal::from(
+            InMemoryEventStore::default(),
+        )))
+        .build();
 
     // When: the full required chain
-    let proxy = AggregateProps::<Counter>::new(AggregateId::new("typestate-agg-ok"), store)
+    let proxy = AggregateProps::<Counter>::new(AggregateId::new("typestate-agg-ok"))
         .spawn(&system)
         .await;
 
@@ -103,25 +108,22 @@ async fn aggregate_props_correct_chain_compiles_and_spawns() {
 #[tokio::test]
 async fn projector_props_correct_chain_compiles_and_spawns() {
     // Given
-    let system = ProcessSystem::new().await;
     let offset_store = InMemoryOffsetStore::default();
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(InMemoryEventStore::default())
-            .projection_offsets(offset_store)
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .projection_offsets(offset_store)
+                .build(),
+        ))
+        .build();
 
     // When: full required chain
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("typestate-proj-ok"),
-        &persistence,
-        NoopProjector::new,
-    )
-    .with_event::<Incremented>() // EventUnset → EventSet
-    .catchup_from_global() // OriginUnset → OriginSet
-    .spawn(&system) // only EventSet + OriginSet
-    .await;
+    let _proxy = ProjectorProps::new(ProjectionId::new("typestate-proj-ok"), NoopProjector::new)
+        .with_event::<Incremented>() // EventUnset → EventSet
+        .catchup_from_global() // OriginUnset → OriginSet
+        .spawn(&system) // only EventSet + OriginSet
+        .await;
 
     // Then: spawn succeeds (no panic, no compile error)
 }
@@ -139,19 +141,19 @@ impl NoopProjector {
 #[tokio::test]
 async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
     // Given
-    let system = ProcessSystem::new().await;
     let offset_store = InMemoryOffsetStore::default();
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(InMemoryEventStore::default())
-            .projection_offsets(offset_store)
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .projection_offsets(offset_store)
+                .build(),
+        ))
+        .build();
 
     // When: two with_event() calls followed by catchup → spawn
     let _proxy = ProjectorProps::new(
         ProjectionId::new("typestate-multi-event-ok"),
-        &persistence,
         NoopProjector::new,
     )
     .with_event::<Incremented>() // first event type
@@ -169,21 +171,21 @@ async fn projector_props_multiple_with_event_calls_compile_and_spawn() {
 #[tokio::test]
 async fn projector_props_catchup_from_aggregate_enables_spawn() {
     // Given
-    let system = ProcessSystem::new().await;
     let offset_store = InMemoryOffsetStore::default();
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(InMemoryEventStore::default())
-            .projection_offsets(offset_store)
-            .build(),
-    );
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .projection_offsets(offset_store)
+                .build(),
+        ))
+        .build();
 
     let agg_id = AggregateId::new("typestate-agg-origin");
 
     // When: using catchup_from_aggregate instead of catchup_from_global
     let _proxy = ProjectorProps::new(
         ProjectionId::new("typestate-proj-agg-origin"),
-        &persistence,
         NoopProjector::new,
     )
     .with_event::<Incremented>()

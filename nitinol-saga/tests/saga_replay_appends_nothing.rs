@@ -52,9 +52,9 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
 use nitinol_persistence::store::{
-    EventStore, EventStream, InMemoryEventStore, InMemoryStore, Journal,
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, Journal,
 };
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -157,10 +157,32 @@ type Batches = Arc<Mutex<Vec<Vec<RecordedEvent>>>>;
 
 /// `EventStore` decorator that appends one entry to `batches` per successful
 /// `append` call, preserving the events of that call as a group.
+///
+/// Every stream is recorded, because a system distributes one journal: the
+/// upstream rows and the saga's own stream are tenants of it. The rows a test
+/// seeds are appended before the clauses start counting, and `forget` is what
+/// draws that line.
 #[derive(Clone)]
 struct RecordingStore {
     inner: InMemoryEventStore,
     batches: Batches,
+}
+
+/// The store a saga is spawned onto here: the journal under observation plus
+/// the saga-offset slot the delivery host every saga spawn starts records its
+/// progress in, and no other slot — nothing in this file snapshots or projects.
+type ReplayStore = CustomStore<Unprovided, Unprovided, InMemoryOffsetStore>;
+
+/// A system over `journal` and that slot.
+async fn system_over(journal: RecordingStore) -> EventSourceSystem<ReplayStore> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(journal)
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build()
 }
 
 #[async_trait]
@@ -326,21 +348,20 @@ const SETTLE: Duration = Duration::from_millis(400);
 /// back with it.
 #[tokio::test]
 async fn a_restart_appends_nothing_before_its_first_live_decision() {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    let upstream = AggregateId::new("replay-pure-orders");
-    append_order_placed(&upstream_store, &upstream, 1, CONSUMED_SKU).await;
-    append_order_placed(&upstream_store, &upstream, 2, FRESH_SKU).await;
-
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store = Journal::from(RecordingStore {
+    let system = system_over(RecordingStore {
         inner: InMemoryEventStore::default(),
         batches: Arc::clone(&batches),
-    });
+    })
+    .await;
+    // One journal: the upstream stream the saga observes and the saga's own
+    // stream are tenants of the store the system distributes.
+    let saga_store = system.persistence().event_store();
+
+    let upstream = AggregateId::new("replay-pure-orders");
+    append_order_placed(&saga_store, &upstream, 1, CONSUMED_SKU).await;
+    append_order_placed(&saga_store, &upstream, 2, FRESH_SKU).await;
+
     let saga_id = SagaId::new(SAGA_ID);
 
     seed_one_handled_input(&saga_store, &saga_id, &upstream, 1).await;
@@ -352,15 +373,14 @@ async fn a_restart_appends_nothing_before_its_first_live_decision() {
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let _proxy =
-        SagaManagerProps::<FoldingSaga>::new(saga_store.clone(), move |_components| FoldingSaga {
-            reserved: Vec::new(),
-            handle_count: Arc::clone(&handle_count_for_producer),
-            handled: Arc::clone(&handled_for_producer),
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaManagerProps::<FoldingSaga>::new(move |_components| FoldingSaga {
+        reserved: Vec::new(),
+        handle_count: Arc::clone(&handle_count_for_producer),
+        handled: Arc::clone(&handled_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream))
+    .spawn(&system)
+    .await;
 
     // `handle` cannot run before `on_start` has replayed the instance's own
     // stream, so reaching it fixes the point after which any recorded batch is
@@ -438,20 +458,17 @@ async fn a_restart_appends_nothing_before_its_first_live_decision() {
 /// ordered after the first live append rather than suppressed.
 #[tokio::test]
 async fn a_restart_with_nothing_fresh_upstream_appends_nothing_at_all() {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-        .build();
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    let upstream = AggregateId::new("replay-quiet-orders");
-    append_order_placed(&upstream_store, &upstream, 1, CONSUMED_SKU).await;
-
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store = Journal::from(RecordingStore {
+    let system = system_over(RecordingStore {
         inner: InMemoryEventStore::default(),
         batches: Arc::clone(&batches),
-    });
+    })
+    .await;
+    let saga_store = system.persistence().event_store();
+
+    let upstream = AggregateId::new("replay-quiet-orders");
+    append_order_placed(&saga_store, &upstream, 1, CONSUMED_SKU).await;
+
     let saga_id = SagaId::new(SAGA_ID);
 
     seed_one_handled_input(&saga_store, &saga_id, &upstream, 1).await;
@@ -462,15 +479,14 @@ async fn a_restart_with_nothing_fresh_upstream_appends_nothing_at_all() {
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let _proxy =
-        SagaManagerProps::<FoldingSaga>::new(saga_store.clone(), move |_components| FoldingSaga {
-            reserved: Vec::new(),
-            handle_count: Arc::clone(&handle_count_for_producer),
-            handled: Arc::clone(&handled_for_producer),
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaManagerProps::<FoldingSaga>::new(move |_components| FoldingSaga {
+        reserved: Vec::new(),
+        handle_count: Arc::clone(&handle_count_for_producer),
+        handled: Arc::clone(&handled_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream))
+    .spawn(&system)
+    .await;
 
     tokio::time::sleep(Duration::from_millis(750)).await;
 

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps,
 };
@@ -178,9 +179,16 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 
 #[tokio::test]
 async fn projector_single_event_type_project_called_during_catchup() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("proj-single-agg");
 
     append_counted(&event_store, &agg_id, 1).await;
@@ -189,13 +197,7 @@ async fn projector_single_event_type_project_called_during_catchup() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(ProjectionId::new("proj-single"), &persistence, move || {
+    let _proxy = ProjectorProps::new(ProjectionId::new("proj-single"), move || {
         TrackingProjector {
             count: Arc::clone(&count_c),
             label_count: Arc::new(AtomicUsize::new(0)),
@@ -219,9 +221,16 @@ async fn projector_single_event_type_project_called_during_catchup() {
 
 #[tokio::test]
 async fn projector_context_provides_correct_projection_id() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("proj-ctx-id-agg");
     let projection_id = ProjectionId::new("my-projection");
 
@@ -233,20 +242,12 @@ async fn projector_context_provides_correct_projection_id() {
     let notify_c = Arc::clone(&notify);
     let last_pid_c = Arc::clone(&last_pid);
 
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        TrackingProjector {
-            count: Arc::clone(&count_c),
-            label_count: Arc::new(AtomicUsize::new(0)),
-            notify: Arc::clone(&notify_c),
-            last_projection_id: Arc::clone(&last_pid_c),
-            last_sequence: Arc::new(AtomicUsize::new(0)),
-        }
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || TrackingProjector {
+        count: Arc::clone(&count_c),
+        label_count: Arc::new(AtomicUsize::new(0)),
+        notify: Arc::clone(&notify_c),
+        last_projection_id: Arc::clone(&last_pid_c),
+        last_sequence: Arc::new(AtomicUsize::new(0)),
     })
     .with_event::<Counted>()
     .catchup_from_aggregate(agg_id)
@@ -268,9 +269,16 @@ async fn projector_context_provides_correct_projection_id() {
 
 #[tokio::test]
 async fn projector_context_provides_current_sequence() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("proj-ctx-seq-agg");
 
     for seq in 1..=3 {
@@ -284,13 +292,7 @@ async fn projector_context_provides_current_sequence() {
     let notify_c = Arc::clone(&notify);
     let last_seq_c = Arc::clone(&last_seq);
 
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(ProjectionId::new("proj-ctx-seq"), &persistence, move || {
+    let _proxy = ProjectorProps::new(ProjectionId::new("proj-ctx-seq"), move || {
         TrackingProjector {
             count: Arc::clone(&count_c),
             label_count: Arc::new(AtomicUsize::new(0)),
@@ -315,9 +317,16 @@ async fn projector_context_provides_current_sequence() {
 
 #[tokio::test]
 async fn projector_multiple_event_types_each_receives_correct_event() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("proj-multi-agg");
 
     append_counted(&event_store, &agg_id, 1).await;
@@ -329,20 +338,12 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
     let lc_c = Arc::clone(&label_count);
     let notify_c = Arc::clone(&notify);
 
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(ProjectionId::new("proj-multi"), &persistence, move || {
-        TrackingProjector {
-            count: Arc::clone(&count_c),
-            label_count: Arc::clone(&lc_c),
-            notify: Arc::clone(&notify_c),
-            last_projection_id: Arc::new(Mutex::new(None)),
-            last_sequence: Arc::new(AtomicUsize::new(0)),
-        }
+    let _proxy = ProjectorProps::new(ProjectionId::new("proj-multi"), move || TrackingProjector {
+        count: Arc::clone(&count_c),
+        label_count: Arc::clone(&lc_c),
+        notify: Arc::clone(&notify_c),
+        last_projection_id: Arc::new(Mutex::new(None)),
+        last_sequence: Arc::new(AtomicUsize::new(0)),
     })
     .with_event::<Counted>()
     .with_event::<Labeled>()
@@ -367,9 +368,16 @@ async fn projector_multiple_event_types_each_receives_correct_event() {
 
 #[tokio::test]
 async fn projector_live_event_is_projected_after_catchup() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("proj-live-agg");
     let projection_id = ProjectionId::new("proj-live");
 
@@ -378,13 +386,7 @@ async fn projector_live_event_is_projected_after_catchup() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id, &persistence, move || TrackingProjector {
+    let _proxy = ProjectorProps::new(projection_id, move || TrackingProjector {
         count: Arc::clone(&count_c),
         label_count: Arc::new(AtomicUsize::new(0)),
         notify: Arc::clone(&notify_c),
@@ -421,9 +423,16 @@ async fn projector_live_event_is_projected_after_catchup() {
 /// 2, the projector has already passed over sequence 1.
 #[tokio::test]
 async fn projector_dispatches_on_the_declaration_a_row_carries_and_not_its_descendants() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("proj-identity-dispatch-agg");
 
     event_store
@@ -445,23 +454,15 @@ async fn projector_dispatches_on_the_declaration_a_row_carries_and_not_its_desce
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("proj-identity-dispatch"),
-        &persistence,
-        move || TrackingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("proj-identity-dispatch"), move || {
+        TrackingProjector {
             count: Arc::clone(&count_c),
             label_count: Arc::new(AtomicUsize::new(0)),
             notify: Arc::clone(&notify_c),
             last_projection_id: Arc::new(Mutex::new(None)),
             last_sequence: Arc::new(AtomicUsize::new(0)),
-        },
-    )
+        }
+    })
     .with_event::<Counted>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)

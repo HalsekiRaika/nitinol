@@ -17,14 +17,14 @@
 #[path = "common/delivery.rs"]
 mod delivery;
 use delivery::{
-    delivery_id, delivery_persistence, in_memory_system, partition_count, spawn_host, DeliverySaga,
-    RecordingEventStore, RecordingOffsetStore, TEST_POLL_INTERVAL,
+    delivery_id, delivery_system, partition_count, spawn_host, DeliverySaga, RecordingEventStore,
+    RecordingOffsetStore, Triggered, TEST_POLL_INTERVAL, TRIGGER_KEY,
 };
 
 use std::time::Duration;
 
 use nitinol_persistence::store::InMemoryEventStore;
-use nitinol_saga::SagaDeliveryProps;
+use nitinol_saga::{SagaManagerProps, Subscription};
 
 /// Deliberately far from any framework default, and far enough above it that a
 /// host polling at a default would be caught by the count below.
@@ -38,20 +38,18 @@ const WINDOW: Duration = Duration::from_millis(1_800);
 async fn the_configured_interval_is_the_interval_between_queries() {
     // Given: nothing to deliver, so the gaps are the poll interval and not the
     // time taken by work.
-    let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(InMemoryEventStore::default());
-    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
+    let system = delivery_system(&recording, &offsets).await;
 
     // When
-    let _host = SagaDeliveryProps::<DeliverySaga, RecordingOffsetStore>::new(
-        &delivery_persistence(&journal, &offsets),
-    )
-    .with_delivery_id(delivery_id())
-    .with_partitions(partition_count(1))
-    .with_poll_interval(SLOW)
-    .spawn(&system)
-    .await;
+    let _host = SagaManagerProps::<DeliverySaga>::new(|_| DeliverySaga)
+        .observing::<Triggered>(Subscription::stream(TRIGGER_KEY))
+        .with_delivery_id(delivery_id())
+        .with_partitions(partition_count(1))
+        .with_delivery_poll_interval(SLOW)
+        .spawn(&system)
+        .await;
     tokio::time::sleep(WINDOW).await;
 
     // Then
@@ -73,13 +71,12 @@ async fn the_configured_interval_is_the_interval_between_queries() {
 #[tokio::test]
 async fn a_shorter_interval_polls_more_often_in_the_same_window() {
     // Given
-    let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(InMemoryEventStore::default());
-    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
+    let system = delivery_system(&recording, &offsets).await;
 
     // When
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, 1).await;
     tokio::time::sleep(WINDOW).await;
 
     // Then

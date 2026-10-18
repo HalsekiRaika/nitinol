@@ -26,9 +26,9 @@
 //! decisions it carries — and started with nothing re-injected, so what the
 //! first clause also fixes is that this shape reaches the argument-free spawn
 //! the hosted props have. The manager is inert here: the fixture saga's
-//! `correlate` answers `None`, and its one declared source is bound to a store
-//! of its own with nothing ever appended to it, so every row the clauses read
-//! on the supplier's journal is the delivery host's.
+//! `correlate` answers `None`, and its one declared source is bound to a stream
+//! nothing is ever appended to, so every row the clauses read on the supplier's
+//! journal is the delivery host's.
 //!
 //! The journal and the receiving aggregates are tenants of the one event store
 //! the supplier distributes, under keys of their own. That is what a single
@@ -98,11 +98,13 @@ async fn wait_until_journal_polls(
     }
 }
 
-/// The fixture saga's one declared source, on a store of its own. Nothing is
-/// ever appended to it, so the manager this binding belongs to adds no load to
-/// the journal the clauses read.
+/// The fixture saga's one declared source, bound to a stream of the system's
+/// journal that nothing is ever appended to — a subscription names what to
+/// observe and nothing about where. The loads it makes name that stream rather
+/// than the decision event type, so the clauses below still read the delivery
+/// host's own polls and no others.
 fn quiet_source(key: &str) -> Subscription {
-    Subscription::stream(InMemoryEventStore::default(), &AggregateId::new(key))
+    Subscription::stream(&AggregateId::new(key))
 }
 
 #[tokio::test]

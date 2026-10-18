@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps, TxProvider,
 };
@@ -263,9 +264,16 @@ async fn wait_for(notify: &Arc<Notify>) {
 #[tokio::test]
 async fn tx_provider_supplies_tx_to_projection_context() {
     // Given
-    let system = ProcessSystem::new().await;
     let store = InMemoryEventStore::default();
     let (mock_cs, _saved_flag) = MockOffsetStore::new();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store.clone())
+                .projection_offsets(mock_cs.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("tx-ctx-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -278,20 +286,12 @@ async fn tx_provider_supplies_tx_to_projection_context() {
     let (tp, _tp_state) = MockTxProvider::new();
 
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(store.clone())
-            .projection_offsets(mock_cs.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("tx-ctx-test-proj"),
-        &persistence,
-        move || TxCapturingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("tx-ctx-test-proj"), move || {
+        TxCapturingProjector {
             received_tx: Arc::clone(&received_tx_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_tx_provider(tp)
     .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
@@ -316,9 +316,16 @@ async fn tx_provider_supplies_tx_to_projection_context() {
 #[tokio::test]
 async fn exactly_once_with_tx_provider_saves_offset_in_same_tx() {
     // Given
-    let system = ProcessSystem::new().await;
     let store = InMemoryEventStore::default();
     let (mock_cs, saved_with_tx) = MockOffsetStore::new();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store.clone())
+                .projection_offsets(mock_cs.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("tx-ckpt-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -328,20 +335,12 @@ async fn exactly_once_with_tx_provider_saves_offset_in_same_tx() {
     let (tp, _tp_state) = MockTxProvider::new();
 
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(store.clone())
-            .projection_offsets(mock_cs.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("tx-ckpt-test-proj"),
-        &persistence,
-        move || TxCapturingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("tx-ckpt-test-proj"), move || {
+        TxCapturingProjector {
             received_tx: Arc::new(AtomicBool::new(false)),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_tx_provider(tp)
     .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
@@ -366,9 +365,16 @@ async fn exactly_once_with_tx_provider_saves_offset_in_same_tx() {
 #[tokio::test]
 async fn tx_provider_commit_called_after_successful_project() {
     // Given
-    let system = ProcessSystem::new().await;
     let store = InMemoryEventStore::default();
     let (mock_cs, _saved_flag) = MockOffsetStore::new();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store.clone())
+                .projection_offsets(mock_cs.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("tx-commit-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -378,20 +384,12 @@ async fn tx_provider_commit_called_after_successful_project() {
     let (tp, tp_state) = MockTxProvider::new();
 
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(store.clone())
-            .projection_offsets(mock_cs.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("tx-commit-test-proj"),
-        &persistence,
-        move || TxCapturingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("tx-commit-test-proj"), move || {
+        TxCapturingProjector {
             received_tx: Arc::new(AtomicBool::new(false)),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_tx_provider(tp)
     .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
@@ -424,9 +422,16 @@ async fn tx_provider_commit_called_after_successful_project() {
 #[tokio::test]
 async fn tx_provider_rollback_called_when_project_fails() {
     // Given
-    let system = ProcessSystem::new().await;
     let store = InMemoryEventStore::default();
     let (mock_cs, saved_with_tx) = MockOffsetStore::new();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store.clone())
+                .projection_offsets(mock_cs.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("tx-rollback-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -436,19 +441,11 @@ async fn tx_provider_rollback_called_when_project_fails() {
     let (tp, tp_state) = MockTxProvider::new();
 
     // When: spawn projector that always fails (ExactlyOnce forced by with_tx_provider)
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(store.clone())
-            .projection_offsets(mock_cs.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("tx-rollback-test-proj"),
-        &persistence,
-        move || FailingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("tx-rollback-test-proj"), move || {
+        FailingProjector {
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_tx_provider(tp)
     .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
@@ -495,11 +492,18 @@ async fn tx_provider_rollback_called_when_project_fails() {
 #[tokio::test]
 async fn without_tx_provider_ctx_tx_returns_none() {
     // Given: use InMemoryOffsetStore (Tx = ()) to test the default path
-    let system = ProcessSystem::new().await;
     let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("tx-none-test");
     use nitinol_persistence::store::InMemoryOffsetStore;
     let cs = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store.clone())
+                .projection_offsets(cs)
+                .build(),
+        ))
+        .build();
 
     append_tick(&store, &agg_id, 1).await;
 
@@ -532,20 +536,12 @@ async fn without_tx_provider_ctx_tx_returns_none() {
     }
 
     // When: spawn without TxProvider (default Tx = ())
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(store.clone())
-            .projection_offsets(cs)
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("tx-none-test-proj"),
-        &persistence,
-        move || NullTxProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("tx-none-test-proj"), move || {
+        NullTxProjector {
             tx_was_some: Arc::clone(&tx_was_some_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_event::<TickEvent>()
     // No with_tx_provider() call — default Tx = ()
     .catchup_from_aggregate(agg_id)

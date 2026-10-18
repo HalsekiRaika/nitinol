@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::error::{AskError, CodecError, PersistError, Retryability};
-use nitinol_eventsource::{Aggregate, AggregateProps, Decider, Decision, Event};
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::{Aggregate, AggregateProps, Decider, Decision, Event, Never};
+use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -173,6 +175,7 @@ struct Recorder;
 
 impl Aggregate for Recorder {
     type Event = MyEvent;
+    type Recover = Never;
 
     fn apply(&mut self, _event: MyEvent) {}
 }
@@ -198,10 +201,13 @@ impl Decider<Record> for Recorder {
 /// on the command.
 #[tokio::test]
 async fn a_failing_encode_is_reported_as_a_codec_error_on_the_persist_path() {
-    let system = ProcessSystem::new().await;
-    let store = Journal::from(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(Journal::from(
+            InMemoryEventStore::default(),
+        )))
+        .build();
 
-    let proxy = AggregateProps::<Recorder>::new(AggregateId::new("codec-encode-fails"), store)
+    let proxy = AggregateProps::<Recorder>::new(AggregateId::new("codec-encode-fails"))
         .spawn(&system)
         .await;
 

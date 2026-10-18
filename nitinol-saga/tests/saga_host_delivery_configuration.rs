@@ -44,9 +44,10 @@
 //! The manager is inert throughout: the fixture sagas' `correlate` answers
 //! `None` and nothing is ever appended to the observed source, so every
 //! decision the host reads was seeded on the journal directly and the manager
-//! contributes no load of its own. The observed source is given a store of its
-//! own for the same reason — the loads these clauses read on the system's
-//! journal are the delivery host's.
+//! decides nothing of its own. A subscription names what to observe and nothing
+//! about where, so that source reads the one journal the delivery host reads
+//! too — and the two are told apart by what they name: the host's queries carry
+//! the decision event type as a prefix, the source's name its own stream.
 //!
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_host_delivery_configuration`.
@@ -56,15 +57,19 @@ mod delivery;
 use delivery::{
     append_decided, delivery_id, delivery_persistence, operations_of, partition_count, scope_of,
     settle, wait_until_operations, wait_until_stored, DeliverySaga, DeliveryStore, Ledger,
-    RecordingEventStore, RecordingOffsetStore, SelectiveSaga, Triggered, PROBE_INTERVAL,
-    PROBE_TIMEOUT, REFUSED_SUFFIX, TEST_POLL_INTERVAL,
+    RecordingEventStore, RecordingOffsetStore, SelectiveSaga, Triggered, FIXTURE_LOCK,
+    PROBE_INTERVAL, PROBE_TIMEOUT, REFUSED_SUFFIX, TEST_POLL_INTERVAL,
 };
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
+
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::AggregateId;
+use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaId, SagaSystemExt, Subscription};
 
@@ -94,13 +99,65 @@ where
         .build()
 }
 
-/// A declared source on a store of its own, so a clause reading the system's
-/// journal reads the delivery host's loads and no others.
+/// The declared source, bound to a stream nothing is ever appended to.
 fn quiet_source() -> Subscription {
-    Subscription::stream(
-        InMemoryEventStore::default(),
-        &AggregateId::new(UPSTREAM_KEY),
-    )
+    Subscription::stream(&AggregateId::new(UPSTREAM_KEY))
+}
+
+/// Records when each load of the observed source's stream was made, and hands
+/// every call to the store it wraps.
+///
+/// A subscription names no store, so the observed source and the delivery host
+/// read the one journal — and [`RecordingEventStore`] times only the host's own
+/// queries, which name the decision event type as a prefix. The source's are
+/// the ones naming its stream, so the clause about *its* cadence reads them
+/// here.
+#[derive(Clone)]
+struct SourceTimeline {
+    inner: RecordingEventStore,
+    loads: Arc<Mutex<Vec<Instant>>>,
+}
+
+impl SourceTimeline {
+    fn new(inner: RecordingEventStore) -> Self {
+        Self {
+            inner,
+            loads: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// The gaps between consecutive loads of the observed source's stream, in
+    /// call order.
+    fn source_gaps(&self) -> Vec<Duration> {
+        self.loads
+            .lock()
+            .expect(FIXTURE_LOCK)
+            .windows(2)
+            .map(|pair| pair[1].saturating_duration_since(pair[0]))
+            .collect()
+    }
+
+    fn source_load_count(&self) -> usize {
+        self.loads.lock().expect(FIXTURE_LOCK).len()
+    }
+}
+
+#[async_trait]
+impl EventStore for SourceTimeline {
+    async fn append(
+        &self,
+        key: &str,
+        events: Vec<AppendingEvent>,
+    ) -> Result<AppendOutcome, AppendError> {
+        self.inner.append(key, events).await
+    }
+
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        if query.stream_key.as_deref() == Some(UPSTREAM_KEY) {
+            self.loads.lock().expect(FIXTURE_LOCK).push(Instant::now());
+        }
+        self.inner.load(query).await
+    }
 }
 
 /// Wait until the delivery host has polled `store` at least `want` times.
@@ -244,21 +301,18 @@ async fn the_partition_count_named_on_the_host_builder_is_the_one_progress_is_sp
 
 #[tokio::test]
 async fn the_delivery_interval_named_on_the_host_builder_reaches_the_delivery_host_alone() {
-    // Given: nothing to deliver and nothing upstream, so every load either
-    // store records is a poll rather than work.
+    // Given: nothing to deliver and nothing upstream, so every load the journal
+    // records is a poll rather than work.
     let journal = RecordingEventStore::new(InMemoryEventStore::default());
-    let upstream = RecordingEventStore::new(InMemoryEventStore::default());
+    let upstream = SourceTimeline::new(journal.clone());
     let offsets = RecordingOffsetStore::new();
-    let system = system_over(&journal, &offsets).await;
+    let system = system_over(&upstream, &offsets).await;
 
     // When: the delivery host is given the slow interval, and the observed
     // source names none at all.
     let _host = system
         .host::<DeliverySaga>(|_components| DeliverySaga)
-        .observing::<Triggered>(Subscription::stream(
-            upstream.clone(),
-            &AggregateId::new(UPSTREAM_KEY),
-        ))
+        .observing::<Triggered>(quiet_source())
         .with_delivery_id(delivery_id())
         .with_delivery_poll_interval(SLOW)
         .spawn()
@@ -294,12 +348,12 @@ async fn the_delivery_interval_named_on_the_host_builder_reaches_the_delivery_ho
     }
 
     // And: the observed source, which named no interval, keeps its own cadence
-    let upstream_gaps = upstream.load_gaps();
+    let upstream_gaps = upstream.source_gaps();
     assert!(
         upstream_gaps.len() >= 2,
         "the observed source must still poll: it polled {} times in {WINDOW:?}, \
          so a delivery interval is being read as this source's cadence too",
-        upstream.load_count()
+        upstream.source_load_count()
     );
     for (nth, gap) in upstream_gaps.iter().enumerate() {
         assert!(

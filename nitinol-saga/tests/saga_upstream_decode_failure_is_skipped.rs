@@ -50,7 +50,7 @@
 //! ## API contract assumed by this file
 //!
 //! - `#[derive(SagaSubscribe)]`, `Saga::Subscribe`, `Saga::correlate`,
-//!   `SagaManagerProps::new(store, Fn(SagaComponents<S>) -> S)` and
+//!   `SagaManagerProps::new(Fn(SagaComponents<S>) -> S)` and
 //!   `observing::<E>(Subscription)` — see
 //!   `saga_multi_source_observation.rs`.
 //!
@@ -70,9 +70,11 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::__private::reserved_family;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -286,28 +288,27 @@ fn position_of_the_readable_record(upstream: &AggregateId) -> ConsumedFactPayloa
 /// durable behind at all.
 #[tokio::test]
 async fn a_corrupt_upstream_record_is_skipped_and_writes_nothing() {
-    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new("decode-skip-upstream");
-    seed_upstream(&upstream_store, &upstream).await;
+    seed_upstream(&journal, &upstream).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy = SagaManagerProps::<SkippingSaga>::new(saga_store.clone(), move |_components| {
-        SkippingSaga {
-            handled: Arc::clone(&handled_for_producer),
-        }
+    let _host = SagaManagerProps::<SkippingSaga>::new(move |_components| SkippingSaga {
+        handled: Arc::clone(&handled_for_producer),
     })
-    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(&ps)
+    .observing::<OrderPlaced>(Subscription::stream(&upstream))
+    .spawn(&system)
     .await;
 
     let observed = wait_for_handled(&handled, 1).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         observed,
@@ -349,28 +350,27 @@ async fn a_corrupt_upstream_record_is_skipped_and_writes_nothing() {
 /// carry a record it never consumed.
 #[tokio::test]
 async fn a_corrupt_upstream_record_is_attributed_to_no_instance() {
-    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new("decode-skip-manager-upstream");
-    seed_upstream(&upstream_store, &upstream).await;
+    seed_upstream(&journal, &upstream).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _manager = SagaManagerProps::<SkippingSaga>::new(saga_store.clone(), move |_components| {
-        SkippingSaga {
-            handled: Arc::clone(&handled_for_producer),
-        }
+    let _host = SagaManagerProps::<SkippingSaga>::new(move |_components| SkippingSaga {
+        handled: Arc::clone(&handled_for_producer),
     })
-    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(&ps)
+    .observing::<OrderPlaced>(Subscription::stream(&upstream))
+    .spawn(&system)
     .await;
 
     let observed = wait_for_handled(&handled, 1).await;
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert_eq!(
         observed,

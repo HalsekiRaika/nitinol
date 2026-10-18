@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{
-    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
+    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event, Never,
     ProjectionContext, ProjectionId, Projector,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
@@ -35,6 +35,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;

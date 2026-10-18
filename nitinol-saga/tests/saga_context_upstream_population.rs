@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -161,30 +161,27 @@ async fn wait_for_count(
 
 #[tokio::test]
 async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-upstream-order");
 
-    append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
+    append_order_placed(&journal, &order_id, 1, "SKU-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _manager_proxy =
-        SagaManagerProps::<CapturingSaga>::new(saga_store, move |_components| CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<CapturingSaga>::new(move |_components| CapturingSaga {
+        captured: Arc::clone(&captured_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     wait_for_count(&captured, &notify, 1).await;
 
@@ -200,32 +197,29 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
 
 #[tokio::test]
 async fn saga_context_exposes_upstream_sequence_from_envelope() {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-upstream-seq-order");
 
-    append_order_placed(&upstream_store, &order_id, 1, "S-1").await;
-    append_order_placed(&upstream_store, &order_id, 2, "S-2").await;
-    append_order_placed(&upstream_store, &order_id, 3, "S-3").await;
+    append_order_placed(&journal, &order_id, 1, "S-1").await;
+    append_order_placed(&journal, &order_id, 2, "S-2").await;
+    append_order_placed(&journal, &order_id, 3, "S-3").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _manager_proxy =
-        SagaManagerProps::<CapturingSaga>::new(saga_store, move |_components| CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<CapturingSaga>::new(move |_components| CapturingSaga {
+        captured: Arc::clone(&captured_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     wait_for_count(&captured, &notify, 3).await;
 
@@ -244,30 +238,27 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
 async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
     let started = jiff::Timestamp::now();
 
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-now-order");
 
-    append_order_placed(&upstream_store, &order_id, 1, "NOW-1").await;
+    append_order_placed(&journal, &order_id, 1, "NOW-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _manager_proxy =
-        SagaManagerProps::<CapturingSaga>::new(saga_store, move |_components| CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<CapturingSaga>::new(move |_components| CapturingSaga {
+        captured: Arc::clone(&captured_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     wait_for_count(&captured, &notify, 1).await;
 
@@ -291,16 +282,14 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
 
 #[tokio::test]
 async fn saga_context_existing_accessors_remain_saga_scoped() {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-saga-scope-order");
 
-    append_order_placed(&upstream_store, &order_id, 7, "SCOPE-1").await;
+    append_order_placed(&journal, &order_id, 7, "SCOPE-1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -308,14 +297,13 @@ async fn saga_context_existing_accessors_remain_saga_scoped() {
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _manager_proxy =
-        SagaManagerProps::<CapturingSaga>::new(saga_store, move |_components| CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<CapturingSaga>::new(move |_components| CapturingSaga {
+        captured: Arc::clone(&captured_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     wait_for_count(&captured, &notify, 1).await;
 

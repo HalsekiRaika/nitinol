@@ -20,9 +20,9 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event, Never};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -47,6 +47,7 @@ struct UpstreamAggregate;
 
 impl Aggregate for UpstreamAggregate {
     type Event = UpstreamTriggered;
+    type Recover = Never;
     fn apply(&mut self, _event: UpstreamTriggered) {}
 }
 
@@ -167,6 +168,7 @@ async fn saga_persist_stores_the_declared_event_type_for_every_arm() {
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
                 .build(),
         ))
         .build();
@@ -181,13 +183,12 @@ async fn saga_persist_stores_the_declared_event_type_for_every_arm() {
     let handled = Arc::new(Notify::new());
     let handled_for_saga = Arc::clone(&handled);
 
-    let _manager_proxy =
-        SagaManagerProps::<WorkflowSaga>::new(store.clone(), move |_components| WorkflowSaga {
-            handled: Arc::clone(&handled_for_saga),
-        })
-        .observing::<UpstreamTriggered>(Subscription::stream(&store, &upstream_id))
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<WorkflowSaga>::new(move |_components| WorkflowSaga {
+        handled: Arc::clone(&handled_for_saga),
+    })
+    .observing::<UpstreamTriggered>(Subscription::stream(&upstream_id))
+    .spawn(&system)
+    .await;
 
     upstream_proxy
         .ask(Trigger)

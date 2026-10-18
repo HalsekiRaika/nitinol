@@ -46,14 +46,14 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{Aggregate, AggregateProxy, Decider, Decision, Event, Query};
+use nitinol_eventsource::{Aggregate, AggregateProxy, Decider, Decision, Event, Never, Query};
 use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
     Saga, SagaContext, SagaDelivery, SagaDeliveryError, SagaEffect, SagaId, SagaSubscribe,
-    SagaSubscriptionExt, SagaSystemExt,
+    SagaSystemExt, Subscription,
 };
 
 // Fixtures: an upstream aggregate, a saga that reacts to it, and the receiver
@@ -122,6 +122,7 @@ struct Order;
 
 impl Aggregate for Order {
     type Event = OrderPlaced;
+    type Recover = Never;
 
     fn apply(&mut self, _event: OrderPlaced) {}
 }
@@ -146,6 +147,7 @@ struct Inventory {
 
 impl Aggregate for Inventory {
     type Event = Reserved;
+    type Recover = Never;
 
     fn apply(&mut self, event: Reserved) {
         self.reserved.push(event.sku);
@@ -280,7 +282,7 @@ async fn one_host_declaration_carries_a_decision_to_its_target() {
     // When: one declaration, and nothing about delivery said at all
     let _host = system
         .host::<ReservationSaga>(|_components| ReservationSaga)
-        .observing::<OrderPlaced>(system.subscription(&order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
         .spawn()
         .await;
 
@@ -313,7 +315,7 @@ async fn the_handle_reaches_the_manager_and_the_delivery_host() {
 
     let host = system
         .host::<ReservationSaga>(|_components| ReservationSaga)
-        .observing::<OrderPlaced>(system.subscription(&order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
         .spawn()
         .await;
 

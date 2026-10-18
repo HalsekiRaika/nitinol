@@ -8,13 +8,17 @@
 //!     And telling an aggregate through it reaches the activation the host
 //!         resolves, on the store the host was built on
 //!
-//!   Scenario: a saga built from props directly has no host
-//!     Given a saga hosted from props built on a store rather than a system
+//!   Scenario: a saga built from props is handed the system it was spawned on
+//!     Given a saga hosted from props spawned on a system
 //!     When its producer asks the components for the hosting system
-//!     Then it is handed none
+//!     Then it is handed that system
 //! ```
 //!
-//! There is one hosted entry point and so one hosted clause.  The host builds
+//! Both entry points hand the instance a `&SystemHandle`, because a saga is
+//! started on a system and has no other way to be started: there is no longer
+//! an unhosted spawn for a clause to describe.  So the second clause asks the
+//! same question of the props-first form and reads the same answer, and the
+//! first clause keeps what reaching through that handle costs — the host builds
 //! every instance from the one producer it was given, so there is no second
 //! path a host handle could reach and no correlated instance it could miss.
 //!
@@ -32,9 +36,10 @@
 //! clause that only read the rows would pass such a handle, because a second
 //! activation replays the stream and takes the next number quite happily.
 //!
-//! The last clause reads a handled count beside the absent host, because
-//! "handed none" is otherwise indistinguishable from a producer that was never
-//! called.
+//! Each clause reads a handled count beside the host it was handed, because
+//! what changed is the answer's type — a `system()` answering an `Option` does
+//! not compile against the annotation in the producer — and a flag on its own
+//! is indistinguishable from a producer that was never called.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -48,9 +53,9 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::{EventSourceSystem, SystemHandle};
-use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Never};
 use nitinol_persistence::provider::{PersistenceProvider, Store};
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -116,6 +121,7 @@ struct Ledger;
 
 impl Aggregate for Ledger {
     type Event = Recorded;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Recorded) {}
 }
@@ -155,19 +161,22 @@ struct Report {
 
 /// A saga whose only dependency is the system that hosts it.
 struct HostedSaga {
-    /// The host the components answered with, if there was one.
-    host: Option<SystemHandle>,
+    /// The host the components answered with.
+    host: SystemHandle,
     report: Arc<Report>,
 }
 
-/// Build one incarnation, recording whether a host was handed over.
+/// Build one incarnation, recording that a host was handed over.
+///
+/// The annotation is the contract: a `system()` answering an `Option` has no
+/// coercion to `&SystemHandle` and does not compile here.
 fn producer(report: &Arc<Report>) -> impl Fn(SagaComponents<HostedSaga>) -> HostedSaga {
     let report = Arc::clone(report);
     move |components| {
-        let host = components.system().cloned();
-        report.host_present.store(host.is_some(), Ordering::SeqCst);
+        let hosting: &SystemHandle = components.system();
+        report.host_present.store(true, Ordering::SeqCst);
         HostedSaga {
-            host,
+            host: hosting.clone(),
             report: Arc::clone(&report),
         }
     }
@@ -189,12 +198,11 @@ impl Saga for HostedSaga {
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         let Observed::Order(event) = input;
-        if let Some(host) = &self.host {
-            host.aggregate_proxy::<Ledger>(AggregateId::new(TARGET))
-                .ask(Record { sku: event.sku })
-                .await
-                .expect("telling an aggregate through the host must succeed");
-        }
+        self.host
+            .aggregate_proxy::<Ledger>(AggregateId::new(TARGET))
+            .ask(Record { sku: event.sku })
+            .await
+            .expect("telling an aggregate through the host must succeed");
         self.report.handled.fetch_add(1, Ordering::SeqCst);
         self.report.notify.notify_one();
         Ok(SagaEffect::None)
@@ -298,7 +306,7 @@ async fn an_instance_the_host_spawns_reaches_the_hosting_systems_resources() {
         .await
         .expect("the first dispatch must persist");
 
-    let upstream = Journal::from(InMemoryEventStore::default());
+    let upstream = system.persistence().event_store();
     let order_id = AggregateId::new("saga-components-host-order");
     let report = Arc::new(Report::default());
 
@@ -306,7 +314,7 @@ async fn an_instance_the_host_spawns_reaches_the_hosting_systems_resources() {
     // outside the producer
     let _host = system
         .host::<HostedSaga>(producer(&report))
-        .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
         .spawn()
         .await;
 
@@ -348,36 +356,38 @@ async fn an_instance_the_host_spawns_reaches_the_hosting_systems_resources() {
     );
 }
 
-// The entry point built directly
+// The entry point built from props
 
-/// A saga hosted from props built on a store has no host, and says so.
+/// A saga hosted from props is handed the system those props were spawned on.
 ///
-/// This path needs no system to run on, so there is nothing truthful to answer
-/// with. The handled count beside it is what makes the absence a statement
-/// rather than a producer that never ran.
+/// Props name no store of their own, so the system they are spawned on is the
+/// only thing there is to answer with — and it is the same answer the system's
+/// own entry point gives. The handled count beside it is what makes the answer
+/// a statement rather than a producer that never ran.
 #[tokio::test]
-async fn a_saga_built_from_props_directly_is_handed_no_host() {
+async fn a_saga_built_from_props_is_handed_the_system_it_was_spawned_on() {
     // Given
-    let ps = ProcessSystem::new().await;
-    let journal = Journal::from(InMemoryEventStore::default());
-    let upstream = Journal::from(InMemoryEventStore::default());
-    let order_id = AggregateId::new("saga-components-no-host-order");
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let upstream = system.persistence().event_store();
+    let order_id = AggregateId::new("saga-components-props-order");
     let report = Arc::new(Report::default());
 
     // When
-    let _saga = SagaManagerProps::<HostedSaga>::new(journal.clone(), producer(&report))
-        .observing::<OrderPlaced>(Subscription::stream(&upstream, &order_id))
-        .spawn(&ps)
+    let _saga = SagaManagerProps::<HostedSaga>::new(producer(&report))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
+        .spawn(&system)
         .await;
 
-    append_order_placed(&upstream, &order_id, 1, "without-a-host").await;
+    append_order_placed(&upstream, &order_id, 1, "from-props").await;
     wait_for_handled(&report, 1, "the instance must observe the order").await;
 
     // Then
     assert!(
-        !report.host_present.load(Ordering::SeqCst),
-        "props built on a store rather than on a system have no host to hand \
-         over, and the components say so rather than naming one that does not \
-         exist"
+        report.host_present.load(Ordering::SeqCst),
+        "an instance hosted from props spawned on a system is handed that \
+         system, so neither entry point needs a clone prepared outside the \
+         spawn"
     );
 }

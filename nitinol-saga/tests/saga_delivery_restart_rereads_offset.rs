@@ -22,42 +22,99 @@
 #[path = "common/delivery.rs"]
 mod delivery;
 use delivery::{
-    delivery_id, delivery_persistence, in_memory_system, partition_count, scope_of,
-    wait_until_loads, DeliverySaga, LoadFault, RecordingEventStore, RecordingOffsetStore,
+    delivery_id, delivery_system, partition_count, scope_of, wait_until_loads, DeliverySaga,
+    RecordingEventStore, RecordingOffsetStore, Triggered, TRIGGER_KEY,
 };
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_persistence::store::InMemoryEventStore;
-use nitinol_saga::SagaDeliveryProps;
+use async_trait::async_trait;
+
+use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::{AppendOutcome, AppendingEvent, LoadQuery};
+use nitinol_saga::{SagaManagerProps, Subscription};
 
 /// Slow enough that the position below is in the store well before the query
 /// that is meant to read it.
 const POLL: Duration = Duration::from_millis(200);
 
-/// The load call that fails, so the partition is restarted under supervision.
+/// The delivery host's load call that fails, so the partition is restarted
+/// under supervision.
 const FAILING_CALL: usize = 3;
 
 /// A position no host in this test could have reached on its own.
 const MOVED_ON_TO: u64 = 5;
 
+/// A store that panics on the delivery host's `nth` load, and hands every call
+/// to the recorder it wraps.
+///
+/// Counted over the host's own loads rather than over every call the store saw:
+/// one journal carries the manager's source poller too, so a fault numbered
+/// over all of them would take down whichever consumer happened to ask third.
+/// A host's load is the one naming the decision event type as a prefix, which
+/// is the same thing [`RecordingEventStore`] reads its record of calls by.
+#[derive(Clone)]
+struct PanicOnHostLoad {
+    inner: RecordingEventStore,
+    nth: usize,
+    host_loads: Arc<AtomicUsize>,
+}
+
+impl PanicOnHostLoad {
+    fn new(inner: RecordingEventStore, nth: usize) -> Self {
+        Self {
+            inner,
+            nth,
+            host_loads: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[async_trait]
+impl EventStore for PanicOnHostLoad {
+    async fn append(
+        &self,
+        key: &str,
+        events: Vec<AppendingEvent>,
+    ) -> Result<AppendOutcome, AppendError> {
+        self.inner.append(key, events).await
+    }
+
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        let host_load = query.event_type_prefix.is_some();
+        let nth = if host_load {
+            self.host_loads.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            0
+        };
+        // Handed on before the fault, so the call that takes the partition down
+        // is in the record the clause below reads.
+        let loaded = self.inner.load(query).await;
+        if host_load && nth == self.nth {
+            panic!("the fixture store panics on the host's load call {nth}");
+        }
+        loaded
+    }
+}
+
 #[tokio::test]
 async fn a_restarted_partition_resumes_from_the_position_now_recorded() {
     // Given
-    let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(InMemoryEventStore::default());
-    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
-    recording.fault_on(FAILING_CALL, LoadFault::Panic);
+    let journal = PanicOnHostLoad::new(recording.clone(), FAILING_CALL);
+    let system = delivery_system(&journal, &offsets).await;
 
-    let _host = SagaDeliveryProps::<DeliverySaga, RecordingOffsetStore>::new(
-        &delivery_persistence(&journal, &offsets),
-    )
-    .with_delivery_id(delivery_id())
-    .with_partitions(partition_count(1))
-    .with_poll_interval(POLL)
-    .spawn(&system)
-    .await;
+    let _host = SagaManagerProps::<DeliverySaga>::new(|_| DeliverySaga)
+        .observing::<Triggered>(Subscription::stream(TRIGGER_KEY))
+        .with_delivery_id(delivery_id())
+        .with_partitions(partition_count(1))
+        .with_delivery_poll_interval(POLL)
+        .spawn(&system)
+        .await;
 
     wait_until_loads(&recording, 1, "the partition must start polling").await;
 

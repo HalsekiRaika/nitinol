@@ -29,7 +29,7 @@ use crate::decision::Decision;
 ///
 /// ```rust
 /// use bytes::Bytes;
-/// use nitinol_contract::{Aggregate, Codec, Decider, Decision, Event};
+/// use nitinol_contract::{Aggregate, Codec, Decider, Decision, Event, Never};
 /// use nitinol_persistence::{EventType, Family, TypeName};
 ///
 /// #[derive(Clone)]
@@ -54,6 +54,7 @@ use crate::decision::Decision;
 ///
 /// impl Aggregate for Counter {
 ///     type Event = CounterEvent;
+///     type Recover = Never;
 ///
 ///     fn apply(&mut self, event: CounterEvent) {
 ///         match event {

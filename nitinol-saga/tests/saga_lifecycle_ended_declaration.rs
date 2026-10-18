@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -171,27 +171,27 @@ async fn stream_after_one_end(upstream_key: &str, sku: &str) -> Vec<LoadedEvent>
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the order stream the saga observes and the saga's own stream
+    // are tenants of the store the system distributes, kept apart by stream key.
+    let journal = system.persistence().event_store();
     let upstream = AggregateId::new(upstream_key);
-    append_order_placed(&upstream_store, &upstream, sku).await;
+    append_order_placed(&journal, &upstream, sku).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
 
-    let _proxy =
-        SagaManagerProps::<EndOnFirstSaga>::new(saga_store.clone(), |_components| EndOnFirstSaga)
-            .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-            .spawn(system.process_system())
-            .await;
+    let _host = SagaManagerProps::<EndOnFirstSaga>::new(|_components| EndOnFirstSaga)
+        .observing::<OrderPlaced>(Subscription::stream(&upstream))
+        .spawn(&system)
+        .await;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let events = load_saga_stream(&saga_store, &saga_id).await;
+        let events = load_saga_stream(&journal, &saga_id).await;
         if events.iter().any(|e| lifecycle_kind_of(e).is_some()) {
             // Let anything the interpreter might still write land, so a row
             // appended just after the fact is not missed.
             tokio::time::sleep(Duration::from_millis(250)).await;
-            return load_saga_stream(&saga_store, &saga_id).await;
+            return load_saga_stream(&journal, &saga_id).await;
         }
         assert!(
             std::time::Instant::now() < deadline,

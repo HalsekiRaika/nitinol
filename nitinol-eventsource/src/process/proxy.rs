@@ -28,13 +28,13 @@ use crate::process::resolve::{AggregateResolver, Incarnation};
 /// # One reference type
 ///
 /// This is the only reference type in the framework: there is no second "already
-/// running" handle to choose between.  What varies is how the reference was
-/// obtained, not what it means.
-///
-/// | Origin | Behaviour |
-/// |---|---|
-/// | [`EventSourceSystem`](crate::system::EventSourceSystem) — `spawn_aggregate`, `aggregate_props(..).spawn(..)`, `aggregate_proxy` | Resolves through the node's registry: at most one activation per key on this node, re-resolved after an activation dies |
-/// | [`AggregateProps::spawn`](crate::AggregateProps::spawn) built directly | Pinned to the activation that call started — an explicit lifecycle, not a resolve |
+/// running" handle to choose between, and no second way of reaching one.  Every
+/// entry point — [`EventSourceSystem::spawn_aggregate`](crate::system::EventSourceSystem::spawn_aggregate),
+/// [`aggregate_props(..).spawn()`](crate::system::EventSourceSystem::aggregate_props),
+/// [`aggregate_proxy`](crate::system::EventSourceSystem::aggregate_proxy) and
+/// [`AggregateProps::spawn`](crate::AggregateProps::spawn) on props built
+/// directly — resolves through the node's registry: at most one activation per
+/// key on this node, re-resolved after an activation dies.
 ///
 /// # Duplicate activations are normal
 ///
@@ -47,32 +47,11 @@ pub struct AggregateProxy<A: Aggregate> {
     /// [`AggregateTellTarget::aggregate_id`](crate::AggregateTellTarget::aggregate_id)
     /// can answer without resolving anything.
     aggregate_id: AggregateId,
-    binding: Binding<A>,
-}
-
-/// How a reference reaches an activation.
-///
-/// Both arms are another name for what they reach rather than a copy of it, so
-/// a reference is shared by cloning it: the pinned arm carries the process
-/// handle the lifecycle started, and the resolved arm carries the one
-/// [`Resolution`] its clones answer from.
-enum Binding<A: Aggregate> {
-    /// The one activation an explicit `AggregateProps::spawn` started.
+    /// The one [`Resolution`] this reference and its clones answer from.
     ///
-    /// That call starts a lifecycle rather than resolving an identity, so its
-    /// reference stays with what it started and does not replace it.
-    Pinned(Incarnation<A>),
-    /// An identity, resolved on demand.
-    Resolved(Resolution<A>),
-}
-
-impl<A: Aggregate> Clone for Binding<A> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Pinned(incarnation) => Self::Pinned(incarnation.clone()),
-            Self::Resolved(resolution) => Self::Resolved(resolution.clone()),
-        }
-    }
+    /// Another name for what it reaches rather than a copy of it, so a
+    /// reference is shared by cloning it.
+    resolution: Resolution<A>,
 }
 
 /// One identity's resolver and the activation it last resolved to.
@@ -142,21 +121,12 @@ impl<A: Aggregate> Clone for AggregateProxy<A> {
     fn clone(&self) -> Self {
         Self {
             aggregate_id: self.aggregate_id.clone(),
-            binding: self.binding.clone(),
+            resolution: self.resolution.clone(),
         }
     }
 }
 
 impl<A: Aggregate> AggregateProxy<A> {
-    /// A reference bound to the activation `incarnation`, for the explicit
-    /// lifecycle path.
-    pub(crate) fn pinned(aggregate_id: AggregateId, incarnation: Incarnation<A>) -> Self {
-        Self {
-            aggregate_id,
-            binding: Binding::Pinned(incarnation),
-        }
-    }
-
     /// A reference that resolves `aggregate_id` through the registry.
     ///
     /// Nothing is activated here; the first dispatch — or an explicit
@@ -164,7 +134,7 @@ impl<A: Aggregate> AggregateProxy<A> {
     pub(crate) fn resolved(aggregate_id: AggregateId, resolver: AggregateResolver<A>) -> Self {
         Self {
             aggregate_id,
-            binding: Binding::Resolved(Resolution::new(resolver)),
+            resolution: Resolution::new(resolver),
         }
     }
 
@@ -257,10 +227,7 @@ impl<A: Aggregate> AggregateProxy<A> {
 
     /// The activation this dispatch goes to.
     async fn incarnation(&self) -> Incarnation<A> {
-        match &self.binding {
-            Binding::Pinned(incarnation) => incarnation.clone(),
-            Binding::Resolved(resolution) => resolution.incarnation().await,
-        }
+        self.resolution.incarnation().await
     }
 
     /// Treat `dead` as gone, so the next dispatch resolves a live activation.
@@ -273,11 +240,7 @@ impl<A: Aggregate> AggregateProxy<A> {
     /// learns the dispatch failed, and [`AskError::retryability`] tells it that
     /// retrying is worthwhile.
     fn invalidate(&self, dead: &Incarnation<A>) {
-        let Binding::Resolved(resolution) = &self.binding else {
-            return;
-        };
-
-        resolution.invalidate(dead);
+        self.resolution.invalidate(dead);
     }
 }
 
@@ -312,4 +275,84 @@ where
                 AppendError::SequenceConflict(_)
             )))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use nitinol_contract::{Codec, Never};
+    use nitinol_persistence::provider::PersistenceProvider;
+    use nitinol_persistence::store::InMemoryStore;
+    use nitinol_persistence::{EventType, Family, TypeName};
+    use nitinol_runtime::ProcessSystem;
+
+    use super::*;
+    use crate::process::props::AggregateProps;
+    use crate::system::EventSourceSystem;
+
+    struct BumpedCodec;
+
+    impl Codec<Bumped> for BumpedCodec {
+        type Error = std::convert::Infallible;
+
+        fn encode(_event: &Bumped) -> Result<Bytes, Self::Error> {
+            Ok(Bytes::new())
+        }
+
+        fn decode(_payload: &[u8]) -> Result<Bumped, Self::Error> {
+            Ok(Bumped)
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Bumped;
+
+    impl nitinol_contract::Event for Bumped {
+        const EVENT_TYPE: EventType =
+            EventType::new(Family::new("proxy.pid"), TypeName::new("Bumped"));
+        type Codec = BumpedCodec;
+    }
+
+    /// Carries no snapshot policy: this test only exercises which activation a
+    /// reference resolves to, not recovery.
+    #[derive(Default)]
+    struct Counted;
+
+    impl Aggregate for Counted {
+        type Event = Bumped;
+        type Recover = Never;
+
+        fn apply(&mut self, _event: Bumped) {}
+    }
+
+    /// Both entry points reach one activation, restated at the layer that owns
+    /// the pid.
+    ///
+    /// A reference does not expose a pid to its caller (see "Resolution is
+    /// silent about what it did" above), so
+    /// `nitinol-eventsource/tests/props_take_their_stores_from_the_system.rs`
+    /// observes the same clause from outside through the store's optimistic
+    /// concurrency rule. This module is the one place allowed to look past
+    /// that and compare pids directly, because it is where the resolution
+    /// cache they come from is defined.
+    #[tokio::test]
+    async fn both_entry_points_resolve_to_the_same_activation() {
+        let system: EventSourceSystem<InMemoryStore> =
+            EventSourceSystem::builder(ProcessSystem::new().await)
+                .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+                .build();
+        let id = AggregateId::new("proxy-pid-one-activation");
+
+        let via_props = AggregateProps::<Counted>::new(id.clone())
+            .spawn(&system)
+            .await;
+        let via_system = system.aggregate_props::<Counted>(id).spawn().await;
+
+        assert_eq!(
+            via_props.incarnation().await.pid(),
+            via_system.incarnation().await.pid(),
+            "the props-first and system-first entry points must resolve the \
+             same identity to one activation, not two"
+        );
+    }
 }

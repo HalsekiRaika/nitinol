@@ -52,8 +52,10 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -281,20 +283,26 @@ async fn wait_for_fired(fired: &Arc<Mutex<Vec<Reminder>>>) -> Vec<Reminder> {
     }
 }
 
+/// A fresh system over one in-memory journal: the saga's own stream and the
+/// upstream trigger stream are tenants of it, kept apart by stream key.
+async fn system() -> EventSourceSystem<InMemoryStore> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build()
+}
+
 async fn spawn_codec_saga(
-    ps: &ProcessSystem,
-    saga_store: &Journal,
-    upstream_store: &Journal,
+    system: &EventSourceSystem<InMemoryStore>,
     upstream_key: &str,
     fired: &Arc<Mutex<Vec<Reminder>>>,
-) -> nitinol_saga::SagaManagerProxy<CodecSaga> {
+) -> nitinol_saga::SagaHostProxy<CodecSaga> {
     let fired = Arc::clone(fired);
-    SagaManagerProps::<CodecSaga>::new(saga_store.clone(), move |components| CodecSaga {
+    SagaManagerProps::<CodecSaga>::new(move |components| CodecSaga {
         deadline: components.deadline(),
         fired: Arc::clone(&fired),
     })
-    .observing::<Trigger>(Subscription::stream(upstream_store, upstream_key))
-    .spawn(ps)
+    .observing::<Trigger>(Subscription::stream(upstream_key))
+    .spawn(system)
     .await
 }
 
@@ -311,13 +319,12 @@ async fn spawn_codec_saga(
 /// reach `handle` would supersede the deadline under test rather than quietly
 /// reproduce it.
 async fn seed_an_inert_boot_record(
-    saga_store: &Journal,
+    journal: &Journal,
     saga_id: &SagaId,
     saga_sequence: u64,
-    upstream_store: &Journal,
     upstream_key: &str,
 ) {
-    saga_store
+    journal
         .append(
             saga_id.as_str(),
             vec![AppendingEvent {
@@ -330,7 +337,7 @@ async fn seed_an_inert_boot_record(
         .await
         .expect("seeding a consumed position must succeed");
 
-    append_trigger(upstream_store, upstream_key, 600_000).await;
+    append_trigger(journal, upstream_key, 600_000).await;
 }
 
 // Tests
@@ -341,25 +348,17 @@ async fn seed_an_inert_boot_record(
 /// what serde would have written.
 #[tokio::test]
 async fn the_schedule_fact_carries_the_codec_the_message_type_names() {
-    let ps = ProcessSystem::new().await;
+    let system = system().await;
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    append_trigger(&upstream_store, "deadline-codec-upstream-1", 5_000).await;
+    append_trigger(&journal, "deadline-codec-upstream-1", 5_000).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<Reminder>::new()));
 
-    let _proxy = spawn_codec_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        "deadline-codec-upstream-1",
-        &fired,
-    )
-    .await;
+    let _host = spawn_codec_saga(&system, "deadline-codec-upstream-1", &fired).await;
 
-    let payloads = wait_for_scheduled_payload(&saga_store, &saga_id).await;
+    let payloads = wait_for_scheduled_payload(&journal, &saga_id).await;
 
     let expected = <PipeCodec as Codec<Reminder>>::encode(&reminder())
         .expect("encoding a Reminder must succeed");
@@ -386,15 +385,15 @@ async fn the_schedule_fact_carries_the_codec_the_message_type_names() {
 /// fact is read back through the same codec it was written with.
 #[tokio::test]
 async fn a_firing_is_read_back_through_the_codec_the_message_type_names() {
-    let ps = ProcessSystem::new().await;
+    let system = system().await;
+    let journal = system.persistence().event_store();
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let expected = reminder();
     let payload = <PipeCodec as Codec<Reminder>>::encode(&expected)
         .expect("encoding a Reminder must succeed");
 
-    saga_store
+    journal
         .append(
             saga_id.as_str(),
             vec![AppendingEvent {
@@ -417,25 +416,10 @@ async fn a_firing_is_read_back_through_the_codec_the_message_type_names() {
 
     // One already-consumed upstream record, so the instance exists at all;
     // replay of the schedule fact is still the only way a deadline gets in.
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    seed_an_inert_boot_record(
-        &saga_store,
-        &saga_id,
-        2,
-        &upstream_store,
-        "deadline-codec-upstream-2-boot",
-    )
-    .await;
+    seed_an_inert_boot_record(&journal, &saga_id, 2, "deadline-codec-upstream-2-boot").await;
     let fired = Arc::new(Mutex::new(Vec::<Reminder>::new()));
 
-    let _proxy = spawn_codec_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        "deadline-codec-upstream-2-boot",
-        &fired,
-    )
-    .await;
+    let _host = spawn_codec_saga(&system, "deadline-codec-upstream-2-boot", &fired).await;
 
     let seen = wait_for_fired(&fired).await;
 

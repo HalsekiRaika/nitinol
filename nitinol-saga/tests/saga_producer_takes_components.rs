@@ -25,7 +25,10 @@
 //! Both entry points take `producer: impl Fn(SagaComponents<S>) -> S`:
 //!
 //! 1. `SagaSystemExt::host::<S>(producer)`
-//! 2. `SagaManagerProps::new(store, producer)`
+//! 2. `SagaManagerProps::new(producer)`
+//!
+//! Neither names a store: both are started on an `EventSourceSystem`, which is
+//! where every store a saga touches comes from.
 //!
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_producer_takes_components`.
@@ -44,13 +47,12 @@ use serde::{Deserialize, Serialize};
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscriptionExt, SagaSystemExt,
-    Subscription,
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSystemExt, Subscription,
 };
 
 // Domain
@@ -183,36 +185,34 @@ async fn wait_for_all(expected: &[&str]) -> Vec<String> {
 #[allow(clippy::default_constructed_unit_structs)]
 #[tokio::test]
 async fn every_entry_point_builds_the_saga_from_the_components_it_is_handed() {
-    let ps = ProcessSystem::new().await;
-    let own_store = Journal::from(InMemoryEventStore::default());
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    // A system per entry point: one saga type declares one delivery
+    // identifier, so two spawns of it on one system would be two consumers of
+    // one progress record rather than two entry points into the same wiring.
+    let props_system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
 
-    // Entry point 1 — `SagaManagerProps`, built on a store of its own.
-    append_ping(&upstream_store, THROUGH_MANAGER_PROPS).await;
+    // Entry point 1 — `SagaManagerProps`, spawned on a system, which is where
+    // the journal it observes and persists onto comes from.
+    let props_store = props_system.persistence().event_store();
+    append_ping(&props_store, THROUGH_MANAGER_PROPS).await;
     let _through_manager_props =
-        SagaManagerProps::<TrivialSaga>::new(own_store.clone(), |_components| {
-            TrivialSaga::default()
-        })
-        .observing::<Ping>(Subscription::stream(&upstream_store, THROUGH_MANAGER_PROPS))
-        .spawn(&ps)
-        .await;
+        SagaManagerProps::<TrivialSaga>::new(|_components| TrivialSaga::default())
+            .observing::<Ping>(Subscription::stream(THROUGH_MANAGER_PROPS))
+            .spawn(&props_system)
+            .await;
 
     // Entry point 2 — `host` on a system, journalling onto the store the
     // provider supplies.
-    let system = EventSourceSystem::builder(ps.clone())
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(InMemoryEventStore::default())
-                .saga_offsets(InMemoryOffsetStore::default())
-                .build(),
-        ))
-        .build();
     let provider_store = system.persistence().event_store();
     append_ping(&provider_store, THROUGH_HOST).await;
 
     let _through_host = system
         .host::<TrivialSaga>(|_components| TrivialSaga::default())
-        .observing::<Ping>(system.subscription(THROUGH_HOST))
+        .observing::<Ping>(Subscription::stream(THROUGH_HOST))
         .spawn()
         .await;
 

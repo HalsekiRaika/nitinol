@@ -1,5 +1,4 @@
 use nitinol_persistence::error::SnapshotError;
-use nitinol_persistence::provider::{PersistenceProvider, SnapshotSlot};
 use nitinol_persistence::store::Album;
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::ident::Pid;
@@ -22,6 +21,29 @@ pub(crate) struct LoadLatestSnapshot {
 /// Persistence process that exclusively owns the supplier's [`Album`].
 ///
 /// All snapshot operations are serialized through this process's message loop.
+///
+/// # One per system, and no way to make a second
+///
+/// [`EventSourceSystem::snapshot_persistor`](crate::system::EventSourceSystem::snapshot_persistor)
+/// is the only way to reach one, and it answers with the single process its
+/// node memoises — the same one an activation of a
+/// [`Latest`](nitinol_contract::Latest) aggregate recovers through. There is no
+/// entry point that starts a persistor over a store a caller named, because the
+/// snapshot contract is written for a single consumer serialising its calls:
+///
+/// ```compile_fail
+/// # use nitinol_eventsource::SnapshotPersistor;
+/// # use nitinol_persistence::provider::PersistenceProvider;
+/// # use nitinol_persistence::store::InMemoryStore;
+/// # use nitinol_runtime::ProcessSystem;
+/// # async fn wiring() {
+/// # let ps = ProcessSystem::new().await;
+/// let persistence = PersistenceProvider::new(InMemoryStore::default());
+/// // `SnapshotPersistor::spawn` is not public: a system distributes the one
+/// // persistor it holds
+/// SnapshotPersistor::spawn(&ps, &persistence).await;
+/// # }
+/// ```
 pub struct SnapshotPersistor {
     store: Album,
 }
@@ -55,44 +77,18 @@ impl Receive<LoadLatestSnapshot> for SnapshotPersistor {
 }
 
 impl SnapshotPersistor {
-    /// Spawn a `SnapshotPersistor` on the given system, over the snapshot store
-    /// `persistence` distributes, and return a typed reference.
+    /// Spawn a `SnapshotPersistor` on `system`, over `store`, and return a typed
+    /// reference.
     ///
     /// - Supervision: `Resume` — the process stays alive after handler errors.
     /// - Idle timeout: `Persistent` — never stopped due to inactivity.
     ///
-    /// This is the low-level entry point, for a lifecycle pinned to one
-    /// aggregate and started without an
-    /// [`EventSourceSystem`](crate::system::EventSourceSystem). A deployment
-    /// that has a system takes
-    /// [`snapshot_persistor`](crate::system::EventSourceSystem::snapshot_persistor)
-    /// from it instead, which starts one process and distributes it; both
-    /// resolve the supplier's snapshot slot, so neither reaches a store of its
-    /// own.
-    ///
-    /// # Typestate
-    ///
-    /// A store that holds no snapshot store is refused here rather than at the
-    /// first save:
-    ///
-    /// ```compile_fail
-    /// # use nitinol_eventsource::SnapshotPersistor;
-    /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-    /// # use nitinol_persistence::store::InMemoryEventStore;
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # async fn wiring() {
-    /// # let ps = ProcessSystem::new().await;
-    /// // no `snapshot` — this store has no snapshot slot
-    /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
-    /// let persistence = PersistenceProvider::new(store);
-    /// SnapshotPersistor::spawn(&ps, &persistence).await;
-    /// # }
-    /// ```
-    pub async fn spawn<St: SnapshotSlot>(
-        system: &ProcessSystem,
-        persistence: &PersistenceProvider<St>,
-    ) -> SnapshotPersistorProxy {
-        let store = persistence.snapshot_store();
+    /// Crate-private, and called from exactly one place: the memoised cell a
+    /// system's node holds. The snapshot contract is written for a single
+    /// consumer serialising its calls, so a second process over one store would
+    /// be two consumers — which is why there is no public form of this and no
+    /// way to start a second persistor at all.
+    pub(crate) async fn spawn(system: &ProcessSystem, store: Album) -> SnapshotPersistorProxy {
         let props = Props::new(move || SnapshotPersistor {
             store: store.clone(),
         })

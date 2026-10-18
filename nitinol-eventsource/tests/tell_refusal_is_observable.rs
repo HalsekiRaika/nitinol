@@ -19,9 +19,11 @@ use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Level, Metadata, Subscriber};
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, Query,
+    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, Never, Query,
 };
+use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -47,6 +49,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -196,11 +199,14 @@ async fn a_refused_told_command_is_reported_and_a_carried_out_one_is_not() {
     })
     .expect("this test binary holds one test, so nothing else installs a subscriber");
 
-    let ps = ProcessSystem::new().await;
-    let store = Journal::from(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(Journal::from(
+            InMemoryEventStore::default(),
+        )))
+        .build();
     let id = AggregateId::new("tell-refusal-reported");
-    let proxy = AggregateProps::<Counter>::new(id.clone(), store.clone())
-        .spawn(&ps)
+    let proxy = AggregateProps::<Counter>::new(id.clone())
+        .spawn(&system)
         .await;
 
     // When: the queue is FIFO, so the query is answered only after the refused

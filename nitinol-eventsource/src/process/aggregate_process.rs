@@ -1,5 +1,4 @@
 use std::borrow::Borrow;
-use std::sync::Arc;
 
 use futures_util::StreamExt;
 use nitinol_contract::{Aggregate, Decider, Decision, Event, Query};
@@ -10,18 +9,8 @@ use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::appending::EventAppending;
 use crate::codec;
-use crate::error::{AskHandlerError, CodecError, ExecHandlerError, PersistError};
-use crate::process::snapshot_persistor::SnapshotPersistorProxy;
-
-// Type alias for the snapshot restoration callback
-
-/// A heap-allocated, shareable function that restores an aggregate from a
-/// snapshot payload.  Stored as `Option<SnapshotRestoreFn<A>>` so it is set
-/// only when both `Snapshotable` and a snapshot persistor are in use.
-///
-/// The function decodes the raw bytes to the snapshot domain value (via the
-/// codec `A` named for its snapshot) and then calls `A::restore`.
-pub(crate) type SnapshotRestoreFn<A> = Arc<dyn Fn(&[u8]) -> Result<A, CodecError> + Send + Sync>;
+use crate::error::{AskHandlerError, ExecHandlerError, PersistError};
+use crate::process::recover::SnapshotRecovery;
 
 // Internal message wrappers
 //
@@ -141,32 +130,37 @@ pub struct AggregateProcess<A: Aggregate> {
     pub(crate) state: A,
     pub(crate) aggregate_id: AggregateId,
     pub(crate) store: Journal,
-    pub(crate) snapshot_ref: Option<SnapshotPersistorProxy>,
     pub(crate) sequence: u64,
-    /// Restores aggregate state from a snapshot payload.
-    /// Set only when the aggregate implements `Snapshotable` and a snapshot
-    /// persistor was provided via `AggregateProps::with_snapshot_persistor`.
-    pub(crate) snapshot_restore: Option<SnapshotRestoreFn<A>>,
+    /// Where the newest snapshot is read from, and how it is read back as `A`.
+    ///
+    /// `Some` exactly when the aggregate's own
+    /// [`Recover`](Aggregate::Recover) marker is
+    /// [`Latest`](nitinol_contract::Latest). Nothing at the wiring sets this:
+    /// the marker decides it, and the system supplies the one persistor it
+    /// resolves through.
+    pub(crate) recovery: Option<SnapshotRecovery<A>>,
 }
 
 impl<A: Aggregate> Process for AggregateProcess<A> {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
-        if let (Some(restore_fn), Some(snapshot_proxy)) =
-            (self.snapshot_restore.clone(), self.snapshot_ref.clone())
-        {
-            match snapshot_proxy.load_latest(self.aggregate_id.clone()).await {
-                Ok(Some(snapshot)) => match restore_fn(&snapshot.payload) {
-                    Ok(restored) => {
-                        self.state = restored;
+        if let Some(recovery) = self.recovery.clone() {
+            // Resolved here rather than at the wiring: starting the system's
+            // persistor is asynchronous, and a reference is built without
+            // awaiting.
+            let persistor = recovery.persistor().await;
+            match persistor.load_latest(self.aggregate_id.clone()).await {
+                Ok(Some(snapshot)) => match recovery.recover(&snapshot.payload) {
+                    Ok(recovered) => {
+                        self.state = recovered;
                         self.sequence = snapshot.sequence;
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "snapshot decode failed; restoring from default state");
+                        tracing::error!(error = %e, "snapshot decode failed; replaying from the start of the stream");
                     }
                 },
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::error!(error = ?e, "snapshot load failed; proceeding without snapshot");
+                    tracing::error!(error = ?e, "snapshot load failed; proceeding without recovering");
                 }
             }
         }

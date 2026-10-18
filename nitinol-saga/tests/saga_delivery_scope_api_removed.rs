@@ -202,7 +202,7 @@ async fn the_withdrawn_advance_verb_belongs_to_a_downstream_definition() {
     // would resolve whatever that outer type does or does not have.
     let host = system
         .host::<ProbeSaga>(|_components| ProbeSaga)
-        .observing::<Signal>(system.subscription(&AggregateId::new(PROBE_SAGA_ID)))
+        .observing::<Signal>(Subscription::stream(&AggregateId::new(PROBE_SAGA_ID)))
         .spawn()
         .await;
 

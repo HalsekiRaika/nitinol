@@ -33,8 +33,9 @@
 //!     Then one activation accepted every append
 //!
 //!   Scenario: a reference's clone shares its binding
-//!     When a pinned reference and a resolved one are each cloned
-//!     Then the pinned pair address the one activation, and the resolved pair
+//!     When a reference from the props-first entry point and one from the
+//!          system-first entry point are each cloned
+//!     Then the first pair address the one activation, and the second pair
 //!          share the cache a death empties: the next dispatch through the
 //!          other clone reaches a live activation first time
 //!
@@ -69,7 +70,7 @@ use nitinol_eventsource::error::PersistError;
 use nitinol_eventsource::system::{EventSourceSystem, SystemHandle};
 use nitinol_eventsource::{
     Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, DurableStream, Event,
-    EventEnvelope, Query, SequenceCursor,
+    EventEnvelope, Never, Query, SequenceCursor,
 };
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::provider::{PersistenceProvider, Store};
@@ -100,6 +101,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -429,48 +431,53 @@ async fn system_clones_race_one_identity_to_one_activation() {
 
 // Scenario: a reference's clone shares its binding
 
-/// A reference and its clone address the same thing, pinned or resolved.
+/// A reference and its clone address the same thing, whichever entry point
+/// handed it over.
 ///
-/// The pinned half is the simpler statement: the clone carries the activation
-/// the explicit lifecycle started, so both halves write one stream and one
-/// aggregate state answers for both.
+/// The first half is the simpler statement: the clone carries the binding it was
+/// cloned from, so both halves write one stream and one aggregate state answers
+/// for both.
 ///
-/// The resolved half is where the cache lives, and the last dispatch is the
+/// The second half is where the cache lives, and the last dispatch is the
 /// discriminator. The twin's query is what put the activation in the cache; the
-/// original then loses the stream to a rival and empties the cache on the
-/// conflict it sees. A reference whose clone kept a cache of its own would send
-/// the next dispatch to the activation that is already on its way out and have
-/// it fail, where a shared cache costs that dispatch a resolve and nothing more.
+/// original then loses the stream to a rival — a second system over the one
+/// store, which is what two writers of one stream look like now that every
+/// reference resolves through the registry its system carries — and empties the
+/// cache on the conflict it sees. A reference whose clone kept a cache of its
+/// own would send the next dispatch to the activation that is already on its way
+/// out and have it fail, where a shared cache costs that dispatch a resolve and
+/// nothing more.
 #[tokio::test]
 async fn a_reference_clone_shares_its_binding() {
     // Given
     let (system, store) = counter_system().await;
     let journal = store.events();
 
-    // When: a pinned reference is cloned and both halves dispatch
-    let pinned_id = AggregateId::new("cheap-clone-binding-pinned");
-    let pinned = AggregateProps::<Counter>::new(pinned_id.clone(), journal.clone())
-        .spawn(system.process_system())
+    // When: a reference the props-first entry point handed back is cloned and
+    // both halves dispatch
+    let props_id = AggregateId::new("cheap-clone-binding-props");
+    let from_props = AggregateProps::<Counter>::new(props_id.clone())
+        .spawn(&system)
         .await;
-    let pinned_twin = pinned.clone();
-    pinned
+    let from_props_twin = from_props.clone();
+    from_props
         .ask(Increment)
         .await
-        .expect("the pinned reference's dispatch must persist");
-    pinned_twin
+        .expect("the reference's own dispatch must persist");
+    from_props_twin
         .ask(Increment)
         .await
-        .expect("the clone must reach the activation the lifecycle started");
+        .expect("the clone must reach the activation its original resolved");
 
     // Then
     assert_eq!(
-        stored_sequences(&journal, &pinned_id).await,
+        stored_sequences(&journal, &props_id).await,
         vec![1, 2],
-        "a pinned reference's clone carries the activation it was pinned to, so \
-         one writer numbers both appends"
+        "a reference's clone carries the binding it was cloned from, so one \
+         writer numbers both appends"
     );
     assert_eq!(
-        pinned_twin
+        from_props_twin
             .exec(GetCount)
             .await
             .expect("the query must reach the activation"),
@@ -478,10 +485,15 @@ async fn a_reference_clone_shares_its_binding() {
         "one activation must have applied both increments"
     );
 
-    // And: a resolved reference's clone shares the resolver and the cache
+    // And: a resolved reference's clone shares the resolver and the cache.  The
+    // rival is a second system over the same store, so its activation of this
+    // stream is a second writer rather than the one the system below resolves.
     let resolved_id = AggregateId::new("cheap-clone-binding-resolved");
-    let rival = AggregateProps::<Counter>::new(resolved_id.clone(), journal.clone())
-        .spawn(system.process_system())
+    let rival_system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store.clone()))
+        .build();
+    let rival = rival_system
+        .spawn_aggregate::<Counter>(resolved_id.clone())
         .await;
     rival
         .ask(Increment)
@@ -691,19 +703,23 @@ async fn append_evt(store: &InMemoryEventStore, key: &str, sequence: u64) {
 async fn a_durable_stream_opens_its_one_gate_on_subscribe() {
     // Given: a stream over a journal that already holds three rows, and a
     // subscriber process that has not subscribed
-    let system = ProcessSystem::new().await;
     let store = InMemoryEventStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(Journal::from(store.clone())))
+        .build();
     let key = AggregateId::new("cheap-clone-gate-agg");
     for sequence in 1..=3 {
         append_evt(&store, key.as_str(), sequence).await;
     }
 
     let recorder = Recorder::new();
-    let subscriber = system.spawn(Props::new(recorder.producer())).await;
+    let subscriber = system
+        .process_system()
+        .spawn(Props::new(recorder.producer()))
+        .await;
 
     let stream = DurableStream::<EventEnvelope<Evt>>::new(
         ProcessName::new("cheap-clone-gate-topic"),
-        store.clone(),
         to_envelope,
     )
     .cursor(SequenceCursor::Stream {

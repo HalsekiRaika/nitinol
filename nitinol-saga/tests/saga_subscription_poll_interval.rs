@@ -46,14 +46,21 @@
 
 #[path = "common/delivery.rs"]
 mod delivery;
-use delivery::{DeliverySaga, RecordingEventStore, Triggered, TEST_POLL_INTERVAL};
+use delivery::{DeliverySaga, Triggered, TEST_POLL_INTERVAL};
 
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use nitinol_persistence::store::InMemoryEventStore;
-use nitinol_persistence::AggregateId;
+use async_trait::async_trait;
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore,
+};
+use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaManagerProps, SagaManagerProxy, Subscription};
+use nitinol_saga::{SagaHostProxy, SagaManagerProps, Subscription};
 
 /// Deliberately far from any framework default, and far enough above it that a
 /// source polling at a default would be caught by the counts below.
@@ -69,34 +76,108 @@ const WINDOW: Duration = Duration::from_millis(1_800);
 /// so an empty stream keeps every recorded load a poll and not work.
 const UPSTREAM_KEY: &str = "saga-subscription-poll-interval-upstream";
 
-/// What one spawned observer leaves for a clause to read.
+/// An `EventStore` that records when the observed source's stream was asked
+/// for.
 ///
-/// The process system and the manager handle are carried so neither is dropped
-/// while the window runs — a dropped `ProcessSystem` would take the poller down
-/// and make an interval look longer than it is.
-struct Observer {
-    recording: RecordingEventStore,
-    _system: ProcessSystem,
-    _manager: SagaManagerProxy<DeliverySaga>,
+/// A system distributes one journal, so the source's poller and the delivery
+/// host the same spawn starts are tenants of one store. The two are kept apart
+/// by what they ask for: a source names the stream key it is bound to, a
+/// delivery host names its saga's decision type and no key at all — so
+/// recording only the calls that name [`UPSTREAM_KEY`] leaves the gaps below
+/// the source's cadence rather than the host's.
+#[derive(Clone)]
+struct SourcePollRecorder {
+    inner: InMemoryEventStore,
+    /// Shared behind the handle, so the store named in the wiring and the
+    /// handle a clause reads are one region.
+    polls: Arc<Mutex<Vec<Instant>>>,
 }
 
-/// Spawn a manager observing `Triggered` on a recording upstream store, with
-/// that source's interval named by `interval` — or left unnamed by `None`.
+impl SourcePollRecorder {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryEventStore::default(),
+            polls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// The gaps between consecutive polls of the observed source, in call
+    /// order.
+    fn load_gaps(&self) -> Vec<Duration> {
+        self.polls
+            .lock()
+            .expect("recorded polls must not be poisoned")
+            .windows(2)
+            .map(|pair| pair[1].saturating_duration_since(pair[0]))
+            .collect()
+    }
+
+    fn load_count(&self) -> usize {
+        self.polls
+            .lock()
+            .expect("recorded polls must not be poisoned")
+            .len()
+    }
+}
+
+#[async_trait]
+impl EventStore for SourcePollRecorder {
+    async fn append(
+        &self,
+        key: &str,
+        events: Vec<AppendingEvent>,
+    ) -> Result<AppendOutcome, AppendError> {
+        self.inner.append(key, events).await
+    }
+
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        if query.stream_key.as_deref() == Some(UPSTREAM_KEY) {
+            self.polls
+                .lock()
+                .expect("recorded polls must not be poisoned")
+                .push(Instant::now());
+        }
+        self.inner.load(query).await
+    }
+}
+
+/// The store the observer's system is built over: the recording journal, plus
+/// the saga-offset slot the delivery host every spawn starts records in.
+type PollStore = CustomStore<Unprovided, Unprovided, InMemoryOffsetStore>;
+
+/// What one spawned observer leaves for a clause to read.
+///
+/// The system and the host handle are carried so neither is dropped while the
+/// window runs — a dropped system would take the poller down and make an
+/// interval look longer than it is.
+struct Observer {
+    recording: SourcePollRecorder,
+    _system: EventSourceSystem<PollStore>,
+    _host: SagaHostProxy<DeliverySaga>,
+}
+
+/// Spawn a manager observing `Triggered` on a system whose journal records what
+/// the source asks for, with that source's interval named by `interval` — or
+/// left unnamed by `None`.
 async fn observe(interval: Option<Duration>) -> Observer {
-    let system = ProcessSystem::new().await;
-    let recording = RecordingEventStore::new(InMemoryEventStore::default());
-    // A journal of its own, so the only store the clauses read is the one the
-    // source polls.
-    let journal = InMemoryEventStore::default();
+    let recording = SourcePollRecorder::new();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(recording.clone())
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build();
 
     let key = AggregateId::new(UPSTREAM_KEY);
-    let subscription = Subscription::stream(recording.clone(), &key);
+    let subscription = Subscription::stream(&key);
     let subscription = match interval {
         Some(interval) => subscription.with_poll_interval(interval),
         None => subscription,
     };
 
-    let manager = SagaManagerProps::<DeliverySaga>::new(journal, |_components| DeliverySaga)
+    let host = SagaManagerProps::<DeliverySaga>::new(|_components| DeliverySaga)
         .observing::<Triggered>(subscription)
         .spawn(&system)
         .await;
@@ -104,7 +185,7 @@ async fn observe(interval: Option<Duration>) -> Observer {
     Observer {
         recording,
         _system: system,
-        _manager: manager,
+        _host: host,
     }
 }
 

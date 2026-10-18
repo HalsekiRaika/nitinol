@@ -46,7 +46,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -167,17 +167,23 @@ fn describe(events: &[LoadedEvent]) -> Vec<String> {
         .collect()
 }
 
-/// A saga, its store and its upstream, with the host already spawned.
+/// A saga, the journal its system distributes and its upstream, with the host
+/// already spawned.
 struct Running {
-    _proxy: nitinol_saga::SagaManagerProxy<RecordingSaga>,
+    _host: nitinol_saga::SagaHostProxy<RecordingSaga>,
+    _system: EventSourceSystem<InMemoryStore>,
     saga_store: Journal,
     saga_id: SagaId,
     handle_count: Arc<AtomicUsize>,
     handled: Arc<Notify>,
 }
 
-/// Spawn the host over `saga_store` with one upstream stream observed, after
-/// `seed` has had its chance to put rows on the instance's own stream.
+/// Spawn the host on a system of its own with one upstream stream observed,
+/// after `seed` has had its chance to put rows on the instance's own stream.
+///
+/// The upstream stream and the instance's own stream are both on the journal
+/// that system distributes, kept apart by stream key: a subscription names what
+/// to observe, and the journal it is observed on is the system's.
 ///
 /// Every record `correlate` claims here names the one instance [`SAGA_ID`], so
 /// what the host spawns on the first arrival is the single resident saga this
@@ -187,18 +193,16 @@ async fn run(
     upstream_records: &[(u64, &str)],
     seed: Option<(EventType, Bytes)>,
 ) -> Running {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
+    let saga_store = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream = AggregateId::new(upstream_key);
     for (sequence, sku) in upstream_records {
-        append_order_placed(&upstream_store, &upstream, *sequence, sku).await;
+        append_order_placed(&saga_store, &upstream, *sequence, sku).await;
     }
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
 
     if let Some((event_type, payload)) = seed {
@@ -221,18 +225,17 @@ async fn run(
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let proxy = SagaManagerProps::<RecordingSaga>::new(saga_store.clone(), move |_components| {
-        RecordingSaga {
-            handle_count: Arc::clone(&handle_count_for_producer),
-            handled: Arc::clone(&handled_for_producer),
-        }
+    let host = SagaManagerProps::<RecordingSaga>::new(move |_components| RecordingSaga {
+        handle_count: Arc::clone(&handle_count_for_producer),
+        handled: Arc::clone(&handled_for_producer),
     })
-    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(system.process_system())
+    .observing::<OrderPlaced>(Subscription::stream(&upstream))
+    .spawn(&system)
     .await;
 
     Running {
-        _proxy: proxy,
+        _host: host,
+        _system: system,
         saga_store,
         saga_id,
         handle_count,

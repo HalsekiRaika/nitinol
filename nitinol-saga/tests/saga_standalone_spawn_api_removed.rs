@@ -64,7 +64,7 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -238,12 +238,8 @@ impl Saga for ProbeSaga {
     }
 }
 
-fn store() -> Journal {
-    Journal::from(InMemoryEventStore::default())
-}
-
 fn manager_props() -> SagaManagerProps<ProbeSaga> {
-    SagaManagerProps::<ProbeSaga>::new(store(), |_components| ProbeSaga)
+    SagaManagerProps::<ProbeSaga>::new(|_components| ProbeSaga)
 }
 
 /// A system over a store that supplies every slot, including the saga-offset

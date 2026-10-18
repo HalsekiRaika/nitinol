@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
-use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Never};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -41,6 +41,7 @@ struct Inventory;
 
 impl Aggregate for Inventory {
     type Event = Reserved;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Reserved) {}
 }

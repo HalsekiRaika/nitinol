@@ -63,8 +63,8 @@ use tokio::sync::Notify;
 use nitinol_eventsource::{
     codec::Codec,
     system::{EventSourceSystem, SystemHandle},
-    Aggregate, Decider, Decision, Event, ProjectionContext, ProjectionId, Projector,
-    ProjectorProps, SnapshotPersistor,
+    Aggregate, Decider, Decision, Event, Never, ProjectionContext, ProjectionId, Projector,
+    ProjectorProps,
 };
 use nitinol_persistence::provider::{
     CustomStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot,
@@ -109,6 +109,7 @@ struct Counter;
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {}
 }
@@ -442,14 +443,15 @@ async fn a_system_and_its_clone_hand_back_one_snapshot_persistor() {
     );
 }
 
-/// The persistor the system distributes and one spawned from the supplier
-/// directly reach one store: a snapshot saved through either is loaded through
-/// the other.
+/// The persistor the system distributes and the one a second system over the
+/// same supplier distributes reach one store: a snapshot saved through either
+/// is loaded through the other.
 ///
-/// The low-level entry point stays because a lifecycle pinned to one aggregate
-/// is started without a system; what must not follow is a second world.
+/// A second system is the only way there is to reach a second persistor —
+/// there is no low-level entry point that starts one — and what must not follow
+/// from building one is a second world.
 #[tokio::test]
-async fn a_persistor_spawned_from_the_supplier_reaches_the_same_snapshot_store() {
+async fn a_persistor_of_a_second_system_reaches_the_same_snapshot_store() {
     // Given
     let events = InMemoryEventStore::default();
     let provider = PersistenceProvider::new(
@@ -463,12 +465,17 @@ async fn a_persistor_spawned_from_the_supplier_reaches_the_same_snapshot_store()
         .build();
     let id = AggregateId::new("system-persistence-snapshot-both-ways");
 
-    // When: the save goes through the persistor spawned from the supplier
-    let directly = SnapshotPersistor::spawn(system.process_system(), &provider).await;
+    // When: the save goes through the persistor of a second system over the
+    // same supplier
+    let directly = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(provider.clone())
+        .build()
+        .snapshot_persistor()
+        .await;
     directly
         .save(a_snapshot(&id, 6))
         .await
-        .expect("saving through the directly spawned persistor must succeed");
+        .expect("saving through the second system's persistor must succeed");
 
     // Then: the load through the system's persistor answers with it
     assert_eq!(
@@ -480,8 +487,8 @@ async fn a_persistor_spawned_from_the_supplier_reaches_the_same_snapshot_store()
             .expect("loading through the system's persistor must succeed")
             .map(|found| found.sequence),
         Some(6),
-        "both wiring entry points resolve the supplier's snapshot slot, so \
-         neither has a store of its own"
+        "both systems resolve the supplier's snapshot slot, so neither has a \
+         store of its own"
     );
 }
 
@@ -549,16 +556,15 @@ async fn the_systems_projector_follows_the_suppliers_event_store_and_projection_
     );
 }
 
-/// `ProjectorProps::new` takes the supplier and resolves both slots from it, so
-/// a projector built without going through the system reaches the same two
-/// stores.
+/// `ProjectorProps::new` names no store, and the system it is spawned on
+/// resolves both slots, so a projector built without going through the system's
+/// own entry point reaches the same two stores.
 #[tokio::test]
-async fn projector_props_resolves_both_slots_from_the_supplier() {
+async fn projector_props_resolves_both_slots_from_the_system_it_is_spawned_on() {
     // Given
     let store = InMemoryStore::default();
-    let provider = PersistenceProvider::new(store.clone());
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
-        .with_persistence(provider.clone())
+        .with_persistence(PersistenceProvider::new(store.clone()))
         .build();
     let id = AggregateId::new("system-persistence-projector-props");
     let projection = ProjectionId::new("system-persistence-projector-props-read-model");
@@ -572,22 +578,21 @@ async fn projector_props_resolves_both_slots_from_the_supplier() {
     let notify_for_producer = Arc::clone(&notify);
 
     // When
-    let _projector =
-        ProjectorProps::new(projection.clone(), &provider, move || CountingProjector {
-            count: Arc::clone(&count_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .with_event::<Incremented>()
-        .catchup_from_aggregate(id)
-        .spawn(system.process_system())
-        .await;
+    let _projector = ProjectorProps::new(projection.clone(), move || CountingProjector {
+        count: Arc::clone(&count_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .with_event::<Incremented>()
+    .catchup_from_aggregate(id)
+    .spawn(&system)
+    .await;
 
     // Then
     wait_for_count(&count, &notify, 1).await;
     let held = wait_for_offset(
         &store.projection_offsets(),
         &projection,
-        "props built from the supplier must record into its projection slot",
+        "props spawned on the system must record into its supplier's projection slot",
     )
     .await;
     assert!(

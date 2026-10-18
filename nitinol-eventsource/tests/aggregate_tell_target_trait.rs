@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
-use nitinol_eventsource::{Aggregate, AggregateProxy, AggregateTellTarget, Decider, Event};
+use nitinol_eventsource::{Aggregate, AggregateProxy, AggregateTellTarget, Decider, Event, Never};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 
 #[derive(Clone, Debug)]
@@ -39,6 +39,7 @@ struct Target;
 
 impl Aggregate for Target {
     type Event = Noop;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Noop) {}
 }

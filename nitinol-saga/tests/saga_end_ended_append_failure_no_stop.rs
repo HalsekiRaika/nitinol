@@ -15,30 +15,31 @@
 //! upstream event again triggers `handle`, which can return `SagaEffect::End`
 //! again, retrying the append.
 //!
-//! This test verifies the alive-after-failure invariant by injecting a saga
-//! store that always rejects appends and confirming that two successive
-//! upstream events each trigger `Saga::handle`.
+//! This test verifies the alive-after-failure invariant by giving the system a
+//! journal that rejects every append addressed to the saga's own stream, and
+//! confirming that two successive upstream events each trigger `Saga::handle`.
+//! Only that one stream is refused: a system distributes one journal, so the
+//! upstream rows the test seeds are tenants of the very store whose other half
+//! is unwritable.
 
 #[path = "common/helpers.rs"]
 mod common;
 use common::JsonCodec;
 
-use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
-    EventStore, EventStream, InMemoryEventStore, InMemoryStore, Journal,
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, Journal,
 };
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
@@ -112,27 +113,42 @@ impl Saga for AlwaysEndSaga {
     }
 }
 
-// Saga store: always rejects appends; loads return an empty stream.
-// The saga therefore can never write the Ended marker (or any other event).
+// Journal: rejects every append to one named stream, and passes everything
+// else to the in-memory store it wraps. The saga therefore can never write the
+// Ended marker (or any other event) onto its own stream, while the upstream
+// rows it reacts to are still writable and readable.
 
 #[derive(Clone)]
-struct AlwaysFailOnAppendStore;
+struct AppendRefusingStore {
+    inner: InMemoryEventStore,
+    /// The stream whose appends are refused.
+    refused: String,
+}
+
+impl AppendRefusingStore {
+    fn refusing(refused: &str) -> Self {
+        Self {
+            inner: InMemoryEventStore::default(),
+            refused: refused.to_owned(),
+        }
+    }
+}
 
 #[async_trait]
-impl EventStore for AlwaysFailOnAppendStore {
+impl EventStore for AppendRefusingStore {
     async fn append(
         &self,
-        _key: &str,
-        _events: Vec<AppendingEvent>,
+        key: &str,
+        events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        Err(AppendError::Backend("always fails".into()))
+        if key == self.refused {
+            return Err(AppendError::Backend("always fails".into()));
+        }
+        self.inner.append(key, events).await
     }
 
-    async fn load(&self, _query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        let stream: Pin<
-            Box<dyn Stream<Item = Result<nitinol_persistence::LoadedEvent, LoadError>> + Send + '_>,
-        > = Box::pin(futures_util::stream::empty());
-        Ok(stream)
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        self.inner.load(query).await
     }
 }
 
@@ -167,17 +183,20 @@ async fn append_order(store: &Journal, agg_id: &AggregateId, sequence: u64, key:
 async fn saga_stays_alive_when_ended_append_fails() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(AppendRefusingStore::refusing(ALWAYS_END_SAGA_ID))
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("ended-fail-order");
 
     // Pre-seed two upstream events so both arrive before the saga starts.
-    append_order(&upstream_store, &order_id, 1, "first").await;
-    append_order(&upstream_store, &order_id, 2, "second").await;
-
-    let saga_store = Journal::from(AlwaysFailOnAppendStore);
+    let seeding = system.persistence().event_store();
+    append_order(&seeding, &order_id, 1, "first").await;
+    append_order(&seeding, &order_id, 2, "second").await;
 
     let handle_count = Arc::new(AtomicUsize::new(0));
     let handled = Arc::new(Notify::new());
@@ -185,16 +204,13 @@ async fn saga_stays_alive_when_ended_append_fails() {
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_clone = Arc::clone(&handled);
 
-    let _saga_proxy =
-        SagaManagerProps::<AlwaysEndSaga>::new(saga_store.clone(), move |_components| {
-            AlwaysEndSaga {
-                handle_count: Arc::clone(&handle_count_clone),
-                handled: Arc::clone(&handled_clone),
-            }
-        })
-        .observing::<OrderEvent>(Subscription::stream(&upstream_store, &order_id))
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<AlwaysEndSaga>::new(move |_components| AlwaysEndSaga {
+        handle_count: Arc::clone(&handle_count_clone),
+        handled: Arc::clone(&handled_clone),
+    })
+    .observing::<OrderEvent>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     // Wait for at least one handle call to confirm event delivery works.
     tokio::time::timeout(Duration::from_secs(3), handled.notified())

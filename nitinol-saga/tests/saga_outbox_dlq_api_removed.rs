@@ -61,7 +61,6 @@ use bytes::Bytes;
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 /// What a downstream crate is free to define once the names are released.
@@ -261,12 +260,8 @@ impl OnTellFailedProbe for ProbeSaga {
     }
 }
 
-fn store() -> Journal {
-    Journal::from(InMemoryEventStore::default())
-}
-
 fn manager_props() -> SagaManagerProps<ProbeSaga> {
-    SagaManagerProps::<ProbeSaga>::new(store(), |_components| ProbeSaga)
+    SagaManagerProps::<ProbeSaga>::new(|_components| ProbeSaga)
 }
 
 /// Given both namespaces are glob-imported, When the bare `TellIntent` name is

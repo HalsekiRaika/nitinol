@@ -27,7 +27,7 @@
 #[path = "common/delivery.rs"]
 mod delivery;
 use delivery::{
-    append_decided, append_row, in_memory_system, operations_of, scope_of, settle, spawn_host,
+    append_decided, append_row, delivery_system, operations_of, scope_of, settle, spawn_host,
     stream_rows, wait_until_loads, DeliverySaga, Ledger, Recorded, RecordingEventStore,
     RecordingOffsetStore,
 };
@@ -45,7 +45,9 @@ const FOREIGN_OPERATION: &str = "op-written-by-someone-else";
 async fn a_collision_with_an_existing_target_is_not_treated_as_delivered() {
     // Given: a reference to the target, resolved and replayed while its stream
     // is still empty, so its next write addresses the stream's first position.
-    let (system, aggregates) = in_memory_system().await;
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let offsets = RecordingOffsetStore::new();
+    let system = delivery_system(&recording, &offsets).await;
     let target = AggregateId::new("ledger-already-created");
     let pinned = system.spawn_aggregate::<Ledger>(target.clone()).await;
     assert!(
@@ -55,7 +57,7 @@ async fn a_collision_with_an_existing_target_is_not_treated_as_delivered() {
 
     // And: somebody else writes that first position in the meantime.
     append_row(
-        &aggregates,
+        &recording,
         target.as_str(),
         1,
         &Recorded {
@@ -64,14 +66,11 @@ async fn a_collision_with_an_existing_target_is_not_treated_as_delivered() {
     )
     .await;
 
-    let recording = RecordingEventStore::new(InMemoryEventStore::default());
-    let journal = recording.clone();
-    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
-    let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
+    let position = append_decided(&recording, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, 1).await;
     wait_until_loads(&recording, 4, "the host must keep polling while held").await;
     settle().await;
 
@@ -92,7 +91,7 @@ async fn a_collision_with_an_existing_target_is_not_treated_as_delivered() {
          the record whose delivery collided"
     );
 
-    let rows = stream_rows(&aggregates, target.as_str()).await;
+    let rows = stream_rows(&recording, target.as_str()).await;
     assert_eq!(
         rows.len(),
         1,

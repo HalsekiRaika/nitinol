@@ -60,6 +60,11 @@ struct ContractPathAggregate;
 
 impl nitinol::contract::Aggregate for ContractPathAggregate {
     type Event = ContractPathEvent;
+    // Named through the *other* path on purpose: the recovery marker is subject
+    // to the same identity claim as the traits, so a contract-path aggregate
+    // satisfying `Recovery<Self>` with the eventsource-path `Latest` is what
+    // says the two paths denote one marker.
+    type Recover = nitinol::eventsource::Latest;
 
     fn apply(&mut self, _event: ContractPathEvent) {}
 }
@@ -70,7 +75,7 @@ impl nitinol::contract::Snapshotable for ContractPathAggregate {
 
     fn capture(&self) {}
 
-    fn restore(_snapshot: ()) -> Self {
+    fn recover(_snapshot: ()) -> Self {
         ContractPathAggregate
     }
 }
@@ -80,6 +85,7 @@ struct EventsourcePathAggregate;
 
 impl nitinol::eventsource::Aggregate for EventsourcePathAggregate {
     type Event = EventsourcePathEvent;
+    type Recover = nitinol::contract::Latest;
 
     fn apply(&mut self, _event: EventsourcePathEvent) {}
 }
@@ -90,7 +96,7 @@ impl nitinol::eventsource::Snapshotable for EventsourcePathAggregate {
 
     fn capture(&self) {}
 
-    fn restore(_snapshot: ()) -> Self {
+    fn recover(_snapshot: ()) -> Self {
         EventsourcePathAggregate
     }
 }

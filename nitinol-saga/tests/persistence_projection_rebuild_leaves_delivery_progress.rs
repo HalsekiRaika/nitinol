@@ -55,11 +55,12 @@ use nitinol_saga::{SagaId, SagaSystemExt, Subscription};
 /// How long a clause waits for a projector to apply what it is catching up on.
 const PROJECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The fixture saga's one declared source, on a store of its own. Nothing is
-/// ever appended to it, so hosting the saga adds neither rows nor positions to
-/// the store this clause reads.
+/// The fixture saga's one declared source, bound to a stream of the system's
+/// journal that nothing is ever appended to — a subscription names what to
+/// observe and nothing about where. So hosting the saga adds neither rows nor
+/// positions to what this clause reads.
 fn quiet_source(key: &str) -> Subscription {
-    Subscription::stream(InMemoryEventStore::default(), &AggregateId::new(key))
+    Subscription::stream(&AggregateId::new(key))
 }
 
 /// A projection whose whole state is how many decisions it has applied.

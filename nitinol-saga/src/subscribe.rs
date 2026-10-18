@@ -38,7 +38,6 @@ use std::time::Duration;
 
 use nitinol_eventsource::error::CodecError;
 use nitinol_eventsource::{Event, SequenceCursor};
-use nitinol_persistence::store::Journal;
 use nitinol_persistence::EventType;
 
 use crate::components::DeadlineMessage;
@@ -249,14 +248,17 @@ pub struct SubscriptionUnset;
 /// constructor.
 pub struct SubscriptionSet(#[doc(hidden)] pub SourceBinding);
 
-/// Where one declared source is read from, from which position, and how often.
+/// From which position one declared source is read, and how often.
 ///
 /// Produced by
 /// [`Subscription::into_binding`](crate::Subscription) and handed to the slot
 /// the bound event type names.  It has no public constructor and no public
 /// field: a user can move one the builder handed out, and cannot invent one.
+///
+/// The journal is absent on purpose: it is the one the system the saga is
+/// spawned on distributes, and the manager hands it to each source's poller at
+/// the spawn.
 pub struct SourceBinding {
-    pub(crate) upstream_store: Journal,
     pub(crate) cursor: SequenceCursor,
     /// The cadence the binding named, where it named one.
     ///

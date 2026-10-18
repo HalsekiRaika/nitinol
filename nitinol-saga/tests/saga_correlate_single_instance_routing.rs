@@ -46,7 +46,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -222,14 +222,12 @@ async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent>
         .expect("collect saga events must succeed")
 }
 
-/// Host the saga under test over `upstream_store`, observing `agg_id` from the
+/// Host the saga under test on `system`, observing `agg_id` from the
 /// beginning.  No routing argument is passed, and no instance is named —
 /// correlation lives on `CorrelationSaga`.
 async fn spawn_correlation_saga(
     system: &EventSourceSystem<InMemoryStore>,
-    upstream_store: &Journal,
     agg_id: &AggregateId,
-    saga_store: Journal,
     captured: &Arc<Mutex<Vec<String>>>,
     notify: &Arc<Notify>,
 ) {
@@ -237,12 +235,12 @@ async fn spawn_correlation_saga(
     let notify_for_producer = Arc::clone(notify);
 
     let _host_proxy =
-        SagaManagerProps::<CorrelationSaga>::new(saga_store, move |_components| CorrelationSaga {
+        SagaManagerProps::<CorrelationSaga>::new(move |_components| CorrelationSaga {
             captured: Arc::clone(&captured_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .observing::<OrderPlaced>(Subscription::stream(upstream_store, agg_id))
-        .spawn(system.process_system())
+        .observing::<OrderPlaced>(Subscription::stream(agg_id))
+        .spawn(system)
         .await;
 }
 
@@ -261,23 +259,16 @@ async fn each_record_reaches_handle_on_the_instance_correlate_names() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the order stream the saga observes and both instances' own
+    // streams are tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("correlate-routing-order");
-    append_mixed_correlation_stream(&upstream_store, &order_id).await;
+    append_mixed_correlation_stream(&journal, &order_id).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
-    spawn_correlation_saga(
-        &system,
-        &upstream_store,
-        &order_id,
-        saga_store,
-        &captured,
-        &notify,
-    )
-    .await;
+    spawn_correlation_saga(&system, &order_id, &captured, &notify).await;
 
     wait_for_count(&captured, &notify, 4).await;
     // The stream ends with a `NONE-*` event; give it time to be delivered and
@@ -310,23 +301,16 @@ async fn a_record_that_names_no_instance_is_silent_and_writes_nothing() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the order stream the saga observes and both instances' own
+    // streams are tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("correlate-routing-silent-order");
-    append_mixed_correlation_stream(&upstream_store, &order_id).await;
+    append_mixed_correlation_stream(&journal, &order_id).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
-    spawn_correlation_saga(
-        &system,
-        &upstream_store,
-        &order_id,
-        saga_store.clone(),
-        &captured,
-        &notify,
-    )
-    .await;
+    spawn_correlation_saga(&system, &order_id, &captured, &notify).await;
 
     // Reaching all four claimed records proves the three unclaimed ones were
     // fetched and evaluated, so the assertions below are about work that
@@ -335,7 +319,7 @@ async fn a_record_that_names_no_instance_is_silent_and_writes_nothing() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     for (instance, claimed) in [(OWN_SAGA_ID, vec![3, 5]), (FOREIGN_SAGA_ID, vec![2, 6])] {
-        let events = load_saga_events(&saga_store, &SagaId::new(instance)).await;
+        let events = load_saga_events(&journal, &SagaId::new(instance)).await;
         let written: Vec<String> = events
             .iter()
             .map(|e| format!("{}@{}", e.event_type, e.sequence))

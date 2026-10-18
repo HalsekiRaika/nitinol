@@ -18,7 +18,7 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaSubscriptionExt, SagaSystemExt};
+use nitinol_saga::{SagaSystemExt, Subscription};
 
 use saga_idempotent_receive::order::{Order, OrderPlaced, PlaceOrder};
 use saga_idempotent_receive::saga::ReservationSaga;
@@ -86,7 +86,7 @@ async fn main() {
     // hosting a saga is not something a wiring can do half of.
     let _host = system
         .host::<ReservationSaga>(|_| ReservationSaga)
-        .observing::<OrderPlaced>(system.subscription(&order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
         .with_delivery_poll_interval(DELIVERY_POLL_INTERVAL)
         .spawn()
         .await;

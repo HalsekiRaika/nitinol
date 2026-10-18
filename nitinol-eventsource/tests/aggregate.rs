@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use nitinol_eventsource::{codec::Codec, Aggregate, Event, Snapshotable};
+use nitinol_eventsource::{codec::Codec, Aggregate, Event, Latest, Snapshotable};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 // Fixtures
@@ -36,6 +36,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Latest;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -61,7 +62,7 @@ impl Codec<u64> for CounterSnapshotCodec {
 }
 
 // Snapshot is the raw counter value (u64). `Snapshotable` names the codec that
-// writes that value down and defines the pure capture / restore functions; the
+// writes that value down and defines the pure capture / recover functions; the
 // encoding itself is never reached from this file.
 impl Snapshotable for Counter {
     type Snapshot = u64;
@@ -72,7 +73,7 @@ impl Snapshotable for Counter {
         self.value
     }
 
-    fn restore(snapshot: u64) -> Self {
+    fn recover(snapshot: u64) -> Self {
         Self { value: snapshot }
     }
 }
@@ -95,7 +96,7 @@ fn event_type_constant_has_correct_string() {
 /// A plain type outside this crate can implement [`Aggregate`] and
 /// [`Snapshotable`] together: `Event`/`Snapshot` and their codecs line up, the
 /// `Default + Send + Sync + 'static` bounds are met, and `apply` / `capture` /
-/// `restore` are callable at the signatures the traits declare.
+/// `recover` are callable at the signatures the traits declare.
 ///
 /// Not a `#[test]` — the contract is that this compiles.  What the fixture's
 /// own arithmetic computes is the fixture's business, so nothing here asserts
@@ -106,5 +107,5 @@ fn _assert_counter_implements_aggregate_and_snapshotable() {
     counter.apply(Incremented);
 
     let snapshot: <Counter as Snapshotable>::Snapshot = counter.capture();
-    let _: Counter = Counter::restore(snapshot);
+    let _: Counter = Counter::recover(snapshot);
 }

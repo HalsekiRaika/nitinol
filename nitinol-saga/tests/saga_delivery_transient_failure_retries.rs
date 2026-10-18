@@ -25,8 +25,9 @@
 #[path = "common/delivery.rs"]
 mod delivery;
 use delivery::{
-    append_decided, scope_of, spawn_host, wait_until_loads, AppendRefusingEventStore, DeliverySaga,
-    Ledger, RecordingEventStore, RecordingOffsetStore, TEST_DELIVERY_ID, TEST_POLL_INTERVAL,
+    append_decided, delivery_system, scope_of, spawn_host, wait_until_loads,
+    AppendRefusingEventStore, DeliverySaga, Ledger, RecordingEventStore, RecordingOffsetStore,
+    TEST_DELIVERY_ID, TEST_POLL_INTERVAL,
 };
 
 use std::collections::BTreeMap;
@@ -34,11 +35,8 @@ use std::fmt::Debug;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::ProcessSystem;
 use nitinol_saga::SagaId;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -186,26 +184,24 @@ async fn a_held_delivery_is_retried_with_a_growing_pause_and_is_diagnosable() {
     //
     // A receiving aggregate's stream is in the journal the system's provider
     // supplies, and there is no per-spawn store to override it with, so the
-    // provider is assembled over the refusing store itself.
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(AppendRefusingEventStore)
-                .build(),
-        ))
-        .build();
+    // provider is assembled over a store that refuses appends to that one
+    // stream and passes everything else — the saga's own decisions included —
+    // to the recorder behind it.
+    let recording = RecordingEventStore::new(InMemoryEventStore::default());
+    let offsets = RecordingOffsetStore::new();
     let target = AggregateId::new("ledger-transient");
+    let system = delivery_system(
+        &AppendRefusingEventStore::refusing(recording.clone(), &target),
+        &offsets,
+    )
+    .await;
     let _unwritable = system.spawn_aggregate::<Ledger>(target.clone()).await;
 
-    let recording = RecordingEventStore::new(InMemoryEventStore::default());
-    let journal = recording.clone();
-    let offsets = RecordingOffsetStore::new();
     let saga_id = SagaId::new("instance-1");
-    let held = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
+    let held = append_decided(&recording, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, 1).await;
     let queries = wait_until_loads(&recording, 6, "the host must keep retrying the record").await;
 
     // Then: the record is asked for again, and again.

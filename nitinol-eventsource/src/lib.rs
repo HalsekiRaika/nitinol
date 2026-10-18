@@ -10,7 +10,10 @@
 //! | [`Decision`] | A decider's conclusion: facts and an answer, or a refusal |
 //! | [`Query<M>`](Query) | Read-only question asked of the current aggregate state |
 //! | [`Event`] | Marker for domain events; names the codec that writes them |
-//! | [`Snapshotable`] | Opt-in snapshot support for faster replay |
+//! | [`Snapshotable`] | How an aggregate's snapshot value is captured and read back |
+//! | [`Recovery`] | What [`Aggregate::Recover`] may name |
+//! | [`Never`] | Replay the whole stream; asks the store for nothing but the journal |
+//! | [`Latest`] | Recover from the system's newest snapshot, then replay what followed it |
 //! | [`AggregateProxy`] | Identity-based reference to an aggregate; resolves a dispatch to an activation and re-resolves after one dies |
 //!
 //! Every trait and type in that table is defined in `nitinol-contract`, which
@@ -81,7 +84,10 @@ pub mod system;
 // Defined in `nitinol-contract` so a runtime-free domain crate can implement
 // them; re-exported here because this crate's own API is stated in terms of
 // them and because these are the paths downstream code already imports.
-pub use nitinol_contract::{Accepting, Aggregate, Decider, Decision, Event, Query, Snapshotable};
+pub use nitinol_contract::{
+    Accepting, Aggregate, Decider, Decision, Event, Latest, Never, Query, RecoverPolicy, Recovery,
+    Snapshotable,
+};
 
 // Framework-managed persistent message abstraction. Hidden from docs and not
 // re-exported through the umbrella crate so it stays an internal API; direct
@@ -101,8 +107,14 @@ pub use self::appending::EventAppending;
 pub use nitinol_contract::{DeclaresEventType, MatchesEventType};
 
 pub use self::error::{AskError, ExecError, Retryability, TellError};
-pub use self::process::{AggregateProps, AggregateProxy, AggregateTellTarget};
+pub use self::process::{AggregateProps, AggregateProxy, AggregateTellTarget, RecoverOn};
 pub use self::process::{SnapshotPersistor, SnapshotPersistorProxy};
+
+// The value an activation of a `Recover = Latest` aggregate carries. It appears
+// in `RecoverOn`'s signature, so it is public for the bound to be nameable, and
+// hidden because nothing outside this crate builds or reads one.
+#[doc(hidden)]
+pub use self::process::SnapshotRecovery;
 
 #[cfg(feature = "test-helpers")]
 pub mod test_helpers;

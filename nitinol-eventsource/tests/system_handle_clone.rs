@@ -36,7 +36,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::system::{EventSourceSystem, EventSourceSystemBuilder, PersistenceUnset};
-use nitinol_eventsource::{codec::Codec, Aggregate, Decider, Decision, Event, Query};
+use nitinol_eventsource::{codec::Codec, Aggregate, Decider, Decision, Event, Never, Query};
 use nitinol_persistence::provider::{PersistenceProvider, Store};
 use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
@@ -61,6 +61,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;

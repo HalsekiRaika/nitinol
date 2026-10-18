@@ -30,7 +30,6 @@
 //! Run with:
 //! `cargo test -p nitinol-eventsource --test codec_injection_api_removed`.
 
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -95,6 +94,7 @@ struct Counter;
 
 impl Aggregate for Counter {
     type Event = Bumped;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Bumped) {}
 }
@@ -166,8 +166,7 @@ impl WithCodecProbe for EventSourceSystemBuilder<PersistenceUnset> {
 /// no inherent method of that name to take precedence.
 #[test]
 fn aggregate_props_has_no_inherent_with_codec() {
-    let store = Journal::from(InMemoryEventStore::default());
-    let props = AggregateProps::<Counter>::new(AggregateId::new("probe-props"), store);
+    let props = AggregateProps::<Counter>::new(AggregateId::new("probe-props"));
 
     assert_eq!(
         props.with_codec(),

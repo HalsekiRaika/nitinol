@@ -46,7 +46,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -216,14 +216,13 @@ const SETTLE: Duration = Duration::from_millis(750);
 const REFUSED_SEQUENCE: u64 = 4;
 
 struct Refusal {
-    /// Kept alive only because dropping a proxy does not stop the process it
-    /// addresses. The restart test therefore gives the second incarnation an
-    /// upstream store of its own rather than trying to retire this one: the
-    /// store this host polls never grows again, so it stays quiet and the two
-    /// never decide the same record onto one stream.
-    _proxy: nitinol_saga::SagaManagerProxy<RefusingSaga>,
+    /// The host the refusal ran on, kept so the restart test can retire it: a
+    /// proxy drop stops nothing, and a system distributes one journal, so the
+    /// manager that refused the record is still polling the very stream the
+    /// second incarnation is given a record on.
+    host: nitinol_saga::SagaHostProxy<RefusingSaga>,
     system: EventSourceSystem<InMemoryStore>,
-    saga_store: Journal,
+    journal: Journal,
     upstream: AggregateId,
     saga_id: SagaId,
     handle_count: Arc<AtomicUsize>,
@@ -238,11 +237,12 @@ async fn refuse_one_record(upstream_key: &str) -> Refusal {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the upstream stream the saga observes and the saga's own
+    // stream are tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let upstream = AggregateId::new(upstream_key);
-    append_order_placed(&upstream_store, &upstream, REFUSED_SEQUENCE, "SKU-REFUSED").await;
+    append_order_placed(&journal, &upstream, REFUSED_SEQUENCE, "SKU-REFUSED").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
 
     let handle_count = Arc::new(AtomicUsize::new(0));
@@ -250,14 +250,12 @@ async fn refuse_one_record(upstream_key: &str) -> Refusal {
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let proxy = SagaManagerProps::<RefusingSaga>::new(saga_store.clone(), move |_components| {
-        RefusingSaga {
-            handle_count: Arc::clone(&handle_count_for_producer),
-            handled: Arc::clone(&handled_for_producer),
-        }
+    let host = SagaManagerProps::<RefusingSaga>::new(move |_components| RefusingSaga {
+        handle_count: Arc::clone(&handle_count_for_producer),
+        handled: Arc::clone(&handled_for_producer),
     })
-    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream))
-    .spawn(system.process_system())
+    .observing::<OrderPlaced>(Subscription::stream(&upstream))
+    .spawn(&system)
     .await;
 
     tokio::time::timeout(SETTLE, handled.notified())
@@ -267,11 +265,11 @@ async fn refuse_one_record(upstream_key: &str) -> Refusal {
     // implementation under test withholds the cursor.
     tokio::time::sleep(SETTLE).await;
 
-    let stream = load_saga_stream(&saga_store, &saga_id).await;
+    let stream = load_saga_stream(&journal, &saga_id).await;
     Refusal {
-        _proxy: proxy,
+        host,
         system,
-        saga_store,
+        journal,
         upstream,
         saga_id,
         handle_count,
@@ -377,24 +375,25 @@ async fn the_refused_input_is_not_redelivered() {
 /// refuses everything". The record behind it is the positive control: without
 /// one, a count of zero could mean the subscription was never wired.
 ///
-/// The second incarnation reads an upstream store of its own, holding both
-/// records under the same stream key. That is what keeps the first incarnation
-/// — which no proxy drop can retire — out of the way: its own store never
-/// grows again, so only one process ever decides the second record.
+/// Both incarnations read the one journal the system distributes, so the first
+/// is retired before the record behind the refused one is appended — a proxy
+/// drop retires nothing, and a manager still polling that stream would decide
+/// the second record onto the same saga stream too.
 #[tokio::test]
 async fn a_restart_does_not_hand_the_refused_input_back() {
     let refusal = refuse_one_record("handle-err-restart-orders").await;
 
-    let restarted_upstream = Journal::from(InMemoryEventStore::default());
+    refusal
+        .host
+        .manager()
+        .stop()
+        .await
+        .expect("retiring the first incarnation's manager must succeed");
+
+    // The refused record is already on this stream; what the restart adds is
+    // the one behind it.
     append_order_placed(
-        &restarted_upstream,
-        &refusal.upstream,
-        REFUSED_SEQUENCE,
-        "SKU-REFUSED",
-    )
-    .await;
-    append_order_placed(
-        &restarted_upstream,
+        &refusal.journal,
         &refusal.upstream,
         REFUSED_SEQUENCE + 1,
         "SKU-AFTER",
@@ -406,16 +405,13 @@ async fn a_restart_does_not_hand_the_refused_input_back() {
     let handle_count_for_producer = Arc::clone(&handle_count);
     let handled_for_producer = Arc::clone(&handled);
 
-    let _second =
-        SagaManagerProps::<AcceptingSaga>::new(refusal.saga_store.clone(), move |_components| {
-            AcceptingSaga {
-                handle_count: Arc::clone(&handle_count_for_producer),
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&restarted_upstream, &refusal.upstream))
-        .spawn(refusal.system.process_system())
-        .await;
+    let _second = SagaManagerProps::<AcceptingSaga>::new(move |_components| AcceptingSaga {
+        handle_count: Arc::clone(&handle_count_for_producer),
+        handled: Arc::clone(&handled_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&refusal.upstream))
+    .spawn(&refusal.system)
+    .await;
 
     tokio::time::timeout(SETTLE, handled.notified())
         .await
@@ -429,7 +425,7 @@ async fn a_restart_does_not_hand_the_refused_input_back() {
          the refused record's position is durable, so no restart re-opens it"
     );
 
-    let stream = load_saga_stream(&refusal.saga_store, &refusal.saga_id).await;
+    let stream = load_saga_stream(&refusal.journal, &refusal.saga_id).await;
     assert_eq!(
         stream
             .iter()

@@ -17,10 +17,10 @@
 //! - `Saga::Subscribe` is that enum; `Saga::correlate(&Self::Subscribe)` and
 //!   `Saga::handle(Self::Subscribe, ctx)` both take it, so a variant added to
 //!   the alphabet is a non-exhaustive `match` at both places.
-//! - `SagaManagerProps::new(store, producer)` where `producer` is
+//! - `SagaManagerProps::new(producer)` where `producer` is
 //!   `Fn(SagaComponents<S>) -> S`, and `observing::<E>(Subscription)` binds one
-//!   declared source per call.  `spawn(&ProcessSystem)` answers a
-//!   `SagaManagerProxy<S>`, the handle to the running host.
+//!   declared source per call.  `spawn(&EventSourceSystem)` answers a
+//!   `SagaHostProxy<S>`, the handle to the running host.
 //! - The instance a record belongs to is never named in the wiring: it is
 //!   whatever `Saga::correlate` answers for that record, and the host spawns it
 //!   on first claim.  A saga correlating every record to one id is therefore
@@ -28,8 +28,8 @@
 //! - `Saga::apply` is optional, so neither saga below declares it.
 //!
 //! The same builder reached from a system is `SagaSystemExt::host::<S>(producer)`
-//! — one entry point, differing only in where the store comes from and in its
-//! `spawn()` taking no argument; it is exercised in
+//! — one entry point, differing only in its `spawn()` taking no argument
+//! because the system is already carried; it is exercised in
 //! `saga_manager_degenerate_single_instance.rs`.
 //!
 //! If a name differs in the implementation, only the wiring lines need to be
@@ -58,9 +58,13 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, Journal,
+};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -312,27 +316,26 @@ fn as_set(seen: &[Seen]) -> Vec<Seen> {
 /// rule, and `handle` receives each as the typed variant it belongs to.
 #[tokio::test]
 async fn both_declared_sources_reach_the_same_instance_as_their_own_variant() {
-    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     let order_stream = AggregateId::new("multi-source-orders");
     let stock_stream = AggregateId::new("multi-source-stock");
-    append_order_placed(&upstream_store, &order_stream, 1, ORDER).await;
-    append_stock_reserved(&upstream_store, &stock_stream, 1, ORDER).await;
+    append_order_placed(&journal, &order_stream, 1, ORDER).await;
+    append_stock_reserved(&journal, &stock_stream, 1, ORDER).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = saga_id_of(ORDER);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy = SagaManagerProps::<TranslatingSaga>::new(saga_store.clone(), move |_components| {
-        TranslatingSaga {
-            handled: Arc::clone(&handled_for_producer),
-        }
+    let _host = SagaManagerProps::<TranslatingSaga>::new(move |_components| TranslatingSaga {
+        handled: Arc::clone(&handled_for_producer),
     })
-    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_stream))
-    .observing::<StockReserved>(Subscription::stream(&upstream_store, &stock_stream))
-    .spawn(&ps)
+    .observing::<OrderPlaced>(Subscription::stream(&order_stream))
+    .observing::<StockReserved>(Subscription::stream(&stock_stream))
+    .spawn(&system)
     .await;
 
     let seen = wait_for_handled(&handled, 2).await;
@@ -356,7 +359,7 @@ async fn both_declared_sources_reach_the_same_instance_as_their_own_variant() {
          named; saw {seen:?}"
     );
 
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
     let decisions: Vec<String> = events
         .iter()
         .filter(|event| event.event_type == Noted::EVENT_TYPE)
@@ -382,30 +385,34 @@ async fn both_declared_sources_reach_the_same_instance_as_their_own_variant() {
 /// its own, and no single shared cursor could have read both stream keys.
 #[tokio::test]
 async fn each_declared_source_is_polled_through_a_subscription_of_its_own() {
-    let ps = ProcessSystem::new().await;
-
     let queries: Queries = Arc::new(Mutex::new(Vec::new()));
-    let upstream_store = Journal::from(QueryRecordingStore {
-        inner: InMemoryEventStore::default(),
-        queries: Arc::clone(&queries),
-    });
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(QueryRecordingStore {
+                    inner: InMemoryEventStore::default(),
+                    queries: Arc::clone(&queries),
+                })
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build();
+    let journal = system.persistence().event_store();
+
     let order_stream = AggregateId::new("per-source-orders");
     let stock_stream = AggregateId::new("per-source-stock");
-    append_order_placed(&upstream_store, &order_stream, 1, ORDER).await;
-    append_stock_reserved(&upstream_store, &stock_stream, 1, ORDER).await;
+    append_order_placed(&journal, &order_stream, 1, ORDER).await;
+    append_stock_reserved(&journal, &stock_stream, 1, ORDER).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy = SagaManagerProps::<TranslatingSaga>::new(saga_store.clone(), move |_components| {
-        TranslatingSaga {
-            handled: Arc::clone(&handled_for_producer),
-        }
+    let _host = SagaManagerProps::<TranslatingSaga>::new(move |_components| TranslatingSaga {
+        handled: Arc::clone(&handled_for_producer),
     })
-    .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_stream))
-    .observing::<StockReserved>(Subscription::stream(&upstream_store, &stock_stream))
-    .spawn(&ps)
+    .observing::<OrderPlaced>(Subscription::stream(&order_stream))
+    .observing::<StockReserved>(Subscription::stream(&stock_stream))
+    .spawn(&system)
     .await;
 
     // Both records having been handled is the barrier: whatever polling it took

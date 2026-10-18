@@ -20,7 +20,7 @@
 //!         handled
 //!
 //!   Scenario: concurrent projectors kept from applying twice (the defence)
-//!     Given two independent ProcessSystems over one projection_id and one
+//!     Given two independent EventSourceSystems over one projection_id and one
 //!           database, both holding the same stale offset
 //!     When both try to apply the same event
 //!     Then the read model is updated once and no more
@@ -59,11 +59,12 @@ use bytes::Bytes;
 use fixture::{committed, typed};
 use linkme::distributed_slice;
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     Event, ProjectionContext, ProjectionId, Projector, ProjectorProps, TxProvider,
 };
 use nitinol_persistence::error::OffsetError;
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
 use nitinol_persistence::store::{Journal, OffsetScope, OffsetStore};
 use nitinol_persistence::{
     AggregateId, EventRegistryEntry, EventType, Family, TypeName, EVENT_REGISTRY,
@@ -133,10 +134,10 @@ impl Codec<Incremented> for NoPayload {
 /// honest: a transaction over a `PgPool` is that pool's own `begin`, `commit`
 /// and `rollback`, and a provider that wrapped them would have to depend on
 /// the interpreter crate that declares `TxProvider` — the wrong way round for
-/// a provider. Nothing is left to get wrong silently:
-/// `ProjectorProps::with_tx_provider` requires the offset store's `Tx` to
-/// be this one's, so a pairing that would not share a transaction does not
-/// compile.
+/// a provider. Nothing is left to get wrong silently: the spawn of a projector
+/// carrying this provider requires the offset store the system distributes to
+/// have this transaction as its own, so a pairing that would not share a
+/// transaction does not compile.
 struct PoolTransactions {
     pool: PgPool,
 }
@@ -279,6 +280,32 @@ fn event_store(pool: &PgPool) -> PostgresEventStore {
         .expect("the event types this test binary linked claim distinct canonical paths")
 }
 
+/// A system over `pool` whose projection slot reports the refusals it answered
+/// to `conflicts`.
+///
+/// Neither the journal a projector follows nor the slot it records its position
+/// in is named at the props any more, so the store a clause wants watched is
+/// named here — on the system the projector is spawned on.
+fn system_over(
+    process_system: ProcessSystem,
+    pool: &PgPool,
+    conflicts: &Arc<AtomicUsize>,
+) -> EventSourceSystem<CustomStore<Unprovided, ObservedOffsets>> {
+    EventSourceSystem::builder(process_system)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store(pool))
+                .projection_offsets(observed(pool.clone(), conflicts))
+                .build(),
+        ))
+        .build()
+}
+
+/// A counter for a clause that does not read the refusals its store answered.
+fn uncounted() -> Arc<AtomicUsize> {
+    Arc::new(AtomicUsize::new(0))
+}
+
 // What a clause reads and waits on.
 
 /// The read model, created by the clause that projects into it.
@@ -407,7 +434,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     let pool = schema.pool();
     create_read_model(&pool).await;
 
-    let system = ProcessSystem::new().await;
+    let process_system = ProcessSystem::new().await;
     let projection_id = ProjectionId::new("sqlx.exactly-once.restart");
     let stream = AggregateId::new("sqlx.exactly-once.restart.stream");
     let events = Journal::from(event_store(&pool));
@@ -417,13 +444,8 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
 
     let never_fail = Arc::new(AtomicBool::new(false));
     let first_attempts = Arc::new(AtomicUsize::new(0));
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store(&pool))
-            .projection_offsets(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
-            .build(),
-    );
-    let first = ProjectorProps::new(projection_id.clone(), &persistence, {
+    let first_system = system_over(process_system.clone(), &pool, &uncounted());
+    let first = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let attempts = Arc::clone(&first_attempts);
         move || CountingProjector {
@@ -435,7 +457,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     .with_tx_provider(PoolTransactions { pool: pool.clone() })
     .with_event::<Incremented>()
     .catchup_from_aggregate(stream.clone())
-    .spawn(&system)
+    .spawn(&first_system)
     .await;
 
     until_settled(
@@ -447,18 +469,13 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
         Some(1),
     )
     .await;
-    stopped(&system, &first).await;
+    stopped(first_system.process_system(), &first).await;
 
     // When: a second projector takes the same projection over, and is handed
     // the event the first one already applied along with one it has not seen.
     let second_attempts = Arc::new(AtomicUsize::new(0));
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store(&pool))
-            .projection_offsets(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
-            .build(),
-    );
-    let second = ProjectorProps::new(projection_id.clone(), &persistence, {
+    let second_system = system_over(process_system, &pool, &uncounted());
+    let second = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let attempts = Arc::clone(&second_attempts);
         move || CountingProjector {
@@ -470,7 +487,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
     .with_tx_provider(PoolTransactions { pool: pool.clone() })
     .with_event::<Incremented>()
     .catchup_from_aggregate(stream.clone())
-    .spawn(&system)
+    .spawn(&second_system)
     .await;
 
     committed(&events, stream.as_str(), vec![typed(2, INCREMENTED, b"")]).await;
@@ -484,7 +501,7 @@ async fn an_event_a_restarted_projector_is_handed_again_is_applied_once() {
         Some(2),
     )
     .await;
-    stopped(&system, &second).await;
+    stopped(second_system.process_system(), &second).await;
 
     assert_eq!(
         applied(&pool).await,
@@ -516,7 +533,7 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_offset_where_they_we
     let pool = schema.pool();
     create_read_model(&pool).await;
 
-    let system = ProcessSystem::new().await;
+    let system = system_over(ProcessSystem::new().await, &pool, &uncounted());
     let projection_id = ProjectionId::new("sqlx.exactly-once.project-fails");
     let stream = AggregateId::new("sqlx.exactly-once.project-fails.stream");
     let events = Journal::from(event_store(&pool));
@@ -526,13 +543,7 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_offset_where_they_we
 
     let fail = Arc::new(AtomicBool::new(true));
     let attempts = Arc::new(AtomicUsize::new(0));
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store(&pool))
-            .projection_offsets(observed(pool.clone(), &Arc::new(AtomicUsize::new(0))))
-            .build(),
-    );
-    let projector = ProjectorProps::new(projection_id.clone(), &persistence, {
+    let projector = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&fail);
         let attempts = Arc::clone(&attempts);
         move || CountingProjector {
@@ -581,7 +592,7 @@ async fn a_project_that_fails_leaves_the_read_model_and_the_offset_where_they_we
         Some(1),
     )
     .await;
-    stopped(&system, &projector).await;
+    stopped(system.process_system(), &projector).await;
 
     assert_eq!(
         applied(&pool).await,
@@ -607,7 +618,6 @@ async fn a_refused_offset_save_rolls_the_read_model_update_back() {
     let pool = schema.pool();
     create_read_model(&pool).await;
 
-    let system = ProcessSystem::new().await;
     let projection_id = ProjectionId::new("sqlx.exactly-once.save-refused");
     let stream = AggregateId::new("sqlx.exactly-once.save-refused.stream");
     let events = Journal::from(event_store(&pool));
@@ -616,13 +626,8 @@ async fn a_refused_offset_save_rolls_the_read_model_update_back() {
     let conflicts = Arc::new(AtomicUsize::new(0));
     let attempts = Arc::new(AtomicUsize::new(0));
     let never_fail = Arc::new(AtomicBool::new(false));
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store(&pool))
-            .projection_offsets(observed(pool.clone(), &conflicts))
-            .build(),
-    );
-    let projector = ProjectorProps::new(projection_id.clone(), &persistence, {
+    let system = system_over(ProcessSystem::new().await, &pool, &conflicts);
+    let projector = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let attempts = Arc::clone(&attempts);
         move || CountingProjector {
@@ -653,7 +658,7 @@ async fn a_refused_offset_save_rolls_the_read_model_update_back() {
         1,
     )
     .await;
-    stopped(&system, &projector).await;
+    stopped(system.process_system(), &projector).await;
 
     assert_eq!(
         applied(&pool).await,
@@ -670,8 +675,8 @@ async fn a_refused_offset_save_rolls_the_read_model_update_back() {
 
 /// Acceptance: "concurrent projectors kept from applying twice (the defence)".
 ///
-/// Two `ProcessSystem`s, two pools, one database, one `projection_id`, and both
-/// projectors holding the same offset the moment they reach the same event.
+/// Two `EventSourceSystem`s, two pools, one database, one `projection_id`, and
+/// both projectors holding the same offset the moment they reach the same event.
 /// The rendezvous inside `project` is what puts them there together — without
 /// it the first would be finished before the second began, which is the
 /// sequential case this clause is not about.
@@ -709,14 +714,8 @@ async fn two_projectors_holding_one_offset_apply_the_event_once() {
     let one_conflicts = Arc::new(AtomicUsize::new(0));
     let other_conflicts = Arc::new(AtomicUsize::new(0));
 
-    let one_system = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store(&one_pool))
-            .projection_offsets(observed(one_pool.clone(), &one_conflicts))
-            .build(),
-    );
-    let one = ProjectorProps::new(projection_id.clone(), &persistence, {
+    let one_system = system_over(ProcessSystem::new().await, &one_pool, &one_conflicts);
+    let one = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);
         move || CountingProjector {
@@ -733,14 +732,8 @@ async fn two_projectors_holding_one_offset_apply_the_event_once() {
     .spawn(&one_system)
     .await;
 
-    let other_system = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store(&other_pool))
-            .projection_offsets(observed(other_pool.clone(), &other_conflicts))
-            .build(),
-    );
-    let other = ProjectorProps::new(projection_id.clone(), &persistence, {
+    let other_system = system_over(ProcessSystem::new().await, &other_pool, &other_conflicts);
+    let other = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);
         move || CountingProjector {
@@ -773,8 +766,8 @@ async fn two_projectors_holding_one_offset_apply_the_event_once() {
     )
     .await;
 
-    stopped(&one_system, &one).await;
-    stopped(&other_system, &other).await;
+    stopped(one_system.process_system(), &one).await;
+    stopped(other_system.process_system(), &other).await;
 
     assert_eq!(
         applied(&one_pool).await,
@@ -833,14 +826,8 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     let one_conflicts = Arc::new(AtomicUsize::new(0));
     let other_conflicts = Arc::new(AtomicUsize::new(0));
 
-    let one_system = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store(&one_pool))
-            .projection_offsets(observed(one_pool.clone(), &one_conflicts))
-            .build(),
-    );
-    let one = ProjectorProps::new(projection_id.clone(), &persistence, {
+    let one_system = system_over(ProcessSystem::new().await, &one_pool, &one_conflicts);
+    let one = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);
         move || CountingProjector {
@@ -857,14 +844,8 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     .spawn(&one_system)
     .await;
 
-    let other_system = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store(&other_pool))
-            .projection_offsets(observed(other_pool.clone(), &other_conflicts))
-            .build(),
-    );
-    let other = ProjectorProps::new(projection_id.clone(), &persistence, {
+    let other_system = system_over(ProcessSystem::new().await, &other_pool, &other_conflicts);
+    let other = ProjectorProps::new(projection_id.clone(), {
         let fail = Arc::clone(&never_fail);
         let rendezvous = Arc::clone(&rendezvous);
         move || CountingProjector {
@@ -897,8 +878,8 @@ async fn two_projectors_starting_a_projection_together_apply_the_event_once() {
     )
     .await;
 
-    stopped(&one_system, &one).await;
-    stopped(&other_system, &other).await;
+    stopped(one_system.process_system(), &one).await;
+    stopped(other_system.process_system(), &other).await;
 
     assert_eq!(
         applied(&one_pool).await,

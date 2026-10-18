@@ -41,9 +41,13 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, Journal,
+};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
@@ -115,7 +119,12 @@ struct RecordedEvent {
 
 type Batches = Arc<Mutex<Vec<Vec<RecordedEvent>>>>;
 
-/// `EventStore` decorator recording one entry per successful `append` call.
+/// `EventStore` decorator recording one entry per successful `append` call to
+/// one named stream.
+///
+/// The stream is named because a system distributes one journal: the upstream
+/// rows a test seeds and the saga's own stream are tenants of it, and a batch
+/// boundary the test seeded is not one the interpreter produced.
 ///
 /// Kept local rather than shared with `saga_combine_persist_single_append.rs`:
 /// that file is the standing evidence for the #69 atomic-batch contract and
@@ -123,13 +132,16 @@ type Batches = Arc<Mutex<Vec<Vec<RecordedEvent>>>>;
 #[derive(Clone)]
 struct RecordingStore {
     inner: InMemoryEventStore,
+    /// Stream key whose appends are recorded.
+    watched: String,
     batches: Batches,
 }
 
 impl RecordingStore {
-    fn new(batches: Batches) -> Self {
+    fn watching(saga_id: &str, batches: Batches) -> Self {
         Self {
             inner: InMemoryEventStore::default(),
+            watched: saga_id.to_owned(),
             batches,
         }
     }
@@ -149,19 +161,40 @@ impl EventStore for RecordingStore {
                 payload: e.payload.clone(),
             })
             .collect();
+        let watched = key == self.watched;
         // Record only after the append durably succeeds: a failed attempt never
         // produced a batch boundary in the stream.
         let outcome = self.inner.append(key, events).await?;
-        self.batches
-            .lock()
-            .expect("recording store batch buffer must not be poisoned")
-            .push(recorded);
+        if watched {
+            self.batches
+                .lock()
+                .expect("recording store batch buffer must not be poisoned")
+                .push(recorded);
+        }
         Ok(outcome)
     }
 
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.inner.load(query).await
     }
+}
+
+/// The store a saga is spawned onto here: the journal under observation plus
+/// the saga-offset slot, and no other slot — nothing in this file snapshots or
+/// projects.
+type RecordingSagaStore = CustomStore<Unprovided, Unprovided, InMemoryOffsetStore>;
+
+/// A system over `journal` and the slot the delivery host every saga spawn
+/// starts records its progress in.
+async fn system_over(journal: &RecordingStore) -> EventSourceSystem<RecordingSagaStore> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(journal.clone())
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build()
 }
 
 fn is_domain_event(event: &RecordedEvent) -> bool {
@@ -399,27 +432,24 @@ async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u6
 /// position.
 #[tokio::test]
 async fn all_empty_persist_writes_only_the_consumed_position() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    let order_id = AggregateId::new("empty-persist-order");
-    append_order_placed(&upstream_store, &order_id, 1, EMPTY_SKU).await;
-    append_order_placed(&upstream_store, &order_id, 2, REAL_SKU).await;
-
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store = Journal::from(RecordingStore::new(Arc::clone(&batches)));
+    let journal = RecordingStore::watching(EMPTY_THEN_REAL_SAGA_ID, Arc::clone(&batches));
+    let system = system_over(&journal).await;
+
+    let order_id = AggregateId::new("empty-persist-order");
+    let seeding = system.persistence().event_store();
+    append_order_placed(&seeding, &order_id, 1, EMPTY_SKU).await;
+    append_order_placed(&seeding, &order_id, 2, REAL_SKU).await;
+
     let handled = Arc::new(AtomicUsize::new(0));
 
     let handled_clone = Arc::clone(&handled);
-    let _manager_proxy =
-        SagaManagerProps::<EmptyThenRealSaga>::new(saga_store.clone(), move |_components| {
-            EmptyThenRealSaga {
-                handled: Arc::clone(&handled_clone),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-        .spawn(&ps)
-        .await;
+    let _host = SagaManagerProps::<EmptyThenRealSaga>::new(move |_components| EmptyThenRealSaga {
+        handled: Arc::clone(&handled_clone),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     let recorded = wait_for_domain_batch(&batches).await;
 
@@ -483,27 +513,29 @@ async fn all_empty_persist_writes_only_the_consumed_position() {
 /// silently dropped and the saga would wait on a timer nothing ever armed.
 #[tokio::test]
 async fn persist_with_no_events_but_a_schedule_is_not_a_noop() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    let order_id = AggregateId::new("schedule-only-order");
-    append_order_placed(&upstream_store, &order_id, 1, "SKU-SCHEDULE").await;
-
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store = Journal::from(RecordingStore::new(Arc::clone(&batches)));
+    let journal = RecordingStore::watching(SCHEDULE_ONLY_SAGA_ID, Arc::clone(&batches));
+    let system = system_over(&journal).await;
+
+    let order_id = AggregateId::new("schedule-only-order");
+    append_order_placed(
+        &system.persistence().event_store(),
+        &order_id,
+        1,
+        "SKU-SCHEDULE",
+    )
+    .await;
+
     let handled = Arc::new(AtomicUsize::new(0));
 
     let handled_clone = Arc::clone(&handled);
-    let _manager_proxy =
-        SagaManagerProps::<ScheduleOnlySaga>::new(saga_store.clone(), move |components| {
-            ScheduleOnlySaga {
-                deadline: components.deadline(),
-                handled: Arc::clone(&handled_clone),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-        .spawn(&ps)
-        .await;
+    let _host = SagaManagerProps::<ScheduleOnlySaga>::new(move |components| ScheduleOnlySaga {
+        deadline: components.deadline(),
+        handled: Arc::clone(&handled_clone),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     // The `scheduled` fact and the consumed position of the input it was
     // decided from, in the one atomic append the branch produces.

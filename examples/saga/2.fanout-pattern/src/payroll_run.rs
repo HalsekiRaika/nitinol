@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Never};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 use crate::codec::JsonCodec;
@@ -67,6 +67,7 @@ pub struct PayrollRun {
 
 impl Aggregate for PayrollRun {
     type Event = PayrollRunApproved;
+    type Recover = Never;
 
     fn apply(&mut self, event: PayrollRunApproved) {
         self.payroll_run = Some(event.payroll_run);

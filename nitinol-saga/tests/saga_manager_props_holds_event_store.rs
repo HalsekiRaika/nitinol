@@ -1,26 +1,27 @@
-//! The store-bound manager builder and the subscription constructors receive
-//! the journal as `impl Into<Journal>`.
+//! The manager builder and the subscription constructors name no journal at
+//! all: every store a saga touches comes from the system it is spawned on.
 //!
 //! ```gherkin
-//!   Scenario: a manager journalling into a destination of its own
-//!     Given a journal held as a backend handle, as a Journal, or as a
-//!           reference to one
-//!     When a manager is built on it and given a store-wide subscription
-//!     Then it spawns on the process system it is handed
+//!   Scenario: a manager built from nothing but a producer
+//!     Given a system over a store that supplies every slot
+//!     When a manager is built with no journal argument and given a store-wide
+//!          subscription
+//!     Then it spawns on that system
 //!
-//!   Scenario: the subscription constructors receive the same three forms
-//!     Given Subscription::stream and Subscription::global
+//!   Scenario: neither constructor receives a journal
+//!     Given SagaManagerProps::new, Subscription::stream and
+//!           Subscription::global
 //!     When their signatures are named
-//!     Then both receive a journal however the caller holds one
+//!     Then the producer, the stream key and nothing else are what they take
 //! ```
 //!
-//! `SagaManagerProps::new` is what remains for the deployment that journals
-//! into another destination, and the argument shape is the whole subject here:
-//! the journal arrives as `impl Into<Journal>`, so a deployment names the
-//! backend it constructed, the handle its supplier answered with, or a reference
-//! to one it has to keep — and none of the three needs wrapping to be named
-//! twice. What the manager then does with that store is pinned in
-//! `saga_hosted_props_spawn.rs`.
+//! `SagaManagerProps::new` is the props-first entry point, and the argument
+//! shape is the whole subject here: the producer arrives alone, so the journal
+//! its instances persist onto, the journal its sources are observed from and
+//! the slot its delivery host records in are all the ones the system handed to
+//! `spawn` distributes. A deployment reaching a second destination builds a
+//! second system over the supplier that holds it. What the manager then does
+//! with that store is pinned in `saga_hosted_props_spawn.rs`.
 
 #[path = "common/helpers.rs"]
 mod common;
@@ -31,11 +32,12 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol_persistence::store::InMemoryStore;
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+    Saga, SagaComponents, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe,
+    Subscription,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,73 +98,44 @@ async fn a_system() -> EventSourceSystem<InMemoryStore> {
         .build()
 }
 
-/// Given the saga's journal and the upstream one are held as backend handles,
-/// When a manager is built on them, Then it spawns.
+/// Given a system over a store that supplies every slot, When a manager is
+/// built from nothing but a producer, Then it spawns on that system.
 #[tokio::test]
-async fn manager_props_spawns_with_a_backend_handle() {
+async fn manager_props_spawn_takes_every_store_from_the_system() {
     let system = a_system().await;
 
-    let _manager =
-        SagaManagerProps::<TrivialSaga>::new(InMemoryEventStore::default(), |_| TrivialSaga)
-            .observing::<Triggered>(Subscription::global(InMemoryEventStore::default()))
-            .spawn(system.process_system())
-            .await;
-}
-
-/// Given both are held as `Journal`s, When a manager is built on them, Then it
-/// spawns.
-#[tokio::test]
-async fn manager_props_spawns_with_a_journal() {
-    let system = a_system().await;
-    let saga_journal = Journal::from(InMemoryEventStore::default());
-    let upstream_journal = Journal::from(InMemoryEventStore::default());
-
-    let _manager = SagaManagerProps::<TrivialSaga>::new(saga_journal, |_| TrivialSaga)
-        .observing::<Triggered>(Subscription::global(upstream_journal))
-        .spawn(system.process_system())
+    let _manager = SagaManagerProps::<TrivialSaga>::new(|_| TrivialSaga)
+        .observing::<Triggered>(Subscription::global())
+        .spawn(&system)
         .await;
 }
 
-/// Given both are held as journals the caller keeps, When a manager is built on
-/// references to them, Then it spawns.
+/// The manager builder receives the producer and nothing else.
 ///
-/// This is the form a deployment reaches for when it reads the same journals
-/// back itself, and it is the one the withdrawn by-reference signatures over a
-/// framework-shared handle used to be the only way to express.
-#[tokio::test]
-async fn manager_props_spawns_with_a_reference_to_a_journal() {
-    let system = a_system().await;
-    let saga_journal = Journal::from(InMemoryEventStore::default());
-    let upstream_journal = Journal::from(InMemoryEventStore::default());
+/// Not a `#[test]` — the compiler enforces the signature at build time. A
+/// regression that put a journal back in front of the producer is a compile
+/// error here, which is the whole claim: the props carry no store and take it
+/// from the system `spawn` is given.
+/// The producer a manager is built from — the one argument `new` takes.
+type Producer = fn(SagaComponents<TrivialSaga>) -> TrivialSaga;
 
-    let _manager = SagaManagerProps::<TrivialSaga>::new(&saga_journal, |_| TrivialSaga)
-        .observing::<Triggered>(Subscription::global(&upstream_journal))
-        .spawn(system.process_system())
-        .await;
-
-    // The caller still holds both journals after naming them, which is what
-    // taking a reference is for.
-    let _still_held = (saga_journal, upstream_journal);
+#[allow(dead_code)]
+fn _assert_sig_manager_props_new_receives_only_a_producer() {
+    let _: fn(Producer) -> SagaManagerProps<TrivialSaga> = SagaManagerProps::<TrivialSaga>::new;
 }
 
-/// Both subscription constructors receive the journal in all three forms.
+/// Neither subscription constructor receives a journal.
 ///
 /// Not a `#[test]` — the compiler enforces the signatures at build time.
-/// `Subscription::stream` keys the upstream stream separately, so the two
-/// generic positions are pinned together here: a regression that fixed either
-/// one to a shared handle is a compile error.
-///
-/// The by-reference forms are named at one lifetime `'j`, because the handle is
-/// a type parameter: `impl Into<Journal>` is settled where the constructor is
-/// instantiated, so `&'j Journal` is one of the forms rather than a family of
-/// them.
+/// `Subscription::stream` names a stream key however the caller holds one — an
+/// `AggregateId`, another saga's `SagaId`, a bare `&str` — and
+/// `Subscription::global` names nothing at all, because the journal both read
+/// is the one the system distributes.
 #[allow(dead_code)]
-fn _assert_sig_the_subscription_constructors_receive_any_form_of_a_journal<'j>(_held: &'j Journal) {
-    let _: fn(InMemoryEventStore, &str) -> Subscription = Subscription::stream;
-    let _: fn(Journal, &str) -> Subscription = Subscription::stream;
-    let _: fn(&'j Journal, &str) -> Subscription = Subscription::stream;
+fn _assert_sig_the_subscription_constructors_receive_no_journal() {
+    let _: fn(&AggregateId) -> Subscription = Subscription::stream;
+    let _: fn(&SagaId) -> Subscription = Subscription::stream;
+    let _: fn(&str) -> Subscription = Subscription::stream;
 
-    let _: fn(InMemoryEventStore) -> Subscription = Subscription::global;
-    let _: fn(Journal) -> Subscription = Subscription::global;
-    let _: fn(&'j Journal) -> Subscription = Subscription::global;
+    let _: fn() -> Subscription = Subscription::global;
 }

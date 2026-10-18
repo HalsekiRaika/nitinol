@@ -52,9 +52,13 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, SagaOffsetSlot};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, Journal,
+};
 use nitinol_persistence::{
     AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -456,23 +460,29 @@ async fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
     }
 }
 
+/// A system over one in-memory journal: the saga's own stream and the upstream
+/// trigger stream are tenants of it, kept apart by stream key.
+async fn in_memory_system() -> EventSourceSystem<InMemoryStore> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build()
+}
+
 /// Spawn a host over [`TimerSaga`] with no scheduler wiring: the alphabet
 /// declaring a deadline variant is the whole of the declaration, and the host
 /// resolves the resident timer core from it.
-async fn spawn_timer_saga(
-    ps: &ProcessSystem,
-    saga_store: &Journal,
-    upstream_store: &Journal,
+async fn spawn_timer_saga<St: SagaOffsetSlot>(
+    system: &EventSourceSystem<St>,
     upstream_key: &str,
     fired: &Arc<Mutex<Vec<String>>>,
-) -> nitinol_saga::SagaManagerProxy<TimerSaga> {
+) -> nitinol_saga::SagaHostProxy<TimerSaga> {
     let fired = Arc::clone(fired);
-    SagaManagerProps::<TimerSaga>::new(saga_store.clone(), move |components| TimerSaga {
+    SagaManagerProps::<TimerSaga>::new(move |components| TimerSaga {
         deadline: components.deadline(),
         fired: Arc::clone(&fired),
     })
-    .observing::<Trigger>(Subscription::stream(upstream_store, upstream_key))
-    .spawn(ps)
+    .observing::<Trigger>(Subscription::stream(upstream_key))
+    .spawn(system)
     .await
 }
 
@@ -489,13 +499,12 @@ const BOOT_SEQUENCE: u64 = 1;
 /// the position, the record is dropped before `Saga::handle`, and the stream
 /// gains no row for it.
 async fn seed_an_inert_boot_record(
-    saga_store: &Journal,
+    journal: &Journal,
     saga_id: &SagaId,
     saga_sequence: u64,
-    upstream_store: &Journal,
     upstream_key: &str,
 ) {
-    saga_store
+    journal
         .append(
             saga_id.as_str(),
             vec![AppendingEvent {
@@ -513,7 +522,7 @@ async fn seed_an_inert_boot_record(
         .expect("seeding a consumed position must succeed");
 
     append_trigger(
-        upstream_store,
+        journal,
         upstream_key,
         BOOT_SEQUENCE,
         Trigger::setting("already-consumed", 0),
@@ -538,28 +547,20 @@ fn assert_correlate_was_never_asked_about_a_deadline() {
 /// message that was set.
 #[tokio::test]
 async fn a_deadline_fires_into_the_deadline_arm_of_handle() {
-    let ps = ProcessSystem::new().await;
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_trigger(
-        &upstream_store,
+        &journal,
         "deadline-upstream-1",
         1,
         Trigger::setting("hello", 150),
     )
     .await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let _proxy = spawn_timer_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        "deadline-upstream-1",
-        &fired,
-    )
-    .await;
+    let _host = spawn_timer_saga(&system, "deadline-upstream-1", &fired).await;
 
     let fired_check = Arc::clone(&fired);
     let ok = wait_until(Duration::from_secs(5), || {
@@ -586,11 +587,13 @@ async fn a_deadline_fires_into_the_deadline_arm_of_handle() {
 /// neither is ever in the store without the other.
 #[tokio::test]
 async fn a_decision_and_the_deadline_it_sets_reach_the_store_in_one_append() {
-    let ps = ProcessSystem::new().await;
-
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    // The trigger is seeded straight through the backing store, so the batches
+    // the wrapper records are the saga's own appends: the system distributes one
+    // journal, and an upstream row written through the wrapper would be the
+    // batch the assertion below reads.
+    let backing = InMemoryEventStore::default();
     append_trigger(
-        &upstream_store,
+        &Journal::from(backing.clone()),
         "deadline-upstream-batch",
         1,
         Trigger::deciding_and_setting("batched", 150),
@@ -598,20 +601,20 @@ async fn a_decision_and_the_deadline_it_sets_reach_the_store_in_one_append() {
     .await;
 
     let batches: Batches = Arc::new(Mutex::new(Vec::new()));
-    let saga_store = Journal::from(RecordingStore {
-        inner: InMemoryEventStore::default(),
-        batches: Arc::clone(&batches),
-    });
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(RecordingStore {
+                    inner: backing,
+                    batches: Arc::clone(&batches),
+                })
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build();
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let _proxy = spawn_timer_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        "deadline-upstream-batch",
-        &fired,
-    )
-    .await;
+    let _host = spawn_timer_saga(&system, "deadline-upstream-batch", &fired).await;
 
     let fired_check = Arc::clone(&fired);
     let ok = wait_until(Duration::from_secs(5), || {
@@ -649,29 +652,21 @@ async fn a_decision_and_the_deadline_it_sets_reach_the_store_in_one_append() {
 /// key.
 #[tokio::test]
 async fn setting_and_firing_persist_schedule_markers_on_the_saga_stream() {
-    let ps = ProcessSystem::new().await;
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_trigger(
-        &upstream_store,
+        &journal,
         "deadline-upstream-2",
         1,
         Trigger::setting("mark", 150),
     )
     .await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let _proxy = spawn_timer_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        "deadline-upstream-2",
-        &fired,
-    )
-    .await;
+    let _host = spawn_timer_saga(&system, "deadline-upstream-2", &fired).await;
 
     let fired_check = Arc::clone(&fired);
     let ok = wait_until(Duration::from_secs(5), || {
@@ -685,7 +680,7 @@ async fn setting_and_firing_persist_schedule_markers_on_the_saga_stream() {
     // waiting for the marker is waiting for the whole post-fire append.
     let deadline_for_rows = Instant::now() + Duration::from_secs(5);
     let events = loop {
-        let events = load_saga_events(&saga_store, &saga_id).await;
+        let events = load_saga_events(&journal, &saga_id).await;
         if count_schedule_transition(&events, "fired") >= 1 {
             break events;
         }
@@ -719,35 +714,27 @@ async fn setting_and_firing_persist_schedule_markers_on_the_saga_stream() {
 /// the earlier registration, so only the latest deadline fires.
 #[tokio::test]
 async fn resetting_the_same_name_auto_cancels_the_earlier_deadline() {
-    let ps = ProcessSystem::new().await;
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_trigger(
-        &upstream_store,
+        &journal,
         "deadline-upstream-3",
         1,
         Trigger::setting("stale", 1_500),
     )
     .await;
     append_trigger(
-        &upstream_store,
+        &journal,
         "deadline-upstream-3",
         2,
         Trigger::setting("fresh", 150),
     )
     .await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let _proxy = spawn_timer_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        "deadline-upstream-3",
-        &fired,
-    )
-    .await;
+    let _host = spawn_timer_saga(&system, "deadline-upstream-3", &fired).await;
 
     let fired_check = Arc::clone(&fired);
     let ok = wait_until(Duration::from_secs(5), || {
@@ -772,36 +759,22 @@ async fn resetting_the_same_name_auto_cancels_the_earlier_deadline() {
 /// records a `cancelled` marker on the saga stream.
 #[tokio::test]
 async fn cancel_prevents_the_deadline_from_firing() {
-    let ps = ProcessSystem::new().await;
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_trigger(
-        &upstream_store,
+        &journal,
         "deadline-upstream-4",
         1,
         Trigger::setting("doomed", 600),
     )
     .await;
-    append_trigger(
-        &upstream_store,
-        "deadline-upstream-4",
-        2,
-        Trigger::cancelling(),
-    )
-    .await;
+    append_trigger(&journal, "deadline-upstream-4", 2, Trigger::cancelling()).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(TIMER_SAGA_ID);
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let _proxy = spawn_timer_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        "deadline-upstream-4",
-        &fired,
-    )
-    .await;
+    let _host = spawn_timer_saga(&system, "deadline-upstream-4", &fired).await;
 
     // The `cancelled` marker is the barrier for the negative claim below: it is
     // appended by the second trigger, so once it is on the stream both triggers
@@ -810,7 +783,7 @@ async fn cancel_prevents_the_deadline_from_firing() {
     // against a stream the poller may not have reached yet.
     let deadline_for_rows = Instant::now() + Duration::from_secs(5);
     let events = loop {
-        let events = load_saga_events(&saga_store, &saga_id).await;
+        let events = load_saga_events(&journal, &saga_id).await;
         if count_schedule_transition(&events, "cancelled") >= 1 {
             break events;
         }
@@ -838,7 +811,7 @@ async fn cancel_prevents_the_deadline_from_firing() {
         "a cancelled deadline must never fire; fired={seen:?}"
     );
 
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
     assert_eq!(
         count_schedule_transition(&events, "fired"),
         0,
@@ -861,9 +834,9 @@ async fn cancel_prevents_the_deadline_from_firing() {
 /// serde instead would not recover the note.
 #[tokio::test]
 async fn replay_rearms_an_unfired_deadline_and_fires_it() {
-    let ps = ProcessSystem::new().await;
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(TIMER_SAGA_ID);
     let name = TimerName::new("reminder");
     let survivor = Reminder {
@@ -874,7 +847,7 @@ async fn replay_rearms_an_unfired_deadline_and_fires_it() {
 
     // The state a crash leaves behind: an unfired schedule fact whose due time
     // is still ahead.
-    saga_store
+    journal
         .append(
             saga_id.as_str(),
             vec![AppendingEvent {
@@ -899,25 +872,10 @@ async fn replay_rearms_an_unfired_deadline_and_fires_it() {
     // stream: it is what wakes the instance, and it is dropped before
     // `Saga::handle`, so replay stays the only way this incarnation can learn
     // about the deadline.
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    seed_an_inert_boot_record(
-        &saga_store,
-        &saga_id,
-        2,
-        &upstream_store,
-        "deadline-upstream-5-boot",
-    )
-    .await;
+    seed_an_inert_boot_record(&journal, &saga_id, 2, "deadline-upstream-5-boot").await;
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let _proxy = spawn_timer_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        "deadline-upstream-5-boot",
-        &fired,
-    )
-    .await;
+    let _host = spawn_timer_saga(&system, "deadline-upstream-5-boot", &fired).await;
 
     let fired_check = Arc::clone(&fired);
     let ok = wait_until(Duration::from_secs(8), || {
@@ -951,29 +909,21 @@ const BEYOND_OLD_WHEEL_HORIZON: u64 = 6_000;
 /// then it fires once and records one `fired` marker.
 #[tokio::test]
 async fn a_deadline_beyond_the_old_wheel_horizon_fires() {
-    let ps = ProcessSystem::new().await;
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_trigger(
-        &upstream_store,
+        &journal,
         "deadline-upstream-horizon",
         1,
         Trigger::setting("beyond-horizon", BEYOND_OLD_WHEEL_HORIZON),
     )
     .await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let set_at = Instant::now();
-    let _proxy = spawn_timer_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        "deadline-upstream-horizon",
-        &fired,
-    )
-    .await;
+    let _host = spawn_timer_saga(&system, "deadline-upstream-horizon", &fired).await;
 
     let fired_check = Arc::clone(&fired);
     let ok = wait_until(Duration::from_secs(20), || {
@@ -1010,34 +960,28 @@ async fn a_deadline_beyond_the_old_wheel_horizon_fires() {
 /// by name on its own — so the stream reads `Scheduled → (new) Scheduled`.
 #[tokio::test]
 async fn a_deadline_reset_from_its_own_firing_survives_replay() {
-    let ps = ProcessSystem::new().await;
+    let system = in_memory_system().await;
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     append_trigger(
-        &upstream_store,
+        &journal,
         "deadline-upstream-arch004",
         1,
         Trigger::setting("first", 150),
     )
     .await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(ONCE_RESCHEDULE_SAGA_ID);
 
     let fires_1 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_1_producer = Arc::clone(&fires_1);
-    let _proxy_1 =
-        SagaManagerProps::<OnceRescheduleSaga>::new(saga_store.clone(), move |components| {
-            OnceRescheduleSaga {
-                deadline: components.deadline(),
-                fires: Arc::clone(&fires_1_producer),
-            }
+    let _host_1 =
+        SagaManagerProps::<OnceRescheduleSaga>::new(move |components| OnceRescheduleSaga {
+            deadline: components.deadline(),
+            fires: Arc::clone(&fires_1_producer),
         })
-        .observing::<Trigger>(Subscription::stream(
-            &upstream_store,
-            "deadline-upstream-arch004",
-        ))
-        .spawn(&ps)
+        .observing::<Trigger>(Subscription::stream("deadline-upstream-arch004"))
+        .spawn(&system)
         .await;
 
     let fires_1_check = Arc::clone(&fires_1);
@@ -1052,7 +996,7 @@ async fn a_deadline_reset_from_its_own_firing_survives_replay() {
     // stream the firing that re-set it has been fully dealt with.
     let deadline_for_rows = Instant::now() + Duration::from_secs(5);
     let events = loop {
-        let events = load_saga_events(&saga_store, &saga_id).await;
+        let events = load_saga_events(&journal, &saga_id).await;
         if count_schedule_transition(&events, "scheduled") >= 2 {
             break events;
         }
@@ -1073,25 +1017,20 @@ async fn a_deadline_reset_from_its_own_firing_survives_replay() {
          remove the very schedule the arm just wrote"
     );
 
-    // A second host over the same store and the same source.  The one record
+    // A second host on the same system and the same source.  The one record
     // there is already named by a position on the saga's own stream, so it
     // wakes the instance this host fronts and is then dropped before
     // `Saga::handle` — which leaves replay as the only account of the re-set
     // deadline, and is what `fires_2` below reads back.
     let fires_2 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_2_producer = Arc::clone(&fires_2);
-    let _proxy_2 =
-        SagaManagerProps::<OnceRescheduleSaga>::new(saga_store.clone(), move |components| {
-            OnceRescheduleSaga {
-                deadline: components.deadline(),
-                fires: Arc::clone(&fires_2_producer),
-            }
+    let _host_2 =
+        SagaManagerProps::<OnceRescheduleSaga>::new(move |components| OnceRescheduleSaga {
+            deadline: components.deadline(),
+            fires: Arc::clone(&fires_2_producer),
         })
-        .observing::<Trigger>(Subscription::stream(
-            &upstream_store,
-            "deadline-upstream-arch004",
-        ))
-        .spawn(&ps)
+        .observing::<Trigger>(Subscription::stream("deadline-upstream-arch004"))
+        .spawn(&system)
         .await;
 
     let fires_2_check = Arc::clone(&fires_2);

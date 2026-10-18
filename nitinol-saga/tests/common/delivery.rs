@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{Aggregate, AggregateProxy, Decider, Decision, Event, Query};
+use nitinol_eventsource::{Aggregate, AggregateProxy, Decider, Decision, Event, Never, Query};
 use nitinol_persistence::error::{AppendError, LoadError, OffsetError};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
 use nitinol_persistence::store::{
@@ -34,8 +34,8 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaDelivery, SagaDeliveryId, SagaDeliveryProps, SagaDeliveryProxy,
-    SagaEffect, SagaId, SagaSubscribe,
+    Saga, SagaContext, SagaDelivery, SagaDeliveryId, SagaDeliveryProxy, SagaEffect, SagaId,
+    SagaManagerProps, SagaSubscribe, Subscription,
 };
 
 /// How long a probe waits for work the host performs on its own poll loop.
@@ -133,6 +133,7 @@ pub struct Ledger {
 
 impl Aggregate for Ledger {
     type Event = Recorded;
+    type Recover = Never;
 
     fn apply(&mut self, event: Recorded) {
         self.operations.push(event.operation);
@@ -196,6 +197,7 @@ pub struct Refuser;
 
 impl Aggregate for Refuser {
     type Event = Recorded;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Recorded) {}
 }
@@ -210,6 +212,7 @@ impl Decider<Record> for Refuser {
 }
 
 /// Maps one decision to one command against a [`Ledger`].
+#[derive(Default)]
 pub struct DeliverySaga;
 
 #[async_trait]
@@ -241,6 +244,7 @@ impl Saga for DeliverySaga {
 }
 
 /// Maps one decision to one command against a [`Refuser`].
+#[derive(Default)]
 pub struct RefusedSaga;
 
 #[async_trait]
@@ -274,6 +278,7 @@ impl Saga for RefusedSaga {
 /// Two deliveries from one decision: the first lands on a [`Ledger`], the
 /// second is refused. One decision the host cannot finish is what the cursor
 /// must not move past, even though part of it succeeded.
+#[derive(Default)]
 pub struct PartlyRefusedSaga;
 
 /// Stream key suffix the second, refused delivery of [`PartlyRefusedSaga`] is
@@ -322,6 +327,7 @@ impl Saga for PartlyRefusedSaga {
 /// One saga type is what makes a partition-local stall observable: both
 /// instances are the same type on the same subscription, so the only thing
 /// separating them is the partition their stream key falls in.
+#[derive(Default)]
 pub struct SelectiveSaga;
 
 #[async_trait]
@@ -355,39 +361,58 @@ impl Saga for SelectiveSaga {
     }
 }
 
-/// An [`EventStore`] whose appends always fail with a backend failure, and
-/// whose loads are empty.
+/// An [`EventStore`] whose appends to one named stream always fail with a
+/// backend failure, and which passes everything else to the store it wraps.
 ///
-/// A receiver activated on this store accepts a command and then cannot record
-/// it, which is a failure of the machinery rather than a verdict on the command
-/// — the transient half of the stall.
+/// A receiver whose own stream is the refused one accepts a command and then
+/// cannot record it, which is a failure of the machinery rather than a verdict
+/// on the command — the transient half of the stall. The rest of the store
+/// still works, because a system distributes one journal: the saga's own
+/// decisions and the receiver's stream are tenants of it, and only the
+/// receiver's half is meant to be unwritable.
 ///
-/// `Clone` carries nothing, because the store holds nothing: every handle onto
-/// it refuses every append and answers every load with the same empty stream.
+/// `Clone` is the inner store's handle plus the key, so every handle refuses
+/// the same stream and reads the same rows.
 #[derive(Clone)]
-pub struct AppendRefusingEventStore;
+pub struct AppendRefusingEventStore {
+    inner: Journal,
+    /// The stream whose appends are refused.
+    refused: String,
+}
+
+impl AppendRefusingEventStore {
+    /// Wrap `inner`, refusing every append addressed to `refused`.
+    pub fn refusing(inner: impl Into<Journal>, refused: &AggregateId) -> Self {
+        Self {
+            inner: inner.into(),
+            refused: refused.as_str().to_owned(),
+        }
+    }
+}
 
 #[async_trait]
 impl EventStore for AppendRefusingEventStore {
     async fn append(
         &self,
-        _key: &str,
-        _events: Vec<AppendingEvent>,
+        key: &str,
+        events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        Err(AppendError::Backend(Box::new(std::io::Error::other(
-            "the fixture store cannot record anything",
-        ))))
+        if key == self.refused {
+            return Err(AppendError::Backend(Box::new(std::io::Error::other(
+                "the fixture store cannot record anything for this stream",
+            ))));
+        }
+        self.inner.append(key, events).await
     }
 
-    async fn load(&self, _query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        Ok(Box::pin(futures_util::stream::empty::<
-            Result<LoadedEvent, LoadError>,
-        >()))
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        self.inner.load(query).await
     }
 }
 
 /// A saga that declares no mapping at all, so the trait's default answers for
 /// it. An existing saga compiles untouched, and delivers nothing.
+#[derive(Default)]
 pub struct SilentSaga;
 
 #[async_trait]
@@ -428,12 +453,17 @@ pub fn partition_count(n: usize) -> NonZeroUsize {
 }
 
 /// The store a delivery host is wired from here: the journal the saga's
-/// decisions are on, `offsets` as the slot the host records in, and no other
-/// slot named.
+/// decisions are on and the receiving aggregates are tenants of, plus
+/// `offsets` as the slot the host records in, and no other slot named.
 ///
 /// A host needs exactly those two, so a store with nothing else on it is what
 /// the fixtures assemble — the projection and snapshot slots are left
 /// unprovided rather than filled with stores no clause here reads.
+///
+/// One journal rather than two: a host reads the journal the system it was
+/// spawned on distributes, and there is no per-spawn store to name a second
+/// one with. The rows a host reads and the rows its deliveries write stay apart
+/// by stream key, which is what the clauses here assert on.
 ///
 /// Each handle is named as the backend's own value: the journal is erased where
 /// the builder takes it, and the offset slot keeps its type so the host's
@@ -443,13 +473,8 @@ pub type DeliveryStore = CustomStore<Unprovided, Unprovided, RecordingOffsetStor
 /// The supplier the delivery fixtures wire a host from.
 pub type DeliveryPersistence = PersistenceProvider<DeliveryStore>;
 
-/// The system the delivery fixtures spawn onto: its store supplies the journal
-/// the receiving aggregates are tenants of.
-///
-/// That journal is a different one from the saga's, which is what keeps the
-/// rows a host reads apart from the rows its deliveries write — the fixtures
-/// assert on both.
-pub type DeliverySystem = EventSourceSystem<CustomStore>;
+/// The system the delivery fixtures spawn onto.
+pub type DeliverySystem = EventSourceSystem<DeliveryStore>;
 
 pub fn delivery_persistence<E>(journal: &E, offsets: &RecordingOffsetStore) -> DeliveryPersistence
 where
@@ -463,40 +488,58 @@ where
     )
 }
 
-/// Start a delivery host for `S` over `journal`, recording progress in
-/// `offsets`, with `partitions` partitions.
-pub async fn spawn_host<S: Saga, E>(
-    system: &DeliverySystem,
-    journal: &E,
-    offsets: &RecordingOffsetStore,
-    partitions: usize,
-) -> SagaDeliveryProxy<S>
+/// A system over `journal` and `offsets`.
+pub async fn delivery_system<E>(journal: &E, offsets: &RecordingOffsetStore) -> DeliverySystem
 where
     E: EventStore + Clone + 'static,
 {
-    SagaDeliveryProps::<S, RecordingOffsetStore>::new(&delivery_persistence(journal, offsets))
-        .with_delivery_id(delivery_id())
-        .with_partitions(partition_count(partitions))
-        .with_poll_interval(TEST_POLL_INTERVAL)
-        .spawn(system)
-        .await
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(delivery_persistence(journal, offsets))
+        .build()
 }
 
-/// A system over a store whose journal is a fresh in-memory store, and the
-/// backend handle that journal was named with.
+/// A system over a fresh in-memory journal and `offsets`, and the backend handle
+/// that journal was named with.
 ///
 /// The handle is answered as the backend's own value rather than as an erased
-/// journal, so a fixture can both name it in a second assembly and read the
-/// rows the system's deliveries wrote through it.
-pub async fn in_memory_system() -> (DeliverySystem, InMemoryEventStore) {
-    let ps = ProcessSystem::new().await;
+/// journal, so a fixture can both seed a saga's decisions through it and read
+/// the rows the system's deliveries wrote.
+pub async fn in_memory_system(
+    offsets: &RecordingOffsetStore,
+) -> (DeliverySystem, InMemoryEventStore) {
     let store = InMemoryEventStore::default();
-    let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder().eventstore(store.clone()).build(),
-        ))
-        .build();
+    let system = delivery_system(&store, offsets).await;
     (system, store)
+}
+
+/// The stream key the fixture sagas' one declared source is bound to.
+///
+/// Nothing ever writes a [`Triggered`] row: these tests seed decisions
+/// directly, and the alphabet exists only because [`Saga`] names one. The
+/// binding is still required at the wiring, so it names a stream of its own
+/// rather than one a clause reads.
+pub const TRIGGER_KEY: &str = "delivery-fixture-unused-trigger";
+
+/// Start the saga `S` on `system`, with `partitions` delivery partitions, and
+/// answer the delivery half of what it started.
+///
+/// One spawn starts both halves — a saga whose decisions nobody carries out is
+/// not a saga — and the manager is left running: dropping its handle stops
+/// nothing, and the fixture sagas correlate to no instance, so the manager
+/// fronts nothing while the host does the work these clauses read.
+pub async fn spawn_host<S>(system: &DeliverySystem, partitions: usize) -> SagaDeliveryProxy<S>
+where
+    S: Saga<Subscribe = Observed> + Default,
+{
+    SagaManagerProps::<S>::new(|_| S::default())
+        .observing::<Triggered>(Subscription::stream(TRIGGER_KEY))
+        .with_delivery_id(delivery_id())
+        .with_partitions(partition_count(partitions))
+        .with_delivery_poll_interval(TEST_POLL_INTERVAL)
+        .spawn(system)
+        .await
+        .delivery()
+        .clone()
 }
 
 /// Append one row to `stream` under the identity `E` declares.
@@ -649,27 +692,42 @@ impl RecordingEventStore {
         self.faults.lock().expect(FIXTURE_LOCK).insert(nth, fault);
     }
 
-    /// Every query handed to this store, in call order.
+    /// Every query a delivery host handed this store, in call order.
+    ///
+    /// A host asks for the rows of the saga's own decision type, and the
+    /// journal it reads is the one the receiving aggregates replay from and the
+    /// manager polls its sources on — so what a clause about *the host* can
+    /// read is the subset of calls carrying that event type, not every call the
+    /// store saw.
     pub fn queries(&self) -> Vec<LoadQuery> {
-        self.calls
-            .lock()
-            .expect(FIXTURE_LOCK)
-            .iter()
-            .map(|(query, _)| query.clone())
+        self.host_calls()
+            .into_iter()
+            .map(|(query, _)| query)
             .collect()
     }
 
-    /// The gaps between consecutive load calls, in call order.
+    /// The gaps between consecutive delivery-host load calls, in call order.
     pub fn load_gaps(&self) -> Vec<Duration> {
-        let calls = self.calls.lock().expect(FIXTURE_LOCK);
-        calls
+        self.host_calls()
             .windows(2)
             .map(|pair| pair[1].1.saturating_duration_since(pair[0].1))
             .collect()
     }
 
     pub fn load_count(&self) -> usize {
-        self.calls.lock().expect(FIXTURE_LOCK).len()
+        self.host_calls().len()
+    }
+
+    /// The calls a delivery host made, as `(query, when)` in call order.
+    fn host_calls(&self) -> Vec<(LoadQuery, Instant)> {
+        let decided = Decided::EVENT_TYPE.to_path();
+        self.calls
+            .lock()
+            .expect(FIXTURE_LOCK)
+            .iter()
+            .filter(|(query, _)| query.event_type_prefix.as_ref() == Some(&decided))
+            .cloned()
+            .collect()
     }
 }
 

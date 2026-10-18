@@ -49,8 +49,10 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -242,13 +244,12 @@ fn scheduled_row(saga_id: &SagaId, name: &str, after: Duration) -> Bytes {
 /// the barrier below waits for, so a record that did reach `handle` could not
 /// be mistaken for one that did not.
 async fn seed_an_inert_boot_record(
-    saga_store: &Journal,
+    journal: &Journal,
     saga_id: &SagaId,
     saga_sequence: u64,
-    upstream_store: &Journal,
     upstream_key: &str,
 ) {
-    saga_store
+    journal
         .append(
             saga_id.as_str(),
             vec![AppendingEvent {
@@ -268,7 +269,7 @@ async fn seed_an_inert_boot_record(
     })
     .map(Bytes::from)
     .expect("encode Trigger must succeed");
-    upstream_store
+    journal
         .append(
             upstream_key,
             vec![AppendingEvent {
@@ -307,27 +308,31 @@ async fn wait_for_fired(fired: &Arc<Mutex<Vec<String>>>, label: &str) -> Vec<Str
 /// Then the cancelled deadline is not re-armed, while an uncancelled one is.
 #[tokio::test]
 async fn replay_does_not_rearm_a_cancelled_deadline() {
-    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the saga's own stream and the upstream boot record are
+    // tenants of the store the system distributes, kept apart by stream key.
+    let journal = system.persistence().event_store();
     let saga_id = SagaId::new(SAGA_ID);
 
     seed_row(
-        &saga_store,
+        &journal,
         &saga_id,
         1,
         scheduled_row(&saga_id, DOOMED, Duration::from_millis(400)),
     )
     .await;
     seed_row(
-        &saga_store,
+        &journal,
         &saga_id,
         2,
         scheduled_row(&saga_id, BARRIER, Duration::from_millis(400)),
     )
     .await;
     seed_row(
-        &saga_store,
+        &journal,
         &saga_id,
         3,
         encode_schedule_cancelled(
@@ -341,29 +346,16 @@ async fn replay_does_not_rearm_a_cancelled_deadline() {
     // One already-consumed upstream record, so there is an instance at all;
     // replay of the seeded facts is still the only way a deadline can be armed
     // in this incarnation.
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    seed_an_inert_boot_record(
-        &saga_store,
-        &saga_id,
-        4,
-        &upstream_store,
-        "deadline-cancel-upstream-boot",
-    )
-    .await;
+    seed_an_inert_boot_record(&journal, &saga_id, 4, "deadline-cancel-upstream-boot").await;
     let fired = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let fired_for_producer = Arc::clone(&fired);
-    let _proxy = SagaManagerProps::<CancellingSaga>::new(saga_store.clone(), move |components| {
-        CancellingSaga {
-            deadline: components.deadline(),
-            fired: Arc::clone(&fired_for_producer),
-        }
+    let _host = SagaManagerProps::<CancellingSaga>::new(move |components| CancellingSaga {
+        deadline: components.deadline(),
+        fired: Arc::clone(&fired_for_producer),
     })
-    .observing::<Trigger>(Subscription::stream(
-        &upstream_store,
-        "deadline-cancel-upstream-boot",
-    ))
-    .spawn(&ps)
+    .observing::<Trigger>(Subscription::stream("deadline-cancel-upstream-boot"))
+    .spawn(&system)
     .await;
 
     let seen = wait_for_fired(&fired, BARRIER).await;

@@ -30,7 +30,6 @@ use delivery::{
 };
 
 use nitinol_persistence::is_within_reserved_namespace;
-use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_saga::SagaId;
 
 /// The key is composed before anything runs, so this half needs no host.
@@ -68,9 +67,8 @@ fn the_key_a_partition_asks_for_is_framework_owned() {
 /// rendered itself.
 #[tokio::test]
 async fn the_host_records_under_the_key_it_asked_for() {
-    let (system, _aggregates) = in_memory_system().await;
-    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
+    let (system, journal) = in_memory_system(&offsets).await;
 
     let last = append_decided(
         &journal,
@@ -81,7 +79,7 @@ async fn the_host_records_under_the_key_it_asked_for() {
     )
     .await;
 
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, 1).await;
 
     wait_until_stored(
         &offsets,

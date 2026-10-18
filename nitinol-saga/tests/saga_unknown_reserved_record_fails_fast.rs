@@ -59,7 +59,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::__private::reserved_family;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -203,12 +203,13 @@ fn describe(events: &[LoadedEvent]) -> Vec<String> {
         .collect()
 }
 
-/// Everything a run of this file needs: the two stores, the upstream record
-/// already waiting, and the handle counter.
+/// Everything a run of this file needs: the system and the one journal it
+/// distributes, the upstream record already waiting, and the handle counter.
 struct Harness {
     system: EventSourceSystem<InMemoryStore>,
-    saga_store: Journal,
-    upstream_store: Journal,
+    /// The journal the upstream stream and the saga's own stream are both
+    /// tenants of, kept apart by key.
+    journal: Journal,
     upstream: AggregateId,
     saga_id: SagaId,
     handle_count: Arc<AtomicUsize>,
@@ -222,14 +223,13 @@ impl Harness {
             .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
             .build();
 
-        let upstream_store = Journal::from(InMemoryEventStore::default());
+        let journal = system.persistence().event_store();
         let upstream = AggregateId::new(upstream_key);
-        append_order_placed(&upstream_store, &upstream, 1).await;
+        append_order_placed(&journal, &upstream, 1).await;
 
         Self {
             system,
-            saga_store: Journal::from(InMemoryEventStore::default()),
-            upstream_store,
+            journal,
             upstream,
             saga_id: SagaId::new(SAGA_ID),
             handle_count: Arc::new(AtomicUsize::new(0)),
@@ -237,17 +237,15 @@ impl Harness {
         }
     }
 
-    async fn spawn(&self) -> nitinol_saga::SagaManagerProxy<RecordingSaga> {
+    async fn spawn(&self) -> nitinol_saga::SagaHostProxy<RecordingSaga> {
         let handle_count = Arc::clone(&self.handle_count);
         let handled = Arc::clone(&self.handled);
-        SagaManagerProps::<RecordingSaga>::new(self.saga_store.clone(), move |_components| {
-            RecordingSaga {
-                handle_count: Arc::clone(&handle_count),
-                handled: Arc::clone(&handled),
-            }
+        SagaManagerProps::<RecordingSaga>::new(move |_components| RecordingSaga {
+            handle_count: Arc::clone(&handle_count),
+            handled: Arc::clone(&handled),
         })
-        .observing::<OrderPlaced>(Subscription::stream(&self.upstream_store, &self.upstream))
-        .spawn(self.system.process_system())
+        .observing::<OrderPlaced>(Subscription::stream(&self.upstream))
+        .spawn(&self.system)
         .await
     }
 }
@@ -273,7 +271,7 @@ async fn assert_load_refuses(harness: &Harness, seeded: usize, what: &str) {
          reported the row and carried on would take that record instead"
     );
 
-    let stream = load_saga_stream(&harness.saga_store, &harness.saga_id).await;
+    let stream = load_saga_stream(&harness.journal, &harness.saga_id).await;
     assert_eq!(
         stream.len(),
         seeded,
@@ -302,7 +300,7 @@ async fn a_sound_stream_still_handles_the_routed_record() {
     .map(Bytes::from)
     .expect("encode ReservationRequested must succeed");
     seed_raw_row(
-        &harness.saga_store,
+        &harness.journal,
         &harness.saga_id,
         1,
         ReservationRequested::EVENT_TYPE,
@@ -310,7 +308,7 @@ async fn a_sound_stream_still_handles_the_routed_record() {
     )
     .await;
     seed_raw_row(
-        &harness.saga_store,
+        &harness.journal,
         &harness.saga_id,
         2,
         CONSUMED_MARKER,
@@ -360,7 +358,7 @@ async fn an_outbox_marker_from_an_earlier_version_refuses_the_load() {
     let harness = Harness::new("fail-fast-outbox-orders").await;
 
     seed_raw_row(
-        &harness.saga_store,
+        &harness.journal,
         &harness.saga_id,
         1,
         saga_record("outbox"),
@@ -379,7 +377,7 @@ async fn an_unheard_of_reserved_row_refuses_the_load() {
     let harness = Harness::new("fail-fast-unheard-orders").await;
 
     seed_raw_row(
-        &harness.saga_store,
+        &harness.journal,
         &harness.saga_id,
         1,
         saga_record("from_a_later_version"),
@@ -399,7 +397,7 @@ async fn a_dead_letter_from_an_earlier_version_refuses_the_load() {
     let harness = Harness::new("fail-fast-dlq-orders").await;
 
     seed_raw_row(
-        &harness.saga_store,
+        &harness.journal,
         &harness.saga_id,
         1,
         saga_record("dead_letter"),
@@ -420,7 +418,7 @@ async fn an_undecodable_schedule_fact_refuses_the_load() {
     // A schedule marker with no `oneof` kind: it says nothing about which
     // transition it records, so there is nothing sound to fold.
     seed_raw_row(
-        &harness.saga_store,
+        &harness.journal,
         &harness.saga_id,
         1,
         SCHEDULE_MARKER,
@@ -439,7 +437,7 @@ async fn an_undecodable_consumed_fact_refuses_the_load() {
     let harness = Harness::new("fail-fast-consumed-orders").await;
 
     seed_raw_row(
-        &harness.saga_store,
+        &harness.journal,
         &harness.saga_id,
         1,
         CONSUMED_MARKER,
@@ -458,7 +456,7 @@ async fn an_undecodable_domain_event_refuses_the_load() {
     let harness = Harness::new("fail-fast-domain-orders").await;
 
     seed_raw_row(
-        &harness.saga_store,
+        &harness.journal,
         &harness.saga_id,
         1,
         ReservationRequested::EVENT_TYPE,
@@ -481,7 +479,7 @@ async fn a_poisoned_row_after_a_sound_one_still_refuses_the_load() {
     .map(Bytes::from)
     .expect("encode ReservationRequested must succeed");
     seed_raw_row(
-        &harness.saga_store,
+        &harness.journal,
         &harness.saga_id,
         1,
         ReservationRequested::EVENT_TYPE,
@@ -489,7 +487,7 @@ async fn a_poisoned_row_after_a_sound_one_still_refuses_the_load() {
     )
     .await;
     seed_raw_row(
-        &harness.saga_store,
+        &harness.journal,
         &harness.saga_id,
         2,
         saga_record("outbox"),

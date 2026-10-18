@@ -1,18 +1,18 @@
-//! `ProjectorProps::new` holds a `Journal` directly.
+//! `ProjectorProps::new` names no store, and the projector process holds the
+//! journal its system distributes directly.
 //!
-//! The projector process now owns its event-store reference inline; it
-//! catches up by calling `store.load` directly instead of asking an
-//! `EventPersistor` process.  The handle reaches it through the
-//! `PersistenceProvider` its props are built from, whose journal slot *is*
-//! a `Journal`.
+//! The projector process owns its event-store reference inline; it catches up
+//! by calling `store.load` directly instead of asking an `EventPersistor`
+//! process.  The handle reaches it from the system the props are spawned on,
+//! whose journal slot *is* a `Journal` — the props carry neither it nor the
+//! offset store.
 //!
 //! Two complementary checks:
 //!
-//! 1. Compile-time type assertion — a `ProjectorProps` is built over a
-//!    provider assembled from a backend handle, and the offset slot is named
-//!    by the backend's own type rather than a shared wrapper.
-//! 2. Runtime integration — events pre-loaded into the journal the provider
-//!    answers with are observed by the projector during catchup.
+//! 1. Compile-time type assertion — `ProjectorProps::new` receives the
+//!    projection's identity and its producer, and nothing that names a store.
+//! 2. Runtime integration — events pre-loaded into the journal the system was
+//!    built on are observed by the projector during catchup.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps,
 };
@@ -75,49 +76,36 @@ impl Projector<PingEvent> for CountingProjector {
 
 // Compile-time type assertion
 
-/// `ProjectorProps::new` MUST take its journal as `Journal` — the
-/// provider it is given names the journal with exactly that type.  Not a
-/// `#[test]` — the compiler enforces the signature.
+/// `ProjectorProps::new` MUST receive the projection's identity and its
+/// producer, and nothing else — neither a journal nor the supplier that holds
+/// one.  Not a `#[test]` — the compiler enforces the signature.
 ///
-/// We exercise the call in a generic context because `ProjectorProps::new` is
-/// generic over the projector type — a function pointer assignment cannot
-/// capture this generic shape directly, so we call it and discard.
+/// A regression to a receiving shape that also takes a store, a provider or an
+/// offset store is a compile error here: the projector takes both of its stores
+/// from the system it is spawned on.
 #[allow(dead_code)]
-fn _assert_sig_projector_props_new_accepts_a_provider_over_a_journal(
-    pid: ProjectionId,
-    store: InMemoryEventStore,
-    cs: InMemoryOffsetStore,
-) {
-    let count = Arc::new(AtomicUsize::new(0));
-    let notify = Arc::new(Notify::new());
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(store)
-            .projection_offsets(cs)
-            .build(),
-    );
-    let _ = ProjectorProps::new(pid, &persistence, move || CountingProjector {
-        count: Arc::clone(&count),
-        notify: Arc::clone(&notify),
-    });
+fn _assert_sig_projector_props_new_receives_an_identity_and_a_producer() {
+    let _: fn(ProjectionId, fn() -> CountingProjector) -> ProjectorProps<CountingProjector> =
+        ProjectorProps::new;
 }
 
 // Runtime: catchup processes pre-loaded events via direct store
 
-/// A projector spawned over a journal catches up by reading events
-/// pre-loaded into the same store — confirming the projector calls
+/// A projector spawned on a system catches up by reading events pre-loaded
+/// into the journal that system was built on — confirming the projector calls
 /// `store.load` directly (no proxy in between).
 #[tokio::test]
 async fn projector_catches_up_via_the_journal_it_was_wired_over() {
     // Given
-    let system = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(InMemoryEventStore::default())
-            .projection_offsets(InMemoryOffsetStore::default())
-            .build(),
-    );
-    let store = persistence.event_store();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .projection_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build();
+    let store = system.persistence().event_store();
     let agg_id = AggregateId::new("projector-direct-store");
 
     // Pre-populate the store with 3 events
@@ -141,15 +129,14 @@ async fn projector_catches_up_via_the_journal_it_was_wired_over() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    // When: spawn the projector over the same journal (no EventPersistor)
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("direct-store-projector"),
-        &persistence,
-        move || CountingProjector {
+    // When: spawn the projector on the system over the same journal (no
+    // EventPersistor)
+    let _proxy = ProjectorProps::new(ProjectionId::new("direct-store-projector"), move || {
+        CountingProjector {
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_event::<PingEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)

@@ -42,7 +42,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -280,8 +280,9 @@ async fn scheduler_firing_activates_a_passivated_instance() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    let saga_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the ping stream the saga observes and the instance's own
+    // stream are tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
 
     let steps: Arc<Mutex<Vec<Step>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -293,21 +294,20 @@ async fn scheduler_firing_activates_a_passivated_instance() {
     let notify_for_producer = Arc::clone(&notify);
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let _manager_proxy =
-        SagaManagerProps::<ReminderSaga>::new(saga_store.clone(), move |components| {
-            spawned_for_producer.fetch_add(1, Ordering::SeqCst);
-            ReminderSaga {
-                deadline: components.deadline(),
-                steps: Arc::clone(&steps_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .observing::<Ping>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
-        .with_instance_passivation(PASSIVATE_AFTER)
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<ReminderSaga>::new(move |components| {
+        spawned_for_producer.fetch_add(1, Ordering::SeqCst);
+        ReminderSaga {
+            deadline: components.deadline(),
+            steps: Arc::clone(&steps_for_producer),
+            notify: Arc::clone(&notify_for_producer),
+        }
+    })
+    .observing::<Ping>(Subscription::stream(UPSTREAM_KEY))
+    .with_instance_passivation(PASSIVATE_AFTER)
+    .spawn(&system)
+    .await;
 
-    append_ping(&upstream_store, 1, NOTE).await;
+    append_ping(&journal, 1, NOTE).await;
     wait_for_steps(
         &steps,
         &notify,

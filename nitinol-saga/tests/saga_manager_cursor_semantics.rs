@@ -10,22 +10,20 @@
 mod common;
 use common::{encode_lifecycle_ended, JsonCodec, LIFECYCLE_MARKER};
 
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_core::Stream;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{
-    EventStore, EventStream, InMemoryEventStore, InMemoryStore, Journal,
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, Journal,
 };
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -182,26 +180,45 @@ impl Saga for FanOutSaga {
     }
 }
 
-/// An `EventStore` that rejects every append and reads back as empty: replay
-/// succeeds (nothing to replay) but nothing an input produces — not even its
-/// consumed position — can ever be recorded durably.
+/// An `EventStore` that rejects every append addressed to one named stream and
+/// passes everything else to the in-memory store it wraps.
+///
+/// A system distributes one journal, so the instance's own stream and the
+/// upstream stream it reacts to are tenants of the same store: refusing one key
+/// leaves replay succeeding (nothing to replay) while nothing an input produces
+/// — not even its consumed position — can ever be recorded durably, and the
+/// upstream rows the test seeds stay writable and readable.
 #[derive(Clone)]
-struct AlwaysFailAppendStore;
+struct AppendRefusingStore {
+    inner: InMemoryEventStore,
+    /// The stream whose appends are refused.
+    refused: String,
+}
+
+impl AppendRefusingStore {
+    fn refusing(refused: &str) -> Self {
+        Self {
+            inner: InMemoryEventStore::default(),
+            refused: refused.to_owned(),
+        }
+    }
+}
 
 #[async_trait]
-impl EventStore for AlwaysFailAppendStore {
+impl EventStore for AppendRefusingStore {
     async fn append(
         &self,
-        _key: &str,
-        _events: Vec<AppendingEvent>,
+        key: &str,
+        events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        Err(AppendError::Backend("injected: every append fails".into()))
+        if key == self.refused {
+            return Err(AppendError::Backend("injected: every append fails".into()));
+        }
+        self.inner.append(key, events).await
     }
 
-    async fn load(&self, _query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
-        let stream: Pin<Box<dyn Stream<Item = Result<LoadedEvent, LoadError>> + Send + '_>> =
-            Box::pin(futures_util::stream::empty());
-        Ok(stream)
+    async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
+        self.inner.load(query).await
     }
 }
 
@@ -304,16 +321,23 @@ fn describe(events: &[LoadedEvent]) -> Vec<String> {
 /// must not advance the shared cursor — the poller redelivers the same record.
 #[tokio::test]
 async fn instance_handler_error_holds_the_shared_cursor() {
+    // The one instance this upstream record correlates to is the stream whose
+    // appends the journal refuses; every other key — the upstream stream
+    // included — is writable.
+    let held_instance = SagaId::new(format!("{HOLD_PREFIX}HOLD-1"));
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(AppendRefusingStore::refusing(held_instance.as_str()))
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
         .build();
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     let upstream_key = AggregateId::new("mgr-hold-orders");
-    append_order_placed(&upstream_store, &upstream_key, 1, "HOLD-1").await;
-
-    let saga_store = Journal::from(AlwaysFailAppendStore);
+    append_order_placed(&journal, &upstream_key, 1, "HOLD-1").await;
 
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -321,14 +345,13 @@ async fn instance_handler_error_holds_the_shared_cursor() {
     let seen_for_producer = Arc::clone(&seen);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _manager_proxy =
-        SagaManagerProps::<HoldSaga>::new(saga_store.clone(), move |_components| HoldSaga {
-            seen: Arc::clone(&seen_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<HoldSaga>::new(move |_components| HoldSaga {
+        seen: Arc::clone(&seen_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
+    .spawn(&system)
+    .await;
 
     wait_for_seen(&seen, &notify, 2).await;
 
@@ -355,12 +378,10 @@ async fn uncorrelated_event_advances_the_cursor() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-selective-orders");
-    append_order_placed(&upstream_store, &upstream_key, 1, "SKIP-1").await;
-    append_order_placed(&upstream_store, &upstream_key, 2, "MATCH-1").await;
-
-    let saga_store = Journal::from(InMemoryEventStore::default());
+    append_order_placed(&journal, &upstream_key, 1, "SKIP-1").await;
+    append_order_placed(&journal, &upstream_key, 2, "MATCH-1").await;
 
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -368,16 +389,13 @@ async fn uncorrelated_event_advances_the_cursor() {
     let seen_for_producer = Arc::clone(&seen);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _manager_proxy =
-        SagaManagerProps::<SelectiveSaga>::new(saga_store.clone(), move |_components| {
-            SelectiveSaga {
-                seen: Arc::clone(&seen_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<SelectiveSaga>::new(move |_components| SelectiveSaga {
+        seen: Arc::clone(&seen_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
+    .spawn(&system)
+    .await;
 
     // Reaching MATCH-1 at all proves SKIP-1 did not hold the cursor.
     wait_for_seen(&seen, &notify, 1).await;
@@ -409,14 +427,13 @@ async fn ended_instance_does_not_stall_the_shared_subscription() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-fanout-orders");
-    append_order_placed(&upstream_store, &upstream_key, 1, "ended").await;
-    append_order_placed(&upstream_store, &upstream_key, 2, "live").await;
+    append_order_placed(&journal, &upstream_key, 1, "ended").await;
+    append_order_placed(&journal, &upstream_key, 2, "live").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let ended_instance = SagaId::new(format!("{FANOUT_PREFIX}ended"));
-    seed_ended_fact(&saga_store, &ended_instance, 1).await;
+    seed_ended_fact(&journal, &ended_instance, 1).await;
 
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -424,14 +441,13 @@ async fn ended_instance_does_not_stall_the_shared_subscription() {
     let seen_for_producer = Arc::clone(&seen);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _manager_proxy =
-        SagaManagerProps::<FanOutSaga>::new(saga_store.clone(), move |_components| FanOutSaga {
-            seen: Arc::clone(&seen_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &upstream_key))
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<FanOutSaga>::new(move |_components| FanOutSaga {
+        seen: Arc::clone(&seen_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
+    .spawn(&system)
+    .await;
 
     wait_for_seen(&seen, &notify, 1).await;
     tokio::time::sleep(Duration::from_millis(400)).await;
@@ -445,7 +461,7 @@ async fn ended_instance_does_not_stall_the_shared_subscription() {
 
     // The live instance has already been served by this point, so the ended
     // instance's arrival has had its chance to write.
-    let ended_stream = load_stream(&saga_store, &ended_instance).await;
+    let ended_stream = load_stream(&journal, &ended_instance).await;
     assert_eq!(
         describe(&ended_stream),
         vec![format!("{LIFECYCLE_MARKER}@1")],

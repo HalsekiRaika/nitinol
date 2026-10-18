@@ -42,7 +42,6 @@ use bytes::Bytes;
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{EventType, Family, TypeName};
 use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
 
@@ -157,10 +156,6 @@ impl Saga for ProbeSaga {
     }
 }
 
-fn store() -> Journal {
-    Journal::from(InMemoryEventStore::default())
-}
-
 /// Given both namespaces are glob-imported, When the bare `SchedulerProxy` name
 /// is used, Then it denotes the downstream probe definition.
 #[test]
@@ -180,7 +175,7 @@ fn the_scheduler_proxy_name_belongs_to_downstream_definitions() {
 /// that name to win resolution.
 #[test]
 fn the_with_scheduler_name_belongs_to_downstream_definitions() {
-    let manager_props = SagaManagerProps::<ProbeSaga>::new(store(), |_components| ProbeSaga);
+    let manager_props = SagaManagerProps::<ProbeSaga>::new(|_components| ProbeSaga);
 
     assert_eq!(
         manager_props.with_scheduler(PROBE_LABEL).label,

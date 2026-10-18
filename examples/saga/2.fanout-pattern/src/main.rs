@@ -26,7 +26,7 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaSubscriptionExt, SagaSystemExt};
+use nitinol_saga::{SagaSystemExt, Subscription};
 
 use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun, PayrollRunApproved};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
@@ -58,8 +58,8 @@ async fn main() {
     //
     // `InMemoryStore` supplies every slot, the saga-offset one included: that
     // is where the host records how far it has finished, and a supplier holding
-    // it is what makes `deliver` below exist at all.  A store without that slot
-    // is a compile error at the wiring rather than a failure at the first save.
+    // it is what makes `host` below exist at all.  A store without that slot is
+    // a compile error at the wiring rather than a failure at the first save.
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
@@ -89,7 +89,7 @@ async fn main() {
     // deployment's to choose.
     let _host = system
         .host::<FanOutSaga>(|_components| FanOutSaga)
-        .observing::<PayrollRunApproved>(system.subscription(&run_id))
+        .observing::<PayrollRunApproved>(Subscription::stream(&run_id))
         .with_delivery_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;

@@ -26,16 +26,14 @@ use delivery::{
     wait_until_operations, PartlyRefusedSaga, RecordingOffsetStore, REFUSED_SUFFIX,
 };
 
-use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
 #[tokio::test]
 async fn a_partly_delivered_record_is_not_progress() {
     // Given
-    let (system, aggregates) = in_memory_system().await;
-    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
+    let (system, journal) = in_memory_system(&offsets).await;
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-partly-delivered");
 
@@ -43,7 +41,7 @@ async fn a_partly_delivered_record_is_not_progress() {
     append_decided(&journal, &saga_id, 2, target.as_str(), "op-2").await;
 
     // When
-    let _host = spawn_host::<PartlyRefusedSaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<PartlyRefusedSaga>(&system, 1).await;
 
     // Then: the delivery that can land, lands.
     let ledger = system.aggregate_proxy::<delivery::Ledger>(target.clone());
@@ -83,15 +81,13 @@ async fn a_partly_delivered_record_is_not_progress() {
 
     // And: the repeated attempts wrote nothing more at the accepted receiver.
     assert_eq!(
-        delivery::stream_rows(&aggregates, target.as_str())
-            .await
-            .len(),
+        delivery::stream_rows(&journal, target.as_str()).await.len(),
         1,
         "the accepted delivery is re-issued while the record is held, and the \
          receiver recognises the repeat from the operation id"
     );
     assert!(
-        delivery::stream_rows(&aggregates, &format!("{}{REFUSED_SUFFIX}", target.as_str()))
+        delivery::stream_rows(&journal, &format!("{}{REFUSED_SUFFIX}", target.as_str()))
             .await
             .is_empty(),
         "nothing was ever accepted at the refusing receiver"

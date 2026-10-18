@@ -1,26 +1,26 @@
-//! `AggregateProps::new` receives the journal as `impl Into<Journal>`, and the
-//! aggregate process holds it inline.
+//! `AggregateProps::new` receives an identity and nothing else, and the
+//! aggregate process holds the journal its system distributes inline.
 //!
 //! ```gherkin
-//!   Scenario: the entry point receives a journal however the caller holds one
-//!     Given a backend handle, a Journal, and a reference to that Journal
-//!     When props are built on each of the three
+//!   Scenario: the entry point receives an identity alone
+//!     Given a system over a journal the caller still holds
+//!     When props are built on three different aggregate ids of that system
 //!     Then all three compile
 //!     And every aggregate they spawn appends into the one journal
 //!
-//!   Scenario: the held journal is what a replay reads
+//!   Scenario: the system's journal is what a replay reads
 //!     Given an aggregate that has decided twice
-//!     When a second process for the same id is spawned on the same journal
+//!     When a second system over the same journal starts that id again
 //!     Then it restores the state those decisions left
 //! ```
 //!
-//! A deployment holds its journal in whichever of the three forms its wiring
-//! produced: a backend it constructed, a [`Journal`] a supplier answered with,
-//! or a reference to one it has to keep. `impl Into<Journal>` is what makes all
-//! three the same call, and the clause that matters is that they are the same
-//! *destination* too — a receiving shape that silently erased a second time, or
-//! took a copy of the backend's shape, would compile just as well and leave each
-//! form writing somewhere else.
+//! A deployment names its journal once, where it builds its system; whichever
+//! form its wiring holds one in — a backend it constructed, a [`Journal`] a
+//! supplier answered with — is that supplier's business and never the props'.
+//! What the props carry is the identity, and the clause that matters is that
+//! every aggregate of one system shares one *destination* too — props that
+//! reached a store of their own would compile just as well and leave each
+//! aggregate writing somewhere else.
 //!
 //! The process boundary this replaced is gone: the aggregate calls
 //! `store.append` / `store.load` on the handle it holds rather than asking a
@@ -28,9 +28,11 @@
 
 use bytes::Bytes;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, Query,
+    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, Never, Query,
 };
+use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
@@ -55,6 +57,7 @@ impl Event for Incremented {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
     }
@@ -107,57 +110,48 @@ async fn appended_count(journal: &Journal, key: &AggregateId) -> usize {
     loaded.len()
 }
 
-// Compile-time type assertion
-
-/// `AggregateProps::<Counter>::new` MUST receive the journal as
-/// `impl Into<Journal>`, which is these three call shapes.
-///
-/// Not a `#[test]` — the compiler enforces the signatures at build time. A
-/// regression to a handle the framework shares for the caller, or to a
-/// receiving shape that takes only one of the three forms, is a compile error
-/// here.
-#[allow(dead_code)]
-fn _assert_sig_aggregate_props_new_receives_any_form_of_a_journal<'a>(_held: &'a Journal) {
-    let _: fn(AggregateId, InMemoryEventStore) -> AggregateProps<Counter> = AggregateProps::new;
-    let _: fn(AggregateId, Journal) -> AggregateProps<Counter> = AggregateProps::new;
-    let _: fn(AggregateId, &'a Journal) -> AggregateProps<Counter> = AggregateProps::new;
+/// A system distributing `journal`, with a registry of its own.
+async fn system_over(journal: &Journal) -> EventSourceSystem<Journal> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(journal.clone()))
+        .build()
 }
 
-// Runtime integration: every receiving form reaches the one journal
+// Compile-time type assertion
 
-/// Spawning an `AggregateProcess` succeeds whichever form the journal arrives
-/// in, and the facts of every accepted decision reach the one journal behind
+/// `AggregateProps::<Counter>::new` MUST receive the identity and nothing else.
+///
+/// Not a `#[test]` — the compiler enforces the signature at build time. A
+/// regression to a receiving shape that also takes a journal, a supplier or a
+/// persistor is a compile error here.
+#[allow(dead_code)]
+fn _assert_sig_aggregate_props_new_receives_an_identity_alone() {
+    let _: fn(AggregateId) -> AggregateProps<Counter> = AggregateProps::new;
+}
+
+// Runtime integration: every aggregate of one system reaches the one journal
+
+/// Spawning an `AggregateProcess` succeeds for every identity a system is asked
+/// for, and the facts of every accepted decision reach the one journal behind
 /// them.
 ///
-/// The three streams are read back through the handle the test kept, so a form
-/// that erased into a destination of its own would leave its stream empty here
-/// while its own `ask` still succeeded.
+/// The three streams are read back through the handle the test kept, so an
+/// aggregate that reached a destination of its own would leave its stream empty
+/// here while its own `ask` still succeeded.
 #[tokio::test]
-async fn every_form_of_a_journal_reaches_the_one_journal() {
-    // Given: one backend, and the three forms a caller can hold it in
-    let system = ProcessSystem::new().await;
-    let backend = InMemoryEventStore::default();
-    let journal = Journal::from(backend.clone());
-    let through_backend = AggregateId::new("journal-form-backend");
-    let through_journal = AggregateId::new("journal-form-journal");
-    let through_reference = AggregateId::new("journal-form-reference");
+async fn every_aggregate_of_one_system_reaches_the_one_journal() {
+    // Given: one journal, named once, and a system distributing it
+    let journal = Journal::from(InMemoryEventStore::default());
+    let system = system_over(&journal).await;
+    let first = AggregateId::new("journal-one-first");
+    let second = AggregateId::new("journal-one-second");
+    let third = AggregateId::new("journal-one-third");
 
-    // When: props are built on each form and each aggregate decides once
-    for (id, props) in [
-        (
-            through_backend.clone(),
-            AggregateProps::<Counter>::new(through_backend.clone(), backend.clone()),
-        ),
-        (
-            through_journal.clone(),
-            AggregateProps::<Counter>::new(through_journal.clone(), journal.clone()),
-        ),
-        (
-            through_reference.clone(),
-            AggregateProps::<Counter>::new(through_reference.clone(), &journal),
-        ),
-    ] {
-        let proxy = props.spawn(&system).await;
+    // When: props are built on each identity and each aggregate decides once
+    for id in [first.clone(), second.clone(), third.clone()] {
+        let proxy = AggregateProps::<Counter>::new(id.clone())
+            .spawn(&system)
+            .await;
         proxy
             .ask(Increment)
             .await
@@ -167,61 +161,59 @@ async fn every_form_of_a_journal_reaches_the_one_journal() {
     // Then: all three streams are in the journal the test holds
     assert_eq!(
         (
-            appended_count(&journal, &through_backend).await,
-            appended_count(&journal, &through_journal).await,
-            appended_count(&journal, &through_reference).await,
+            appended_count(&journal, &first).await,
+            appended_count(&journal, &second).await,
+            appended_count(&journal, &third).await,
         ),
         (1, 1, 1),
-        "a backend, a journal and a reference to that journal are three ways of \
-         naming one destination, so each aggregate's fact is in the journal the \
-         test kept — a form that erased a second time would have its own region \
-         and nothing would report it"
+        "props name an identity and take their journal from the system, so each \
+         aggregate's fact is in the journal the test kept — props that reached a \
+         store of their own would each have a region and nothing would report it"
     );
 }
 
-// Runtime integration: state replay via the held journal
+// Runtime integration: state replay via the system's journal
 
-/// After two decisions on process 1, a second process for the same id over the
-/// same journal replays the stored events in `on_start` and observes the
-/// restored state.
+/// After two decisions on the first activation, a second system over the same
+/// journal replays the stored events in `on_start` and observes the restored
+/// state.
 ///
-/// This is the key behaviour the refactor preserves: replay still works, and the
-/// handle the second process holds is a clone of the first's rather than a
-/// shared pointer to it.
+/// Two systems are what make this two activations: one system resolves an
+/// identity to one activation, so a second start of the id on it would reach
+/// the activation that is already there and replay nothing.
 #[tokio::test]
 async fn an_aggregate_replays_its_state_through_a_clone_of_the_journal() {
     // Given
-    let system = ProcessSystem::new().await;
     let journal = Journal::from(InMemoryEventStore::default());
+    let system = system_over(&journal).await;
     let id = AggregateId::new("direct-store-replay");
 
-    // Write 2 events through process 1
+    // Write 2 events through the first activation
     {
-        let proxy = AggregateProps::<Counter>::new(id.clone(), &journal)
+        let proxy = AggregateProps::<Counter>::new(id.clone())
             .spawn(&system)
             .await;
         proxy.ask(Increment).await.expect("ask 1 must succeed");
         proxy.ask(Increment).await.expect("ask 2 must succeed");
     }
 
-    // When: a fresh process for the same id is spawned on the same journal
-    let replayed = AggregateProps::<Counter>::new(id, journal.clone())
-        .spawn(&system)
-        .await;
+    // When: a fresh system over the same journal starts the same id
+    let restarted = system_over(&journal).await;
+    let replayed = AggregateProps::<Counter>::new(id).spawn(&restarted).await;
 
     // Then
     assert_eq!(
         replayed.exec(GetCount).await.expect("exec must succeed"),
         2,
-        "replay reads the journal the first process appended to, so the restored \
-         state is 2"
+        "replay reads the journal the first activation appended to, so the \
+         restored state is 2"
     );
 }
 
-// Several processes over one journal
+// Several aggregates over one journal
 
-/// Two `AggregateProcess` instances on different ids run over clones of one
-/// journal.
+/// Two `AggregateProcess` instances on different ids run over clones of the one
+/// journal their system distributes.
 ///
 /// Without a persistor process in between, the store itself is the
 /// synchronisation point — its own thread-safe internals are what make that
@@ -230,15 +222,15 @@ async fn an_aggregate_replays_its_state_through_a_clone_of_the_journal() {
 #[tokio::test]
 async fn several_aggregate_processes_run_over_clones_of_one_journal() {
     // Given
-    let system = ProcessSystem::new().await;
     let journal = Journal::from(InMemoryEventStore::default());
+    let system = system_over(&journal).await;
 
-    // When: two aggregates are spawned on clones of the journal
-    let proxy_a = AggregateProps::<Counter>::new(AggregateId::new("share-a"), journal.clone())
+    // When: two aggregates are spawned on the one system
+    let proxy_a = AggregateProps::<Counter>::new(AggregateId::new("share-a"))
         .spawn(&system)
         .await;
 
-    let proxy_b = AggregateProps::<Counter>::new(AggregateId::new("share-b"), journal.clone())
+    let proxy_b = AggregateProps::<Counter>::new(AggregateId::new("share-b"))
         .spawn(&system)
         .await;
 

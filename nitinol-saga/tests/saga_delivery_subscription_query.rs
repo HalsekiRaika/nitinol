@@ -20,7 +20,7 @@
 #[path = "common/delivery.rs"]
 mod delivery;
 use delivery::{
-    append_decided, in_memory_system, scope_of, spawn_host, wait_until_loads, wait_until_stored,
+    append_decided, delivery_system, scope_of, spawn_host, wait_until_loads, wait_until_stored,
     Decided, DeliverySaga, RecordingEventStore, RecordingOffsetStore,
 };
 
@@ -32,17 +32,16 @@ use nitinol_saga::SagaId;
 #[tokio::test]
 async fn every_query_names_the_event_type_and_the_position() {
     // Given
-    let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(InMemoryEventStore::default());
-    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
+    let system = delivery_system(&recording, &offsets).await;
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-subscription-query");
 
-    append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
+    append_decided(&recording, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, 1).await;
     let queries = wait_until_loads(&recording, 3, "the host must poll the store").await;
 
     // Then
@@ -77,17 +76,16 @@ async fn every_query_names_the_event_type_and_the_position() {
 #[tokio::test]
 async fn the_position_asked_for_follows_the_progress_recorded() {
     // Given
-    let (system, _aggregates) = in_memory_system().await;
     let recording = RecordingEventStore::new(InMemoryEventStore::default());
-    let journal = recording.clone();
     let offsets = RecordingOffsetStore::new();
+    let system = delivery_system(&recording, &offsets).await;
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-query-follows-progress");
 
-    let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
+    let position = append_decided(&recording, &saga_id, 1, target.as_str(), "op-1").await;
 
     // When
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, 1).await;
     wait_until_stored(
         &offsets,
         &scope_of(0),

@@ -38,9 +38,9 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event, Never};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     is_within_reserved_namespace, AggregateId, AppendingEvent, EventType, Family, LoadQuery,
     LoadedEvent, TypeName,
@@ -66,6 +66,7 @@ struct UpstreamAggregate;
 
 impl Aggregate for UpstreamAggregate {
     type Event = Triggered;
+    type Recover = Never;
     fn apply(&mut self, _event: Triggered) {}
 }
 
@@ -151,11 +152,7 @@ async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent>
 async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(InMemoryEventStore::default())
-                .build(),
-        ))
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
     let store = system.persistence().event_store();
 
@@ -171,15 +168,14 @@ async fn domain_event_is_persisted_as_raw_codec_payload_not_wrapped_by_envelope(
     let applied_for_saga = Arc::clone(&applied);
     let persisted_for_saga = Arc::clone(&persisted);
 
-    let _host_proxy =
-        SagaManagerProps::<EnvelopeSaga>::new(store.clone(), move |_components| EnvelopeSaga {
-            applied: Arc::clone(&applied_for_saga),
-            persisted: Arc::clone(&persisted_for_saga),
-            note: "persisted-by-handle".to_owned(),
-        })
-        .observing::<Triggered>(Subscription::stream(&store, &upstream_id))
-        .spawn(system.process_system())
-        .await;
+    let _host_proxy = SagaManagerProps::<EnvelopeSaga>::new(move |_components| EnvelopeSaga {
+        applied: Arc::clone(&applied_for_saga),
+        persisted: Arc::clone(&persisted_for_saga),
+        note: "persisted-by-handle".to_owned(),
+    })
+    .observing::<Triggered>(Subscription::stream(&upstream_id))
+    .spawn(&system)
+    .await;
 
     upstream_proxy
         .ask(Trigger)
@@ -281,7 +277,9 @@ async fn replay_applies_domain_event_and_never_applies_a_framework_record() {
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let store = Journal::from(InMemoryEventStore::default());
+    // One journal: the stream the boot record is on and the saga's own stream
+    // are tenants of the store the system distributes.
+    let store = system.persistence().event_store();
 
     let saga_id = SagaId::new(ENVELOPE_SAGA_ID);
 
@@ -322,8 +320,7 @@ async fn replay_applies_domain_event_and_never_applies_a_framework_record() {
     // The record that wakes the instance, at a position the seeded fact already
     // names: it reaches no `handle`, so what it adds is the instance's
     // existence and nothing else.
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    upstream_store
+    store
         .append(
             UNUSED_UPSTREAM,
             vec![AppendingEvent {
@@ -338,15 +335,14 @@ async fn replay_applies_domain_event_and_never_applies_a_framework_record() {
         .await
         .expect("appending the boot record must succeed");
 
-    let _host_proxy =
-        SagaManagerProps::<EnvelopeSaga>::new(store.clone(), move |_components| EnvelopeSaga {
-            applied: Arc::clone(&applied_for_saga),
-            persisted: Arc::clone(&persisted_for_saga),
-            note: "unused-on-replay".to_owned(),
-        })
-        .observing::<Triggered>(Subscription::stream(&upstream_store, UNUSED_UPSTREAM))
-        .spawn(system.process_system())
-        .await;
+    let _host_proxy = SagaManagerProps::<EnvelopeSaga>::new(move |_components| EnvelopeSaga {
+        applied: Arc::clone(&applied_for_saga),
+        persisted: Arc::clone(&persisted_for_saga),
+        note: "unused-on-replay".to_owned(),
+    })
+    .observing::<Triggered>(Subscription::stream(UNUSED_UPSTREAM))
+    .spawn(&system)
+    .await;
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {

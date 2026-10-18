@@ -54,8 +54,10 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -327,21 +329,17 @@ async fn seed_shared_upstream(store: &Journal, shared: &AggregateId) {
 }
 
 async fn spawn_shared(
-    ps: &ProcessSystem,
-    saga_store: &Journal,
-    upstream_store: &Journal,
+    system: &EventSourceSystem<InMemoryStore>,
     shared: &AggregateId,
     handled: &Handled,
-) -> nitinol_saga::SagaManagerProxy<SharedStreamSaga> {
+) -> nitinol_saga::SagaHostProxy<SharedStreamSaga> {
     let handled = Arc::clone(handled);
-    SagaManagerProps::<SharedStreamSaga>::new(saga_store.clone(), move |_components| {
-        SharedStreamSaga {
-            handled: Arc::clone(&handled),
-        }
+    SagaManagerProps::<SharedStreamSaga>::new(move |_components| SharedStreamSaga {
+        handled: Arc::clone(&handled),
     })
-    .observing::<Alpha>(Subscription::stream(upstream_store, shared))
-    .observing::<Beta>(Subscription::stream(upstream_store, shared))
-    .spawn(ps)
+    .observing::<Alpha>(Subscription::stream(shared))
+    .observing::<Beta>(Subscription::stream(shared))
+    .spawn(system)
     .await
 }
 
@@ -356,16 +354,17 @@ async fn spawn_shared(
 /// handled, 2's fate is already decided.
 #[tokio::test]
 async fn one_sources_position_does_not_cover_another_sources_record() {
-    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     let shared = AggregateId::new("per-source-shared");
-    seed_shared_upstream(&upstream_store, &shared).await;
+    seed_shared_upstream(&journal, &shared).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     seed_position(
-        &saga_store,
+        &journal,
         &saga_id,
         1,
         &shared,
@@ -375,7 +374,7 @@ async fn one_sources_position_does_not_cover_another_sources_record() {
     .await;
 
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let _proxy = spawn_shared(&ps, &saga_store, &upstream_store, &shared, &handled).await;
+    let _host = spawn_shared(&system, &shared, &handled).await;
 
     let observed = wait_for_handled(&handled, 2).await;
 
@@ -403,20 +402,21 @@ async fn one_sources_position_does_not_cover_another_sources_record() {
 /// later incarnation can tell which source it settled.
 #[tokio::test]
 async fn the_position_a_decision_carries_names_its_own_source() {
-    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     let shared = AggregateId::new("written-shared");
-    append_beta(&upstream_store, &shared, 1, "b1").await;
+    append_beta(&journal, &shared, 1, "b1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
-    let _proxy = spawn_shared(&ps, &saga_store, &upstream_store, &shared, &handled).await;
+    let _host = spawn_shared(&system, &shared, &handled).await;
     wait_for_handled(&handled, 1).await;
 
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
     let positions: Vec<PerSourceConsumedPayload> =
         events.iter().filter_map(consumed_position_of).collect();
 

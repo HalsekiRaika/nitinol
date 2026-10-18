@@ -22,7 +22,7 @@ use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaSubscriptionExt, SagaSystemExt};
+use nitinol_saga::{SagaSystemExt, Subscription};
 
 use saga_basic_saga::inventory::{GetReservedCount, Inventory};
 use saga_basic_saga::order::{Order, OrderPlaced, PlaceOrder};
@@ -56,8 +56,8 @@ async fn main() {
     //
     // `InMemoryStore` also supplies a saga-offset slot, which is the
     // second thing a delivery host needs: a store with no such slot makes
-    // `deliver` below a compile error rather than a host that cannot record
-    // where it got to.
+    // `host` below a compile error rather than a host that cannot record where
+    // it got to.
     let system = EventSourceSystem::builder(ps)
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
@@ -106,7 +106,7 @@ async fn main() {
         .host::<ReservationSaga>(move |_components| ReservationSaga {
             inventory: saga_inventory.clone(),
         })
-        .observing::<OrderPlaced>(system.subscription(&order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
         .with_delivery_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;

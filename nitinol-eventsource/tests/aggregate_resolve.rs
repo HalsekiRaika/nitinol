@@ -24,7 +24,7 @@ use nitinol_eventsource::error::PersistError;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
-    Query, SnapshotPersistor, Snapshotable,
+    Latest, Never, Query, Snapshotable,
 };
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
@@ -53,6 +53,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -68,6 +69,7 @@ struct SnapshottingCounter {
 
 impl Aggregate for SnapshottingCounter {
     type Event = Incremented;
+    type Recover = Latest;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -83,7 +85,7 @@ impl Snapshotable for SnapshottingCounter {
         self.value
     }
 
-    fn restore(snapshot: u64) -> Self {
+    fn recover(snapshot: u64) -> Self {
         Self { value: snapshot }
     }
 }
@@ -342,11 +344,15 @@ async fn aggregate_props_spawn_addresses_the_same_aggregate() {
     );
 }
 
-/// The snapshot-persistor step of the props builder must not drop the resolve
-/// wiring: `with_snapshot_persistor` rebuilds the builder, and a field lost
-/// there would silently send this one entry point back to per-call activation.
+/// An aggregate that recovers from the newest snapshot must resolve through the
+/// same registry as one that replays its whole stream.
+///
+/// `Recover = Latest` is what makes the activation ask its system for a
+/// snapshot persistor, and those recovery ingredients travel with the
+/// activation the props build — so a resolve wiring lost alongside them would
+/// silently send this one entry point back to per-call activation.
 #[tokio::test]
-async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() {
+async fn aggregate_props_for_a_recovering_aggregate_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
     let persistence = PersistenceProvider::new(
@@ -359,13 +365,10 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
     let system = EventSourceSystem::builder(ps)
         .with_persistence(persistence)
         .build();
-    let snapshot_ref =
-        SnapshotPersistor::spawn(system.process_system(), system.persistence()).await;
     let id = AggregateId::new("resolve-props-snapshot");
 
     let first = system
         .aggregate_props::<SnapshottingCounter>(id.clone())
-        .with_snapshot_persistor(snapshot_ref.clone())
         .spawn()
         .await;
     first.ask(Increment).await.expect("first dispatch");
@@ -373,13 +376,12 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
     // When
     let second = system
         .aggregate_props::<SnapshottingCounter>(id.clone())
-        .with_snapshot_persistor(snapshot_ref)
         .spawn()
         .await;
     second
         .ask(Increment)
         .await
-        .expect("a snapshot-configured props must dispatch to the same aggregate");
+        .expect("a snapshot-recovering props must dispatch to the same aggregate");
     first
         .ask(Increment)
         .await
@@ -389,7 +391,7 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
     assert_eq!(
         stored_sequences(&store, &id).await,
         vec![1, 2, 3],
-        "configuring a snapshot persistor must not restore per-call activation"
+        "an aggregate that recovers from a snapshot must not restore per-call activation"
     );
 }
 
@@ -397,9 +399,10 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
 
 /// R-5: a reference stays valid across the death of the activation it reached.
 ///
-/// A rival writer is spawned through the raw `AggregateProps` path, which keeps
-/// activating per call, so it can take the stream away from the resolved
-/// reference's activation.  The resolved activation then loses an append on a
+/// A rival writer is spawned on a second system over the same journal, which
+/// resolves through an aggregate registry of its own, so it can take the stream
+/// away from the resolved reference's activation.  The resolved activation then
+/// loses an append on a
 /// non-genesis sequence, stops because of it, and the *very next* dispatch through the
 /// same reference — no retry loop — must reach a re-activated aggregate that
 /// replayed everything the rival wrote: the proxy evicts the dying activation
@@ -419,8 +422,11 @@ async fn reference_survives_the_death_of_its_activation() {
         .build();
     let id = AggregateId::new("resolve-self-heal");
 
-    let rival = AggregateProps::<Counter>::new(id.clone(), store.clone())
-        .spawn(system.process_system())
+    let rival_system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store.clone()))
+        .build();
+    let rival = AggregateProps::<Counter>::new(id.clone())
+        .spawn(&rival_system)
         .await;
     rival
         .ask(Increment)

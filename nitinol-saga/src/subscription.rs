@@ -4,33 +4,32 @@ use std::borrow::Borrow;
 use std::time::Duration;
 
 use nitinol_eventsource::SequenceCursor;
-use nitinol_persistence::store::Journal;
 
 use crate::subscribe::SourceBinding;
 
-/// Which records one declared source is fed: the store to poll and the position
-/// to start from, as one value.
+/// Which records one declared source is fed: the position to start from and the
+/// cadence to ask at, as one value.
 ///
-/// The two travel together — a position means nothing without the store it
-/// indexes into — so the spawn builder takes them as a single argument rather
-/// than as a store plus a hand-built cursor.
+/// There is no store here. The journal every source is read from is the one the
+/// system the saga is spawned on distributes, so a subscription names *what* to
+/// observe and nothing about *where* — and a source in another destination is a
+/// saga hosted on a second system over the supplier that holds it.
 ///
 /// One of these is handed to
 /// [`observing`](crate::SagaManagerProps::observing) per declared source, so a
-/// saga observing several sources names a store and a start position for each.
+/// saga observing several sources names a start position for each.
 /// Two sources may name the same stream key: each reads only the rows of its own
 /// event type, and each keeps its own cursor and its own consumed position.
 ///
-/// A source reads either one stream ([`stream`](Self::stream)) or the whole store
-/// in the order it accepted the records ([`global`](Self::global)).
+/// A source reads either one stream ([`stream`](Self::stream)) or the whole
+/// journal in the order it accepted the records ([`global`](Self::global)).
 pub struct Subscription {
-    store: Journal,
     source: Source,
     after: u64,
     poll_interval: Option<Duration>,
 }
 
-/// Which records of the store the source reads: one stream, or all of them.
+/// Which records of the journal the source reads: one stream, or all of them.
 ///
 /// The two differ in the dimension `after` counts in — a stream's own sequence
 /// against the store's global one — so they are one choice rather than a key
@@ -53,14 +52,23 @@ impl Subscription {
     /// only with records that one has not decided from.
     /// [`with_after`](Self::with_after) names a position to start past instead.
     ///
-    /// The journal arrives as whatever the deployment holds: a backend handle,
-    /// a [`Journal`] a supplier answered with, or a reference to one it keeps.
-    pub fn stream<K>(store: impl Into<Journal>, key: &K) -> Self
+    /// The stream is read from the journal the system this saga is spawned on
+    /// distributes. There is no form of this that names a store:
+    ///
+    /// ```compile_fail
+    /// # use nitinol_persistence::store::InMemoryEventStore;
+    /// # use nitinol_persistence::AggregateId;
+    /// # use nitinol_saga::Subscription;
+    /// # fn wiring() {
+    /// let store = InMemoryEventStore::default();
+    /// Subscription::stream(store, &AggregateId::new("order"));
+    /// # }
+    /// ```
+    pub fn stream<K>(key: &K) -> Self
     where
         K: ?Sized + Borrow<str>,
     {
         Self {
-            store: store.into(),
             source: Source::Stream {
                 key: key.borrow().to_owned(),
             },
@@ -69,8 +77,8 @@ impl Subscription {
         }
     }
 
-    /// Subscribe to every stream of one store at once, ordered by the store's
-    /// global sequence.
+    /// Subscribe to every stream of the system's journal at once, ordered by
+    /// the store's global sequence.
     ///
     /// This is how a source observes several aggregates whose events must be
     /// seen in the order the store accepted them — an ordering a per-stream
@@ -84,11 +92,10 @@ impl Subscription {
     /// has already consumed after a restart — which the per-source consumed
     /// positions still drop before they reach
     /// [`Saga::handle`](crate::Saga::handle).
-    /// The journal arrives in the same three forms
-    /// [`stream`](Self::stream) accepts.
-    pub fn global(store: impl Into<Journal>) -> Self {
+    ///
+    /// The journal is the system's, the same one [`stream`](Self::stream) reads.
+    pub fn global() -> Self {
         Self {
-            store: store.into(),
             source: Source::Global,
             after: 0,
             poll_interval: None,
@@ -108,11 +115,10 @@ impl Subscription {
     /// Ask this source's store no more often than every `interval`.
     ///
     /// The observing side's counterpart of the delivery side's cadence —
-    /// [`SagaManagerProps::with_delivery_poll_interval`](crate::SagaManagerProps::with_delivery_poll_interval)
-    /// on a hosted saga's builder, or
+    /// [`SagaManagerProps::with_delivery_poll_interval`](crate::SagaManagerProps::with_delivery_poll_interval),
+    /// whose contract is written on
     /// [`SagaDeliveryProps::with_poll_interval`](crate::SagaDeliveryProps::with_poll_interval)
-    /// on a host whose stores are named by hand — and a deployment's choice for
-    /// the same reason: a pull consumer trades
+    /// — and a deployment's choice for the same reason: a pull consumer trades
     /// latency for load on the store, and which way a deployment wants that is
     /// not something the framework can know.
     ///
@@ -135,7 +141,6 @@ impl Subscription {
             Source::Global => SequenceCursor::Global { after: self.after },
         };
         SourceBinding {
-            upstream_store: self.store,
             cursor,
             poll_interval: self.poll_interval,
         }

@@ -58,7 +58,7 @@ use crate::subscribe::SagaSubscribe;
 /// implemented it arrives as a separate opt-in extension trait
 /// (`SagaSnapshotable`, symmetrical to
 /// [`nitinol_eventsource::Snapshotable`]) carrying an associated snapshot type
-/// plus its capture/restore pair — so a saga that does not snapshot never sees
+/// plus its capture/recover pair — so a saga that does not snapshot never sees
 /// the surface, and the ability is visible in the type system rather than
 /// hidden behind a default that panics.
 #[async_trait]

@@ -1,18 +1,22 @@
 //! The saga manager entry point on a system, and which store it resolves.
 //!
 //! `system.host::<S>(producer)` returns a manager builder with everything the
-//! system already knows filled in: the store each instance journals onto, which
-//! is the journal the system's provider supplies.  The two formats are settled
-//! by the event types themselves — each names its codec — so only the
-//! subscription handed to `observing` stays in the caller's hands, which makes
-//! it where another upstream is named:
-//! `Subscription::stream(&store, &key)` names one explicitly where
-//! `system.subscription(&key)` resolves the provider's.
+//! system already knows filled in: the store each instance journals onto and
+//! the store each declared source is observed from are both the journal the
+//! system's provider supplies.  The two formats are settled by the event types
+//! themselves — each names its codec — so what is left at the wiring site is a
+//! stream key and a position, which is all a
+//! [`Subscription`](nitinol_saga::Subscription) carries.
 //!
 //! The store is stream-keyed, so the one journal a provider supplies holds the
 //! upstream stream and every correlated instance's own stream side by side;
 //! that is what the first test observes, on the id `Saga::correlate` derived
 //! rather than on a fixed one.
+//!
+//! Reaching another destination is therefore a saga hosted on a second system
+//! over the supplier that holds it, and the second test is that boundary: a
+//! record under the very same stream key on another system's journal must never
+//! reach a manager hosted on this one.
 
 #[path = "common/helpers.rs"]
 mod common;
@@ -35,8 +39,7 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSubscriptionExt, SagaSystemExt,
-    Subscription,
+    Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSystemExt, Subscription,
 };
 
 // Fixtures
@@ -204,7 +207,7 @@ async fn wait_for_instance_persisted(store: &Journal, saga_id: &SagaId) -> Vec<S
 
 // The provider's journal: both directions of the manager
 
-/// `system.host::<S>(producer).observing(system.subscription(&key))` must
+/// `system.host::<S>(producer).observing(Subscription::stream(&key))` must
 /// resolve both stores from the system's provider: the upstream it polls and
 /// the journal each correlated instance writes to.
 #[tokio::test]
@@ -234,7 +237,7 @@ async fn the_host_uses_the_providers_event_store_for_upstream_and_journal() {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .observing::<OrderPlaced>(system.subscription(&upstream_key))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
         .spawn()
         .await;
 
@@ -258,17 +261,21 @@ async fn the_host_uses_the_providers_event_store_for_upstream_and_journal() {
     );
 }
 
-// An upstream store named explicitly: the provider's store is not polled
+// Another system's journal: it is not polled
 
-/// An upstream store named through `Subscription::stream` must be the only one
-/// the manager polls, even when the store the provider supplies holds a record
-/// under the very same stream key.
+/// The journal of the system a manager is hosted on must be the only upstream
+/// it polls, even when another system's journal holds a record under the very
+/// same stream key.
+///
+/// Observing a source in a different destination is a saga hosted on a second
+/// system, so two systems is what "another store" now means — and the decoy
+/// below is the record a wiring that resolved an upstream from anywhere but its
+/// own system would deliver.
 #[tokio::test]
-async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls() {
-    // Given: the same stream key exists in both stores, holding different records
-    let ps = ProcessSystem::new().await;
-    let named_store = Journal::from(InMemoryEventStore::default());
-    let system = EventSourceSystem::builder(ps)
+async fn the_hosting_systems_journal_is_the_only_upstream_the_manager_polls() {
+    // Given: the same stream key exists in both systems' journals, holding
+    // different records
+    let hosting = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(InMemoryEventStore::default())
@@ -276,13 +283,22 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls()
                 .build(),
         ))
         .build();
-    let provider_store = system.persistence().event_store();
+    let other = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build();
+    let hosting_store = hosting.persistence().event_store();
+    let other_store = other.persistence().event_store();
 
     let upstream_key = AggregateId::new("mgr-override-store-orders");
     // Seeded before the spawn so a subscription that wrongly resolved to the
-    // provider's store would deliver it on the manager's very first poll.
-    append_order_placed(&provider_store, &upstream_key, 1, "FROM-THE-PROVIDER").await;
-    append_order_placed(&named_store, &upstream_key, 1, "FROM-THE-NAMED-STORE-1").await;
+    // other system's store would deliver it on the manager's very first poll.
+    append_order_placed(&other_store, &upstream_key, 1, "FROM-THE-PROVIDER").await;
+    append_order_placed(&hosting_store, &upstream_key, 1, "FROM-THE-NAMED-STORE-1").await;
 
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -290,21 +306,21 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls()
     let notify_for_producer = Arc::clone(&notify);
 
     // When
-    let _manager_proxy = system
+    let _manager_proxy = hosting
         .host::<FanoutSaga>(move |_components| FanoutSaga {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .observing::<OrderPlaced>(Subscription::stream(&named_store, &upstream_key))
+        .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
         .spawn()
         .await;
 
     wait_for_handled(&handled, &notify, 1).await;
-    // A second record on the named store acts as the barrier: once it has been
-    // handled the manager has completed a further poll cycle with the
-    // provider's decoy already visible, so "not delivered yet" and "never
-    // delivered" are no longer the same observation.
-    append_order_placed(&named_store, &upstream_key, 2, "FROM-THE-NAMED-STORE-2").await;
+    // A second record on the hosting system's journal acts as the barrier: once
+    // it has been handled the manager has completed a further poll cycle with
+    // the other system's decoy already visible, so "not delivered yet" and
+    // "never delivered" are no longer the same observation.
+    append_order_placed(&hosting_store, &upstream_key, 2, "FROM-THE-NAMED-STORE-2").await;
     wait_for_handled(&handled, &notify, 2).await;
 
     // Then
@@ -314,8 +330,9 @@ async fn an_explicitly_subscribed_store_is_the_only_upstream_the_manager_polls()
             "FROM-THE-NAMED-STORE-1".to_owned(),
             "FROM-THE-NAMED-STORE-2".to_owned()
         ],
-        "only the explicitly subscribed store may be polled; the provider's \
-         record under the same stream key must never reach an instance"
+        "only the journal of the system the manager is hosted on may be polled; \
+         another system's record under the same stream key must never reach an \
+         instance"
     );
 }
 

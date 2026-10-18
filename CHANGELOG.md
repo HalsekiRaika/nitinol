@@ -44,17 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own decisions. How often an observed *source* is asked is that source's own
   `Subscription::with_poll_interval`, named per source on `observing`.
 
-- (`nitinol-saga`): `SagaSystemExt::SagaOffsets` is the backend's own offset
-  store as the provider's saga slot is configured with it, and
-  `SagaHosted<S, Cs>` is the typestate the hosted builder starts in — it carries
-  the system the manager runs on and the delivery host wiring resolved from the
-  same supplier, which is why both are public and re-exported.
-
-- (`nitinol-saga`): `SagaSubscriptionExt::subscription` is split out of
-  `SagaSystemExt` into its own trait, `impl<St: Store> …`, because it reads the
-  provider's journal back and needs no saga-offset slot — unlike `host`, which
-  does. A provider with a journal but no saga slot therefore still has
-  `subscription`, even though it has no `host`.
+- (`nitinol-saga`): `SagaSystemExt::Store` is the hosting system's own store
+  type, and `SagaHosted<S, St>` is the typestate the system-first builder starts
+  in — it carries that system, which is why both are public and re-exported.
+  Carrying the store type rather than erasing it is what keeps the saga-offset
+  slot a requirement of the returned props' `spawn`, exactly as it is of the
+  props-first form's.
 
 - (`nitinol-persistence`): the journal and the snapshot store a supplier hands
   out are named types — `store::Journal` and `store::Album` — so a wiring point
@@ -649,6 +644,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (`nitinol-contract`, `nitinol-eventsource`, `nitinol-saga`,
+  `nitinol`): every spawn is on an `EventSourceSystem`, and takes every store it
+  needs from it. No public API names a store, a supplier or a persistor by hand.
+
+  There are two ways to start anything and no more: **props-first**,
+  `XProps::new(..)…spawn(&system)`, and **system-first**,
+  `system.x_props(..)…spawn()`. Both meet on one private path per props, so they
+  reach the same registry, the same journal and the same activation — which form
+  a deployment writes is a matter of where the wiring reads better and nothing
+  else. `system.spawn_aggregate` and `system.aggregate_proxy` are shorthands for
+  the system-first form rather than a third way.
+
+  What a props carried before was a destination a caller had taken out of a
+  supplier and handed back in. That made half of the framework's wiring
+  resolve the one store its system distributes and the other half name a store
+  of its own, and it let a deployment half-move a stream: two activations
+  writing to two worlds, with nothing in the types saying so. Reaching a second
+  destination is now a second supplier and a second system over it, which is
+  what reaching two destinations has to be.
+
+  | was | is |
+  |---|---|
+  | `AggregateProps::<A>::new(id, store)` | `AggregateProps::<A>::new(id)` |
+  | `AggregateProps…spawn(&process_system)` | `AggregateProps…spawn(&system)` |
+  | `ProjectorProps::new(id, &persistence, producer)` | `ProjectorProps::new(id, producer)` |
+  | `ProjectorProps…spawn(&process_system)` | `ProjectorProps…spawn(&system)` |
+  | `ProjectorProps<P, Cs, Tx, E, O, H>` | `ProjectorProps<P, Tx, E, O, H>` — the offset store is the system's |
+  | `with_tx_provider` required `Cs: OffsetStore<Tx = TP::Tx>` | the match is `St::ProjectionOffsets: OffsetStore<Tx = Tx>` at the `spawn`, where both are known |
+  | `DurableStream::new(topic, store, transform)` | `DurableStream::new(topic, transform)` |
+  | `DurableStream…spawn(&process_system)` | `DurableStream…spawn(&system)`, or `system.durable_stream(topic, transform)…spawn()` |
+  | `DurableSubscription::new(store, transform)` | `DurableSubscription::new(transform)`; the journal is an argument of `spawn_child` / `spawn_child_for` / `spawn_from` |
+  | `SagaManagerProps::<S>::new(store, producer)` | `SagaManagerProps::<S>::new(producer)` |
+  | `SagaManagerProps…spawn(&process_system) -> SagaManagerProxy<S>` | `SagaManagerProps…spawn(&system) -> SagaHostProxy<S>`, requiring `St: SagaOffsetSlot` — it starts the manager *and* the delivery host, as the system-first form already did |
+  | `Subscription::stream(store, &key)` | `Subscription::stream(&key)` |
+  | `Subscription::global(store)` | `Subscription::global()` |
+  | `Hosted` | `Hosted<St>`, carrying the typed `EventSourceSystem<St>`; `Hosted::new` takes it |
+  | `SagaHosted<S, Cs>` | `SagaHosted<S, St>` |
+  | `SagaSystemExt::SagaOffsets` | `SagaSystemExt::Store: SagaOffsetSlot` |
+  | `SagaComponents::system() -> Option<&SystemHandle>` | `-> &SystemHandle` |
+  | `SnapshotPersistor::spawn(&ps, &persistence)` | `system.snapshot_persistor().await` — one process per system |
+
+  Carrying the typed store into `Hosted<St>` rather than erasing it is what
+  keeps the two forms observationally identical: a slot the deployment's store
+  does not hold is the same trait-bound error at a system-first `spawn()` as at
+  a props-first `spawn(&system)`. A system-first form over an erased handle
+  would have moved that check to run time.
+
+  Migrating: build a system where a test or a wiring held a `ProcessSystem` and
+  a store —
+  `EventSourceSystem::builder(ps).with_persistence(PersistenceProvider::new(store)).build()`
+  — then drop the store argument from every constructor and spawn on the system.
+  `system.process_system()` hands the `ProcessSystem` back for the entries that
+  still take one (`DurableStreamProxy::subscribe_from` / `unsubscribe`, which
+  look a poller up by name rather than resolve a store). Wiring that needed
+  *two* activations of one stream — an optimistic-concurrency test — builds two
+  systems over the same store, which is what two writers of one stream now is.
+
+- **BREAKING** (`nitinol-contract`, `nitinol-eventsource`, `nitinol`):
+  `Aggregate` has a required associated type `Recover`, and whether an
+  activation starts from a snapshot is the aggregate type's own statement.
+
+  `type Recover: Recovery<Self>` names one of two markers. `Never` replays the
+  whole stream and asks its system for nothing but the journal, so it spawns on
+  any store. `Latest` recovers from the newest snapshot the system's persistor
+  holds and then replays only what was written after it; it is implemented only
+  where `Self: Snapshotable`, and spawning such an aggregate requires the store
+  to hold a snapshot slot. Both are exported from `nitinol_contract`,
+  `nitinol_eventsource`, `nitinol::contract` and `nitinol::eventsource`, and
+  `Recovery::POLICY` is a `RecoverPolicy` value for wiring that wants to report
+  the choice — the choice itself is the type, because only a type can change a
+  bound.
+
+  The declaration is on the aggregate because whether a snapshot exists to
+  recover from is a property of the type: the same type names the snapshot value
+  and the codec that writes it. Saying it again at the wiring would leave two
+  places to disagree, and saying it with a value would leave the mismatch
+  between a recovering aggregate and a store with no snapshots to show up as a
+  failure at the first load rather than as a compile error.
+
+  There is no default: `Aggregate` implementors add one line.
+
+  | was | is |
+  |---|---|
+  | `impl Aggregate for A { type Event = E; .. }` | `impl Aggregate for A { type Event = E; type Recover = Never; .. }` |
+  | a snapshotting aggregate + `props.with_snapshot_persistor(p)` | `type Recover = Latest;` and nothing at the wiring |
+  | `Snapshotable::restore(snapshot)` | `Snapshotable::recover(snapshot)` |
+
+  A consequence worth stating: `SagaDelivery::new::<A, C>` now requires
+  `A::Recover: RecoverOn<A, Journal>`. A saga's mapping is written once and
+  names one system type for every deployment, so a host addresses its targets
+  through the handle a system's store type is erased to — and only the journal
+  survives that erasure. A `Latest` aggregate cannot be a delivery target; it is
+  resolved through the typed system it was built on.
+
+  The vocabulary follows the mechanism: an event is **replayed**, a snapshot is
+  **recovered**. `restore` is not used for either.
+
 - **BREAKING** (`nitinol-saga`): `host::<S>` starts the delivery host too, and
   requires a provider that supplies the saga-offset slot it records in.
 
@@ -673,9 +765,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | `system.deliver::<S>().with_delivery_id(id).spawn()` | `system.host::<S>(f)…with_delivery_id(id).spawn()` |
   | `system.deliver::<S>().with_partitions(n).spawn()` | `system.host::<S>(f)…with_partitions(n).spawn()` |
   | `host(..)…spawn()` answers `SagaManagerProxy<S>` | answers `SagaHostProxy<S>`; `pid` and `stop` are `.manager()`'s |
-  | `host(..)` has type `SagaManagerProps<S, SourceBindings<S>, Hosted>` | `SagaManagerProps<S, SourceBindings<S>, SagaHosted<S, St::SagaOffsets>>` |
+  | `host(..)` has type `SagaManagerProps<S, SourceBindings<S>, Hosted>` | `SagaManagerProps<S, SourceBindings<S>, SagaHosted<S, St>>` |
   | `impl<St: Store> SagaSystemExt for EventSourceSystem<St>` | `impl<St: SagaOffsetSlot> …` — a journal-only store has no `host` |
-  | `subscription` lived on `SagaSystemExt` | moved to the new `SagaSubscriptionExt`, `impl<St: Store> …` — a journal-only store still has `subscription`, since reading it back needs no saga-offset slot |
 
   Migrating: delete the `deliver` declaration and move its settings onto the
   `host` chain, renaming `with_poll_interval` to `with_delivery_poll_interval`
@@ -684,10 +775,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider — `CustomStore::builder().eventstore(..).saga_offsets(..)`, or
   `InMemoryStore`, which supplies every slot.
 
-  A host over stores named by hand is unchanged: `SagaDeliveryProps::new(&persistence)`
-  with `spawn(&system)` still starts a delivery host alone, which is what a
-  second host beside a running one, or a host over a different destination's
-  stores, is wired with.
+  The props-first form starts both halves on the same terms:
+  `SagaManagerProps::<S>::new(f)…spawn(&system)` requires the same slot and
+  answers the same `SagaHostProxy<S>`. There is no public way to start a
+  delivery host alone, and a second host beside a running one is a second
+  system over the supplier that holds its stores.
 
 - **BREAKING** (`nitinol-persistence`, `nitinol-eventsource`, `nitinol-saga`,
   `nitinol-store-conformance`, `nitinol-conformance`, `nitinol-sqlx`,
@@ -1408,6 +1500,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **BREAKING** (`nitinol-contract`, `nitinol-eventsource`, `nitinol-saga`):
+  every public entry point that named a store, a supplier or a persistor by
+  hand is withdrawn. No alias and no deprecated shim answers for any of them, so
+  a reference to one is a compile error.
+
+  | withdrawn | what replaces it |
+  |---|---|
+  | `AggregateProps::<A>::with_snapshot_persistor(p)` | `type Recover = Latest;` on the aggregate — the system distributes the persistor |
+  | `SnapshotPersistor::spawn(&ps, &persistence)` | `system.snapshot_persistor().await`, which answers the one process the system holds |
+  | `SagaDeliveryProps::new(&persistence)` and its `spawn(&system)` | a saga's own spawn, which starts the manager and the host together |
+  | `SagaSubscriptionExt` and `system.subscription(&key)` | `Subscription::stream(&key)` — a subscription names a stream key and a position, and the journal is the system's |
+  | the store argument of `Subscription::stream` / `Subscription::global` | — |
+  | the store argument of `AggregateProps::new`, `ProjectorProps::new` (the supplier), `DurableStream::new`, `DurableSubscription::new`, `SagaManagerProps::new` | the system named at the spawn |
+  | `spawn(self, system: &ProcessSystem)` on `AggregateProps`, `ProjectorProps`, `DurableStream` and `SagaManagerProps` | `spawn(self, system: &EventSourceSystem<St>)` |
+  | pinned activations — the reference `AggregateProps::spawn` on directly-built props handed back | every aggregate entry point resolves through the system's registry, so one identity has one activation per node whatever form its wiring was written in |
+  | `Snapshotable::restore` | `Snapshotable::recover` |
+
+  A second persistor is not offered rather than merely discouraged: the snapshot
+  contract is written for a single consumer serialising its calls, so a path
+  that could start a second process over one store would contradict it.
+
+  A second activation of one stream is likewise not offered. It was reachable
+  before as an explicit lifecycle, and both activations believed they were the
+  only writer of their stream — so all but one of them lost an append and
+  stopped. Wiring that genuinely wants two writers of one store builds two
+  systems over it, which says so.
+
 - **BREAKING** (`nitinol-saga`): `SagaDeliveryExt` and `system.deliver::<S>()`
   are withdrawn, and so is `SagaDeliveryProps<S, Cs, Hosted>` with its
   argument-free `spawn()`.
@@ -1419,9 +1538,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trait to say. No public path starts a delivery host from a system alone.
 
   No alias and no deprecated shim answers for either name, so a reference to one
-  is a compile error. The explicit form — `SagaDeliveryProps::new(&persistence)`
-  naming a journal and an offset store, started with `spawn(&system)` — is
-  unchanged and is what a second host beside a running one is wired with.
+  is a compile error. A delivery host is started by the saga whose decisions it
+  carries, from either entry point, and by nothing else — see the removal of
+  `SagaDeliveryProps::new` / `spawn` below.
 
 - **BREAKING** (`nitinol-persistence`): `provider::DynStore` is withdrawn, and
   the store that holds the journal alone is `store::Journal` itself.

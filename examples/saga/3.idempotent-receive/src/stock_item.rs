@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Never};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 use crate::codec::JsonCodec;
@@ -96,6 +96,7 @@ impl StockItem {
 
 impl Aggregate for StockItem {
     type Event = StockReserved;
+    type Recover = Never;
 
     fn apply(&mut self, event: StockReserved) {
         self.reservations.push(event);

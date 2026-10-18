@@ -86,7 +86,7 @@
 //!
 //! Fixed by `second_spawn_aggregate_addresses_the_same_aggregate`,
 //! `aggregate_props_spawn_addresses_the_same_aggregate` and
-//! `aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate` in
+//! `aggregate_props_for_a_recovering_aggregate_addresses_the_same_aggregate` in
 //! `nitinol-eventsource/tests/aggregate_resolve.rs`, and by
 //! `synchronously_built_reference_addresses_the_same_aggregate` in
 //! `nitinol-eventsource/tests/aggregate_proxy_sync_entry.rs`.
@@ -102,9 +102,12 @@
 //! into `spawn` would make starting a lifecycle indistinguishable from resolving
 //! an identity and would silently change what every existing `spawn` caller gets.
 //!
-//! The same split shows on the reference: props built through an
-//! [`EventSourceSystem`](crate::system::EventSourceSystem) resolve, while props
-//! built directly start a lifecycle and stay pinned to what they started.
+//! The split is between the two layers rather than between two kinds of props:
+//! every aggregate entry point resolves, whether the props were taken from an
+//! [`EventSourceSystem`](crate::system::EventSourceSystem) or built directly
+//! and spawned on one. There is no entry point that starts a lifecycle of an
+//! aggregate and stays pinned to it, because a second activation of one stream
+//! is what R-1 exists to prevent.
 //!
 //! Fixed by `spawn_starts_a_new_process_for_every_call` and
 //! `spawn_under_a_taken_name_still_starts_a_new_process` in

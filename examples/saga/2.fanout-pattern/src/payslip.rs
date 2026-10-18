@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Query};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Never, Query};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 use crate::codec::JsonCodec;
@@ -90,6 +90,7 @@ impl Payslip {
 
 impl Aggregate for Payslip {
     type Event = PayslipIssued;
+    type Recover = Never;
 
     fn apply(&mut self, _event: PayslipIssued) {
         self.issued = true;

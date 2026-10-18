@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps,
 };
@@ -161,9 +162,16 @@ async fn wait_for_offset(
 #[tokio::test]
 async fn at_most_once_offset_advanced_even_when_project_fails() {
     // Given
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("dm-amo-agg");
     let projection_id = ProjectionId::new("dm-amo");
 
@@ -177,13 +185,7 @@ async fn at_most_once_offset_advanced_even_when_project_fails() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with AtMostOnce
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
             count: Arc::clone(&count_c),
@@ -218,9 +220,16 @@ async fn at_most_once_offset_advanced_even_when_project_fails() {
 #[tokio::test]
 async fn at_most_once_offset_advanced_on_success() {
     // Given
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("dm-amo-ok-agg");
     let projection_id = ProjectionId::new("dm-amo-ok");
 
@@ -236,13 +245,7 @@ async fn at_most_once_offset_advanced_on_success() {
     let notify_c = Arc::clone(&notify);
 
     // When
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
             count: Arc::clone(&count_c),
@@ -270,9 +273,16 @@ async fn at_most_once_offset_advanced_on_success() {
 #[tokio::test]
 async fn at_least_once_offset_not_saved_when_project_fails() {
     // Given
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("dm-alo-fail-agg");
     let projection_id = ProjectionId::new("dm-alo-fail");
 
@@ -286,13 +296,7 @@ async fn at_least_once_offset_not_saved_when_project_fails() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with AtLeastOnce (default)
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
             count: Arc::clone(&count_c),
@@ -329,9 +333,16 @@ async fn at_least_once_offset_not_saved_when_project_fails() {
 #[tokio::test]
 async fn at_least_once_offset_saved_after_successful_project() {
     // Given
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("dm-alo-ok-agg");
     let projection_id = ProjectionId::new("dm-alo-ok");
 
@@ -347,13 +358,7 @@ async fn at_least_once_offset_saved_after_successful_project() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with AtLeastOnce (default)
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
             count: Arc::clone(&count_c),
@@ -382,9 +387,16 @@ async fn at_least_once_offset_saved_after_successful_project() {
 #[tokio::test(flavor = "multi_thread")]
 async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     // Given
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("dm-alo-restart-agg");
     let projection_id = ProjectionId::new("dm-alo-restart");
 
@@ -402,22 +414,12 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
         let count_c = Arc::clone(&count);
         let notify_c = Arc::clone(&notify);
         let projection_id_c = projection_id.clone();
-        let event_store_c = event_store.clone();
-        let offset_store_c = offset_store.clone();
         let agg_id_c = agg_id.clone();
 
-        let persistence = PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(event_store_c)
-                .projection_offsets(offset_store_c)
-                .build(),
-        );
-        ProjectorProps::new(projection_id_c, &persistence, move || {
-            ConditionallyFailingProjector {
-                should_fail: Arc::clone(&sf_c),
-                count: Arc::clone(&count_c),
-                notify: Arc::clone(&notify_c),
-            }
+        ProjectorProps::new(projection_id_c, move || ConditionallyFailingProjector {
+            should_fail: Arc::clone(&sf_c),
+            count: Arc::clone(&count_c),
+            notify: Arc::clone(&notify_c),
         })
         .with_event::<Evt>()
         .delivery_mode(DeliveryMode::AtLeastOnce)
@@ -444,7 +446,7 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if system.lookup(proxy_pid).await.is_none() {
+            if system.process_system().lookup(proxy_pid).await.is_none() {
                 break;
             }
             assert!(
@@ -474,13 +476,7 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
     let notify2 = Arc::clone(&notify);
     let sf2 = Arc::clone(&should_fail);
 
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy2 = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+    let _proxy2 = ProjectorProps::new(projection_id.clone(), move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf2),
             count: Arc::clone(&count2),
@@ -511,9 +507,16 @@ async fn at_least_once_failed_event_is_reprocessed_after_restart() {
 #[tokio::test]
 async fn exactly_once_framework_does_not_save_offset() {
     // Given
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("dm-eo-agg");
     let projection_id = ProjectionId::new("dm-eo");
 
@@ -527,13 +530,7 @@ async fn exactly_once_framework_does_not_save_offset() {
     let notify_c = Arc::clone(&notify);
 
     // When: spawn with ExactlyOnce (framework skips offset saving)
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || {
         ConditionallyFailingProjector {
             should_fail: Arc::clone(&sf_c),
             count: Arc::clone(&count_c),

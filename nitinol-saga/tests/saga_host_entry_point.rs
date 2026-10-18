@@ -2,8 +2,9 @@
 //!
 //! The wiring under test is the one the caller no longer writes: both codecs
 //! are resolved from the event types themselves (`Event::Codec`), the
-//! `ProcessSystem` is never handed over, and store + cursor arrive as a single
-//! subscription value.  Each test therefore observes the two codec directions
+//! `ProcessSystem` is never handed over, and the stream key and the cursor
+//! arrive as a single subscription value over the journal the system
+//! distributes.  Each test therefore observes the two codec directions
 //! (upstream record decoded into `Saga::handle`, the saga's own event encoded
 //! onto its stream) and the cursor position the subscription value carries.
 //!
@@ -201,9 +202,10 @@ async fn host_uses_the_codecs_its_events_name() {
                 .build(),
         ))
         .build();
+    // One journal: a subscription names the stream to observe and nothing about
+    // where, so the upstream records are appended to the store the system
+    // distributes, under a key of their own.
     let journal = system.persistence().event_store();
-
-    let order_store = Journal::from(InMemoryEventStore::default());
     let order_id = AggregateId::new("saga-host-entry-order");
 
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
@@ -218,13 +220,13 @@ async fn host_uses_the_codecs_its_events_name() {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .observing::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
         .spawn()
         .await;
 
-    // The upstream store stays owned by the caller after the subscription is
-    // built, exactly as the example needs it for its own aggregate wiring.
-    append_order_placed(&order_store, &order_id, 1, "SKU-EXT").await;
+    // Appended after the subscription was built, so what reaches handle() is
+    // what the poller read rather than a catchup of rows that pre-dated it.
+    append_order_placed(&journal, &order_id, 1, "SKU-EXT").await;
 
     wait_for_handled(&handled, &notify, 1).await;
     assert_eq!(
@@ -247,10 +249,10 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let order_store = Journal::from(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-host-entry-catchup-order");
-    append_order_placed(&order_store, &order_id, 1, "BEFORE-1").await;
-    append_order_placed(&order_store, &order_id, 2, "BEFORE-2").await;
+    append_order_placed(&journal, &order_id, 1, "BEFORE-1").await;
+    append_order_placed(&journal, &order_id, 2, "BEFORE-2").await;
 
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -262,7 +264,7 @@ async fn stream_subscription_starts_at_the_beginning_of_the_upstream_stream() {
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .observing::<OrderPlaced>(Subscription::stream(&order_store, &order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
         .spawn()
         .await;
 
@@ -281,10 +283,10 @@ async fn stream_subscription_after_override_skips_records_up_to_that_position() 
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let order_store = Journal::from(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-host-entry-resume-order");
-    append_order_placed(&order_store, &order_id, 1, "SKIPPED").await;
-    append_order_placed(&order_store, &order_id, 2, "DELIVERED").await;
+    append_order_placed(&journal, &order_id, 1, "SKIPPED").await;
+    append_order_placed(&journal, &order_id, 2, "DELIVERED").await;
 
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -296,7 +298,7 @@ async fn stream_subscription_after_override_skips_records_up_to_that_position() 
             handled: Arc::clone(&handled_for_producer),
             notify: Arc::clone(&notify_for_producer),
         })
-        .observing::<OrderPlaced>(Subscription::stream(&order_store, &order_id).with_after(1))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id).with_after(1))
         .spawn()
         .await;
 

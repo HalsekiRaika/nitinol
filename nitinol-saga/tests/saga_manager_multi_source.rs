@@ -36,7 +36,7 @@ use tokio::sync::Notify;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -244,16 +244,16 @@ async fn a_manager_decodes_each_source_once_and_routes_both_to_the_same_instance
         .build();
 
     // Each source reads a stream key of its own, which is the ordinary shape:
-    // two aggregates a coordinator watches.
-    let order_store = Journal::from(InMemoryEventStore::default());
+    // two aggregates a coordinator watches — tenants of the one journal the
+    // system distributes, kept apart by their stream keys.
+    let journal = system.persistence().event_store();
     let order_key = AggregateId::new("mgr-multi-orders");
-    let stock_store = Journal::from(InMemoryEventStore::default());
     let stock_key = AggregateId::new("mgr-multi-stock");
 
     for (index, order) in ORDERS.iter().enumerate() {
         let sequence = u64::try_from(index + 1).expect("test sequence fits in u64");
         append(
-            &order_store,
+            &journal,
             &order_key,
             sequence,
             &OrderPlaced {
@@ -262,7 +262,7 @@ async fn a_manager_decodes_each_source_once_and_routes_both_to_the_same_instance
         )
         .await;
         append(
-            &stock_store,
+            &journal,
             &stock_key,
             sequence,
             &StockReserved {
@@ -272,8 +272,6 @@ async fn a_manager_decodes_each_source_once_and_routes_both_to_the_same_instance
         .await;
     }
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
-
     let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
     let instances_spawned = Arc::new(AtomicUsize::new(0));
@@ -282,18 +280,17 @@ async fn a_manager_decodes_each_source_once_and_routes_both_to_the_same_instance
     let notify_for_producer = Arc::clone(&notify);
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let _manager_proxy =
-        SagaManagerProps::<RecordingSaga>::new(saga_store.clone(), move |_components| {
-            spawned_for_producer.fetch_add(1, Ordering::SeqCst);
-            RecordingSaga {
-                seen: Arc::clone(&seen_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .observing::<OrderPlaced>(Subscription::stream(&order_store, &order_key))
-        .observing::<StockReserved>(Subscription::stream(&stock_store, &stock_key))
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<RecordingSaga>::new(move |_components| {
+        spawned_for_producer.fetch_add(1, Ordering::SeqCst);
+        RecordingSaga {
+            seen: Arc::clone(&seen_for_producer),
+            notify: Arc::clone(&notify_for_producer),
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_key))
+    .observing::<StockReserved>(Subscription::stream(&stock_key))
+    .spawn(&system)
+    .await;
 
     wait_for_seen(&seen, &notify, ORDERS.len() * 2).await;
     // A per-instance poller keeps decoding after the last delivery, so settle

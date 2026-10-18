@@ -49,13 +49,13 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event, Never};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSubscriptionExt, SagaSystemExt,
+    Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSystemExt, Subscription,
 };
 
 /// The single instance every upstream event correlates to.  Constant
@@ -95,6 +95,7 @@ struct Order;
 
 impl Aggregate for Order {
     type Event = OrderPlaced;
+    type Recover = Never;
 
     fn apply(&mut self, _event: OrderPlaced) {}
 }
@@ -274,7 +275,7 @@ async fn single_constant_correlation_reproduces_the_resident_saga() {
         .host::<ReservationSaga>(move |_components| ReservationSaga {
             captured: Arc::clone(&captured_for_producer),
         })
-        .observing::<OrderPlaced>(system.subscription(&order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
         .with_instance_passivation(INSTANCE_PASSIVATION)
         .spawn()
         .await;

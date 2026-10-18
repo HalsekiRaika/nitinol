@@ -7,7 +7,7 @@
 //   call resolved, rather than a second activation of it
 // - ProjectorProps wired from the system projects catch-up events through the
 //   codec each event type names
-// - Snapshot save → load → state restoration via EventSourceSystem
+// - Snapshot save → load → state recovery via EventSourceSystem
 //
 // The system itself carries no codec: an event names the one that writes it
 // down, so there is nothing to hand the builder and nothing to ask it for.
@@ -22,9 +22,8 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::SnapshotPersistor;
 use nitinol_eventsource::{
-    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event,
+    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event, Latest, Never,
     ProjectionContext, ProjectionId, Projector, ProjectorProps, Query, Snapshotable,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
@@ -55,6 +54,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -70,6 +70,7 @@ struct CounterWithSnapshot {
 
 impl Aggregate for CounterWithSnapshot {
     type Event = Incremented;
+    type Recover = Latest;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -85,7 +86,7 @@ impl Snapshotable for CounterWithSnapshot {
         self.value
     }
 
-    fn restore(snapshot: u64) -> Self {
+    fn recover(snapshot: u64) -> Self {
         Self { value: snapshot }
     }
 }
@@ -341,9 +342,9 @@ async fn spawn_aggregate_sequential_increments_accumulate_state() {
 
 // Test: a projector wired from the system decodes through the named codec
 
-/// A `ProjectorProps` built against the system's process runtime projects the
-/// catch-up events it is asked for, decoding them through the codec
-/// `Incremented` names — `with_event::<E>()` is handed nothing.
+/// A `ProjectorProps` spawned on the system projects the catch-up events it is
+/// asked for, decoding them through the codec `Incremented` names —
+/// `with_event::<E>()` is handed nothing.
 #[tokio::test]
 async fn projector_props_decode_through_the_codec_each_event_names() {
     // Given
@@ -357,7 +358,7 @@ async fn projector_props_decode_through_the_codec_each_event_names() {
     );
     let event_store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(persistence.clone())
+        .with_persistence(persistence)
         .build();
 
     let agg_id = AggregateId::new("sys-proj-agg");
@@ -384,15 +385,13 @@ async fn projector_props_decode_through_the_codec_each_event_names() {
     let notify_c = Arc::clone(&notify);
 
     // When: wire a projector for the event type, naming no codec
-    let _proxy = ProjectorProps::new(ProjectionId::new("sys-proj"), &persistence, move || {
-        CountingProjector {
-            count: Arc::clone(&count_c),
-            notify: Arc::clone(&notify_c),
-        }
+    let _proxy = ProjectorProps::new(ProjectionId::new("sys-proj"), move || CountingProjector {
+        count: Arc::clone(&count_c),
+        notify: Arc::clone(&notify_c),
     })
     .with_event::<Incremented>()
     .catchup_from_aggregate(agg_id)
-    .spawn(system.process_system())
+    .spawn(&system)
     .await;
 
     // Then: project() is called for the one stored event
@@ -404,27 +403,26 @@ async fn projector_props_decode_through_the_codec_each_event_names() {
     );
 }
 
-// Test: aggregate_props allows manual snapshot configuration
+// Test: aggregate_props recovers from the system's snapshot slot
 
 /// system.aggregate_props() returns a pre-wired AggregateProps.
-/// Passing it the snapshot persistor allows snapshotable aggregates to restore
-/// state from a saved snapshot, read back through the codec
-/// `CounterWithSnapshot` names.
+/// An aggregate whose `Recover` is `Latest` recovers its state from a saved
+/// snapshot, read back through the codec `CounterWithSnapshot` names — the
+/// persistor comes from the system rather than being passed in.
 #[tokio::test]
 async fn snapshot_roundtrip_via_event_source_system() {
     // Given
     let ps = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(InMemoryEventStore::default())
-            .snapshot(InMemorySnapshotStore::default())
-            .build(),
-    );
     let system = EventSourceSystem::builder(ps)
-        .with_persistence(persistence.clone())
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .snapshot(InMemorySnapshotStore::default())
+                .build(),
+        ))
         .build();
 
-    let snapshot_ref = SnapshotPersistor::spawn(system.process_system(), &persistence).await;
+    let snapshot_ref = system.snapshot_persistor().await;
     let id = AggregateId::new("sys-snap-restore");
 
     // Manually save a JSON-encoded snapshot (value=7 at sequence=7)
@@ -441,19 +439,18 @@ async fn snapshot_roundtrip_via_event_source_system() {
         .await
         .expect("save snapshot must succeed");
 
-    // When: spawn a process that restores from the snapshot through the codec
+    // When: spawn a process that recovers from the snapshot through the codec
     // the aggregate names
     let proxy = system
         .aggregate_props::<CounterWithSnapshot>(id)
-        .with_snapshot_persistor(snapshot_ref)
         .spawn()
         .await;
 
     let count = proxy.exec(GetCount).await.expect("exec must succeed");
 
-    // Then: state is restored from snapshot (value=7)
+    // Then: state is recovered from snapshot (value=7)
     assert_eq!(
         count, 7,
-        "snapshot restore must produce the saved value (7)"
+        "snapshot recover must produce the saved value (7)"
     );
 }

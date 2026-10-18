@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Never};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 use crate::codec::JsonCodec;
@@ -51,6 +51,7 @@ pub struct Order;
 
 impl Aggregate for Order {
     type Event = OrderPlaced;
+    type Recover = Never;
 
     fn apply(&mut self, _event: OrderPlaced) {}
 }

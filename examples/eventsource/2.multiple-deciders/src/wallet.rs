@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Decider, Decision, Query};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Never, Query};
 
 use crate::codec::JsonCodec;
 
@@ -47,6 +47,7 @@ pub struct Wallet {
 
 impl Aggregate for Wallet {
     type Event = WalletEvent;
+    type Recover = Never;
 
     fn apply(&mut self, event: WalletEvent) {
         match event {

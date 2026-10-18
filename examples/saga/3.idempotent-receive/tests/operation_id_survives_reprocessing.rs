@@ -9,9 +9,8 @@
 mod common;
 use common::{
     decision_position, fingerprint, load_stream, recorded_progress, recorded_reservations,
-    requested_reservations, single_store, spawn_delivery_host, spawn_world, wait_for_progress,
-    wait_for_records, UnrecordedProgressStore, DECISION_BLOCK_LEN, DELIVERY_TIMEOUT,
-    ORDER_QUANTITY, SKU,
+    requested_reservations, single_store, spawn_world, wait_for_progress, wait_for_records,
+    UnrecordedProgressStore, DECISION_BLOCK_LEN, DELIVERY_TIMEOUT, ORDER_QUANTITY, SKU,
 };
 
 use nitinol_persistence::store::InMemoryOffsetStore;
@@ -95,9 +94,8 @@ async fn a_decision_reprocessed_by_a_new_host_converges_on_one_reservation() {
     // never recorded, so the operation stays owed as far as any later host can
     // tell.
 
-    let first = spawn_world(&order_id, store.clone()).await;
-    let _interrupted_host = spawn_delivery_host(
-        &first.system,
+    let first = spawn_world(
+        &order_id,
         &backend,
         &UnrecordedProgressStore::over(&offsets),
     )
@@ -148,18 +146,18 @@ async fn a_decision_reprocessed_by_a_new_host_converges_on_one_reservation() {
 
     // Stopping the manager cascade-stops its poller and its saga instances.
     first
-        .manager
+        .host
+        .manager()
         .stop()
         .await
         .expect("stopping the manager must succeed");
 
-    // Incarnation 2 — a new `ProcessSystem` over the same durable state. Its
-    // manager re-delivers the order's fact event, which the replayed saga
-    // instance drops; its delivery host reads the decision that instance already
-    // wrote and carries it again. Bound for the rest of the test: this handle
-    // owns the system the assertions observe.
-    let second = spawn_world(&order_id, store.clone()).await;
-    let _resumed_host = spawn_delivery_host(&second.system, &backend, &offsets).await;
+    // Incarnation 2 — a new `ProcessSystem` over the same durable state, and an
+    // offset store whose saves land. Its manager re-delivers the order's fact
+    // event, which the replayed saga instance drops; its delivery host reads the
+    // decision that instance already wrote and carries it again. Bound for the
+    // rest of the test: this handle owns the system the assertions observe.
+    let _second = spawn_world(&order_id, &backend, &offsets).await;
 
     wait_for_progress(
         &offsets,

@@ -109,14 +109,14 @@ pub(crate) struct SagaInstanceSpec<S: Saga> {
     /// capability is bound to the incarnation that holds it: the pending-deadline
     /// view a `Deadline` reads belongs to the process that writes it.
     pub(crate) producer: SagaProducer<S>,
-    /// The system this instance is hosted by, where it was wired from one.
+    /// The system this instance is hosted by.
     ///
     /// Handed to every incarnation through
     /// [`SagaComponents::system`](crate::SagaComponents::system), so a saga
     /// reaches its host's resources without one being captured outside the
     /// spawn. It is a handle: holding it keeps the host's process system and
     /// registry alive, and neither holds a saga instance back.
-    pub(crate) host: Option<SystemHandle>,
+    pub(crate) host: SystemHandle,
     pub(crate) scheduler: Option<SchedulerProxy>,
     pub(crate) delivery: ScheduleDelivery<S>,
 }

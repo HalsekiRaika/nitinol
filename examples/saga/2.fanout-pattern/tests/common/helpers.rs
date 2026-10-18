@@ -22,7 +22,7 @@ use nitinol_persistence::store::{
 };
 use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDeliveryId, SagaHostProxy, SagaSubscriptionExt, SagaSystemExt};
+use nitinol_saga::{SagaDeliveryId, SagaHostProxy, SagaSystemExt, Subscription};
 
 use saga_fanout_pattern::payroll_run::{PayrollRun, PayrollRunApproved};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
@@ -199,7 +199,7 @@ pub async fn spawn_saga(
 ) -> SagaHostProxy<FanOutSaga> {
     system
         .host::<FanOutSaga>(|_components| FanOutSaga)
-        .observing::<PayrollRunApproved>(system.subscription(run_id))
+        .observing::<PayrollRunApproved>(Subscription::stream(run_id))
         .with_delivery_id(delivery_id.clone())
         .with_delivery_poll_interval(DELIVERY_POLL_INTERVAL)
         .spawn()

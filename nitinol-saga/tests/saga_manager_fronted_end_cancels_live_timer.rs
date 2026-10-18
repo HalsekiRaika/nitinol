@@ -54,7 +54,7 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -254,30 +254,30 @@ async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    let saga_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the pings the instance observes and the instance's own
+    // stream are tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let saga_id = SagaId::new(INSTANCE_ID);
 
     let instances_spawned = Arc::new(AtomicUsize::new(0));
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let _manager_proxy =
-        SagaManagerProps::<EndingSaga>::new(saga_store.clone(), move |components| {
-            spawned_for_producer.fetch_add(1, Ordering::SeqCst);
-            EndingSaga {
-                deadline: components.deadline(),
-            }
-        })
-        .observing::<Ping>(Subscription::stream(&upstream_store, UPSTREAM_KEY))
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<EndingSaga>::new(move |components| {
+        spawned_for_producer.fetch_add(1, Ordering::SeqCst);
+        EndingSaga {
+            deadline: components.deadline(),
+        }
+    })
+    .observing::<Ping>(Subscription::stream(UPSTREAM_KEY))
+    .spawn(&system)
+    .await;
 
-    append_ping(&upstream_store, 1).await;
+    append_ping(&journal, 1).await;
     // The `Ended` fact is the barrier: once it is durable, the terminal
     // `on_stop` has run and whatever it did or did not release is settled.  It
     // is also the half of the contract that is positive — `End` under a manager
     // has to terminate the saga, not merely fail to fire a timer.
-    let at_end = wait_for_ended_fact(&saga_store, &saga_id, Duration::from_secs(5)).await;
+    let at_end = wait_for_ended_fact(&journal, &saga_id, Duration::from_secs(5)).await;
 
     assert!(
         at_end
@@ -300,7 +300,7 @@ async fn terminal_end_cancels_the_live_timer_so_it_never_fires() {
     tokio::time::sleep(DEADLINE * 5).await;
 
     // Then
-    let events = load_saga_events(&saga_store, &saga_id).await;
+    let events = load_saga_events(&journal, &saga_id).await;
 
     assert!(
         !events

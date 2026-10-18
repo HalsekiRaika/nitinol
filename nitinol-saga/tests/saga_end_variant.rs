@@ -25,7 +25,7 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -146,11 +146,12 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
+    // One journal: the order stream the saga observes and the saga's own stream
+    // are tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("end-order");
-    append_order_placed(&upstream_store, &order_id, 1, "FIRST").await;
+    append_order_placed(&journal, &order_id, 1, "FIRST").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(PERSIST_THEN_END_SAGA_ID);
     let handle_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let handled_first = Arc::new(Notify::new());
@@ -158,15 +159,13 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_first_clone = Arc::clone(&handled_first);
 
-    let _saga_proxy =
-        SagaManagerProps::<PersistThenEndSaga>::new(saga_store.clone(), move |_components| {
-            PersistThenEndSaga {
-                handle_count: Arc::clone(&handle_count_clone),
-                handled_first: Arc::clone(&handled_first_clone),
-            }
+    let _host =
+        SagaManagerProps::<PersistThenEndSaga>::new(move |_components| PersistThenEndSaga {
+            handle_count: Arc::clone(&handle_count_clone),
+            handled_first: Arc::clone(&handled_first_clone),
         })
-        .observing::<OrderPlaced>(Subscription::stream(&upstream_store, &order_id))
-        .spawn(system.process_system())
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
+        .spawn(&system)
         .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled_first.notified())
@@ -178,7 +177,7 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     // is broken.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let events_after_first = load_saga_events(&saga_store, &saga_id).await;
+    let events_after_first = load_saga_events(&journal, &saga_id).await;
     let user_events_after_first: Vec<&LoadedEvent> = events_after_first
         .iter()
         .filter(|e| e.event_type == ReservationRequested::EVENT_TYPE)
@@ -196,7 +195,7 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     // names regardless — and if End was interpreted correctly, what receives it
     // starts from the durable `Ended` fact: handle() will not run again and no
     // further user events will be persisted.
-    append_order_placed(&upstream_store, &order_id, 2, "SECOND").await;
+    append_order_placed(&journal, &order_id, 2, "SECOND").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let final_handle_count = *handle_count
@@ -208,7 +207,7 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
          Saga::handle must not be invoked for any subsequent upstream event"
     );
 
-    let final_events = load_saga_events(&saga_store, &saga_id).await;
+    let final_events = load_saga_events(&journal, &saga_id).await;
     let final_user_events: Vec<&LoadedEvent> = final_events
         .iter()
         .filter(|e| e.event_type == ReservationRequested::EVENT_TYPE)

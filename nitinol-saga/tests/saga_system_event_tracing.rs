@@ -73,7 +73,7 @@ use tracing::{Metadata, Subscriber};
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{system::EventSourceSystem, Event};
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -427,28 +427,25 @@ async fn a_registered_and_a_fired_timer_are_reported_with_distinct_arms() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    append_ping(&upstream_store, "tracing-schedule-upstream", 1, "tick").await;
+    // One journal: the upstream stream the saga observes and the saga's own
+    // stream are tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
+    append_ping(&journal, "tracing-schedule-upstream", 1, "tick").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SCHEDULE_SAGA_ID);
     let fired = Arc::new(Notify::new());
     let fired_for_saga = Arc::clone(&fired);
 
-    let _proxy =
-        SagaManagerProps::<ScheduleSaga>::new(saga_store.clone(), move |components| ScheduleSaga {
-            deadline: components.deadline(),
-            fired: Arc::clone(&fired_for_saga),
-        })
-        .observing::<Ping>(Subscription::stream(
-            &upstream_store,
-            "tracing-schedule-upstream",
-        ))
-        .spawn(system.process_system())
-        .await;
+    let _proxy = SagaManagerProps::<ScheduleSaga>::new(move |components| ScheduleSaga {
+        deadline: components.deadline(),
+        fired: Arc::clone(&fired_for_saga),
+    })
+    .observing::<Ping>(Subscription::stream("tracing-schedule-upstream"))
+    .spawn(&system)
+    .await;
 
     // Two schedule rows: the registration and the firing.
-    wait_for_rows(&saga_store, &saga_id, SCHEDULE_MARKER, 2).await;
+    wait_for_rows(&journal, &saga_id, SCHEDULE_MARKER, 2).await;
 
     capture
         .wait_for(SCHEDULE_SAGA_ID, SCHEDULE, "scheduled")
@@ -508,27 +505,24 @@ async fn the_position_a_batch_consumed_is_reported_with_its_own_arm() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    append_ping(&upstream_store, POSITION_UPSTREAM_KEY, 1, "note").await;
+    let journal = system.persistence().event_store();
+    append_ping(&journal, POSITION_UPSTREAM_KEY, 1, "note").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(POSITION_SAGA_ID);
     let handled = Arc::new(Notify::new());
     let handled_for_saga = Arc::clone(&handled);
 
-    let _proxy = SagaManagerProps::<PositionSaga>::new(saga_store.clone(), move |_components| {
-        PositionSaga {
-            handled: Arc::clone(&handled_for_saga),
-        }
+    let _proxy = SagaManagerProps::<PositionSaga>::new(move |_components| PositionSaga {
+        handled: Arc::clone(&handled_for_saga),
     })
-    .observing::<Ping>(Subscription::stream(&upstream_store, POSITION_UPSTREAM_KEY))
-    .spawn(system.process_system())
+    .observing::<Ping>(Subscription::stream(POSITION_UPSTREAM_KEY))
+    .spawn(&system)
     .await;
 
     // The row has to be on the stream before the record about it means
     // anything: a record claiming a write that never happened would be worse
     // than none.
-    wait_for_rows(&saga_store, &saga_id, CONSUMED_MARKER, 1).await;
+    wait_for_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
 
     capture
         .wait_for(POSITION_SAGA_ID, CONSUMED, "consumed")
@@ -600,22 +594,18 @@ async fn a_terminated_saga_reports_the_ended_lifecycle_fact() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    append_ping(&upstream_store, "tracing-lifecycle-upstream", 1, "last").await;
+    let journal = system.persistence().event_store();
+    append_ping(&journal, "tracing-lifecycle-upstream", 1, "last").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(LIFECYCLE_SAGA_ID);
 
-    let _proxy = SagaManagerProps::<EndingSaga>::new(saga_store.clone(), |_components| EndingSaga)
-        .observing::<Ping>(Subscription::stream(
-            &upstream_store,
-            "tracing-lifecycle-upstream",
-        ))
-        .spawn(system.process_system())
+    let _proxy = SagaManagerProps::<EndingSaga>::new(|_components| EndingSaga)
+        .observing::<Ping>(Subscription::stream("tracing-lifecycle-upstream"))
+        .spawn(&system)
         .await;
 
     // The record is about a write, so the write is what the test waits on first.
-    wait_for_rows(&saga_store, &saga_id, LIFECYCLE_MARKER, 1).await;
+    wait_for_rows(&journal, &saga_id, LIFECYCLE_MARKER, 1).await;
 
     capture
         .wait_for(LIFECYCLE_SAGA_ID, LIFECYCLE, "ended")
@@ -665,29 +655,23 @@ async fn a_user_event_is_not_reported_as_a_framework_record() {
         .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    append_ping(&upstream_store, "tracing-domain-upstream", 1, "note").await;
+    let journal = system.persistence().event_store();
+    append_ping(&journal, "tracing-domain-upstream", 1, "note").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(DOMAIN_ONLY_SAGA_ID);
     let handled = Arc::new(Notify::new());
     let handled_for_saga = Arc::clone(&handled);
 
-    let _proxy = SagaManagerProps::<DomainOnlySaga>::new(saga_store.clone(), move |_components| {
-        DomainOnlySaga {
-            handled: Arc::clone(&handled_for_saga),
-        }
+    let _proxy = SagaManagerProps::<DomainOnlySaga>::new(move |_components| DomainOnlySaga {
+        handled: Arc::clone(&handled_for_saga),
     })
-    .observing::<Ping>(Subscription::stream(
-        &upstream_store,
-        "tracing-domain-upstream",
-    ))
-    .spawn(system.process_system())
+    .observing::<Ping>(Subscription::stream("tracing-domain-upstream"))
+    .spawn(&system)
     .await;
 
     // The domain row has to be on the stream before its absence from the
     // capture means anything.
-    wait_for_rows(&saga_store, &saga_id, SagaLog::EVENT_TYPE, 1).await;
+    wait_for_rows(&journal, &saga_id, SagaLog::EVENT_TYPE, 1).await;
 
     let named = capture.event_types(DOMAIN_ONLY_SAGA_ID);
     let user_path = SagaLog::EVENT_TYPE.to_path().to_string();

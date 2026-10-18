@@ -24,7 +24,7 @@ use futures_util::TryStreamExt;
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Query,
+    Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Never, Query,
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
 use nitinol_persistence::store::{InMemoryEventStore, Journal};
@@ -83,6 +83,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, event: Incremented) {
         self.value += event.by;
@@ -157,6 +158,7 @@ struct Nameplate {
 
 impl Aggregate for Nameplate {
     type Event = Labelled;
+    type Recover = Never;
 
     fn apply(&mut self, event: Labelled) {
         self.label = event.label;
@@ -202,15 +204,24 @@ async fn stored_payloads(store: &Journal, id: &AggregateId) -> Vec<Bytes> {
     loaded.into_iter().map(|event| event.payload).collect()
 }
 
+/// A system over `store`, on a process system of its own.
+///
+/// A second activation of one aggregate is a second system over the same
+/// journal: one system resolves an identity to one activation, so asking the
+/// same system again would reach the resident state rather than replay the
+/// stream.
+async fn system_over(store: Journal) -> EventSourceSystem<Journal> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store))
+        .build()
+}
+
 /// Props with no codec step: `new` straight to `spawn`.
 async fn spawn_counter(
-    system: &ProcessSystem,
+    system: &EventSourceSystem<Journal>,
     id: AggregateId,
-    store: Journal,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id, store)
-        .spawn(system)
-        .await
+    AggregateProps::<Counter>::new(id).spawn(system).await
 }
 
 // Appending
@@ -220,11 +231,11 @@ async fn spawn_counter(
 /// produces — so the codec the event names is the one that wrote them.
 #[tokio::test]
 async fn an_append_writes_the_bytes_the_events_codec_produces() {
-    let system = ProcessSystem::new().await;
     let store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(store.clone()).await;
     let id = AggregateId::new("named-codec-append");
 
-    let proxy = spawn_counter(&system, id.clone(), store.clone()).await;
+    let proxy = spawn_counter(&system, id.clone()).await;
     proxy.ask(Increment(7)).await.expect("first ask");
     proxy.ask(Increment(5)).await.expect("second ask");
 
@@ -257,17 +268,18 @@ async fn an_append_writes_the_bytes_the_events_codec_produces() {
 /// stream through the codec the event names and reaches the same state.
 #[tokio::test]
 async fn a_replay_reads_the_stream_through_the_events_codec() {
-    let system = ProcessSystem::new().await;
     let store = Journal::from(InMemoryEventStore::default());
+    let writing = system_over(store.clone()).await;
     let id = AggregateId::new("named-codec-replay");
 
     {
-        let writer = spawn_counter(&system, id.clone(), store.clone()).await;
+        let writer = spawn_counter(&writing, id.clone()).await;
         writer.ask(Increment(7)).await.expect("first ask");
         writer.ask(Increment(5)).await.expect("second ask");
     }
 
-    let replayed = spawn_counter(&system, id, store).await;
+    let restarted = system_over(store).await;
+    let replayed = spawn_counter(&restarted, id).await;
     let value = replayed.exec(GetCount).await.expect("exec must succeed");
 
     assert_eq!(

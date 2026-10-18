@@ -171,10 +171,10 @@ system
 ```
 
 Props taken from a system carry the system they came from, so the spawn above
-needs nothing re-injected. A projector wired without a system is the same two
-slots named from the same supplier, started on a process system named at the
-spawn — `ProjectorProps::new(ProjectionId::new("orders.totals"), &persistence,
-OrderTotals::new) … .spawn(&ps)`.
+needs nothing re-injected. Props built directly name the same thing and take
+both slots from the system the spawn is given —
+`ProjectorProps::new(ProjectionId::new("orders.totals"), OrderTotals::new) …
+.spawn(&system)`.
 
 ```rust,ignore
 async fn project(

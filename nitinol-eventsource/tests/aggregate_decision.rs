@@ -25,11 +25,13 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
-    Query,
+    Never, Query,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
+use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
@@ -57,6 +59,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -199,14 +202,20 @@ impl EventStore for CountingStore {
 
 // Helpers
 
-/// Activate one writer for `id` on `store`.
+/// A system distributing `store`, with an aggregate registry of its own.
+async fn system_over(store: &Journal) -> EventSourceSystem<Journal> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store.clone()))
+        .build()
+}
+
+/// Activate one writer for `id` on `system`.
 async fn spawn_counter(
-    ps: &ProcessSystem,
+    system: &EventSourceSystem<Journal>,
     id: &AggregateId,
-    store: &Journal,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id.clone(), store.clone())
-        .spawn(ps)
+    AggregateProps::<Counter>::new(id.clone())
+        .spawn(system)
         .await
 }
 
@@ -234,10 +243,10 @@ async fn stored_sequences(store: &Journal, id: &AggregateId) -> Vec<u64> {
 #[tokio::test]
 async fn ask_answers_with_the_output_of_the_decision() {
     // Given
-    let ps = ProcessSystem::new().await;
     let (store, _appends) = counting_store();
+    let system = system_over(&store).await;
     let id = AggregateId::new("decision-ask-output");
-    let proxy = spawn_counter(&ps, &id, &store).await;
+    let proxy = spawn_counter(&system, &id).await;
 
     // When
     let first = proxy.ask(Increment).await.expect("the first ask");
@@ -261,10 +270,10 @@ async fn ask_answers_with_the_output_of_the_decision() {
 #[tokio::test]
 async fn accepted_facts_are_persisted_as_a_single_append() {
     // Given
-    let ps = ProcessSystem::new().await;
     let (store, appends) = counting_store();
+    let system = system_over(&store).await;
     let id = AggregateId::new("decision-atomic-append");
-    let proxy = spawn_counter(&ps, &id, &store).await;
+    let proxy = spawn_counter(&system, &id).await;
 
     // When
     proxy
@@ -295,10 +304,10 @@ async fn accepted_facts_are_persisted_as_a_single_append() {
 #[tokio::test]
 async fn empty_acceptance_answers_without_reaching_the_store() {
     // Given: the counter is already at the floor the command asks for
-    let ps = ProcessSystem::new().await;
     let (store, appends) = counting_store();
+    let system = system_over(&store).await;
     let id = AggregateId::new("decision-empty-acceptance");
-    let proxy = spawn_counter(&ps, &id, &store).await;
+    let proxy = spawn_counter(&system, &id).await;
     proxy
         .ask(IncrementBy(2))
         .await
@@ -334,10 +343,10 @@ async fn empty_acceptance_answers_without_reaching_the_store() {
 #[tokio::test]
 async fn refusal_is_answered_as_a_rejection_and_writes_nothing() {
     // Given
-    let ps = ProcessSystem::new().await;
     let (store, appends) = counting_store();
+    let system = system_over(&store).await;
     let id = AggregateId::new("decision-refusal");
-    let proxy = spawn_counter(&ps, &id, &store).await;
+    let proxy = spawn_counter(&system, &id).await;
 
     // When
     let err = proxy
@@ -372,10 +381,10 @@ async fn refusal_is_answered_as_a_rejection_and_writes_nothing() {
 #[tokio::test]
 async fn refusal_on_the_tell_path_leaves_the_activation_answering() {
     // Given
-    let ps = ProcessSystem::new().await;
     let (store, appends) = counting_store();
+    let system = system_over(&store).await;
     let id = AggregateId::new("decision-tell-refusal");
-    let proxy = spawn_counter(&ps, &id, &store).await;
+    let proxy = spawn_counter(&system, &id).await;
 
     // When: the queue is FIFO, so the query is answered by the same activation
     // after it has handled the refused command.

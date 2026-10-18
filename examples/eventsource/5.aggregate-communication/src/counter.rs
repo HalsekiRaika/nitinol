@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Decider, Decision, Query};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Never, Query};
 
 use crate::codec::JsonCodec;
 
@@ -33,6 +33,7 @@ pub struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, event: Incremented) {
         self.value += 1;

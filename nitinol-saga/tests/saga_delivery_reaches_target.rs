@@ -32,22 +32,20 @@ use delivery::{
     SilentSaga,
 };
 
-use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::SagaId;
 
 #[tokio::test]
 async fn a_persisted_decision_reaches_the_target_aggregate() {
     // Given
-    let (system, _aggregates) = in_memory_system().await;
-    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
+    let (system, journal) = in_memory_system(&offsets).await;
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-reaches-target");
 
     // When
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, 1).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target);
@@ -75,15 +73,14 @@ async fn a_persisted_decision_reaches_the_target_aggregate() {
 #[tokio::test]
 async fn a_decision_that_maps_to_nothing_delivers_nothing_and_still_advances() {
     // Given
-    let (system, _aggregates) = in_memory_system().await;
-    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
+    let (system, journal) = in_memory_system(&offsets).await;
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-maps-to-nothing");
 
     // When
     let position = append_decided(&journal, &saga_id, 1, target.as_str(), "op-1").await;
-    let _host = spawn_host::<SilentSaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<SilentSaga>(&system, 1).await;
 
     // Then
     let stored = wait_until_stored(
@@ -107,9 +104,8 @@ async fn a_decision_that_maps_to_nothing_delivers_nothing_and_still_advances() {
 async fn progress_moves_past_rows_the_subscription_leaves_out() {
     // Given: a journal where rows of another event type outnumber the
     // decisions, which is the normal shape of a saga's own stream.
-    let (system, _aggregates) = in_memory_system().await;
-    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
+    let (system, journal) = in_memory_system(&offsets).await;
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-with-gaps");
 
@@ -119,7 +115,7 @@ async fn progress_moves_past_rows_the_subscription_leaves_out() {
     append_noted(&journal, &saga_id, 4).await;
 
     // When
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, 1).await;
+    let _host = spawn_host::<DeliverySaga>(&system, 1).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target);

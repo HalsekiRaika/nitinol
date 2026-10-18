@@ -51,8 +51,10 @@ use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -232,36 +234,29 @@ async fn wait_for_handled(handled: &Handled, expected: usize) -> Vec<&'static st
 /// variant asked for no binding of its own.
 #[tokio::test]
 async fn binding_every_external_source_is_enough_even_with_a_deadline_declared() {
-    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     let placed_stream = AggregateId::new("bind-all-placed");
     let reserved_stream = AggregateId::new("bind-all-reserved");
     let shipped_stream = AggregateId::new("bind-all-shipped");
-    append(&upstream_store, &placed_stream, Placed::EVENT_TYPE, ORDER).await;
-    append(
-        &upstream_store,
-        &reserved_stream,
-        Reserved::EVENT_TYPE,
-        ORDER,
-    )
-    .await;
-    append(&upstream_store, &shipped_stream, Shipped::EVENT_TYPE, ORDER).await;
+    append(&journal, &placed_stream, Placed::EVENT_TYPE, ORDER).await;
+    append(&journal, &reserved_stream, Reserved::EVENT_TYPE, ORDER).await;
+    append(&journal, &shipped_stream, Shipped::EVENT_TYPE, ORDER).await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
     let handled_for_producer = Arc::clone(&handled);
-    let _proxy = SagaManagerProps::<ThreeSourceSaga>::new(saga_store.clone(), move |components| {
-        ThreeSourceSaga {
-            deadline: components.deadline(),
-            handled: Arc::clone(&handled_for_producer),
-        }
+    let _proxy = SagaManagerProps::<ThreeSourceSaga>::new(move |components| ThreeSourceSaga {
+        deadline: components.deadline(),
+        handled: Arc::clone(&handled_for_producer),
     })
-    .observing::<Placed>(Subscription::stream(&upstream_store, &placed_stream))
-    .observing::<Reserved>(Subscription::stream(&upstream_store, &reserved_stream))
-    .observing::<Shipped>(Subscription::stream(&upstream_store, &shipped_stream))
-    .spawn(&ps)
+    .observing::<Placed>(Subscription::stream(&placed_stream))
+    .observing::<Reserved>(Subscription::stream(&reserved_stream))
+    .observing::<Shipped>(Subscription::stream(&shipped_stream))
+    .spawn(&system)
     .await;
 
     let mut seen = wait_for_handled(&handled, 3).await;

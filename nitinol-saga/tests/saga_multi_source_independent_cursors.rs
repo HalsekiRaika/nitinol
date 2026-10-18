@@ -45,9 +45,13 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol::saga::SagaSubscribe;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, SagaOffsetSlot};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, InMemoryStore, Journal,
+};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
@@ -285,21 +289,19 @@ fn as_set(observed: &[Seen]) -> Vec<Seen> {
     sorted
 }
 
-async fn spawn_two_source_saga(
-    ps: &ProcessSystem,
-    saga_store: &Journal,
-    upstream_store: &Journal,
+async fn spawn_two_source_saga<St: SagaOffsetSlot>(
+    system: &EventSourceSystem<St>,
     alpha_stream: &AggregateId,
     beta_stream: &AggregateId,
     handled: &Handled,
-) -> nitinol_saga::SagaManagerProxy<TwoSourceSaga> {
+) -> nitinol_saga::SagaHostProxy<TwoSourceSaga> {
     let handled = Arc::clone(handled);
-    SagaManagerProps::<TwoSourceSaga>::new(saga_store.clone(), move |_components| TwoSourceSaga {
+    SagaManagerProps::<TwoSourceSaga>::new(move |_components| TwoSourceSaga {
         handled: Arc::clone(&handled),
     })
-    .observing::<Alpha>(Subscription::stream(upstream_store, alpha_stream))
-    .observing::<Beta>(Subscription::stream(upstream_store, beta_stream))
-    .spawn(ps)
+    .observing::<Alpha>(Subscription::stream(alpha_stream))
+    .observing::<Beta>(Subscription::stream(beta_stream))
+    .spawn(system)
     .await
 }
 
@@ -311,28 +313,21 @@ async fn spawn_two_source_saga(
 /// one position per source, and neither speaks for the other.
 #[tokio::test]
 async fn each_source_is_owed_only_what_its_own_position_leaves() {
-    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let journal = system.persistence().event_store();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
     let alpha_stream = AggregateId::new("icur-alpha");
     let beta_stream = AggregateId::new("icur-beta");
-    append_alpha(&upstream_store, &alpha_stream, 1, "a1").await;
-    append_alpha(&upstream_store, &alpha_stream, 2, "a2").await;
-    append_alpha(&upstream_store, &alpha_stream, 3, "a3").await;
+    append_alpha(&journal, &alpha_stream, 1, "a1").await;
+    append_alpha(&journal, &alpha_stream, 2, "a2").await;
+    append_alpha(&journal, &alpha_stream, 3, "a3").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let saga_id = SagaId::new(SAGA_ID);
     let first_handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
-    let first = spawn_two_source_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        &alpha_stream,
-        &beta_stream,
-        &first_handled,
-    )
-    .await;
+    let first = spawn_two_source_saga(&system, &alpha_stream, &beta_stream, &first_handled).await;
 
     let first_seen = wait_for_handled(&first_handled, 3).await;
     assert_eq!(
@@ -356,25 +351,18 @@ async fn each_source_is_owed_only_what_its_own_position_leaves() {
     );
     // Every decision carries its input's position, so three positions means
     // all three of A's records are durably consumed.
-    wait_for_positions(&saga_store, &saga_id, 3).await;
+    wait_for_positions(&journal, &saga_id, 3).await;
 
-    first.stop().await.expect("stop must succeed");
+    first.manager().stop().await.expect("stop must succeed");
     drop(first);
 
     // Source B gets its first record only now, and source A gets one more.
-    append_beta(&upstream_store, &beta_stream, 1, "b1").await;
-    append_alpha(&upstream_store, &alpha_stream, 4, "a4").await;
+    append_beta(&journal, &beta_stream, 1, "b1").await;
+    append_alpha(&journal, &alpha_stream, 4, "a4").await;
 
     let second_handled: Handled = Arc::new(Mutex::new(Vec::new()));
-    let _second = spawn_two_source_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        &alpha_stream,
-        &beta_stream,
-        &second_handled,
-    )
-    .await;
+    let _second =
+        spawn_two_source_saga(&system, &alpha_stream, &beta_stream, &second_handled).await;
 
     let second_seen = wait_for_handled(&second_handled, 2).await;
     assert_eq!(
@@ -401,31 +389,29 @@ async fn each_source_is_owed_only_what_its_own_position_leaves() {
 /// Then it reaches `handle`: a source that is stuck holds back only itself.
 #[tokio::test]
 async fn a_stalled_source_does_not_stop_the_other_from_progressing() {
-    let ps = ProcessSystem::new().await;
-
     let alpha_stream = AggregateId::new("stall-alpha");
     let beta_stream = AggregateId::new("stall-beta");
-    let upstream_store = Journal::from(StallingStore {
-        inner: InMemoryEventStore::default(),
-        stalled_key: alpha_stream.as_str().to_owned(),
-    });
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(StallingStore {
+                    inner: InMemoryEventStore::default(),
+                    stalled_key: alpha_stream.as_str().to_owned(),
+                })
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build();
+    let journal = system.persistence().event_store();
+
     // Written through the decorator, which serves appends normally; only reads
     // of the alpha stream stall.
-    append_alpha(&upstream_store, &alpha_stream, 1, "never-delivered").await;
-    append_beta(&upstream_store, &beta_stream, 1, "b1").await;
+    append_alpha(&journal, &alpha_stream, 1, "never-delivered").await;
+    append_beta(&journal, &beta_stream, 1, "b1").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled: Handled = Arc::new(Mutex::new(Vec::new()));
 
-    let _proxy = spawn_two_source_saga(
-        &ps,
-        &saga_store,
-        &upstream_store,
-        &alpha_stream,
-        &beta_stream,
-        &handled,
-    )
-    .await;
+    let _host = spawn_two_source_saga(&system, &alpha_stream, &beta_stream, &handled).await;
 
     let observed = wait_for_handled(&handled, 1).await;
 

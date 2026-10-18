@@ -39,8 +39,8 @@
 //!
 //! - `#[derive(SagaSubscribe)]` accepts a `#[subscribe(deadline)]` variant
 //!   whether or not the saga holds a `Deadline<M>`.
-//! - `SagaManagerProps::new(store, Fn(SagaComponents<S>) -> S)` calls the
-//!   producer with the components; a producer is free to ignore them.
+//! - `SagaManagerProps::new(Fn(SagaComponents<S>) -> S)` calls the producer
+//!   with the components; a producer is free to ignore them.
 //!
 //! Run with:
 //! `cargo test -p nitinol-saga --test saga_deadline_requires_component`.
@@ -58,8 +58,10 @@ use bytes::Bytes;
 
 use nitinol::saga::SagaSubscribe;
 use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::Event;
-use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
@@ -203,26 +205,24 @@ async fn append_nudge(store: &Journal, sequence: u64, note: &str) {
 /// component for it spawns, runs, and never reaches the arm it cannot drive.
 #[tokio::test]
 async fn a_saga_declaring_a_deadline_without_the_component_runs_normally() {
-    let ps = ProcessSystem::new().await;
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
 
-    let upstream_store = Journal::from(InMemoryEventStore::default());
-    append_nudge(&upstream_store, 1, "first").await;
-    append_nudge(&upstream_store, 2, "second").await;
+    let journal = system.persistence().event_store();
+    append_nudge(&journal, 1, "first").await;
+    append_nudge(&journal, 2, "second").await;
 
-    let saga_store = Journal::from(InMemoryEventStore::default());
     let handled = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let handled_for_producer = Arc::clone(&handled);
     // The whole of the producer: the components are offered and declined.
-    let _proxy =
-        SagaManagerProps::<ComponentlessSaga>::new(saga_store.clone(), move |_components| {
-            ComponentlessSaga {
-                handled: Arc::clone(&handled_for_producer),
-            }
-        })
-        .observing::<Nudge>(Subscription::stream(&upstream_store, UPSTREAM))
-        .spawn(&ps)
-        .await;
+    let _proxy = SagaManagerProps::<ComponentlessSaga>::new(move |_components| ComponentlessSaga {
+        handled: Arc::clone(&handled_for_producer),
+    })
+    .observing::<Nudge>(Subscription::stream(UPSTREAM))
+    .spawn(&system)
+    .await;
 
     // Upstream seq 2 is the barrier: the poller delivers ascending and asks one
     // record at a time, so once it has been handled the incarnation is settled.

@@ -1,31 +1,41 @@
-// Integration tests for SnapshotPersistor process.
+// Integration tests for the SnapshotPersistor process.
 //
 // SnapshotPersistor is a dedicated persistence process that owns Album.
-// AggregateProcess communicates with it via SnapshotPersistorRef, never holding the
-// store directly — satisfying the Phase 2 lockless messaging design.
+// AggregateProcess communicates with it via SnapshotPersistorProxy, never holding
+// the store directly — satisfying the Phase 2 lockless messaging design.
 //
-// Compile errors are expected until SnapshotPersistor and SnapshotPersistorRef are
-// implemented in nitinol-eventsource/src/process/persistence/.
+// A persistor is not started by hand: the system whose store holds a snapshot
+// slot distributes the one process over it, and `system.snapshot_persistor()` is
+// how every caller — an activation recovering from a snapshot, or a test — asks
+// for it.
 
 use bytes::Bytes;
-use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::SnapshotPersistorProxy;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore};
+use nitinol_persistence::store::{Album, InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::ProcessSystem;
 
 // Test helpers
 
-/// Spawns a fresh ProcessSystem with an InMemorySnapshotStore-backed SnapshotPersistor.
-async fn setup() -> (ProcessSystem, SnapshotPersistorProxy) {
-    let system = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(InMemoryEventStore::default())
-            .snapshot(InMemorySnapshotStore::default())
-            .build(),
-    );
-    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
+/// A system over an InMemorySnapshotStore, and the one persistor it distributes.
+///
+/// The system is handed back because it is what keeps that process reachable:
+/// its node holds the cell the persistor was started in.
+async fn setup() -> (
+    EventSourceSystem<CustomStore<Album>>,
+    SnapshotPersistorProxy,
+) {
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .snapshot(InMemorySnapshotStore::default())
+                .build(),
+        ))
+        .build();
+    let snapshot_ref = system.snapshot_persistor().await;
     (system, snapshot_ref)
 }
 

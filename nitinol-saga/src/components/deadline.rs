@@ -95,7 +95,7 @@ impl PendingDeadlines {
     /// A fresh incarnation knows nothing of what it set, so the journal is the
     /// whole of the answer — which is also why this replaces rather than
     /// merges.
-    pub(crate) fn restore(&self, pending: impl IntoIterator<Item = (TimerName, jiff::Timestamp)>) {
+    pub(crate) fn replay(&self, pending: impl IntoIterator<Item = (TimerName, jiff::Timestamp)>) {
         let mut held = self.write();
         held.clear();
         held.extend(pending);

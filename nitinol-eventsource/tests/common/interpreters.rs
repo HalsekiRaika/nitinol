@@ -29,10 +29,12 @@ use nitinol_conformance::{
     Balance, Fault, Interpretation, Interpreted, Interpreter, Ledger, LedgerEvent, LedgerNotOpen,
     LedgerRejection, Unanswered,
 };
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event, ExecError, Query,
 };
 use nitinol_persistence::error::AppendError;
+use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::Journal;
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::ProcessSystem;
@@ -160,8 +162,16 @@ impl Interpretation for ActivationInterpretation {
 
     fn interpret(&self, ledger: AggregateId, store: Journal) -> BoxFuture<'_, Self::Interpreter> {
         Box::pin(async move {
-            let proxy = AggregateProps::<Ledger>::new(ledger.clone(), store)
-                .spawn(&self.process_system)
+            // A system of its own per interpretation, over the journal the kit
+            // handed in: props take their store from the system they are
+            // spawned on, and a fresh system is what gives each interpretation
+            // its own activation of the ledger — which is what the kit asks for
+            // when it interprets one ledger twice.
+            let system = EventSourceSystem::builder(self.process_system.clone())
+                .with_persistence(PersistenceProvider::new(store))
+                .build();
+            let proxy = AggregateProps::<Ledger>::new(ledger.clone())
+                .spawn(&system)
                 .await;
             ActivationInterpreter {
                 proxy,

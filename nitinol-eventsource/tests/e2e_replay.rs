@@ -1,7 +1,12 @@
-// E2E test: Aggregate replay after process restart.
+// E2E test: Aggregate replay after a restart.
 //
-// Scenario: Aggregate accumulates events → process "restarts" (same store,
-// new proxy) → on_start replays from the EventStore → state is fully restored.
+// Scenario: Aggregate accumulates events → the aggregate "restarts" (same
+// store, a second system over it) → on_start replays from the EventStore →
+// state is fully restored.
+//
+// A restart is a second system because one system resolves one activation per
+// identity: asking the same system again reaches the state already in memory,
+// which is nothing a replay produced.
 //
 // Three E2E stories:
 //   1. Basic replay: N events → restart → state = N
@@ -13,12 +18,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Query,
-    SnapshotPersistor, SnapshotPersistorProxy, Snapshotable,
+    codec::Codec, Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Latest,
+    Never, Query, Snapshotable,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, SnapshotSlot, Store};
 use nitinol_persistence::store::{
     EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore, Journal,
 };
@@ -49,6 +55,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -64,6 +71,7 @@ struct SnapshotableCounter {
 
 impl Aggregate for SnapshotableCounter {
     type Event = Incremented;
+    type Recover = Latest;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -79,7 +87,7 @@ impl Snapshotable for SnapshotableCounter {
         self.value
     }
 
-    fn restore(snapshot: u64) -> Self {
+    fn recover(snapshot: u64) -> Self {
         Self { value: snapshot }
     }
 }
@@ -188,52 +196,57 @@ impl EventStore for SlowEventStore {
     }
 }
 
-// Helpers: spawn helpers
+// Helpers: a system, and the spawn helpers
 
-async fn spawn_counter(
-    system: &ProcessSystem,
+/// A system over `store`, on a process system of its own.
+async fn system_over<St: Store>(store: St) -> EventSourceSystem<St> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store))
+        .build()
+}
+
+async fn spawn_counter<St: Store>(
+    system: &EventSourceSystem<St>,
     id: AggregateId,
-    store: Journal,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id, store)
-        .spawn(system)
-        .await
+    AggregateProps::<Counter>::new(id).spawn(system).await
 }
 
-async fn spawn_snapshotable_counter(
-    system: &ProcessSystem,
+/// `SnapshotableCounter` declares `Recover = Latest`, so the snapshot store it
+/// recovers through is one more thing the system supplies.
+async fn spawn_snapshotable_counter<St: SnapshotSlot>(
+    system: &EventSourceSystem<St>,
     id: AggregateId,
-    store: Journal,
-    snapshot_ref: SnapshotPersistorProxy,
 ) -> AggregateProxy<SnapshotableCounter> {
-    AggregateProps::<SnapshotableCounter>::new(id, store)
-        .with_snapshot_persistor(snapshot_ref)
+    AggregateProps::<SnapshotableCounter>::new(id)
         .spawn(system)
         .await
 }
 
-// Test 1: replay restores state after process restart
+// Test 1: replay restores state after a restart
 
-/// Given three ask(Increment) calls via process 1 (3 events persisted),
-/// When a second process is spawned for the same AggregateId,
+/// Given three ask(Increment) calls via activation 1 (3 events persisted),
+/// When a second activation starts for the same AggregateId,
 /// Then on_start replays all 3 events and restores counter to 3.
 #[tokio::test]
 async fn e2e_replay_restores_state_after_process_restart() {
-    // Given: shared system and event store
-    let system = ProcessSystem::new().await;
+    // Given: one event store, and a system over it
     let store = Journal::from(InMemoryEventStore::default());
+    let writing = system_over(store.clone()).await;
     let id = AggregateId::new("e2e-replay-basic");
 
-    // Process 1: write 3 events
+    // Activation 1: write 3 events
     {
-        let proxy1 = spawn_counter(&system, id.clone(), store.clone()).await;
+        let proxy1 = spawn_counter(&writing, id.clone()).await;
         proxy1.ask(Increment).await.expect("ask 1");
         proxy1.ask(Increment).await.expect("ask 2");
         proxy1.ask(Increment).await.expect("ask 3");
     }
 
-    // When: spawn process 2 (triggers replay in on_start)
-    let proxy2 = spawn_counter(&system, id, store).await;
+    // When: a second system over the same store starts activation 2 (triggers
+    // replay in on_start)
+    let restarted = system_over(store).await;
+    let proxy2 = spawn_counter(&restarted, id).await;
     let count: u64 = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: state fully restored from replay
@@ -247,7 +260,7 @@ async fn e2e_replay_restores_state_after_process_restart() {
 
 /// Given a SlowEventStore that delays load() by 50 ms,
 /// and 2 events pre-written to the inner store,
-/// When a process is spawned (on_start enters slow replay) AND exec(GetCount) is called
+/// When an activation starts (on_start enters slow replay) AND exec(GetCount) is called
 /// immediately (before on_start finishes),
 /// Then the exec is buffered in the mpsc channel and processed after replay completes,
 /// returning count == 2.
@@ -258,23 +271,22 @@ async fn e2e_message_sent_during_slow_replay_is_processed_after() {
     let id = AggregateId::new("e2e-replay-buffer");
 
     {
-        let setup_system = ProcessSystem::new().await;
-        let store = Journal::from(inner.clone());
-        let proxy = spawn_counter(&setup_system, id.clone(), store).await;
+        let setup = system_over(Journal::from(inner.clone())).await;
+        let proxy = spawn_counter(&setup, id.clone()).await;
         proxy.ask(Increment).await.expect("setup ask 1");
         proxy.ask(Increment).await.expect("setup ask 2");
     }
 
-    // Wrap the inner store in a slow store (50 ms load delay)
-    let slow_store = Journal::from(SlowEventStore {
+    // The restart reads the same records through a store that delays every load
+    // by 50 ms, so on_start is still replaying when the exec below is sent
+    let slow = system_over(Journal::from(SlowEventStore {
         inner: inner.clone(),
         load_delay: Duration::from_millis(50),
-    });
+    }))
+    .await;
 
-    let system = ProcessSystem::new().await;
-
-    // When: spawn process (on_start begins the 50 ms slow replay)
-    let proxy = spawn_counter(&system, id, slow_store).await;
+    // When: the activation starts (on_start begins the 50 ms slow replay)
+    let proxy = spawn_counter(&slow, id).await;
 
     // exec is queued while on_start is still sleeping; runtime buffers it
     let count: u64 = proxy.exec(GetCount).await.expect("exec must succeed");
@@ -289,34 +301,31 @@ async fn e2e_message_sent_during_slow_replay_is_processed_after() {
 // Test 3: replay with snapshot restores state correctly
 
 /// Given a snapshot at sequence=3 (value=3) followed by 2 additional events (seq=4,5),
-/// When a new process is spawned for the same AggregateId,
+/// When a new activation starts for the same AggregateId,
 /// Then on_start loads the snapshot, applies the 2 delta events, and restores counter to 5.
 #[tokio::test]
 async fn e2e_replay_with_snapshot_restores_state() {
-    // Given: shared persistors
-    let system = ProcessSystem::new().await;
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(InMemoryEventStore::default())
-            .snapshot(InMemorySnapshotStore::default())
-            .build(),
-    );
-    let store = persistence.event_store();
-    let snapshot_ref = SnapshotPersistor::spawn(&system, &persistence).await;
+    // Given: a store holding a journal and snapshots, and a system over it
+    let store = CustomStore::builder()
+        .eventstore(InMemoryEventStore::default())
+        .snapshot(InMemorySnapshotStore::default())
+        .build();
+    let writing = system_over(store.clone()).await;
     let id = AggregateId::new("e2e-replay-snap");
 
-    // Write 5 events through process 1
+    // Write 5 events through activation 1
     {
-        let proxy1 =
-            spawn_snapshotable_counter(&system, id.clone(), store.clone(), snapshot_ref.clone())
-                .await;
+        let proxy1 = spawn_snapshotable_counter(&writing, id.clone()).await;
         for _ in 0..5 {
             proxy1.ask(Increment).await.expect("ask must succeed");
         }
     }
 
-    // Save a snapshot at sequence=3 (value=3)
-    snapshot_ref
+    // Save a snapshot at sequence=3 (value=3), through the persistor that
+    // system distributes
+    writing
+        .snapshot_persistor()
+        .await
         .save(PersistedSnapshot {
             aggregate_id: id.clone(),
             sequence: 3,
@@ -326,8 +335,10 @@ async fn e2e_replay_with_snapshot_restores_state() {
         .await
         .expect("save snapshot must succeed");
 
-    // When: spawn process 2 — replay: snapshot (seq=3) + delta events (seq=4, seq=5)
-    let proxy2 = spawn_snapshotable_counter(&system, id, store, snapshot_ref).await;
+    // When: a second system over the same store starts activation 2 — replay:
+    // snapshot (seq=3) + delta events (seq=4, seq=5)
+    let restarted = system_over(store).await;
+    let proxy2 = spawn_snapshotable_counter(&restarted, id).await;
     let count: u64 = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: snapshot (value=3) + 2 delta events = 5

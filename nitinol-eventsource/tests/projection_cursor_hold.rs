@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps, TxProvider,
 };
@@ -457,9 +458,16 @@ impl OffsetStore for MockOffsetStore {
 /// redelivered.
 #[tokio::test(flavor = "multi_thread")]
 async fn at_least_once_failing_event_blocks_the_next_event() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("alo-hold-agg");
     let projection_id = ProjectionId::new("alo-hold");
 
@@ -471,18 +479,10 @@ async fn at_least_once_failing_event_blocks_the_next_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: Some(1),
-            remaining_failures: Arc::clone(&failures_c),
-        }
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: Some(1),
+        remaining_failures: Arc::clone(&failures_c),
     })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
@@ -514,9 +514,16 @@ async fn at_least_once_failing_event_blocks_the_next_event() {
 /// before that success, and the offset must end at 2.
 #[tokio::test(flavor = "multi_thread")]
 async fn at_least_once_next_event_waits_for_the_retry_to_succeed() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("alo-retry-agg");
     let projection_id = ProjectionId::new("alo-retry");
 
@@ -528,18 +535,10 @@ async fn at_least_once_next_event_waits_for_the_retry_to_succeed() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: Some(1),
-            remaining_failures: Arc::clone(&failures_c),
-        }
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: Some(1),
+        remaining_failures: Arc::clone(&failures_c),
     })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
@@ -580,9 +579,16 @@ async fn at_least_once_next_event_waits_for_the_retry_to_succeed() {
 /// restarted over the same stores redelivers seq=1 rather than skipping it.
 #[tokio::test(flavor = "multi_thread")]
 async fn at_least_once_failed_event_survives_a_restart() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("alo-restart-agg");
     let projection_id = ProjectionId::new("alo-restart");
 
@@ -595,18 +601,10 @@ async fn at_least_once_failed_event_survives_a_restart() {
     let first_run = {
         let recorder_c = Arc::clone(&recorder);
         let failures_c = Arc::clone(&failures);
-        let persistence = PersistenceProvider::new(
-            CustomStore::builder()
-                .eventstore(event_store.clone())
-                .projection_offsets(offset_store.clone())
-                .build(),
-        );
-        ProjectorProps::new(projection_id.clone(), &persistence, move || {
-            RecordingProjector {
-                recorder: Arc::clone(&recorder_c),
-                fail_sequence: Some(1),
-                remaining_failures: Arc::clone(&failures_c),
-            }
+        ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
+            recorder: Arc::clone(&recorder_c),
+            fail_sequence: Some(1),
+            remaining_failures: Arc::clone(&failures_c),
         })
         .with_event::<Evt>()
         .delivery_mode(DeliveryMode::AtLeastOnce)
@@ -635,7 +633,7 @@ async fn at_least_once_failed_event_survives_a_restart() {
     let first_pid = first_run.pid();
     let _ = first_run.stop().await;
     assert!(
-        wait_for_deregister(&system, first_pid).await,
+        wait_for_deregister(system.process_system(), first_pid).await,
         "the first projector must deregister before the second one starts"
     );
 
@@ -645,18 +643,10 @@ async fn at_least_once_failed_event_survives_a_restart() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _second_run = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: Some(1),
-            remaining_failures: Arc::clone(&failures_c),
-        }
+    let _second_run = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: Some(1),
+        remaining_failures: Arc::clone(&failures_c),
     })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
@@ -682,9 +672,16 @@ async fn at_least_once_failed_event_survives_a_restart() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn exactly_once_tx_project_failure_blocks_the_next_event() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let (offset_store, saves) = MockOffsetStore::new(0);
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("eo-tx-project-agg");
     let projection_id = ProjectionId::new("eo-tx-project");
 
@@ -697,18 +694,10 @@ async fn exactly_once_tx_project_failure_blocks_the_next_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingTxProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: Some(1),
-            remaining_failures: Arc::clone(&failures_c),
-        }
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || RecordingTxProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: Some(1),
+        remaining_failures: Arc::clone(&failures_c),
     })
     .with_tx_provider(provider)
     .with_event::<Evt>()
@@ -755,9 +744,16 @@ async fn exactly_once_tx_project_failure_blocks_the_next_event() {
 /// event".
 #[tokio::test(flavor = "multi_thread")]
 async fn exactly_once_tx_begin_failure_blocks_the_next_event() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let (offset_store, _saves) = MockOffsetStore::new(0);
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("eo-tx-begin-agg");
     let projection_id = ProjectionId::new("eo-tx-begin");
 
@@ -768,18 +764,10 @@ async fn exactly_once_tx_begin_failure_blocks_the_next_event() {
     let (provider, counters) = CountingTxProvider::new(2, 0);
 
     let recorder_c = Arc::clone(&recorder);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingTxProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: None,
-            remaining_failures: budget(0),
-        }
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || RecordingTxProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: None,
+        remaining_failures: budget(0),
     })
     .with_tx_provider(provider)
     .with_event::<Evt>()
@@ -814,9 +802,16 @@ async fn exactly_once_tx_begin_failure_blocks_the_next_event() {
 /// transaction failed and the transaction was rolled back.
 #[tokio::test(flavor = "multi_thread")]
 async fn exactly_once_tx_offset_save_failure_blocks_the_next_event() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let (offset_store, _saves) = MockOffsetStore::new(2);
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("eo-tx-save-agg");
     let projection_id = ProjectionId::new("eo-tx-save");
 
@@ -827,18 +822,10 @@ async fn exactly_once_tx_offset_save_failure_blocks_the_next_event() {
     let (provider, counters) = CountingTxProvider::new(0, 0);
 
     let recorder_c = Arc::clone(&recorder);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingTxProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: None,
-            remaining_failures: budget(0),
-        }
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || RecordingTxProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: None,
+        remaining_failures: budget(0),
     })
     .with_tx_provider(provider)
     .with_event::<Evt>()
@@ -873,9 +860,16 @@ async fn exactly_once_tx_offset_save_failure_blocks_the_next_event() {
 /// committed": the cursor holds and seq=1 is redelivered.
 #[tokio::test(flavor = "multi_thread")]
 async fn exactly_once_tx_commit_failure_blocks_the_next_event() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let (offset_store, _saves) = MockOffsetStore::new(0);
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("eo-tx-commit-agg");
     let projection_id = ProjectionId::new("eo-tx-commit");
 
@@ -886,18 +880,10 @@ async fn exactly_once_tx_commit_failure_blocks_the_next_event() {
     let (provider, counters) = CountingTxProvider::new(0, PERMANENT);
 
     let recorder_c = Arc::clone(&recorder);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingTxProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: None,
-            remaining_failures: budget(0),
-        }
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || RecordingTxProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: None,
+        remaining_failures: budget(0),
     })
     .with_tx_provider(provider)
     .with_event::<Evt>()
@@ -936,9 +922,16 @@ async fn exactly_once_tx_commit_failure_blocks_the_next_event() {
 /// every delivery mode: seq=2 must still be applied after seq=1 fails.
 #[tokio::test(flavor = "multi_thread")]
 async fn at_most_once_failing_event_does_not_block_the_next_event() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("amo-keep-agg");
     let projection_id = ProjectionId::new("amo-keep");
 
@@ -950,18 +943,10 @@ async fn at_most_once_failing_event_does_not_block_the_next_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: Some(1),
-            remaining_failures: Arc::clone(&failures_c),
-        }
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: Some(1),
+        remaining_failures: Arc::clone(&failures_c),
     })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtMostOnce)
@@ -990,9 +975,16 @@ async fn at_most_once_failing_event_does_not_block_the_next_event() {
 /// though the framework still saves no offset in this mode.
 #[tokio::test(flavor = "multi_thread")]
 async fn exactly_once_without_tx_project_failure_blocks_the_next_event() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("eo-notx-agg");
     let projection_id = ProjectionId::new("eo-notx");
 
@@ -1004,18 +996,10 @@ async fn exactly_once_without_tx_project_failure_blocks_the_next_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: Some(1),
-            remaining_failures: Arc::clone(&failures_c),
-        }
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: Some(1),
+        remaining_failures: Arc::clone(&failures_c),
     })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::ExactlyOnce)
@@ -1048,9 +1032,16 @@ async fn exactly_once_without_tx_project_failure_blocks_the_next_event() {
 /// dead rather than paused.
 #[tokio::test(flavor = "multi_thread")]
 async fn projector_keeps_retrying_a_permanently_failing_event() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("supervision-agg");
     let projection_id = ProjectionId::new("supervision");
 
@@ -1061,18 +1052,10 @@ async fn projector_keeps_retrying_a_permanently_failing_event() {
 
     let recorder_c = Arc::clone(&recorder);
     let failures_c = Arc::clone(&failures);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: Some(1),
-            remaining_failures: Arc::clone(&failures_c),
-        }
+    let proxy = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: Some(1),
+        remaining_failures: Arc::clone(&failures_c),
     })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
@@ -1082,7 +1065,7 @@ async fn projector_keeps_retrying_a_permanently_failing_event() {
 
     let retried = wait_for(|| recorder.len() >= 3).await;
     let attempts = recorder.len();
-    let alive = system.lookup(proxy.pid()).await.is_some();
+    let alive = system.process_system().lookup(proxy.pid()).await.is_some();
 
     assert!(
         alive,
@@ -1100,9 +1083,16 @@ async fn projector_keeps_retrying_a_permanently_failing_event() {
 /// the events behind it must still be delivered.
 #[tokio::test(flavor = "multi_thread")]
 async fn unregistered_event_type_does_not_block_the_next_event() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("skip-agg");
     let projection_id = ProjectionId::new("skip");
 
@@ -1112,18 +1102,10 @@ async fn unregistered_event_type_does_not_block_the_next_event() {
     let recorder = Recorder::new();
 
     let recorder_c = Arc::clone(&recorder);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let _proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: None,
-            remaining_failures: budget(0),
-        }
+    let _proxy = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: None,
+        remaining_failures: budget(0),
     })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)
@@ -1150,9 +1132,16 @@ async fn unregistered_event_type_does_not_block_the_next_event() {
 /// move past a redelivery; reporting it as a failure would stall the stream.
 #[tokio::test(flavor = "multi_thread")]
 async fn already_processed_event_is_accepted_without_projecting() {
-    let system = ProcessSystem::new().await;
     let event_store = InMemoryEventStore::default();
     let offset_store = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("duplicate-agg");
     let projection_id = ProjectionId::new("duplicate");
 
@@ -1164,18 +1153,10 @@ async fn already_processed_event_is_accepted_without_projecting() {
     let recorder = Recorder::new();
 
     let recorder_c = Arc::clone(&recorder);
-    let persistence = PersistenceProvider::new(
-        CustomStore::builder()
-            .eventstore(event_store.clone())
-            .projection_offsets(offset_store.clone())
-            .build(),
-    );
-    let proxy = ProjectorProps::new(projection_id.clone(), &persistence, move || {
-        RecordingProjector {
-            recorder: Arc::clone(&recorder_c),
-            fail_sequence: None,
-            remaining_failures: budget(0),
-        }
+    let proxy = ProjectorProps::new(projection_id.clone(), move || RecordingProjector {
+        recorder: Arc::clone(&recorder_c),
+        fail_sequence: None,
+        remaining_failures: budget(0),
     })
     .with_event::<Evt>()
     .delivery_mode(DeliveryMode::AtLeastOnce)

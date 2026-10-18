@@ -21,16 +21,14 @@ use delivery::{
     wait_until_stored, DeliverySaga, Ledger, RecordingOffsetStore,
 };
 
-use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::AggregateId;
 use nitinol_saga::{partition_of, SagaId};
 
 #[tokio::test]
 async fn one_instance_is_delivered_in_persisted_order() {
     // Given
-    let (system, _aggregates) = in_memory_system().await;
-    let journal = InMemoryEventStore::default();
     let offsets = RecordingOffsetStore::new();
+    let (system, journal) = in_memory_system(&offsets).await;
     let saga_id = SagaId::new("instance-1");
     let target = AggregateId::new("ledger-order");
 
@@ -40,7 +38,7 @@ async fn one_instance_is_delivered_in_persisted_order() {
 
     // When: four partitions, so the instance occupies one of several.
     let partitions = 4usize;
-    let _host = spawn_host::<DeliverySaga, _>(&system, &journal, &offsets, partitions).await;
+    let _host = spawn_host::<DeliverySaga>(&system, partitions).await;
 
     // Then
     let ledger = system.aggregate_proxy::<Ledger>(target);

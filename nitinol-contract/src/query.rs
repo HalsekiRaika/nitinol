@@ -16,7 +16,7 @@ use crate::aggregate::Aggregate;
 ///
 /// ```rust
 /// use bytes::Bytes;
-/// use nitinol_contract::{Aggregate, Codec, Event, Query};
+/// use nitinol_contract::{Aggregate, Codec, Event, Never, Query};
 /// use nitinol_persistence::{EventType, Family, TypeName};
 ///
 /// #[derive(Clone)]
@@ -41,6 +41,7 @@ use crate::aggregate::Aggregate;
 ///
 /// impl Aggregate for Counter {
 ///     type Event = CounterEvent;
+///     type Recover = Never;
 ///
 ///     fn apply(&mut self, event: CounterEvent) {
 ///         match event {

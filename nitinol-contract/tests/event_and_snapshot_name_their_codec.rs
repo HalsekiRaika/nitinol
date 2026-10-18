@@ -25,7 +25,7 @@ use std::convert::Infallible;
 use std::fmt;
 
 use bytes::Bytes;
-use nitinol_contract::{Aggregate, Codec, Event, Snapshotable};
+use nitinol_contract::{Aggregate, Codec, Event, Latest, Snapshotable};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 // Fixture: an event and the codec it names.
@@ -92,6 +92,7 @@ struct Wallet {
 
 impl Aggregate for Wallet {
     type Event = Credited;
+    type Recover = Latest;
 
     fn apply(&mut self, event: Credited) {
         self.balance += event.amount;
@@ -125,7 +126,7 @@ impl Snapshotable for Wallet {
         self.balance
     }
 
-    fn restore(snapshot: u64) -> Self {
+    fn recover(snapshot: u64) -> Self {
         Self { balance: snapshot }
     }
 }
@@ -207,7 +208,7 @@ fn a_snapshot_round_trips_through_the_codec_it_names() {
     let decoded = <<Wallet as Snapshotable>::Codec as Codec<u64>>::decode(&payload)
         .expect("the snapshot must decode through the codec it names");
 
-    assert_eq!(Wallet::restore(decoded), Wallet { balance: 42 });
+    assert_eq!(Wallet::recover(decoded), Wallet { balance: 42 });
 }
 
 /// Given the event codec and the snapshot codec are named independently, When
