@@ -1,15 +1,15 @@
 //! What can go wrong inside the store, and what each failure means to a caller.
 //!
-//! Every fallible step of an append, a load or an offset save answers with
-//! the one error below, so a step reports what went wrong without also deciding
-//! what it amounts to. Reaching the contract's own errors happens here, in one
-//! place per error: a refusal the caller is expected to see is told apart from
-//! a fault in the store the same way wherever in an append the database raised
-//! it.
+//! Every fallible step of an append, a load, a snapshot save or an offset save
+//! answers with the one error below, so a step reports what went wrong without
+//! also deciding what it amounts to. Reaching the contract's own errors happens
+//! here, in one place per error: a refusal the caller is expected to see is told
+//! apart from a fault in the store the same way wherever in an append the
+//! database raised it.
 
 use std::num::TryFromIntError;
 
-use nitinol_persistence::error::{AppendError, LoadError, OffsetError};
+use nitinol_persistence::error::{AppendError, LoadError, OffsetError, SnapshotError};
 
 use super::load::UnknownEventType;
 use super::numbering::OutOfRange;
@@ -76,6 +76,15 @@ impl From<Failure> for AppendError {
 }
 
 impl From<Failure> for LoadError {
+    fn from(failure: Failure) -> Self {
+        Self::Backend(failure.into_cause())
+    }
+}
+
+/// A snapshot store has no refusal of its own to report: a save replaces
+/// whatever row the aggregate had, so every way a save or a load can fail is a
+/// fault in the store.
+impl From<Failure> for SnapshotError {
     fn from(failure: Failure) -> Self {
         Self::Backend(failure.into_cause())
     }

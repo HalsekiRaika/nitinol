@@ -1,11 +1,12 @@
 # nitinol-sqlx
 
-A Postgres `EventStore` and `OffsetStore` for `nitinol`, built on `sqlx`.
+A Postgres `EventStore`, `SnapshotStore` and `OffsetStore` for `nitinol`, built
+on `sqlx`.
 
 The crate carries its own schema as `sqlx` migrations and puts itself through
 `nitinol-store-conformance`, the executable form of the store contracts — the
-`EventStore` OCC clauses and the `OffsetStore` clauses, each against a
-schema of its own.
+`EventStore` OCC clauses, the `SnapshotStore` clauses and the `OffsetStore`
+clauses, each against a schema of its own.
 
 ## Using it
 
@@ -26,7 +27,8 @@ use nitinol::sqlx::{PostgresEventStore, PostgresStore};
 let pool = PgPoolOptions::new().connect(&std::env::var("DATABASE_URL")?).await?;
 PostgresEventStore::migrate(&pool).await?;
 
-// One store: the journal and both offset slots over this database.
+// One store: every slot — the journal, the snapshot store and both offset
+// slots — over this database.
 let persistence = PersistenceProvider::new(PostgresStore::new(pool)?);
 
 let system = EventSourceSystem::builder(ProcessSystem::new().await)
@@ -35,11 +37,13 @@ let system = EventSourceSystem::builder(ProcessSystem::new().await)
 ```
 
 The supplier is what every wiring point resolves its store from, so a
-deployment names the database once. There is no snapshot store in this crate,
-so `PostgresStore` does not implement that slot: wiring that needs one is
-refused while it is compiled rather than at the first save. A deployment that
-wants snapshots names each handle itself instead, which is what mixing backends
-has to look like:
+deployment names the database once. `PostgresStore` holds every slot, so an
+aggregate whose `Recover` is `Latest` — which requires the system it is spawned
+on to hold a snapshot slot — compiles against this store with no second backend
+beside it.
+
+Mixing backends is still a choice you have, and `CustomStore` is where a handle
+is named per slot:
 
 ```rust,ignore
 use nitinol::persistence::provider::CustomStore;
@@ -96,6 +100,27 @@ and each refuses the other's appends.
 No TLS feature of `sqlx` is enabled: the roots and backends those features reach
 for carry licences outside the set this workspace allows. Connecting to a
 managed Postgres that requires TLS is not supported by this crate as it stands.
+
+## Snapshotting
+
+`PostgresSnapshotStore` keeps one row per aggregate: a save replaces the
+snapshot before it, and `load_latest` answers with the save that came last.
+Nothing here is a record — the journal is — so a lost row costs a longer replay
+rather than a fact.
+
+**The save that came last wins, a lower position included.** A save at a
+position the stored snapshot has already reached, or behind it, replaces it
+rather than being refused or absorbed. The `SnapshotStore` contract leaves that
+clause to a backend, and this one answers it the way `InMemorySnapshotStore`
+does, so moving a deployment between the two does not change how its snapshots
+behave.
+
+**The table comes with the migration you already run.** `PostgresEventStore::migrate`
+applies the crate's whole schema, the snapshot table included.
+
+**The instant is yours.** `created_at` is stored as you handed it over, the way
+an event's `occurred_at` is: a load hands back when the snapshot was taken and
+not when its row was written.
 
 ## Projecting with `ExactlyOnce`
 

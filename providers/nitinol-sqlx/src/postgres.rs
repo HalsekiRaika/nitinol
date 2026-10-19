@@ -3,6 +3,7 @@ mod failure;
 mod load;
 mod numbering;
 mod offset;
+mod snapshot;
 mod store;
 mod timestamp;
 
@@ -18,10 +19,12 @@ use sqlx::PgPool;
 
 pub use self::load::UnknownEventType;
 pub use self::offset::{OffsetConflict, PostgresOffsetStore};
+pub use self::snapshot::PostgresSnapshotStore;
 pub use self::store::PostgresStore;
 
-/// This crate's schema — the journal and the offsets — carried in the binary
-/// so a deployment applies the version of it the code was built against.
+/// This crate's schema — the journal, the snapshots and the offsets — carried
+/// in the binary so a deployment applies the version of it the code was built
+/// against.
 static MIGRATOR: Migrator = sqlx::migrate!();
 
 /// A [`EventStore`] over a Postgres journal.
@@ -60,10 +63,10 @@ impl PostgresEventStore {
     /// Bring the database `pool` is connected to up to the schema this crate
     /// was built against.
     ///
-    /// That schema is the crate's rather than this store's: the table
-    /// [`PostgresOffsetStore`] keeps offsets in is created here too, so a
-    /// deployment running both has one migration step and not two that could
-    /// be applied apart.
+    /// That schema is the crate's rather than this store's: the tables
+    /// [`PostgresSnapshotStore`] and [`PostgresOffsetStore`] keep snapshots and
+    /// offsets in are created here too, so a deployment running them has one
+    /// migration step and not three that could be applied apart.
     pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
         MIGRATOR.run(pool).await
     }

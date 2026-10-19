@@ -17,14 +17,21 @@
 //!   Given a store whose offset slots are one Postgres table
 //!   When the slot-independence verification is run
 //!   Then neither slot answers for what the other holds
+//!
+//! Scenario: the store keeps every clause of the supplier contract whole
+//!   Given a Postgres this run has reached
+//!   And a store assembled from one pool over one schema
+//!   When the whole-supplier verification is run
+//!   Then every clause holds
 //! ```
 //!
-//! This store supplies the journal and both offset slots and **no snapshot
-//! store**, so it runs the slot entry points it has and owes the snapshot one
-//! nothing — the same division the store contracts already keep, where a
-//! backend implementing one trait runs that contract and no other. The
-//! whole-supplier entry point is therefore not run here; the in-memory
-//! reference store is what exercises it.
+//! This store supplies **every** slot — the journal, the snapshot store and
+//! both offset slots — so it runs each slot entry point and the whole-supplier
+//! entry point besides. The two are not the same evidence. A slot entry point
+//! reports a broken clause against the slot that broke it, which is what makes
+//! a failure readable; the whole-supplier entry point is what a deployment
+//! naming this store as its only store relies on, and running the slots one by
+//! one is not a claim about the assembly they were taken from.
 //!
 //! The clone clause is not a separate test: each slot entry point reads across
 //! a clone of the store handle as well as across a repeated take, so the
@@ -79,6 +86,22 @@ async fn the_postgres_stores_event_store_slot_conforms() {
     provider::verify_event_store(&backend, &TokioExecutor).await;
 }
 
+/// The snapshot slot: taken twice from one store, and across its clone, it is
+/// one album — and the snapshot contract holds against the handle it answers
+/// with.
+///
+/// No executor: the snapshot contract has no clause that needs a writer and a
+/// reader at once, and a slot entry point inherits that shape rather than
+/// asking for a runtime it has nothing to spawn on.
+#[tokio::test]
+async fn the_postgres_stores_snapshot_slot_conforms() {
+    let Some(backend) = harness::postgres_backend().await else {
+        return;
+    };
+
+    provider::verify_snapshot_store(&backend).await;
+}
+
 /// The projection-offset slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_postgres_stores_projection_offset_slot_conforms() {
@@ -107,4 +130,15 @@ async fn the_postgres_stores_offset_slots_are_independent() {
     };
 
     provider::verify_offset_independence(&backend).await;
+}
+
+/// Every clause of the supplier contract, against the store whole: the entry
+/// point a backend supplying every slot runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_postgres_store_conforms_to_every_provider_clause() {
+    let Some(backend) = harness::postgres_backend().await else {
+        return;
+    };
+
+    provider::verify(&backend, &TokioExecutor).await;
 }

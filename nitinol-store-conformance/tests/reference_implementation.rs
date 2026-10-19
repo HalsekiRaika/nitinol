@@ -120,10 +120,11 @@ async fn the_offset_concurrency_clause_runs_on_its_own() {
 /// Every `PRV` clause must hold for the reference provider, slot by slot and
 /// then for the provider whole.
 ///
-/// The whole-provider entry is the one a backend supplying every slot runs, and
-/// the reference provider is the only implementation in the repository that
-/// does: the Postgres provider supplies no snapshot store, so its own
-/// conformance test runs the slot entries it has and none it has not.
+/// The whole-provider entry is the one a backend supplying every slot runs. The
+/// Postgres provider supplies every slot too and runs it in its own conformance
+/// test, so what this one is evidence about is the reference provider itself:
+/// the implementation the suite's own clauses are written against, and the one a
+/// backend's author reads to see what an assembly is expected to answer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_in_memory_provider_conforms_to_every_provider_clause() {
     provider::verify(&ReferenceProvider, &TokioExecutor).await;

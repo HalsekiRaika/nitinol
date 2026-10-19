@@ -12,7 +12,7 @@
 //! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
 //! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
 //! | `full`         | All of the above |
-//! | `postgres`     | `sqlx` — Postgres backend (`PostgresEventStore`, `PostgresOffsetStore`) |
+//! | `postgres`     | `sqlx` — Postgres backend (`PostgresEventStore`, `PostgresSnapshotStore`, `PostgresOffsetStore`) |
 //!
 //! # Example
 //!

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-sqlx`): `PostgresSnapshotStore`, a `SnapshotStore` over a Postgres
+  table, and the migration `0004_create_snapshot.sql` that creates it. The
+  table is part of the crate's schema, so `PostgresEventStore::migrate` applies
+  it with everything else and there is no second migration step to forget.
+
+  One aggregate is one row, keyed by the aggregate alone: a save replaces the
+  snapshot before it rather than accumulating beside it, so `load_latest`
+  answers with the save that came last. That holds for a save at a position the
+  stored snapshot has already reached, or behind it — the `SnapshotStore`
+  contract leaves that clause to a backend, and this one answers it the way
+  `InMemorySnapshotStore` does, so moving a deployment between the two does not
+  change how its snapshots behave. `created_at` is stored as the caller handed
+  it over, the way an event's `occurred_at` is.
+
+- (`nitinol-sqlx`): `PostgresStore` implements `SnapshotSlot`, so it is now this
+  backend as **every** slot — the journal, the snapshot store and both offset
+  slots — over one database.
+
+  An aggregate whose `Recover` is `Latest` requires the system it is spawned on
+  to hold a snapshot slot, so such an aggregate now compiles on an
+  `EventSourceSystem<PostgresStore>` with no second backend beside it. A
+  deployment on Postgres that previously had to name each handle in a
+  `CustomStore` to have snapshots at all can name one store; mixing backends
+  stays possible and is now a choice rather than the only way.
+
 - (`nitinol-saga`): `SagaDeliveryProxy<S>: Clone` and `SagaHostProxy<S>: Clone`,
   so both halves of the handle a hosted declaration answers with are shared by
   cloning rather than by being wrapped.

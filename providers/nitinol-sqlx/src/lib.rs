@@ -1,7 +1,8 @@
-//! A Postgres [`EventStore`] and [`OffsetStore`] for `nitinol`, built on
-//! `sqlx`.
+//! A Postgres [`EventStore`], [`SnapshotStore`] and [`OffsetStore`] for
+//! `nitinol`, built on `sqlx`.
 //!
 //! [`EventStore`]: nitinol_persistence::store::EventStore
+//! [`SnapshotStore`]: nitinol_persistence::store::SnapshotStore
 //! [`OffsetStore`]: nitinol_persistence::store::OffsetStore
 //!
 //! # Getting one running
@@ -14,8 +15,8 @@
 //! let pool = PgPoolOptions::new().connect(url).await?;
 //! PostgresEventStore::migrate(&pool).await?;
 //!
-//! // [`PostgresStore`] is this backend as one store: the journal and both
-//! // offset slots over one database, and no snapshot slot.
+//! // [`PostgresStore`] is this backend as one store: every slot — the
+//! // journal, the snapshot store and both offset slots — over one database.
 //! let persistence = PersistenceProvider::new(PostgresStore::new(pool)?);
 //! # Ok(())
 //! # }
@@ -30,6 +31,16 @@
 //! and how it authenticates — stays a decision this crate does not make. `sqlx`
 //! is re-exported so that pool is built against the same version this crate
 //! links.
+//!
+//! # Snapshotting
+//!
+//! [`PostgresSnapshotStore`] keeps one row per aggregate, so a save replaces
+//! the snapshot before it and `load_latest` answers with whichever save came
+//! last — a save at a position the stored snapshot has already reached, or
+//! behind it, included. The snapshot contract leaves that clause to a backend
+//! and this one answers it the way the in-memory store does, so a deployment
+//! moving between the two finds its snapshots behaving the same way for it.
+//! `PostgresEventStore::migrate` creates the table it uses.
 //!
 //! # Projecting with `ExactlyOnce`
 //!
@@ -120,7 +131,8 @@ mod postgres;
 
 #[cfg(feature = "postgres")]
 pub use self::postgres::{
-    OffsetConflict, PostgresEventStore, PostgresOffsetStore, PostgresStore, UnknownEventType,
+    OffsetConflict, PostgresEventStore, PostgresOffsetStore, PostgresSnapshotStore, PostgresStore,
+    UnknownEventType,
 };
 
 /// The `sqlx` this crate links, so a caller builds the pool it is handed
