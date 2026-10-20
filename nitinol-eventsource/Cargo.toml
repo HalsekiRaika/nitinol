@@ -7,6 +7,13 @@ authors.workspace = true
 repository.workspace = true
 description = "Event sourcing runtime for nitinol: interprets the aggregate contract"
 
+# The library is a benchmark target too, and libtest's harness is what runs it,
+# so a plain `cargo bench -p nitinol-eventsource -- --save-baseline <name>` hands
+# criterion's arguments to libtest, which rejects them outright. Nothing in the
+# library is a benchmark, so switching its target off leaves `--` to criterion.
+[lib]
+bench = false
+
 [features]
 test-helpers = []
 
@@ -30,3 +37,8 @@ serde_json = "1"
 # The conformance suite runs as part of this crate's ordinary test run: a law
 # that only holds under an opt-in configuration is not a law this crate keeps.
 nitinol-conformance = { path = "../nitinol-conformance" }
+criterion = { workspace = true }
+
+[[bench]]
+name = "event_source_system"
+harness = false

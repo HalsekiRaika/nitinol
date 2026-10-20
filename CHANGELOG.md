@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (workspace): criterion benchmarks for the single-node paths, and
+  `BENCHMARKS.md` beside them. `nitinol-persistence/benches` measures
+  `InMemoryEventStore::append` (one record, and a batch of a hundred) and
+  `load` by stream and from the global order over streams of 1, 100 and 1000;
+  `nitinol-eventsource/benches` measures bringing an aggregate back by replay
+  and from a snapshot at the same three lengths, and a projection catching up
+  with a stream written before it existed; `nitinol-saga/benches` measures one
+  trip from a placed order through a saga's decision to the reservation a
+  delivery host carries to an inventory, with both poll intervals named;
+  `providers/nitinol-sqlx/benches` measures `PostgresEventStore::append` and an
+  offset save inside the caller's transaction.
+
+  Run with `cargo bench -p <crate>`. The provider's benchmarks need a
+  `DATABASE_URL`: with none they say so on stderr and exit successfully,
+  having registered no benchmark — a database started per run measures that
+  database's cold caches rather than this backend.
+
+  No library gained a dependency: criterion is a dev-dependency, defined once
+  in the workspace's `[workspace.dependencies]` with `plotters` and `rayon`
+  left out, so there are no HTML reports and the licence closure stays inside
+  the set `deny.toml` allows. `BENCHMARKS.md` carries what each benchmark
+  times, how to save and compare a baseline, the first measurements taken and
+  the machine they were taken on, and how to reach a flame graph or
+  tokio-console from here.
+
 - (`nitinol-sqlx`): `PostgresSnapshotStore`, a `SnapshotStore` over a Postgres
   table, and the migration `0004_create_snapshot.sql` that creates it. The
   table is part of the crate's schema, so `PostgresEventStore::migrate` applies

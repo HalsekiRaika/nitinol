@@ -2,6 +2,9 @@
 
 An Event Sourcing toolkit for Rust.
 
+The benchmarks, how to run them, and the measurements taken so far are in
+[BENCHMARKS.md](BENCHMARKS.md).
+
 ## Code style: calling free functions
 
 A free function defined in another module is called through that module, not

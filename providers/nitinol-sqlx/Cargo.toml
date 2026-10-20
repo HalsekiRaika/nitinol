@@ -7,6 +7,13 @@ authors.workspace = true
 repository.workspace = true
 description = "sqlx-backed EventStore provider for nitinol"
 
+# The library is a benchmark target too, and libtest's harness is what runs it,
+# so a plain `cargo bench -p nitinol-sqlx -- --save-baseline <name>` hands
+# criterion's arguments to libtest, which rejects them outright. Nothing in the
+# library is a benchmark, so switching its target off leaves `--` to criterion.
+[lib]
+bench = false
+
 [features]
 # Enabled by default so that a plain `cargo clippy --workspace --all-targets`
 # and `cargo test --workspace --all-targets` compile the backend rather than an
@@ -61,3 +68,9 @@ testcontainers = "=0.27.3"
 testcontainers-modules = { version = "=0.15.0", default-features = false, features = [
   "postgres",
 ] }
+
+criterion = { workspace = true }
+
+[[bench]]
+name = "postgres"
+harness = false

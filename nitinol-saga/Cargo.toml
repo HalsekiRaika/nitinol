@@ -7,6 +7,13 @@ authors.workspace = true
 repository.workspace = true
 description = "Event-sourced process manager (Saga) for nitinol"
 
+# The library is a benchmark target too, and libtest's harness is what runs it,
+# so a plain `cargo bench -p nitinol-saga -- --save-baseline <name>` hands
+# criterion's arguments to libtest, which rejects them outright. Nothing in the
+# library is a benchmark, so switching its target off leaves `--` to criterion.
+[lib]
+bench = false
+
 [dependencies]
 async-trait = "0.1"
 bytes = "1"
@@ -47,3 +54,8 @@ nitinol-eventsource = { path = "../nitinol-eventsource", features = ["test-helpe
 # `nitinol-macros` already has, and Cargo permits it: a dev-dependency is not
 # part of the library's own build.
 nitinol = { path = "..", features = ["saga"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "saga_round_trip"
+harness = false
