@@ -16,13 +16,13 @@ provider_routing:
           effort: medium
     project-consistency-gpt-worker:
       provider: codex
-      model: gpt-5.6-terra
+      model: gpt-6-terra
       provider_options:
         codex:
           reasoning_effort: medium
     project-consistency-gpt-structured:
       provider: codex
-      model: gpt-5.6-luna
+      model: gpt-6-luna
       provider_options:
         codex:
           reasoning_effort: medium
@@ -112,7 +112,7 @@ provider_routing:
             - WebFetch
     route-codex-gpt55:
       provider: codex
-      model: gpt-5.6-sol
+      model: gpt-6.1-sol
     route-claude-repair-high:
       provider_options:
         claude:
