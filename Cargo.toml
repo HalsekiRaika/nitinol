@@ -31,6 +31,16 @@ repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
 [workspace.dependencies]
+# Defined once here so every crate's benchmarks are built with one version and
+# one feature set. `default-features = false` drops `plotters` and `rayon`: the
+# measurements are read from the terminal and compared with `--save-baseline`,
+# and the licence closure stays inside the set `deny.toml` allows.
+# `cargo_bench_support` is what lets `cargo bench` run these at all, and
+# `async_tokio` is what lets a benchmark await the framework's own entry points.
+criterion = { version = "0.7", default-features = false, features = [
+  "async_tokio",
+  "cargo_bench_support",
+] }
 
 [package]
 name = "nitinol"

@@ -7,6 +7,13 @@ authors.workspace = true
 repository.workspace = true
 description = "Persistence abstractions for nitinol event sourcing"
 
+# The library is a benchmark target too, and libtest's harness is what runs it,
+# so a plain `cargo bench -p nitinol-persistence -- --save-baseline <name>` hands
+# criterion's arguments to libtest, which rejects them outright. Nothing in the
+# library is a benchmark, so switching its target off leaves `--` to criterion.
+[lib]
+bench = false
+
 [dependencies]
 bytes = "1"
 jiff = "0.2"
@@ -21,3 +28,8 @@ linkme = "0.3"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 futures-util = "0.3"
+criterion = { workspace = true }
+
+[[bench]]
+name = "in_memory_event_store"
+harness = false
