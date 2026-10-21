@@ -2,20 +2,20 @@
 //
 // Tests verify the full request lifecycle: spawn → ask/tell/exec → persistence → state.
 //
-// AggregateProps holds Arc<dyn EventStore> directly: the
-// EventPersistor actor was removed and the process now calls store.append /
-// store.load inline.
-
-use std::sync::Arc;
+// The activation holds the Journal the system it was spawned on distributes:
+// the EventPersistor process was removed and the process now calls store.append
+// / store.load inline.
 
 use bytes::Bytes;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
-    Query, TellError,
+    Never, Query, TellError,
 };
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName, Variant};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // Fixtures: event
@@ -26,6 +26,8 @@ struct Incremented;
 
 impl Event for Incremented {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
+
+    type Codec = TestCodec;
 }
 
 // Fixtures: aggregate
@@ -37,6 +39,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -118,46 +121,54 @@ impl Codec<Incremented> for TestCodec {
     }
 }
 
-// Helper: spawn a Counter process holding a fresh Arc<dyn EventStore>
+// Helper: spawn a Counter process on a system over a fresh Journal
 
-/// Creates a ProcessSystem and spawns a Counter AggregateProcess holding an
-/// `Arc<dyn EventStore>` directly.
+/// A system over `store`, on a process system of its own.
+///
+/// A second activation of one aggregate is a second system over the same
+/// journal: one system resolves an identity to one activation, so asking the
+/// same system again would reach the resident state rather than replay the
+/// stream.
+async fn system_over(store: Journal) -> EventSourceSystem<Journal> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store))
+        .build()
+}
+
+/// Spawns a Counter AggregateProcess on a system over a fresh `Journal`.
 ///
 /// Returns (system, proxy).  Caller must keep `_system` alive.
-async fn spawn_counter(aggregate_id: AggregateId) -> (ProcessSystem, AggregateProxy<Counter>) {
-    let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let proxy = AggregateProps::<Counter>::new(aggregate_id, store)
-        .with_codec(Arc::new(TestCodec))
+async fn spawn_counter(
+    aggregate_id: AggregateId,
+) -> (EventSourceSystem<Journal>, AggregateProxy<Counter>) {
+    let system = system_over(Journal::from(InMemoryEventStore::default())).await;
+    let proxy = AggregateProps::<Counter>::new(aggregate_id)
         .spawn(&system)
         .await;
     (system, proxy)
 }
 
-// ask<Increment>: events are persisted and replayable via shared Arc<dyn EventStore>
+// ask<Increment>: events are persisted and replayable via shared Journal
 
 /// After ask(Increment) on process 1, a second process sharing the same
-/// `Arc<dyn EventStore>` replays the stored event and restores the count to 1.
+/// `Journal` replays the stored event and restores the count to 1.
 #[tokio::test]
 async fn ask_persists_events_to_event_store() {
     // Given
-    let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
+    let writing = system_over(store.clone()).await;
     let id = AggregateId::new("agg-ask-persist");
 
-    let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-        .with_codec(Arc::new(TestCodec))
-        .spawn(&system)
+    let proxy = AggregateProps::<Counter>::new(id.clone())
+        .spawn(&writing)
         .await;
 
     // When
     proxy.ask(Increment).await.expect("ask must succeed");
 
-    // Then: a fresh process for the same aggregate_id replays through the same Arc<dyn EventStore>.
-    let proxy2 = AggregateProps::<Counter>::new(id, store)
-        .with_codec(Arc::new(TestCodec))
-        .spawn(&system)
-        .await;
+    // Then: a fresh process for the same aggregate_id replays through the same Journal.
+    let restarted = system_over(store).await;
+    let proxy2 = AggregateProps::<Counter>::new(id).spawn(&restarted).await;
 
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
     assert_eq!(
@@ -306,23 +317,19 @@ async fn interleaved_ask_and_exec_maintain_consistent_state() {
     assert_eq!(after_second, 3, "count must be 3 after IncrementBy(2)");
 }
 
-// Regression: aggregate persist path stores enum event's variant() in LoadedEvent
+// The identity the aggregate persist path writes into the column
 
-/// An enum event with arm-specific `variant()` override.
+/// An enum event: one declaration, whichever arm a value holds.
 #[derive(Clone, PartialEq, Debug)]
 enum CounterOp {
     Incremented,
+    Decremented,
 }
 
 impl Event for CounterOp {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("CounterOp"));
 
-    fn variant(&self) -> EventType {
-        let v = match self {
-            CounterOp::Incremented => Variant::new("Incremented"),
-        };
-        EventType::with_variant(Family::new(""), TypeName::new("CounterOp"), v)
-    }
+    type Codec = CounterOpCodec;
 }
 
 #[derive(Default)]
@@ -332,22 +339,24 @@ struct CounterEnum {
 
 impl Aggregate for CounterEnum {
     type Event = CounterOp;
+    type Recover = Never;
 
     fn apply(&mut self, event: CounterOp) {
         match event {
             CounterOp::Incremented => self.value += 1,
+            CounterOp::Decremented => self.value -= 1,
         }
     }
 }
 
-struct IncOp;
+struct SwingOp;
 
-impl Decider<IncOp> for CounterEnum {
+impl Decider<SwingOp> for CounterEnum {
     type Output = ();
     type Rejection = std::convert::Infallible;
 
-    fn decide(&self, _cmd: IncOp) -> Decision<CounterOp, (), Self::Rejection> {
-        Decision::persist(vec![CounterOp::Incremented]).output(())
+    fn decide(&self, _cmd: SwingOp) -> Decision<CounterOp, (), Self::Rejection> {
+        Decision::persist(vec![CounterOp::Incremented, CounterOp::Decremented]).output(())
     }
 }
 
@@ -365,32 +374,32 @@ impl Codec<CounterOp> for CounterOpCodec {
     }
 }
 
-/// Regression test: the aggregate persist path must store the arm-specific
-/// `variant()` of an enum event in `LoadedEvent.event_type`, not the
-/// type-level `EVENT_TYPE` (which always has `variant: None`).
+/// Given an aggregate whose event type is an enum, When two different arms are
+/// persisted in one acceptance, Then both rows carry the event type the
+/// declaration states.
 ///
-/// Failure mode without the fix: `event_type: A::Event::EVENT_TYPE` ignores
-/// the `variant()` override, so the stored event_type has `variant=None` even
-/// for enum events.
+/// The column names the declaration, and the declaration names the codec that
+/// reads the payload back; which arm a row holds is the payload's to say. A
+/// persist path that derived a per-value identity instead would write a path no
+/// declaration answers for, and the rows would fail their load.
 #[tokio::test]
-async fn aggregate_persist_stores_enum_event_variant_in_loaded_event() {
+async fn aggregate_persist_stores_the_declared_event_type_for_every_arm() {
     use futures_util::TryStreamExt;
     use nitinol_persistence::LoadQuery;
 
     // Given
-    let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let id = AggregateId::new("agg-enum-variant-persist");
+    let store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(store.clone()).await;
+    let id = AggregateId::new("agg-enum-identity-persist");
 
-    let proxy = AggregateProps::<CounterEnum>::new(id.clone(), Arc::clone(&store))
-        .with_codec(Arc::new(CounterOpCodec))
+    let proxy = AggregateProps::<CounterEnum>::new(id.clone())
         .spawn(&system)
         .await;
 
-    // When: persist an enum event via AggregateProcess
-    proxy.ask(IncOp).await.expect("ask(IncOp) must succeed");
+    // When: persist two different arms of the enum in one acceptance
+    proxy.ask(SwingOp).await.expect("ask(SwingOp) must succeed");
 
-    // Then: the stored LoadedEvent carries the arm-specific variant=Some("Incremented")
+    // Then
     let events: Vec<_> = store
         .load(LoadQuery::by_stream(id.as_str()))
         .await
@@ -399,16 +408,12 @@ async fn aggregate_persist_stores_enum_event_variant_in_loaded_event() {
         .await
         .expect("stream collect must succeed");
 
-    assert_eq!(events.len(), 1, "exactly one event must be stored");
-    assert_eq!(
-        events[0].event_type.variant(),
-        Some(Variant::new("Incremented")),
-        "aggregate persist must store enum event's arm variant (Some), not None; \
-         regression for aggregate_process.rs using event.variant() instead of EVENT_TYPE"
-    );
-    assert_eq!(
-        events[0].event_type.type_key(),
-        CounterOp::EVENT_TYPE.type_key(),
-        "type_key must match EVENT_TYPE so routing dispatch still works"
-    );
+    assert_eq!(events.len(), 2, "exactly two events must be stored");
+    for event in &events {
+        assert_eq!(
+            event.event_type,
+            CounterOp::EVENT_TYPE,
+            "a row of a declared event carries that declaration's canonical path"
+        );
+    }
 }

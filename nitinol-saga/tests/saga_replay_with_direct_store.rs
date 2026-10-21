@@ -11,13 +11,14 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, Decider, Decision, Event, SequenceCursor,
-};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event, Never};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct OrderPlaced {
@@ -27,6 +28,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("e2e.direct"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Default)]
@@ -34,6 +36,7 @@ struct Order;
 
 impl Aggregate for Order {
     type Event = OrderPlaced;
+    type Recover = Never;
     fn apply(&mut self, _event: OrderPlaced) {}
 }
 
@@ -60,11 +63,19 @@ impl Event for ReservationRequested {
         Family::new("e2e.direct"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`RecordingSaga`]: every `OrderPlaced` belongs to the
-/// one recording instance each test in this file spawns against its own store.
+/// one recording instance the host in each test derives from it, kept on the
+/// very store the aggregates in this file are journalled to.
 const RECORDING_SAGA_ID: &str = "direct-store-saga-1";
+
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
 
 struct RecordingSaga {
     captured: Arc<Mutex<Vec<SagaId>>>,
@@ -73,22 +84,20 @@ struct RecordingSaga {
 
 #[async_trait]
 impl Saga for RecordingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RECORDING_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.captured
             .lock()
             .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
@@ -100,7 +109,7 @@ impl Saga for RecordingSaga {
     }
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -110,8 +119,22 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-async fn wait_for_saga_event_count(
-    store: &Arc<dyn EventStore>,
+/// The saga's own decisions, told apart from the framework bookkeeping that
+/// shares their stream — the consumed-position record that rides the append
+/// closing an input out, which for this file's single-`Persist` saga is the
+/// same append its decision is in.
+fn decisions(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
+    events
+        .iter()
+        .filter(|e| e.event_type == ReservationRequested::EVENT_TYPE)
+        .collect()
+}
+
+/// Wait for `expected` *decisions*, not for `expected` rows: a decision no
+/// longer occupies its stream alone, so counting rows would return while the
+/// saga still owes a decision.
+async fn wait_for_decisions(
+    store: &Journal,
     saga_id: &SagaId,
     expected: usize,
     timeout: Duration,
@@ -119,29 +142,27 @@ async fn wait_for_saga_event_count(
     tokio::time::timeout(timeout, async {
         loop {
             let events = load_saga_events(store, saga_id).await;
-            if events.len() >= expected {
+            if decisions(&events).len() >= expected {
                 return events;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {expected} saga events"))
+    .unwrap_or_else(|_| panic!("timed out waiting for {expected} saga decisions"))
 }
 
 #[tokio::test]
-async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
+async fn aggregate_and_saga_share_one_journal() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
 
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("direct-order");
-    let order_proxy = system
-        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&store))
-        .await;
+    let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<SagaId>>> = Arc::new(Mutex::new(Vec::new()));
@@ -150,24 +171,13 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     let captured_for_producer = Arc::clone(&captured);
     let done_for_producer = Arc::clone(&done);
 
-    let _saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
-            RecordingSaga {
-                captured: Arc::clone(&captured_for_producer),
-                done: Arc::clone(&done_for_producer),
-            }
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy = SagaManagerProps::<RecordingSaga>::new(move |_components| RecordingSaga {
+        captured: Arc::clone(&captured_for_producer),
+        done: Arc::clone(&done_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     order_proxy
         .ask(PlaceOrder {
@@ -183,16 +193,16 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let saga_events = load_saga_events(&store, &saga_id).await;
+    let persisted = decisions(&saga_events);
 
     assert_eq!(
-        saga_events.len(),
+        persisted.len(),
         1,
         "saga must persist exactly one ReservationRequested event"
     );
-    assert_eq!(saga_events[0].sequence, 1);
-    assert_eq!(saga_events[0].event_type, ReservationRequested::EVENT_TYPE);
+    assert_eq!(persisted[0].sequence, 1);
     assert_eq!(
-        saga_events[0].stream_key,
+        persisted[0].stream_key,
         saga_id.as_str(),
         "saga event must be keyed by saga_id (Borrow<str>) — not by an aggregate id"
     );
@@ -217,23 +227,21 @@ async fn aggregate_and_saga_share_one_arc_dyn_event_store() {
     assert_eq!(captured[0].as_str(), RECORDING_SAGA_ID);
 }
 
-/// Regression test: dropping all `SagaProxy` handles must NOT stop the
-/// upstream `DurableStream` subscription.  The subscription lifetime is owned by `SagaProcess` itself,
-/// so the process continues receiving and persisting events after every handle
-/// has been released.
+/// Regression test: dropping all `SagaManagerProxy` handles must NOT stop the
+/// upstream `DurableStream` subscription.  The subscription lifetime is owned
+/// by the host process itself, so it continues receiving, routing and
+/// persisting events after every handle has been released.
 #[tokio::test]
 async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .build();
 
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let system = EventSourceSystem::builder(ps)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+        .build();
+    let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("drop-proxy-order");
-    let order_proxy = system
-        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&store))
-        .await;
+    let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<SagaId>>> = Arc::new(Mutex::new(Vec::new()));
@@ -242,24 +250,13 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
     let captured_for_producer = Arc::clone(&captured);
     let done_for_producer = Arc::clone(&done);
 
-    let saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
-            RecordingSaga {
-                captured: Arc::clone(&captured_for_producer),
-                done: Arc::clone(&done_for_producer),
-            }
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let saga_proxy = SagaManagerProps::<RecordingSaga>::new(move |_components| RecordingSaga {
+        captured: Arc::clone(&captured_for_producer),
+        done: Arc::clone(&done_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     order_proxy
         .ask(PlaceOrder {
@@ -267,7 +264,7 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
         })
         .await
         .expect("ask(PlaceOrder) must succeed");
-    wait_for_saga_event_count(&store, &saga_id, 1, Duration::from_secs(3)).await;
+    wait_for_decisions(&store, &saga_id, 1, Duration::from_secs(3)).await;
 
     drop(saga_proxy);
 
@@ -278,30 +275,32 @@ async fn saga_proxy_drop_does_not_stop_upstream_subscription() {
         .await
         .expect("ask(PlaceOrder) must succeed");
 
-    let saga_events = wait_for_saga_event_count(&store, &saga_id, 2, Duration::from_secs(3)).await;
+    let saga_events = wait_for_decisions(&store, &saga_id, 2, Duration::from_secs(3)).await;
+    let persisted = decisions(&saga_events);
 
     assert_eq!(
-        saga_events.len(),
+        persisted.len(),
         2,
-        "SagaProxy drop must not stop the upstream subscription; \
-         SagaProcess must continue persisting events after the handle is released"
+        "a `SagaManagerProxy` drop must not stop the upstream subscription; the \
+         host must continue persisting its instance's decisions after the \
+         handle is released"
     );
-    assert_eq!(saga_events[0].sequence, 1);
-    assert_eq!(saga_events[1].sequence, 2);
+    // Each decision is committed with the position of the input it was decided
+    // from, so the second one starts a sequence past its predecessor's pair.
+    assert_eq!(persisted[0].sequence, 1);
+    assert_eq!(persisted[1].sequence, 3);
 }
 
 #[tokio::test]
 async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = system.persistence().event_store();
 
     let order_id = AggregateId::new("replay-order");
-    let order_proxy = system
-        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&store))
-        .await;
+    let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
     let saga_id = SagaId::new(RECORDING_SAGA_ID);
     let captured: Arc<Mutex<Vec<SagaId>>> = Arc::new(Mutex::new(Vec::new()));
@@ -310,24 +309,13 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
     let captured_first = Arc::clone(&captured);
     let done_first = Arc::clone(&done);
 
-    let saga_proxy =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
-            RecordingSaga {
-                captured: Arc::clone(&captured_first),
-                done: Arc::clone(&done_first),
-            }
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let saga_proxy = SagaManagerProps::<RecordingSaga>::new(move |_components| RecordingSaga {
+        captured: Arc::clone(&captured_first),
+        done: Arc::clone(&done_first),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     order_proxy
         .ask(PlaceOrder {
@@ -335,36 +323,30 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
         })
         .await
         .expect("ask must succeed");
-    wait_for_saga_event_count(&store, &saga_id, 1, Duration::from_secs(3)).await;
+    wait_for_decisions(&store, &saga_id, 1, Duration::from_secs(3)).await;
 
-    // Explicitly stop the saga process so the upstream DurableStream poller is
-    // also torn down.  Dropping the proxy handle alone is not sufficient —
-    // the process is owned by the runtime, not by the handle.
-    saga_proxy.stop().await.expect("stop must succeed");
+    // Explicitly stop the host so the upstream DurableStream poller and the
+    // instance behind it are both torn down.  Dropping the proxy handle alone
+    // is not sufficient — the process is owned by the runtime, not by the
+    // handle.
+    saga_proxy
+        .manager()
+        .stop()
+        .await
+        .expect("stop must succeed");
     drop(saga_proxy);
 
     let done2 = Arc::new(Notify::new());
     let captured2 = Arc::clone(&captured);
     let done2_for_producer = Arc::clone(&done2);
 
-    let _saga_proxy2 =
-        SagaProps::<RecordingSaga>::new(saga_id.clone(), Arc::clone(&store), move || {
-            RecordingSaga {
-                captured: Arc::clone(&captured2),
-                done: Arc::clone(&done2_for_producer),
-            }
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _saga_proxy2 = SagaManagerProps::<RecordingSaga>::new(move |_components| RecordingSaga {
+        captured: Arc::clone(&captured2),
+        done: Arc::clone(&done2_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     order_proxy
         .ask(PlaceOrder {
@@ -373,19 +355,38 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
         .await
         .expect("ask must succeed");
 
-    let saga_events = wait_for_saga_event_count(&store, &saga_id, 3, Duration::from_secs(3)).await;
+    let saga_events = wait_for_decisions(&store, &saga_id, 2, Duration::from_secs(3)).await;
 
+    let seen = captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+        .len();
     assert_eq!(
-        saga_events.len(),
-        3,
-        "saga stream must contain three events after respawn (1 pre-drop, \
-         2 post-respawn from at-least-once catchup + new live event)"
+        seen, 2,
+        "one handle call per upstream order: the catchup the respawn performs \
+         re-reads the order the first incarnation already decided from, and the \
+         position replay restored is what keeps it from reaching handle a \
+         second time"
     );
-    assert_eq!(saga_events[0].sequence, 1);
-    assert_eq!(saga_events[1].sequence, 2);
+
+    let persisted = decisions(&saga_events);
     assert_eq!(
-        saga_events[2].sequence, 3,
-        "highest saga sequence must be 3, proving on_start restored \
-         state.sequence to 1 from the direct store"
+        persisted.len(),
+        2,
+        "one decision per order — one written before the drop and one after the \
+         respawn"
+    );
+    assert_eq!(persisted[0].sequence, 1);
+    assert_eq!(
+        persisted[1].sequence, 3,
+        "the respawned incarnation appends past the pair the first one left \
+         behind, which is what proves on_start restored state.sequence to 2 \
+         from the direct store"
+    );
+    assert_eq!(
+        saga_events.last().map(|e| e.sequence),
+        Some(4),
+        "the position committed with the second decision is the stream's last \
+         row"
     );
 }

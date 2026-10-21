@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package nitinol.saga.lifecycle;
+
+// Lifecycle facts of a saga instance.  Persisted on the saga's own EventStore
+// stream, classified back as `SagaPersisted::Lifecycle`.
+//
+// `Ended` used to share an envelope with a transport mechanism's transitions,
+// so "this saga terminated" could only be read by a reader that also knew that
+// mechanism's grammar.  It is a fact about the saga's own life, so it has a
+// declaration of its own.
+message LifecycleMarker {
+  oneof kind {
+    Ended ended = 1;
+  }
+}
+
+// Durable terminal fact written when `SagaEffect::End` is interpreted.  Its
+// presence in the saga's own event stream is the signal that the saga has
+// terminated; on a subsequent spawn `on_start` refuses to wire up the upstream
+// subscription.  Carries no fields — presence is the whole signal.
+message Ended {}

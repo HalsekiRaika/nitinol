@@ -1,3 +1,30 @@
+//! Snapshot contract tests for [`InMemorySnapshotStore`].
+//!
+//! These tests are the record of the snapshot behaviour every `SnapshotStore`
+//! backend must reproduce, as the reference implementation keeps it.  What binds
+//! a backend is the contract on [`SnapshotStore`]; what a backend of its own is
+//! put through is `nitinol-store-conformance`, which runs these same labels
+//! against any store.  Each contract carries a stable label, which the doc of
+//! the test fixing it here begins with:
+//!
+//! | Label | Contract |
+//! |---|---|
+//! | `SNAP-1` | Nothing saved is a condition, not a failure: `load_latest` for an aggregate the store holds no snapshot for answers `Ok(None)`. |
+//! | `SNAP-2` | One save reads back whole: the `aggregate_id` a save was for, the `sequence` it was taken at, and the `payload` holding the state there are read back together. |
+//! | `SNAP-3` | The save that came last is what a load answers with: after several saves at ascending `sequence`es, `load_latest` answers with the last one's `sequence` and its `payload`. |
+//!
+//! Two things the contract leaves open are not asserted here either.
+//! `created_at` is stored and read back, but no consumer in the framework reads
+//! it, so what precision a backend keeps it to is its own business.  And a save
+//! at a `sequence` the stored snapshot has already reached, or behind it, is the
+//! backend's to answer: this implementation keeps whichever save came last,
+//! which is its behaviour rather than a clause.
+//!
+//! `SNAP-4` — that one aggregate's snapshot is never another's — has no test in
+//! this file, where every test holds a single aggregate. It is fixed by the
+//! `snapshot` module of `nitinol-store-conformance`, for this store and for any
+//! other.
+
 use bytes::Bytes;
 use jiff::Timestamp;
 use nitinol_persistence::store::{InMemorySnapshotStore, SnapshotStore};
@@ -16,7 +43,7 @@ fn make_snapshot(
     }
 }
 
-/// save した Snapshot を load_latest で取得でき、内容が一致する
+/// SNAP-2: A saved Snapshot comes back from load_latest with the same contents.
 #[tokio::test]
 async fn save_and_load_latest_roundtrip() {
     // Given: an empty store and one snapshot to save
@@ -38,7 +65,7 @@ async fn save_and_load_latest_roundtrip() {
     assert_eq!(loaded.payload, Bytes::from_static(b"state-at-42"));
 }
 
-/// 同一 Aggregate に複数回 save した場合、最後に save したものが返る
+/// SNAP-3: Several saves against one Aggregate return the one saved last.
 #[tokio::test]
 async fn multiple_saves_return_latest_snapshot() {
     // Given: an empty store
@@ -70,7 +97,8 @@ async fn multiple_saves_return_latest_snapshot() {
     assert_eq!(loaded.payload, Bytes::from_static(b"state-10"));
 }
 
-/// 未保存 Aggregate への load_latest は Ok(None) を返す（エラーにならない）
+/// SNAP-1: load_latest for an unsaved Aggregate returns Ok(None), and is not an
+/// error.
 #[tokio::test]
 async fn load_latest_for_unknown_aggregate_returns_none() {
     // Given: an empty store

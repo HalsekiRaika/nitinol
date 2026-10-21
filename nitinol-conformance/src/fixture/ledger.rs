@@ -1,4 +1,4 @@
-use nitinol_contract::{Aggregate, Decider, Decision, Query};
+use nitinol_contract::{Aggregate, Decider, Decision, Never, Query};
 
 use crate::fixture::command::{Open, Settle};
 use crate::fixture::event::LedgerEvent;
@@ -19,6 +19,7 @@ pub struct Ledger {
 
 impl Aggregate for Ledger {
     type Event = LedgerEvent;
+    type Recover = Never;
 
     fn apply(&mut self, event: LedgerEvent) {
         match event {

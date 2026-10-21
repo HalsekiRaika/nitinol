@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream};
+use nitinol_persistence::store::{EventStore, EventStream, Journal};
 use nitinol_persistence::{AppendOutcome, AppendingEvent, LoadQuery};
 
 /// A store that answers every read and records nothing.
@@ -10,12 +8,13 @@ use nitinol_persistence::{AppendOutcome, AppendingEvent, LoadQuery};
 /// A clause that needs "the machinery got in the way" needs the interpreter to
 /// have replayed its history and reached a decision first, so loading has to
 /// keep working while appending does not.
+#[derive(Clone)]
 pub(crate) struct WedgedStore {
-    backing: Arc<dyn EventStore>,
+    backing: Journal,
 }
 
 impl WedgedStore {
-    pub(crate) fn over(backing: Arc<dyn EventStore>) -> Self {
+    pub(crate) fn over(backing: Journal) -> Self {
         Self { backing }
     }
 }

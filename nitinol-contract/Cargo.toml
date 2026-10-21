@@ -12,3 +12,6 @@ description = "Runtime-free contract traits between nitinol and downstream domai
 # written in terms of and is itself runtime-free.
 [dependencies]
 nitinol-persistence = { path = "../nitinol-persistence" }
+# The codec signature is stated in `Bytes`, the same currency the persistence
+# layer's payloads are in.  A byte buffer is not an async runtime.
+bytes = "1"

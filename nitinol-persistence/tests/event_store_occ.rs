@@ -1,8 +1,11 @@
 //! Optimistic-concurrency-control contract tests for [`InMemoryEventStore`].
 //!
-//! These tests are the normative record of the OCC behaviour every
-//! `EventStore` backend must reproduce.  Each contract carries a stable label
-//! that its test names begin with:
+//! These tests are the record of the OCC behaviour every `EventStore` backend
+//! must reproduce, as the reference implementation keeps it.  What binds a
+//! backend is the contract on [`EventStore::append`]; what a backend of its own
+//! is put through is `nitinol-store-conformance`, which runs these same labels
+//! against any store.  Each contract carries a stable label that its test names
+//! begin with:
 //!
 //! | Label | Contract |
 //! |---|---|
@@ -16,7 +19,10 @@
 //! stream carries `sequence = 1`.
 //!
 //! Only deterministic invariants are fixed here. No test races concurrent
-//! readers or writers against each other.
+//! readers or writers against each other, which is why `OCC-5` — what a reader
+//! following the global order by checkpoint may be shown while a writer is
+//! committing — has no test in this file. It is fixed by the concurrency half
+//! of `nitinol-store-conformance`, for this store and for any other.
 
 use std::borrow::Borrow;
 

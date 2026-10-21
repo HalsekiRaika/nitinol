@@ -16,7 +16,10 @@ impl SystemEventDecodeError {
     }
 }
 
-/// Error produced when a [`crate::codec::ErasedCodec`] operation fails.
+/// Error produced when the codec a domain type named fails.
+///
+/// The codec's own error is boxed rather than surfaced, so a domain's choice of
+/// wire format does not become part of the framework's error family.
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
     #[error("encode error: {0}")]
@@ -129,8 +132,9 @@ pub enum ExecError<E: std::error::Error + Send + Sync + 'static> {
 
 /// Internal error produced by `AggregateProcess::recv` for command messages.
 ///
-/// Mapped variant-for-variant to `AskError<R>` by `AggregateProxy`, which adds
-/// only the failures it can observe itself.
+/// Carried to the caller as [`AskError`], variant for variant, by the `From`
+/// below; the failures the reference boundary can observe itself are the ones
+/// that conversion adds.
 #[derive(Debug, thiserror::Error)]
 pub enum AskHandlerError<R: std::error::Error + Send + Sync + 'static> {
     #[error("rejection: {0}")]
@@ -143,9 +147,71 @@ pub enum AskHandlerError<R: std::error::Error + Send + Sync + 'static> {
 
 /// Internal error produced by `AggregateProcess::recv` for query messages.
 ///
-/// Mapped to `ExecError<E>` by `AggregateProxy`.
+/// Carried to the caller as [`ExecError`] by the `From` below.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecHandlerError<E: std::error::Error + Send + Sync + 'static> {
     #[error("domain error: {0}")]
     Domain(E),
 }
+
+/// What an activation's answer to a command becomes at the reference boundary.
+///
+/// The handler's verdict keeps its meaning, and every way the dispatch could
+/// fail to arrive collapses to [`AskError::Send`]: nothing was decided, because
+/// the command reached no aggregate that could judge it. Which way it failed to
+/// arrive is the runtime's to report; what this layer says is only that no
+/// verdict exists.
+impl<R> From<nitinol_runtime::error::AskError<AskHandlerError<R>>> for AskError<R>
+where
+    R: std::error::Error + Send + Sync + 'static,
+{
+    fn from(e: nitinol_runtime::error::AskError<AskHandlerError<R>>) -> Self {
+        match e {
+            nitinol_runtime::error::AskError::Handler(h) => match h {
+                AskHandlerError::Rejection(r) => AskError::Rejection(r),
+                AskHandlerError::AlreadyCreated => AskError::AlreadyCreated,
+                AskHandlerError::Persist(e) => AskError::Persist(e),
+            },
+            nitinol_runtime::error::AskError::DeadLetter { .. }
+            | nitinol_runtime::error::AskError::ReplyDropped
+            | nitinol_runtime::error::AskError::Timeout { .. } => {
+                AskError::Send(nitinol_runtime::error::SendError)
+            }
+        }
+    }
+}
+
+/// What an activation's answer to a query becomes at the reference boundary.
+///
+/// The query surface's counterpart of the conversion above, and the same
+/// reading of an undelivered dispatch.
+impl<E> From<nitinol_runtime::error::AskError<ExecHandlerError<E>>> for ExecError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn from(e: nitinol_runtime::error::AskError<ExecHandlerError<E>>) -> Self {
+        match e {
+            nitinol_runtime::error::AskError::Handler(h) => match h {
+                ExecHandlerError::Domain(e) => ExecError::Domain(e),
+            },
+            nitinol_runtime::error::AskError::DeadLetter { .. }
+            | nitinol_runtime::error::AskError::ReplyDropped
+            | nitinol_runtime::error::AskError::Timeout { .. } => {
+                ExecError::Send(nitinol_runtime::error::SendError)
+            }
+        }
+    }
+}
+
+/// Internal error produced by `ProjectorProcess::recv` when an event's
+/// application did not settle.
+///
+/// Returning this error value from the handler is how the delivery layer
+/// (`DirectPollerProcess` via `ask()`) is told not to advance the subscription
+/// cursor: an event the projector could not apply is redelivered on the next
+/// poll rather than overtaken by the events behind it and lost.  The cause is
+/// already reported by the delivery engine at the stage that failed, so this
+/// type carries no payload of its own.
+#[derive(Debug, thiserror::Error)]
+#[error("event application did not settle; the event must not be treated as processed")]
+pub struct ProjectionNotSettled;

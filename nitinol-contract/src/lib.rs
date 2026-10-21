@@ -3,8 +3,10 @@
 //! | Item | Purpose |
 //! |---|---|
 //! | [`Event`] | Marker for domain events; carries their persisted identity |
+//! | [`Codec`] | The format a domain value is written to and read back from |
 //! | [`Aggregate`] | Domain state holder; evolves state by applying events |
 //! | [`Snapshotable`] | Opt-in snapshot support for faster replay |
+//! | [`Recovery`] | What [`Aggregate::Recover`] may name: [`Never`] or [`Latest`] |
 //! | [`Decider`] | Decides what a command means for the current state |
 //! | [`Decision`] | A decider's conclusion: facts and an answer, or a refusal |
 //! | [`Query`] | Asks the current state a question |
@@ -16,10 +18,16 @@
 //! machinery — or Tokio — that runs them. `nitinol-eventsource` re-exports all
 //! of them, so the framework-side paths are unchanged.
 //!
-//! The execution-side abstractions — the aggregate activation, `Codec`, the
-//! projection layer, the error families — are deliberately *not* here: they
-//! describe how the runtime drives an aggregate, not what an aggregate is or
-//! what it decides.
+//! [`Codec`] is here for the same reason: [`Event`] and [`Snapshotable`] each
+//! *name* the codec that writes their values down, so stating a format is part
+//! of defining a domain type rather than part of wiring one up. What a failure
+//! of that codec means to an interpreter — how it is classified, whether it is
+//! worth retrying — stays in `nitinol-eventsource`, which is where the failure
+//! is observed.
+//!
+//! The execution-side abstractions — the aggregate activation, the projection
+//! layer, the error families — are deliberately *not* here: they describe how
+//! the runtime drives an aggregate, not what an aggregate is or what it decides.
 //!
 //! # Laws
 //!
@@ -104,13 +112,22 @@
 //! plausible homes for every future contract.
 
 mod aggregate;
+mod codec;
 mod decider;
 mod decision;
 mod event;
 mod query;
+mod recover;
 
 pub use self::aggregate::{Aggregate, Snapshotable};
+pub use self::codec::Codec;
 pub use self::decider::Decider;
 pub use self::decision::{Accepting, Decision};
 pub use self::event::Event;
+// The declaration a stored `event_type` is matched against.  Hidden and not
+// re-exported through the umbrella crate: a domain type is covered by
+// declaring `Event`, and the framework's own records declare it by hand.
+#[doc(hidden)]
+pub use self::event::{DeclaresEventType, MatchesEventType};
 pub use self::query::Query;
+pub use self::recover::{Latest, Never, RecoverPolicy, Recovery};

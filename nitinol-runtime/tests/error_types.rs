@@ -116,19 +116,6 @@ async fn poison_on_already_stopped_process_returns_send_error() {
     let _: SendError = result.expect_err("poison on an already-stopped process must fail");
 }
 
-/// `SendError` implements `std::error::Error` (required for `thiserror` chain).
-#[tokio::test]
-async fn send_error_implements_std_error() {
-    // Given: a SendError value
-    let err = SendError;
-
-    // When: Display and Error trait are used
-    let msg = err.to_string();
-
-    // Then: a non-empty message is produced
-    assert!(!msg.is_empty());
-}
-
 /// `ask` to a stopped process returns `AskError::DeadLetter`.
 #[tokio::test]
 async fn ask_to_stopped_process_returns_ask_error_dead_letter() {
@@ -193,13 +180,13 @@ async fn ask_to_failing_handler_returns_ask_error_handler() {
     // When: an ask is sent (handler will fail)
     let result = proxy.ask(FailMsg).await;
 
-    // Then: AskError::Handler is returned with the handler's concrete error
-    match result {
-        Err(AskError::Handler(e)) => {
-            assert_eq!(e.to_string(), "handler error: deliberate failure");
-        }
-        other => panic!("expected AskError::Handler, got {:?}", other),
-    }
+    // Then: AskError::Handler is returned carrying the handler's own concrete
+    // error type — not flattened into a runtime-owned error.  The Display
+    // wording belongs to the fixture, so it is not part of the contract.
+    assert!(
+        matches!(&result, Err(AskError::Handler(HandlerTestError(_)))),
+        "expected Err(AskError::Handler(HandlerTestError(_))), got {result:?}"
+    );
 }
 
 /// `ask` to a handler that returns `Ok` produces `Ok(value)`.
@@ -258,18 +245,6 @@ async fn spawn_error_display_contains_topic_name() {
         msg.contains("my-stream-topic"),
         "SpawnError Display should contain the topic name, got: {msg}"
     );
-}
-
-/// `SpawnError` implements `std::error::Error`.
-#[tokio::test]
-async fn spawn_error_implements_std_error() {
-    // Given: a SpawnError
-    let err = SpawnError {
-        topic: "topic".to_string(),
-    };
-
-    // When: used as dyn Error
-    let _: &dyn std::error::Error = &err;
 }
 
 /// `dead_letter_stream().pid()` returns a non-zero PID.

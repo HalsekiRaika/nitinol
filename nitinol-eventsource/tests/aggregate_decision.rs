@@ -25,12 +25,14 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
-    Query,
+    Never, Query,
 };
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
@@ -44,6 +46,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("decision"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 // Fixtures: aggregate
@@ -55,6 +59,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -136,7 +141,6 @@ impl Query<GetCount> for Counter {
 
 // Fixtures: codec
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -156,6 +160,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 /// Delegates every call to the in-memory reference store and counts the
 /// `append` calls, so that "one append carrying three events" can be told from
 /// "three appends carrying one event each".
+#[derive(Clone)]
 struct CountingStore {
     inner: InMemoryEventStore,
     appends: Arc<AtomicUsize>,
@@ -170,9 +175,9 @@ impl AppendCount {
     }
 }
 
-fn counting_store() -> (Arc<dyn EventStore>, AppendCount) {
+fn counting_store() -> (Journal, AppendCount) {
     let appends = Arc::new(AtomicUsize::new(0));
-    let store: Arc<dyn EventStore> = Arc::new(CountingStore {
+    let store = Journal::from(CountingStore {
         inner: InMemoryEventStore::default(),
         appends: Arc::clone(&appends),
     });
@@ -197,20 +202,25 @@ impl EventStore for CountingStore {
 
 // Helpers
 
-/// Activate one writer for `id` on `store`.
+/// A system distributing `store`, with an aggregate registry of its own.
+async fn system_over(store: &Journal) -> EventSourceSystem<Journal> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store.clone()))
+        .build()
+}
+
+/// Activate one writer for `id` on `system`.
 async fn spawn_counter(
-    ps: &ProcessSystem,
+    system: &EventSourceSystem<Journal>,
     id: &AggregateId,
-    store: &Arc<dyn EventStore>,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id.clone(), Arc::clone(store))
-        .with_codec(Arc::new(JsonCodec))
-        .spawn(ps)
+    AggregateProps::<Counter>::new(id.clone())
+        .spawn(system)
         .await
 }
 
 /// Stream sequences stored under `id`, in ascending order.
-async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<u64> {
+async fn stored_sequences(store: &Journal, id: &AggregateId) -> Vec<u64> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await
@@ -233,10 +243,10 @@ async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<
 #[tokio::test]
 async fn ask_answers_with_the_output_of_the_decision() {
     // Given
-    let ps = ProcessSystem::new().await;
     let (store, _appends) = counting_store();
+    let system = system_over(&store).await;
     let id = AggregateId::new("decision-ask-output");
-    let proxy = spawn_counter(&ps, &id, &store).await;
+    let proxy = spawn_counter(&system, &id).await;
 
     // When
     let first = proxy.ask(Increment).await.expect("the first ask");
@@ -260,10 +270,10 @@ async fn ask_answers_with_the_output_of_the_decision() {
 #[tokio::test]
 async fn accepted_facts_are_persisted_as_a_single_append() {
     // Given
-    let ps = ProcessSystem::new().await;
     let (store, appends) = counting_store();
+    let system = system_over(&store).await;
     let id = AggregateId::new("decision-atomic-append");
-    let proxy = spawn_counter(&ps, &id, &store).await;
+    let proxy = spawn_counter(&system, &id).await;
 
     // When
     proxy
@@ -294,10 +304,10 @@ async fn accepted_facts_are_persisted_as_a_single_append() {
 #[tokio::test]
 async fn empty_acceptance_answers_without_reaching_the_store() {
     // Given: the counter is already at the floor the command asks for
-    let ps = ProcessSystem::new().await;
     let (store, appends) = counting_store();
+    let system = system_over(&store).await;
     let id = AggregateId::new("decision-empty-acceptance");
-    let proxy = spawn_counter(&ps, &id, &store).await;
+    let proxy = spawn_counter(&system, &id).await;
     proxy
         .ask(IncrementBy(2))
         .await
@@ -333,10 +343,10 @@ async fn empty_acceptance_answers_without_reaching_the_store() {
 #[tokio::test]
 async fn refusal_is_answered_as_a_rejection_and_writes_nothing() {
     // Given
-    let ps = ProcessSystem::new().await;
     let (store, appends) = counting_store();
+    let system = system_over(&store).await;
     let id = AggregateId::new("decision-refusal");
-    let proxy = spawn_counter(&ps, &id, &store).await;
+    let proxy = spawn_counter(&system, &id).await;
 
     // When
     let err = proxy
@@ -371,10 +381,10 @@ async fn refusal_is_answered_as_a_rejection_and_writes_nothing() {
 #[tokio::test]
 async fn refusal_on_the_tell_path_leaves_the_activation_answering() {
     // Given
-    let ps = ProcessSystem::new().await;
     let (store, appends) = counting_store();
+    let system = system_over(&store).await;
     let id = AggregateId::new("decision-tell-refusal");
-    let proxy = spawn_counter(&ps, &id, &store).await;
+    let proxy = spawn_counter(&system, &id).await;
 
     // When: the queue is FIFO, so the query is answered by the same activation
     // after it has handled the refused command.

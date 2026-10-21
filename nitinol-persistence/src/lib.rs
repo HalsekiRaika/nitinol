@@ -6,19 +6,45 @@
 //! |---|---|
 //! | [`store::EventStore`] | Append and load domain events |
 //! | [`store::SnapshotStore`] | Save and load aggregate snapshots |
-//! | [`store::CheckpointStore`] | Track the delivery progress of a projector |
+//! | [`store::OffsetStore`] | Track the progress of an event consumer |
+//! | [`store::OffsetScope`] | The key a consumer's progress is filed under |
 //! | [`store::DeliveryMode`] | Delivery guarantee: `AtMostOnce` / `AtLeastOnce` / `ExactlyOnce` |
+//! | [`provider::Store`] | Hold the stores above, as one cloneable handle per deployment |
+//! | [`provider::CustomStore`] | Assemble a store by naming one handle per slot |
+//! | [`provider::PersistenceProvider`] | Distribute what a store holds to the framework's wiring |
 //!
 //! An in-memory reference implementation is provided under [`store`] for
-//! use in tests and examples.  It is **not** intended for production use.
+//! use in tests and examples, and [`store::InMemoryStore`] is a whole store
+//! over it.  Neither is intended for production use.
 //!
 //! # Third-party backends
 //!
 //! Production backends (Postgres, SQLite, DynamoDB, etc.) are intentionally
 //! out of scope for this crate.  Implement [`store::EventStore`],
-//! [`store::SnapshotStore`], and [`store::CheckpointStore`] against your
-//! preferred storage engine and wire them through
-//! `nitinol_eventsource::system::ProcessSystem`.
+//! [`store::SnapshotStore`], and [`store::OffsetStore`] against your
+//! preferred storage engine, then either implement [`provider::Store`] over
+//! them or name your handles in a [`provider::CustomStore`] — and hand the
+//! result to [`provider::PersistenceProvider::new`], which is what every
+//! wiring point in the framework resolves its stores from.
+//!
+//! All three store traits carry behavioural contracts a backend has to
+//! reproduce, stated as labelled clauses on the trait itself:
+//! [`store::EventStore`] carries `OCC-1` … `OCC-5` and `LOAD-1`,
+//! [`store::SnapshotStore`] carries `SNAP-1` … `SNAP-4`, and
+//! [`store::OffsetStore`] carries `OFS-1` … `OFS-6`.  One OCC clause is
+//! broken silently by the most obvious way to number events in a relational
+//! store, and one `OFS` clause by the most obvious way to read a missing row.
+//! [`provider::Store`] carries `PRV-1` … `PRV-5` for the layer above them —
+//! what distribution, identity and slot independence mean, and what a single
+//! supplier is explicitly not.
+//! `nitinol-store-conformance` is those contracts as a suite to run against
+//! your implementation.
+//!
+//! What the clauses fix is each store on its own.  A contract that holds only
+//! for a store *together with* the machinery driving it — that a projection's
+//! result and the offset covering it settle in one transaction — is fixed
+//! against a supplier and a projector at once instead; each trait's
+//! documentation names where.
 //!
 //! # Reserved namespace
 //!
@@ -26,24 +52,75 @@
 //! stream-key space and the event-type space — a single law with two
 //! enforcement points, because the two spaces learn a name at different times.
 //! An identifier inside it is refused when it is constructed; an event `family`
-//! inside it is refused by `#[derive(Event)]` when it is expanded.  See
-//! [`reserved`] for the boundary rule, the constant, and what a hand-written
-//! `impl Event` is expected to honour on its own.
+//! inside it is refused by [`Family::new`] while the constant holding it is
+//! evaluated.  See [`reserved`] for the boundary rule, the constant, and the
+//! way the framework's own records get the names they reserved.
+//!
+//! # Restoring an event type
+//!
+//! A stored row carries a canonical path, and every component of an
+//! [`EventType`] is a `&'static str`, so the path cannot become one again
+//! without leaking the string it was read into. [`EventRegistry`] is the way
+//! back, and what it answers for is collected by the linker rather than
+//! registered by hand: a declaration places an [`EventRegistryEntry`] in
+//! [`EVENT_REGISTRY`], and the framework builds one registry per process out of
+//! what the binary linked. There is nothing to construct and nothing to hand a
+//! store. See [`EVENT_REGISTRY`] for what link-time collection does not reach.
+//!
+//! # One declaration per canonical path
+//!
+//! Two declarations claiming one path are refused twice over: each carries an
+//! exported symbol named after its path, so the second is a definition rustc
+//! refuses within a crate and the linker refuses across crates — and the
+//! registry the process builds refuses the entries as well. The second layer
+//! is not a spare: link-time detection has holes (static libraries linked
+//! together need not report a duplicate), and an entry placed by hand rather
+//! than derived carries no symbol at all.
 
 pub mod error;
+pub mod provider;
 pub mod reserved;
 pub mod store;
 
 mod event;
+mod event_registry;
+mod event_symbol;
 mod event_type;
 mod id;
 mod materialized_path;
 mod query;
 mod snapshot;
 
+/// The way the framework's own records carry the names the framework reserved,
+/// and nothing a user writes.
+///
+/// [`Family::new`] and [`EventRegistryEntry::new`] refuse the `nitinol`
+/// namespace, which is the point of reserving it. The framework persists
+/// records under exactly those names, so it needs constructors that waive the
+/// namespace rule — and only that rule.
+///
+/// No stability is promised for anything below.
+///
+/// Building the registry is here for the same reason: what a store serves its
+/// loads out of is the framework's own business, and the constructors below are
+/// how the framework and the suites that judge its validation reach it.
+#[doc(hidden)]
+pub mod __private {
+    pub use linkme;
+
+    pub use crate::event_registry::{
+        event_registry_from_entries, linked_event_registry, reserved_event_registry_entry,
+    };
+    pub use crate::event_symbol::{
+        is_verbatim_event_symbol, is_verbatim_event_symbol_byte, EVENT_UNIQUENESS_SYMBOL_PREFIX,
+    };
+    pub use crate::event_type::reserved_family;
+}
+
 pub use event::{AppendingEvent, LoadedEvent};
-pub use event_type::{EventType, Family, ParsedEventType, TypeKey, TypeName, Variant};
-pub use id::{AggregateId, ProjectionId};
+pub use event_registry::{EventRegistry, EventRegistryEntry, EventRegistryError, EVENT_REGISTRY};
+pub use event_type::{EventType, Family, ParsedEventType, TypeName};
+pub use id::AggregateId;
 pub use materialized_path::{MaterializedPath, MaterializedPathParseError};
 pub use query::{AppendOutcome, LoadQuery};
 pub use reserved::{is_within_reserved_namespace, reject_reserved_id, RESERVED_NAMESPACE};

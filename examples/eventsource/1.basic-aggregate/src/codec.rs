@@ -1,7 +1,8 @@
 //! JSON codec used by the basic-aggregate example.
 //!
-//! Uses `serde_json` for both encoding and decoding.  The codec is stateless
-//! and `Default`-constructible so it works with `EventSourceSystem::with_codec`.
+//! Uses `serde_json` for both encoding and decoding.  A codec is a format
+//! rather than a value — it is never constructed, only named, which is what
+//! `#[event(codec = JsonCodec)]` on `Incremented` does.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use nitinol_eventsource::codec::Codec;
 
 /// JSON codec: encodes events as JSON bytes and decodes them back.
-#[derive(Default)]
 pub struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {

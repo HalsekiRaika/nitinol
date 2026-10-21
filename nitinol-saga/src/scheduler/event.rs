@@ -1,20 +1,24 @@
 //! `ScheduleEvent` — the `SystemEvent` persisted for each timer transition.
 //!
-//! Modelled one-for-one on the `OutboxEvent` canonical example: a reserved
-//! type-level [`EventType`] (`nitinol.saga.schedule`, variant `None`) whose
-//! per-arm `variant()` writes `scheduled` / `cancelled` / `fired` on the wire,
-//! with a prost `oneof` codec that owns its own serialization.
+//! Shaped like every framework declaration on a saga's own stream — its
+//! siblings are [`crate::consumed`] and [`crate::lifecycle`]: one reserved
+//! [`EventType`] (`nitinol.saga.schedule`) every timer marker is written down
+//! as, with a prost `oneof` codec that owns its own serialization and carries
+//! which transition — `scheduled` / `cancelled` / `fired` — the marker records.
 
 use std::borrow::Borrow;
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use nitinol_eventsource::{appending_system_event, SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{EventType, Family, TypeName, Variant};
+use nitinol_eventsource::{SystemEvent, SystemEventDecodeError};
+use nitinol_persistence::store::Journal;
+use nitinol_persistence::{reserved_event, EventType};
 
+use crate::consumed::{
+    append_consumed_position, finalize_consumed_position, ConsumedPositionEvent, ConsumedPositions,
+};
 use crate::id::SagaId;
+use crate::observability::report_system_event;
 use crate::scheduler::token::{ScheduleToken, TimerName};
 
 mod proto {
@@ -24,9 +28,26 @@ mod proto {
 use self::proto::schedule_marker::Kind;
 use self::proto::{Cancelled, Fired, ScheduleMarker, Scheduled};
 
-/// Reserved type-level identity shared by every schedule marker.
-pub(crate) const SCHEDULE_MARKER: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("schedule"));
+reserved_event! {
+    /// The one identity every schedule marker is written down as.
+    ///
+    /// What a binary linking this crate collects for the scheduler, so that a
+    /// load of a saga's own stream restores its timer markers rather than
+    /// failing on them.
+    pub(crate) const SCHEDULE_MARKER {
+        family = "nitinol.saga",
+        type_name = "schedule",
+        declared_by = ScheduleEvent,
+    }
+
+    // The transitions a schedule marker records — the scheduler's whole arm
+    // set. A stored row names the declaration, so the transition lives in the
+    // payload's `oneof`; these are the names that `oneof` is reported under.
+    arm_type = ScheduleEvent;
+    ScheduleEvent::Scheduled { .. } => pub(crate) SCHEDULED_ARM = "scheduled",
+    ScheduleEvent::Cancelled { .. } => CANCELLED_ARM = "cancelled",
+    ScheduleEvent::Fired { .. } => FIRED_ARM = "fired",
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("schedule marker payload carried no `oneof` kind")]
@@ -37,6 +58,13 @@ pub(crate) enum ScheduleEvent {
     Scheduled {
         token: ScheduleToken,
         after: Duration,
+        /// The identity `payload` was written under —
+        /// `DeadlineMessage::TYPE_NAME` / `DeadlineMessage::CODEC_NAME` at the
+        /// time `Deadline::set` ran — carried beside the bytes so a later
+        /// firing can be checked against what this fact says rather than only
+        /// against whichever alphabet happens to be linked into the reader.
+        message_type: String,
+        message_codec: String,
         payload: Bytes,
         scheduled_at_unix_millis: i64,
     },
@@ -50,27 +78,27 @@ pub(crate) enum ScheduleEvent {
     },
 }
 
+impl ScheduleEvent {
+    /// The timer this marker is about.
+    fn timer(&self) -> &TimerName {
+        match self {
+            ScheduleEvent::Scheduled { token, .. }
+            | ScheduleEvent::Cancelled { token, .. }
+            | ScheduleEvent::Fired { token, .. } => &token.name,
+        }
+    }
+}
+
 impl SystemEvent for ScheduleEvent {
     const EVENT_TYPE: EventType = SCHEDULE_MARKER;
-
-    fn variant(&self) -> EventType {
-        let variant = match self {
-            ScheduleEvent::Scheduled { .. } => Variant::new("scheduled"),
-            ScheduleEvent::Cancelled { .. } => Variant::new("cancelled"),
-            ScheduleEvent::Fired { .. } => Variant::new("fired"),
-        };
-        EventType::with_variant(
-            SCHEDULE_MARKER.family(),
-            SCHEDULE_MARKER.type_name(),
-            variant,
-        )
-    }
 
     fn encode(&self) -> Bytes {
         let kind = match self {
             ScheduleEvent::Scheduled {
                 token,
                 after,
+                message_type,
+                message_codec,
                 payload,
                 scheduled_at_unix_millis,
             } => Kind::Scheduled(Scheduled {
@@ -81,6 +109,8 @@ impl SystemEvent for ScheduleEvent {
                 after_nanos: u64::try_from(after.as_nanos()).unwrap_or(u64::MAX),
                 payload: payload.to_vec(),
                 scheduled_at_unix_millis: *scheduled_at_unix_millis,
+                message_type: message_type.clone(),
+                message_codec: message_codec.clone(),
             }),
             ScheduleEvent::Cancelled {
                 token,
@@ -108,17 +138,19 @@ impl SystemEvent for ScheduleEvent {
             .map_err(SystemEventDecodeError::new)?;
         match marker.kind {
             Some(Kind::Scheduled(m)) => Ok(ScheduleEvent::Scheduled {
-                token: token_of(m.saga_id, m.name),
+                token: ScheduleToken::new(SagaId::new(m.saga_id), TimerName::new(m.name)),
                 after: Duration::from_nanos(m.after_nanos),
+                message_type: m.message_type,
+                message_codec: m.message_codec,
                 payload: Bytes::from(m.payload),
                 scheduled_at_unix_millis: m.scheduled_at_unix_millis,
             }),
             Some(Kind::Cancelled(m)) => Ok(ScheduleEvent::Cancelled {
-                token: token_of(m.saga_id, m.name),
+                token: ScheduleToken::new(SagaId::new(m.saga_id), TimerName::new(m.name)),
                 cancelled_at_unix_millis: m.cancelled_at_unix_millis,
             }),
             Some(Kind::Fired(m)) => Ok(ScheduleEvent::Fired {
-                token: token_of(m.saga_id, m.name),
+                token: ScheduleToken::new(SagaId::new(m.saga_id), TimerName::new(m.name)),
                 fired_at_unix_millis: m.fired_at_unix_millis,
             }),
             None => Err(SystemEventDecodeError::new(MissingScheduleKind)),
@@ -126,40 +158,60 @@ impl SystemEvent for ScheduleEvent {
     }
 }
 
-fn token_of(saga_id: String, name: String) -> ScheduleToken {
-    ScheduleToken {
-        saga_id: SagaId::new(saga_id),
-        name: TimerName::new(name),
-    }
+// A stored identity is matched against this record the same way it is matched
+// against a domain event.  Written out by hand because the blanket that covers
+// every `Event` cannot reach a `SystemEvent`: the two traits are independent
+// and nothing implements both, which is also why this does not conflict with
+// it.  The trait is named by path rather than imported so `EVENT_TYPE` in this
+// module keeps resolving to the one `SystemEvent` states.
+impl nitinol_eventsource::DeclaresEventType for ScheduleEvent {
+    const EVENT_TYPE: EventType = <Self as SystemEvent>::EVENT_TYPE;
 }
 
-/// Type-level classification: does `event_type` belong to the schedule marker
-/// family (`nitinol.saga.schedule` and its per-arm variants)?
+/// Append a single schedule marker at `*sequence + 1` — plus the consumed
+/// position, when `input_position` names one this append is closing out —
+/// advancing `*sequence` past every row only on success: a failed store append
+/// leaves the caller's sequence untouched so the next attempt does not skip
+/// numbers.  Every other append site on a saga's own stream keeps the same
+/// discipline — see [`crate::lifecycle::append_ended`] and
+/// [`crate::consumed::settle_with_position`].
 ///
-/// `nitinol.saga.schedule` is a sibling of `nitinol.saga.outbox`, so the two
-/// classifications never overlap on segment boundaries.
-pub(crate) fn is_schedule_event_type(event_type: EventType) -> bool {
-    event_type.to_path().is_within(&SCHEDULE_MARKER.to_path())
-}
-
-/// Append a single schedule marker at `*sequence + 1`, advancing `*sequence`
-/// only on success.  Mirrors the terminal-append discipline used for outbox
-/// markers (`OutboxAppender::append_terminal`): a failed store append leaves
-/// the caller's sequence untouched so the next attempt does not skip numbers.
+/// `input_position` is `None` at call sites with no upstream input to
+/// consume (a timer firing), and also whenever this marker is not the append
+/// closing out its input — the interpreter's `Sequence` handling only ever
+/// hands the position to that one.
 pub(crate) async fn append_schedule_marker(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     saga_id: &SagaId,
     sequence: &mut u64,
     event: ScheduleEvent,
     occurred_at: jiff::Timestamp,
+    input_position: Option<&ConsumedPositionEvent>,
+    consumed: &mut ConsumedPositions,
 ) -> bool {
     let candidate = *sequence + 1;
-    let appending = appending_system_event(candidate, &event, occurred_at);
-    if let Err(e) = store.append(saga_id.borrow(), vec![appending]).await {
+    let mut appending = vec![event.appending(candidate, occurred_at)];
+    let mut next_seq = candidate;
+    let recorded_position = append_consumed_position(
+        &mut appending,
+        input_position,
+        consumed,
+        &mut next_seq,
+        occurred_at,
+    );
+
+    if let Err(e) = store.append(saga_id.borrow(), appending).await {
         tracing::warn!(error = %e, "saga schedule marker append failed");
         return false;
     }
-    *sequence = candidate;
+    *sequence = next_seq;
+    report_system_event!(
+        ScheduleEvent::EVENT_TYPE,
+        event.arm(),
+        saga_id.as_str(),
+        timer = event.timer().as_str(),
+    );
+    finalize_consumed_position(consumed, saga_id.as_str(), recorded_position);
     true
 }
 
@@ -175,22 +227,23 @@ mod tests {
     }
 
     #[test]
-    fn schedule_event_reserves_a_single_type_level_event_type() {
+    fn schedule_event_reserves_a_single_event_type() {
         assert_eq!(ScheduleEvent::EVENT_TYPE, SCHEDULE_MARKER);
         assert_eq!(SCHEDULE_MARKER.to_string(), "nitinol.saga.schedule");
-        assert!(
-            SCHEDULE_MARKER.variant().is_none(),
-            "the reserved schedule type is type-level (variant None)"
-        );
     }
 
+    /// The arm a marker reports is the name of the `oneof` its payload carries.
+    /// The column no longer distinguishes them, so this is the whole of what an
+    /// operator has to tell one timer marker from another.
     #[test]
-    fn each_arm_writes_its_per_arm_variant_on_the_wire() {
+    fn each_marker_reports_the_transition_its_payload_carries() {
         let cases = [
             (
                 ScheduleEvent::Scheduled {
                     token: token(),
                     after: Duration::from_secs(1),
+                    message_type: "reminder".to_owned(),
+                    message_codec: "reminder-codec".to_owned(),
                     payload: Bytes::from_static(b"p"),
                     scheduled_at_unix_millis: 5,
                 },
@@ -212,8 +265,7 @@ mod tests {
             ),
         ];
         for (event, expected) in cases {
-            assert_eq!(event.variant().variant(), Some(Variant::new(expected)));
-            assert_eq!(event.variant().type_key(), SCHEDULE_MARKER.type_key());
+            assert_eq!(event.arm(), expected);
         }
     }
 
@@ -222,6 +274,8 @@ mod tests {
         let event = ScheduleEvent::Scheduled {
             token: token(),
             after: Duration::from_millis(1_500),
+            message_type: "reminder".to_owned(),
+            message_codec: "reminder-codec".to_owned(),
             payload: Bytes::from_static(b"hello"),
             scheduled_at_unix_millis: 1_700_000_000_000,
         };
@@ -229,11 +283,15 @@ mod tests {
             Ok(ScheduleEvent::Scheduled {
                 token: t,
                 after,
+                message_type,
+                message_codec,
                 payload,
                 scheduled_at_unix_millis,
             }) => {
                 assert_eq!(t, token());
                 assert_eq!(after, Duration::from_millis(1_500));
+                assert_eq!(message_type, "reminder");
+                assert_eq!(message_codec, "reminder-codec");
                 assert_eq!(payload, Bytes::from_static(b"hello"));
                 assert_eq!(scheduled_at_unix_millis, 1_700_000_000_000);
             }
@@ -252,6 +310,8 @@ mod tests {
         let event = ScheduleEvent::Scheduled {
             token: token(),
             after: sub_ms,
+            message_type: "reminder".to_owned(),
+            message_codec: "reminder-codec".to_owned(),
             payload: Bytes::from_static(b""),
             scheduled_at_unix_millis: 0,
         };
@@ -277,6 +337,8 @@ mod tests {
         let event = ScheduleEvent::Scheduled {
             token: token(),
             after: one_hundred_years,
+            message_type: "reminder".to_owned(),
+            message_codec: "reminder-codec".to_owned(),
             payload: Bytes::from_static(b""),
             scheduled_at_unix_millis: 0,
         };
@@ -309,21 +371,6 @@ mod tests {
             ScheduleEvent::decode(&fired.encode()),
             Ok(ScheduleEvent::Fired { .. })
         ));
-    }
-
-    #[test]
-    fn is_schedule_event_type_accepts_reserved_type_and_variants_but_not_outbox() {
-        assert!(is_schedule_event_type(SCHEDULE_MARKER));
-        assert!(is_schedule_event_type(EventType::with_variant(
-            SCHEDULE_MARKER.family(),
-            SCHEDULE_MARKER.type_name(),
-            Variant::new("scheduled"),
-        )));
-        // Sibling outbox family must not be classified as a schedule event.
-        assert!(!is_schedule_event_type(EventType::new(
-            Family::new("nitinol.saga"),
-            TypeName::new("outbox"),
-        )));
     }
 
     #[test]

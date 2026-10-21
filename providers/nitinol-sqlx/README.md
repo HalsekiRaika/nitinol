@@ -1,0 +1,357 @@
+# nitinol-sqlx
+
+A Postgres `EventStore`, `SnapshotStore` and `OffsetStore` for `nitinol`, built
+on `sqlx`.
+
+The crate carries its own schema as `sqlx` migrations and puts itself through
+`nitinol-store-conformance`, the executable form of the store contracts — the
+`EventStore` OCC clauses, the `SnapshotStore` clauses and the `OffsetStore`
+clauses, each against a schema of its own.
+
+## Using it
+
+```toml
+[dependencies]
+nitinol = { version = "0.4", features = ["postgres"] }
+# or, without the umbrella:
+# nitinol-sqlx = "0.1"
+```
+
+```rust,ignore
+use nitinol::eventsource::system::EventSourceSystem;
+use nitinol::runtime::ProcessSystem;
+use nitinol::sqlx::sqlx::postgres::PgPoolOptions;
+use nitinol::persistence::provider::PersistenceProvider;
+use nitinol::sqlx::{PostgresEventStore, PostgresStore};
+
+let pool = PgPoolOptions::new().connect(&std::env::var("DATABASE_URL")?).await?;
+PostgresEventStore::migrate(&pool).await?;
+
+// One store: every slot — the journal, the snapshot store and both offset
+// slots — over this database.
+let persistence = PersistenceProvider::new(PostgresStore::new(pool)?);
+
+let system = EventSourceSystem::builder(ProcessSystem::new().await)
+    .with_persistence(persistence.clone())
+    .build();
+```
+
+The supplier is what every wiring point resolves its store from, so a
+deployment names the database once. `PostgresStore` holds every slot, so an
+aggregate whose `Recover` is `Latest` — which requires the system it is spawned
+on to hold a snapshot slot — compiles against this store with no second backend
+beside it.
+
+Mixing backends is still a choice you have, and `CustomStore` is where a handle
+is named per slot:
+
+```rust,ignore
+use nitinol::persistence::provider::CustomStore;
+use nitinol::sqlx::{PostgresOffsetStore, PostgresEventStore};
+
+let persistence = PersistenceProvider::new(
+    CustomStore::builder()
+        .eventstore(PostgresEventStore::new(pool.clone())?)
+        .offsets(PostgresOffsetStore::new(pool.clone()))
+        .snapshot(snapshots_from_somewhere_else)
+        .build(),
+);
+```
+
+One supplier is not one transaction: the clauses on
+`nitinol::persistence::provider::Store` state what a supplier does and does not
+promise across its slots.
+
+Four things the store expects of its caller.
+
+**The pool is yours.** How many connections it holds, and how it authenticates,
+are decisions this crate does not make. The concurrency the store can offer is
+the concurrency the pool allows.
+
+**Migrations are applied explicitly.** `PostgresEventStore::migrate` brings the
+database up to the schema the binary was built against. Nothing runs it for you.
+
+**Every event type is collected at link time, not registered by hand.** Each
+component of an `EventType` is a `&'static str`, so a path read out of a column
+cannot become one again without leaking the string it was read into.
+`#[derive(Event)]` places what your type is written down as in
+`nitinol::persistence::EVENT_REGISTRY`, and the framework places its own
+records — a saga's schedule, consumed-position and lifecycle facts — the same
+way. The registry a load is served out of is built once for the process, out of
+what the binary linked; there is none to construct and none to hand over.
+`PostgresEventStore::new` refuses to open at all when two declarations claim one
+canonical path — though a collision that reaches it is one the build already
+had a chance to refuse, since a declaration carries a symbol named after its
+canonical path and a second claim on that path is a duplicate definition. A row
+whose type nothing collected fails its load rather than being passed over, and a
+projector that never sees a row never learns it is there.
+
+A crate the binary references nothing of may be dropped from the link, and its
+declarations go with it silently. Where you depend on a crate purely for the
+events it declares, reference something of it.
+
+**A stream key is unique across the whole store.** Aggregates and sagas are
+journalled side by side in one table, keyed by nothing but the string you append
+under. Two of them sharing a key share a stream: their sequence numbers collide,
+and each refuses the other's appends.
+
+### TLS
+
+No TLS feature of `sqlx` is enabled: the roots and backends those features reach
+for carry licences outside the set this workspace allows. Connecting to a
+managed Postgres that requires TLS is not supported by this crate as it stands.
+
+## Snapshotting
+
+`PostgresSnapshotStore` keeps one row per aggregate: a save replaces the
+snapshot before it, and `load_latest` answers with the save that came last.
+Nothing here is a record — the journal is — so a lost row costs a longer replay
+rather than a fact.
+
+**The save that came last wins, a lower position included.** A save at a
+position the stored snapshot has already reached, or behind it, replaces it
+rather than being refused or absorbed. The `SnapshotStore` contract leaves that
+clause to a backend, and this one answers it the way `InMemorySnapshotStore`
+does, so moving a deployment between the two does not change how its snapshots
+behave.
+
+**The table comes with the migration you already run.** `PostgresEventStore::migrate`
+applies the crate's whole schema, the snapshot table included.
+
+**The instant is yours.** `created_at` is stored as you handed it over, the way
+an event's `occurred_at` is: a load hands back when the snapshot was taken and
+not when its row was written.
+
+## Projecting with `ExactlyOnce`
+
+A read model that counts — anything an overwrite cannot absorb — needs the
+update and the offset that covers it to be one commit. `PostgresOffsetStore`
+is the half of that this crate owns: it keeps a projection's offset in the
+same database as the journal, and its `Tx` is a `sqlx` transaction, so a
+projector can write both inside one.
+
+**The table comes with the migration you already run.** `PostgresEventStore::migrate`
+applies the crate's whole schema, the offset table included. There is no
+second migration step to forget.
+
+**The transaction is yours.** This crate implements no `TxProvider`. That trait
+belongs to `nitinol-eventsource`, and a provider that depended on the
+interpreter in order to implement it would invert the layering this workspace
+keeps. Over a `PgPool` it is `begin`, `commit` and `rollback` and nothing
+besides.
+
+`TxProvider` lives behind the umbrella's `eventsource` feature, which
+`postgres` does not turn on by itself, and implementing it needs `async_trait`
+as its own dependency — this crate does not re-export it:
+
+```toml
+[dependencies]
+nitinol = { version = "0.4", features = ["postgres", "eventsource"] }
+async-trait = "0.1"
+```
+
+```rust,ignore
+use async_trait::async_trait;
+use nitinol::eventsource::TxProvider;
+use nitinol::sqlx::sqlx::{self, PgPool, PgTransaction};
+
+struct PoolTransactions {
+    pool: PgPool,
+}
+
+#[async_trait]
+impl TxProvider for PoolTransactions {
+    type Tx = PgTransaction<'static>;
+    type Error = sqlx::Error;
+
+    async fn begin(&self) -> Result<Self::Tx, Self::Error> {
+        self.pool.begin().await
+    }
+
+    async fn commit(&self, tx: Self::Tx) -> Result<(), Self::Error> {
+        tx.commit().await
+    }
+
+    async fn rollback(&self, tx: Self::Tx) {
+        // A rollback that could not be sent means the connection is going away,
+        // and the transaction it held goes with it.
+        let _ = tx.rollback().await;
+    }
+}
+```
+
+Hand it to the projector, whose journal and offset store both come from the
+supplier, and write the read model through the transaction `project` is given.
+`ProjectionId` is `nitinol_eventsource::ProjectionId`, beside the projector it
+names:
+
+```rust,ignore
+system
+    .projector_props(ProjectionId::new("orders.totals"), OrderTotals::new)
+    .with_tx_provider(PoolTransactions { pool: pool.clone() })
+    .with_event::<OrderPlaced>()
+    .catchup_from_global()
+    .spawn()
+    .await;
+```
+
+Props taken from a system carry the system they came from, so the spawn above
+needs nothing re-injected. Props built directly name the same thing and take
+both slots from the system the spawn is given —
+`ProjectorProps::new(ProjectionId::new("orders.totals"), OrderTotals::new) …
+.spawn(&system)`.
+
+```rust,ignore
+async fn project(
+    &mut self,
+    event: OrderPlaced,
+    ctx: &mut ProjectionContext<'_, PgTransaction<'static>>,
+) -> Result<(), Self::Error> {
+    // Writing anywhere but through this transaction is what the mode exists to
+    // stop: an update on a connection of its own does not roll back with the
+    // offset.
+    let tx = ctx.tx().ok_or(ProjectionFailed::NoTransaction)?;
+    sqlx::query("UPDATE order_totals SET placed = placed + 1")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+```
+
+`with_tx_provider` requires the offset store's `Tx` to be the provider's, so
+a pairing that would not share a transaction does not compile. The framework
+then drives `begin → project → offset save → commit` for each event, and
+rolls back — leaving the event to be redelivered — if any of the four fails.
+
+### An offset moves forward or not at all
+
+A save carrying a sequence the consumer has already reached, or one behind it,
+is refused as `OffsetConflict`. It is never absorbed as a successful no-op
+and never folded away with a `GREATEST`. The comparison and the write are one
+statement against one row, so two writers racing for one key cannot both
+be told they won — including the race to write a key's *first*
+offset, where there is no row yet to compare against.
+
+Such a save means another writer holds that key. Refusing is this backend's
+answer to `OFS-4`, which leaves the answer open, and the consumer's half of it
+is that it does not stop: it carries on and saves again at its next move
+forward. Under `ExactlyOnce` the refusal is also what rolls the read-model
+update back, so a second writer becomes something somebody can see rather than
+a counter quietly incremented twice.
+
+A save that skips numbers is still taken: a projection following the store-wide
+order moves its offset over events it has no handler for, so the rule is
+that the offset moves *forward*, not that it moves by one.
+
+### Telling a conflict from a failure worth retrying
+
+Both reach you as `OffsetError::Backend`, and they call for different
+answers. A `OffsetConflict` says another writer holds this key, so retrying
+*this* save reaches the same refusal; what moves the offset on is the consumer's
+next move forward. Anything else — a connection that dropped, a database that
+was not there — arrives as the `sqlx` error that raised it, and a retry may well
+clear it.
+
+```rust,ignore
+let OffsetError::Backend(cause) = failure;
+if cause.downcast_ref::<OffsetConflict>().is_some() {
+    // Another writer holds this key. The consumer saves again when it moves on.
+} else {
+    // The database was not reachable. This one is worth retrying.
+}
+```
+
+### What this guarantees, and what it does not
+
+`ExactlyOnce` is guaranteed for **one consumer per offset scope**. Run a
+projection from one place.
+
+The refusal above is what makes a second writer visible — it detects a
+duplicate and an offset going backwards. It is not a general answer to
+running one projection from two places. A projector loads its offset once at
+startup and carries it in memory, and a sequence genuinely past the stored
+offset is taken from whoever saves it first. Acquiring and revalidating the
+right to process a projection, and ordering events between concurrent
+projectors, are not things this crate does.
+
+## Running the tests
+
+The contract tests need a database, and they find one in one of three ways:
+
+1. `DATABASE_URL` names one, and that one is used.
+2. There is no `DATABASE_URL`, but a container runtime is reachable: each test
+   starts a Postgres of its own and removes it on the way out, panics included.
+3. Neither is available, and the tests return without judging the provider.
+
+Only the third leaves a test passing on no evidence, and a run of that shape is
+not evidence that this provider keeps the contract. Once a database has been
+reached, failing to connect to it, to migrate it, or to keep a clause is a test
+failure.
+
+```console
+$ cargo test -p nitinol-sqlx
+```
+
+### With a container runtime
+
+Nothing to set up beyond a reachable Docker socket — the tests pull the pinned
+Postgres image and start it themselves. The socket is looked for at
+`$DOCKER_HOST`, then `/var/run/docker.sock`, then the usual rootless locations.
+
+### With a database of your own
+
+Point `DATABASE_URL` at it. This is the path CI takes when it runs Postgres as a
+service container, and the path to take when the container runtime is out of
+reach or when you want the data to still be there afterwards.
+
+```console
+$ DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres cargo test -p nitinol-sqlx
+```
+
+A compose file for a database you keep between runs:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:18cfe3ef5e6815560c98237d6216d1e5119702fb0f3894c8785dd58b8bbe5d73
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 1s
+      retries: 30
+```
+
+```console
+$ docker compose up -d
+$ DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres cargo test -p nitinol-sqlx
+```
+
+Each test brings up a schema of its own — `nitinol_sqlx_<pid>_<n>` — and
+migrates it, so tests running in parallel do not read each other's rows. On the
+container path they go when the container does. Against a database of your own
+they stay, which is what makes a failure inspectable afterwards; drop them when
+you are done:
+
+```sql
+DO $$
+DECLARE leftover text;
+BEGIN
+    FOR leftover IN
+        SELECT nspname FROM pg_namespace WHERE nspname LIKE 'nitinol\_sqlx\_%'
+    LOOP
+        EXECUTE format('DROP SCHEMA %I CASCADE', leftover);
+    END LOOP;
+END $$;
+```
+
+### Pinned versions
+
+`testcontainers` and `testcontainers-modules` are pinned exactly rather than by
+caret, and the Postgres image by digest. Both crates break their API across
+patch ranges of their dependency on each other, and an image tag that moved
+would change what a green run means with nothing in the repository having
+changed. Moving either is a deliberate change, not something a `cargo update`
+should do.

@@ -5,7 +5,7 @@
 //
 // 1. Call provider.begin() before project() for each event.
 // 2. Pass the resulting Tx to ProjectionContext so ctx.tx() returns Some(&mut Tx).
-// 3. Call checkpoint_store.save(..., Some(&mut tx)) in ExactlyOnce mode.
+// 3. Call offset_store.save(..., Some(&mut tx)) in ExactlyOnce mode.
 // 4. Call provider.commit(tx) after a successful project().
 //
 use std::collections::HashMap;
@@ -17,12 +17,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    codec::Codec, Event, ProjectionContext, Projector, ProjectorProps, TxProvider,
+    codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps, TxProvider,
 };
-use nitinol_persistence::error::CheckpointError;
-use nitinol_persistence::store::{CheckpointStore, EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
+use nitinol_persistence::error::OffsetError;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, OffsetScope, OffsetStore};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // Fixtures: minimal event type
@@ -32,6 +34,8 @@ struct TickEvent;
 
 impl Event for TickEvent {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("TickEvent"));
+
+    type Codec = TickCodec;
 }
 
 struct TickCodec;
@@ -114,59 +118,56 @@ impl TxProvider for MockTxProvider {
     }
 }
 
-// Fixtures: MockCheckpointStore
+// Fixtures: MockOffsetStore
 
-/// A CheckpointStore with Tx = MockTx.
+/// A OffsetStore with Tx = MockTx.
 ///
 /// Records whether save() was called with Some(tx) (ExactlyOnce+TxProvider path)
 /// or None (all other paths).
-pub struct MockCheckpointStore {
-    state: Mutex<HashMap<ProjectionId, u64>>,
+#[derive(Clone)]
+pub struct MockOffsetStore {
+    state: Arc<Mutex<HashMap<String, u64>>>,
     /// True if save() was ever called with Some(&mut tx).
     saved_with_tx: Arc<AtomicBool>,
 }
 
-impl MockCheckpointStore {
-    fn new() -> (Arc<Self>, Arc<AtomicBool>) {
+impl MockOffsetStore {
+    fn new() -> (Self, Arc<AtomicBool>) {
         let saved_with_tx = Arc::new(AtomicBool::new(false));
-        let store = Arc::new(Self {
-            state: Mutex::new(HashMap::new()),
+        let store = Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
             saved_with_tx: Arc::clone(&saved_with_tx),
-        });
+        };
         (store, saved_with_tx)
     }
 }
 
 #[async_trait]
-impl CheckpointStore for MockCheckpointStore {
+impl OffsetStore for MockOffsetStore {
     type Tx = MockTx;
 
-    async fn load(&self, id: &ProjectionId) -> Result<Option<u64>, CheckpointError> {
+    async fn load(&self, scope: &OffsetScope) -> Result<Option<u64>, OffsetError> {
         Ok(self
             .state
             .lock()
-            .expect(
-                "state mutex is never poisoned: no checkpoint operation panics while holding it",
-            )
-            .get(id)
+            .expect("state mutex is never poisoned: no offset operation panics while holding it")
+            .get(scope.as_str())
             .copied())
     }
 
     async fn save(
         &self,
-        id: &ProjectionId,
+        scope: &OffsetScope,
         seq: u64,
         tx: Option<&mut Self::Tx>,
-    ) -> Result<(), CheckpointError> {
+    ) -> Result<(), OffsetError> {
         if tx.is_some() {
             self.saved_with_tx.store(true, Ordering::SeqCst);
         }
         self.state
             .lock()
-            .expect(
-                "state mutex is never poisoned: no checkpoint operation panics while holding it",
-            )
-            .insert(id.clone(), seq);
+            .expect("state mutex is never poisoned: no offset operation panics while holding it")
+            .insert(scope.as_str().to_owned(), seq);
         Ok(())
     }
 }
@@ -263,9 +264,16 @@ async fn wait_for(notify: &Arc<Notify>) {
 #[tokio::test]
 async fn tx_provider_supplies_tx_to_projection_context() {
     // Given
-    let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
-    let (mock_cs, _saved_flag) = MockCheckpointStore::new();
+    let store = InMemoryEventStore::default();
+    let (mock_cs, _saved_flag) = MockOffsetStore::new();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store.clone())
+                .projection_offsets(mock_cs.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("tx-ctx-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -278,17 +286,14 @@ async fn tx_provider_supplies_tx_to_projection_context() {
     let (tp, _tp_state) = MockTxProvider::new();
 
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("tx-ctx-test-proj"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        Arc::clone(&mock_cs),
-        move || TxCapturingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("tx-ctx-test-proj"), move || {
+        TxCapturingProjector {
             received_tx: Arc::clone(&received_tx_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_tx_provider(tp)
-    .with_event::<TickEvent>(Arc::new(TickCodec))
+    .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -302,18 +307,25 @@ async fn tx_provider_supplies_tx_to_projection_context() {
     );
 }
 
-// Test 2: ExactlyOnce + TxProvider calls checkpoint save with Some(tx)
+// Test 2: ExactlyOnce + TxProvider calls offset save with Some(tx)
 
 /// In ExactlyOnce mode with a TxProvider, the framework must call
-/// checkpoint_store.save(..., Some(&mut tx)) rather than save(..., None).
-/// This enables the user's CheckpointStore to atomically save the checkpoint
+/// offset_store.save(..., Some(&mut tx)) rather than save(..., None).
+/// This enables the user's OffsetStore to atomically save the offset
 /// and read-model update within the same transaction.
 #[tokio::test]
-async fn exactly_once_with_tx_provider_saves_checkpoint_in_same_tx() {
+async fn exactly_once_with_tx_provider_saves_offset_in_same_tx() {
     // Given
-    let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
-    let (mock_cs, saved_with_tx) = MockCheckpointStore::new();
+    let store = InMemoryEventStore::default();
+    let (mock_cs, saved_with_tx) = MockOffsetStore::new();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store.clone())
+                .projection_offsets(mock_cs.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("tx-ckpt-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -323,26 +335,23 @@ async fn exactly_once_with_tx_provider_saves_checkpoint_in_same_tx() {
     let (tp, _tp_state) = MockTxProvider::new();
 
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("tx-ckpt-test-proj"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        Arc::clone(&mock_cs),
-        move || TxCapturingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("tx-ckpt-test-proj"), move || {
+        TxCapturingProjector {
             received_tx: Arc::new(AtomicBool::new(false)),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_tx_provider(tp)
-    .with_event::<TickEvent>(Arc::new(TickCodec))
+    .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
 
     wait_for(&notify).await;
-    // Allow the framework to complete checkpoint save after project() returns.
+    // Allow the framework to complete offset save after project() returns.
     tokio::task::yield_now().await;
 
-    // Then: checkpoint was saved with Some(&mut tx)
+    // Then: offset was saved with Some(&mut tx)
     assert!(
         saved_with_tx.load(Ordering::SeqCst),
         "save() must be called with Some(&mut tx) when TxProvider is configured (ExactlyOnce)"
@@ -356,9 +365,16 @@ async fn exactly_once_with_tx_provider_saves_checkpoint_in_same_tx() {
 #[tokio::test]
 async fn tx_provider_commit_called_after_successful_project() {
     // Given
-    let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
-    let (mock_cs, _saved_flag) = MockCheckpointStore::new();
+    let store = InMemoryEventStore::default();
+    let (mock_cs, _saved_flag) = MockOffsetStore::new();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store.clone())
+                .projection_offsets(mock_cs.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("tx-commit-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -368,17 +384,14 @@ async fn tx_provider_commit_called_after_successful_project() {
     let (tp, tp_state) = MockTxProvider::new();
 
     // When: spawn projector with TxProvider (ExactlyOnce is forced automatically)
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("tx-commit-test-proj"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        Arc::clone(&mock_cs),
-        move || TxCapturingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("tx-commit-test-proj"), move || {
+        TxCapturingProjector {
             received_tx: Arc::new(AtomicBool::new(false)),
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_tx_provider(tp)
-    .with_event::<TickEvent>(Arc::new(TickCodec))
+    .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -401,17 +414,24 @@ async fn tx_provider_commit_called_after_successful_project() {
 }
 
 // Test 4: project() failure triggers rollback, commit is not called,
-//         and checkpoint is not persisted
+//         and offset is not persisted
 
 /// When project() returns Err in ExactlyOnce + TxProvider mode, the framework
-/// must call provider.rollback(tx), NOT commit.  The checkpoint store must NOT
+/// must call provider.rollback(tx), NOT commit.  The offset store must NOT
 /// be updated.
 #[tokio::test]
 async fn tx_provider_rollback_called_when_project_fails() {
     // Given
-    let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
-    let (mock_cs, saved_with_tx) = MockCheckpointStore::new();
+    let store = InMemoryEventStore::default();
+    let (mock_cs, saved_with_tx) = MockOffsetStore::new();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store.clone())
+                .projection_offsets(mock_cs.clone())
+                .build(),
+        ))
+        .build();
     let agg_id = AggregateId::new("tx-rollback-test");
 
     append_tick(&store, &agg_id, 1).await;
@@ -421,16 +441,13 @@ async fn tx_provider_rollback_called_when_project_fails() {
     let (tp, tp_state) = MockTxProvider::new();
 
     // When: spawn projector that always fails (ExactlyOnce forced by with_tx_provider)
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("tx-rollback-test-proj"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        Arc::clone(&mock_cs),
-        move || FailingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("tx-rollback-test-proj"), move || {
+        FailingProjector {
             notify: Arc::clone(&notify_c),
-        },
-    )
+        }
+    })
     .with_tx_provider(tp)
-    .with_event::<TickEvent>(Arc::new(TickCodec))
+    .with_event::<TickEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -451,18 +468,20 @@ async fn tx_provider_rollback_called_when_project_fails() {
         "provider.commit() must NOT be called when project() fails"
     );
 
-    // Then: checkpoint store was not updated
+    // Then: offset store was not updated
     assert!(
         !saved_with_tx.load(Ordering::SeqCst),
-        "checkpoint store must not be updated when project() fails and rollback occurs"
+        "offset store must not be updated when project() fails and rollback occurs"
     );
     let persisted = mock_cs
-        .load(&ProjectionId::new("tx-rollback-test-proj"))
+        .load(&OffsetScope::from(&ProjectionId::new(
+            "tx-rollback-test-proj",
+        )))
         .await
         .expect("load must succeed");
     assert_eq!(
         persisted, None,
-        "checkpoint must not be persisted after a failed project + rollback"
+        "offset must not be persisted after a failed project + rollback"
     );
 }
 
@@ -472,12 +491,19 @@ async fn tx_provider_rollback_called_when_project_fails() {
 /// This verifies that the default (Tx = ()) path is not affected by the T2 change.
 #[tokio::test]
 async fn without_tx_provider_ctx_tx_returns_none() {
-    // Given: use InMemoryCheckpointStore (Tx = ()) to test the default path
-    let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    // Given: use InMemoryOffsetStore (Tx = ()) to test the default path
+    let store = InMemoryEventStore::default();
     let agg_id = AggregateId::new("tx-none-test");
-    use nitinol_persistence::store::InMemoryCheckpointStore;
-    let cs = Arc::new(InMemoryCheckpointStore::default());
+    use nitinol_persistence::store::InMemoryOffsetStore;
+    let cs = InMemoryOffsetStore::default();
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store.clone())
+                .projection_offsets(cs)
+                .build(),
+        ))
+        .build();
 
     append_tick(&store, &agg_id, 1).await;
 
@@ -510,16 +536,13 @@ async fn without_tx_provider_ctx_tx_returns_none() {
     }
 
     // When: spawn without TxProvider (default Tx = ())
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("tx-none-test-proj"),
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        cs,
-        move || NullTxProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("tx-none-test-proj"), move || {
+        NullTxProjector {
             tx_was_some: Arc::clone(&tx_was_some_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
-    .with_event::<TickEvent>(Arc::new(TickCodec))
+        }
+    })
+    .with_event::<TickEvent>()
     // No with_tx_provider() call — default Tx = ()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)

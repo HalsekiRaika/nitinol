@@ -1,0 +1,28 @@
+-- A consumer that follows one event type across every stream asks for that type
+-- above the position it has finished with. Without an index on the type it is
+-- served by the global-order index alone: every row above the position is read
+-- and most are thrown away. A saga's own stream makes that the normal case
+-- rather than an unlucky one — the framework's own records outnumber a saga's
+-- decisions, so a consumer of the decisions discards most of what it reads, and
+-- a stretch in which its type does not appear is re-read in full on every poll.
+--
+-- The collation is the whole reason this index is written out rather than being
+-- the obvious `(event_type, global_sequence)`. A prefix condition reaches an
+-- index by being asked as a range over the column, and a range is only the set
+-- of paths under the prefix if the comparison orders by bytes: the separator
+-- `.` and the byte above it `/` are adjacent in byte order, so everything
+-- between `prefix.` and `prefix/` is exactly the prefix followed by a
+-- separator. Under a locale collation they are not adjacent, and the same range
+-- answers with neither the same rows nor the right ones. `C` is therefore named
+-- here and at every comparison the provider makes against this column, and the
+-- two have to keep naming the same thing for this index to be reachable at all.
+--
+-- `global_sequence` is the second column because a consumer always pairs the
+-- type with a lower bound on the position, which makes the pair one index range
+-- rather than a type's whole history to be filtered afterwards.
+--
+-- Rows already in the journal are indexed as it is built; nothing stored
+-- changes, and a consumer reading through the provider sees the same events in
+-- the same order as before.
+CREATE INDEX nitinol_journal_event_type_global_sequence
+    ON nitinol_journal ((event_type COLLATE "C"), global_sequence);

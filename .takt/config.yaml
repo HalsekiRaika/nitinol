@@ -3,8 +3,8 @@ workflow_command_gates:
 
 takt_providers:
   assistant:
-    provider: claude
-    model: claude-fable-5
+    provider: codex
+    model: gpt-6-astra
 
 provider_routing:
   tags:
@@ -16,13 +16,13 @@ provider_routing:
           effort: medium
     project-consistency-gpt-worker:
       provider: codex
-      model: gpt-5.6-terra
+      model: gpt-6-terra
       provider_options:
         codex:
           reasoning_effort: medium
     project-consistency-gpt-structured:
       provider: codex
-      model: gpt-5.6-luna
+      model: gpt-6-luna
       provider_options:
         codex:
           reasoning_effort: medium
@@ -67,6 +67,19 @@ provider_routing:
             - Bash
             - WebSearch
             - WebFetch
+    route-claude-fable-read:
+      provider: claude
+      model: fable
+      provider_options:
+        claude:
+          effort: high
+          allowed_tools:
+            - Read
+            - Glob
+            - Grep
+            - Bash
+            - WebSearch
+            - WebFetch
     route-claude-opus-high-edit:
       provider: claude
       model: opus
@@ -99,7 +112,7 @@ provider_routing:
             - WebFetch
     route-codex-gpt55:
       provider: codex
-      model: gpt-5.5
+      model: gpt-6.1-sol
     route-claude-repair-high:
       provider_options:
         claude:

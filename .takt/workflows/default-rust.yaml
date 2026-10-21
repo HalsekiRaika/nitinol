@@ -8,7 +8,7 @@ steps:
       - plan
       - rust
       - route-provider-network
-      - route-claude-opus-high-read
+      - route-claude-fable-read
     edit: false
     persona: planner
     session_key: rust-plan

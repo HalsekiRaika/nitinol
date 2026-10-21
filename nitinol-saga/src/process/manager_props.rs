@@ -1,152 +1,207 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_eventsource::codec::ErasedCodec;
-use nitinol_eventsource::SequenceCursor;
-use nitinol_persistence::store::EventStore;
-use nitinol_persistence::AggregateId;
-use nitinol_runtime::process::{Process, ProcessProxy, Receive, SupervisionStrategy};
-use nitinol_runtime::{IdleTimeout, ProcessSystem, Props};
+use nitinol_eventsource::system::{EventSourceSystem, Hosted, Unhosted};
+use nitinol_eventsource::Event;
+use nitinol_persistence::provider::SagaOffsetSlot;
+use nitinol_runtime::process::SupervisionStrategy;
+use nitinol_runtime::{IdleTimeout, Props};
 
-use crate::dead_letter::{
-    default_enqueue_policy, make_dlq_child_spawn, DeadLetterEvent, DlqChildSpawn, EnqueuePolicy,
-};
-use crate::effect::TellIntent;
-use crate::id::SagaId;
+use crate::components::SagaComponents;
+use crate::delivery::{SagaDeliveryId, SagaDeliveryProps};
+use crate::process::instance::SagaProducer;
 use crate::process::manager::SagaManagerProcess;
-use crate::process::props::{CodecSet, CodecUnset, SubscriptionSet, SubscriptionUnset};
-use crate::process::proxy::SagaManagerProxy;
-use crate::process::saga_process::{
-    upstream_subscription, CrashRestartFactory, DecodeFailureRouteFn, SagaProcess,
-};
+use crate::process::proxy::{SagaHostProxy, SagaManagerProxy};
+use crate::process::saga_process;
 use crate::saga::Saga;
-use crate::scheduler::SchedulerProxy;
+use crate::scheduler;
+use crate::subscribe::{AllSourcesSubscribed, BindSource, SourceBindings};
+use crate::subscription::Subscription;
+use std::marker::PhantomData;
 
-/// Builder for the saga instance manager.
+/// Where a hosted saga's props start: the system they came from.
 ///
-/// Where [`SagaProps`](crate::SagaProps) spawns one saga bound to one
-/// [`SagaId`](crate::SagaId), this spawns a manager that holds a single
-/// upstream subscription and derives the instance for each record from
-/// [`Saga::correlate`]: an id with no resident instance is spawned and replayed
-/// on the spot, an id already resident is handed the record directly.
+/// `St` is that system's own store type, carried rather than erased so the
+/// saga-offset slot a delivery host records its progress in is required at the
+/// `spawn` of these props the same way it is required at the `spawn` of props
+/// built directly.
+pub struct SagaHosted<S: Saga, St> {
+    system: Hosted<St>,
+    _saga: PhantomData<fn() -> S>,
+}
+
+/// The builder every saga is started from.
 ///
-/// The state parameters mirror [`SagaProps`](crate::SagaProps):
-/// - `C` — codec configuration (`CodecUnset` / `CodecSet<S::Event>`)
-/// - `Sub` — subscription configuration (`SubscriptionUnset` / `SubscriptionSet<S>`)
+/// It spawns a manager that holds one upstream subscription per declared
+/// source — shared by every instance of the saga type — and derives the
+/// instance for each record from [`Saga::correlate`]: an id with no resident
+/// instance is spawned and replayed on the spot, an id already resident is
+/// handed the record directly. Beside it, it starts the delivery host that
+/// carries out what the manager decides: a saga whose decisions nobody carries
+/// out is not a saga, so the two are one declaration.
 ///
-/// # Relationship to a single resident saga
+/// `B` is the binding typestate: one slot per declared source,
+/// [`observing`](Self::observing) moves one, and [`spawn`](Self::spawn) exists
+/// only once every slot is filled.  `H` is whether the system has been named
+/// yet — [`new`](Self::new) builds an [`Unhosted`] one whose
+/// [`spawn`](Self::spawn) takes a system, and
+/// [`SagaSystemExt::host`](crate::SagaSystemExt::host) hands back a
+/// [`SagaHosted`] one that carries it already. Neither names a store: the
+/// journal its instances persist to, the journals its sources are observed
+/// from, and the slot its delivery host records in are all the system's.
+///
+/// # A single resident saga
 ///
 /// A [`Saga::correlate`] that always answers the same id reduces the manager to
-/// exactly one instance, which behaves as the standalone builder's saga does —
-/// same replay, same effect interpretation, same outbox ordering — **provided
-/// the same settings are carried over**.  Every instance-level setting
-/// [`SagaProps`](crate::SagaProps) accepts has a counterpart here, which the
-/// manager hands to each instance it spawns:
-///
-/// | On [`SagaProps`](crate::SagaProps) | Here |
-/// |---|---|
-/// | [`with_scheduler`](crate::SagaProps::with_scheduler) | [`with_scheduler`](Self::with_scheduler) |
-/// | [`with_enqueue_policy`](crate::SagaProps::with_enqueue_policy) | [`with_enqueue_policy`](Self::with_enqueue_policy) |
-/// | [`with_dead_letter_subscriber`](crate::SagaProps::with_dead_letter_subscriber) | [`with_dead_letter_subscriber`](Self::with_dead_letter_subscriber) |
-/// | [`with_crash_restart_factory`](crate::SagaProps::with_crash_restart_factory) | [`with_crash_restart_factory`](Self::with_crash_restart_factory) |
-/// | [`with_decode_failure_route`](crate::SagaProps::with_decode_failure_route) | [`with_decode_failure_route`](Self::with_decode_failure_route) |
-///
-/// That is the migration path: the resident saga is the degenerate case of the
-/// manager, not a separate mechanism.
-pub struct SagaManagerProps<S: Saga, C = CodecUnset, Sub = SubscriptionUnset> {
-    store: Arc<dyn EventStore>,
-    producer: Arc<dyn Fn() -> S + Send + Sync>,
-    codec: C,
-    subscription: Sub,
+/// exactly one instance — same replay, same effect interpretation, same append
+/// ordering as any other instance.  That is not a second mechanism to reach for
+/// but this one's degenerate case, which is why there is no separate builder
+/// for it: what an instance does is settled by the saga type itself, and the
+/// one knob this builder adds —
+/// [`with_instance_passivation`](Self::with_instance_passivation) — is about
+/// residency rather than behaviour.  A saga's own time needs no wiring either:
+/// the host resolves the resident timer core from the saga's alphabet, so one
+/// instance gets its deadlines on exactly the same terms a thousand do.
+pub struct SagaManagerProps<S: Saga, B = SourceBindings<S>, H = Unhosted> {
+    producer: SagaProducer<S>,
+    bindings: B,
     instance_idle_timeout: IdleTimeout,
-    scheduler: Option<SchedulerProxy>,
-    enqueue_policy: Option<Arc<dyn EnqueuePolicy>>,
-    dead_letter_subscriber: Option<Arc<dyn DlqChildSpawn<SagaProcess<S>>>>,
-    crash_restart_factory: Option<CrashRestartFactory>,
-    decode_failure_route_fn: Option<DecodeFailureRouteFn>,
+    /// The delivery host's settings, carried in every `H` because both entry
+    /// points start a host and both name those settings on this builder.
+    delivery: SagaDeliveryProps<S>,
+    host: H,
 }
 
-impl<S: Saga> SagaManagerProps<S, CodecUnset, SubscriptionUnset> {
-    /// Begin a manager spawn.
+impl<S: Saga> SagaManagerProps<S, SourceBindings<S>, Unhosted> {
+    /// Begin a manager spawn, with every declared source still unbound.
     ///
-    /// `store` is the EventStore every instance persists its own events to;
-    /// each one uses the [`SagaId`](crate::SagaId) `Saga::correlate` named as
-    /// its stream key.  `producer` constructs a saga instance and is called once
-    /// per spawned instance, so anything the saga captures (e.g. an
-    /// `AggregateProxy` to tell) must be re-acquirable.
-    pub fn new(
-        store: Arc<dyn EventStore>,
-        producer: impl Fn() -> S + Send + Sync + 'static,
-    ) -> Self {
+    /// Nothing but the producer: the journal its instances persist their own
+    /// events to, the journal its sources are read from and the slot its
+    /// delivery host records in are all taken from the system
+    /// [`spawn`](Self::spawn) is given.
+    ///
+    /// ```compile_fail
+    /// # use nitinol_persistence::store::InMemoryEventStore;
+    /// # use nitinol_saga::SagaManagerProps;
+    /// # struct ReservationSaga;
+    /// # fn wiring() {
+    /// let store = InMemoryEventStore::default();
+    /// // there is no form of this that takes a journal
+    /// SagaManagerProps::<ReservationSaga>::new(store, |_| ReservationSaga);
+    /// # }
+    /// ```
+    ///
+    /// `producer` builds a saga instance from the capabilities the framework
+    /// resolved for it and is called once per spawned instance, so anything the
+    /// saga captures (a reference it reads the world through, say) must be
+    /// re-acquirable.
+    pub fn new(producer: impl Fn(SagaComponents<S>) -> S + Send + Sync + 'static) -> Self {
         Self {
-            store,
             producer: Arc::new(producer),
-            codec: CodecUnset,
-            subscription: SubscriptionUnset,
+            bindings: SourceBindings::<S>::default(),
             instance_idle_timeout: IdleTimeout::Inherit,
-            scheduler: None,
-            enqueue_policy: None,
-            dead_letter_subscriber: None,
-            crash_restart_factory: None,
-            decode_failure_route_fn: None,
+            delivery: SagaDeliveryProps::new(),
+            host: Unhosted,
         }
     }
 }
 
-impl<S: Saga, Sub> SagaManagerProps<S, CodecUnset, Sub> {
-    /// Bind the codec used to encode and decode the instances' own events.
-    pub fn with_codec(
+impl<S: Saga, B> SagaManagerProps<S, B, Unhosted> {
+    /// Carry `host` as where these props start — as what the instances they
+    /// spawn are handed through [`SagaComponents::system`], and as the system
+    /// the delivery host starts its partitions on.
+    pub(crate) fn hosted<St>(
         self,
-        codec: Arc<dyn ErasedCodec<S::Event>>,
-    ) -> SagaManagerProps<S, CodecSet<S::Event>, Sub> {
+        host: EventSourceSystem<St>,
+    ) -> SagaManagerProps<S, B, SagaHosted<S, St>> {
         SagaManagerProps {
-            store: self.store,
             producer: self.producer,
-            codec: CodecSet { codec },
-            subscription: self.subscription,
+            bindings: self.bindings,
             instance_idle_timeout: self.instance_idle_timeout,
-            scheduler: self.scheduler,
-            enqueue_policy: self.enqueue_policy,
-            dead_letter_subscriber: self.dead_letter_subscriber,
-            crash_restart_factory: self.crash_restart_factory,
-            decode_failure_route_fn: self.decode_failure_route_fn,
-        }
-    }
-}
-
-impl<S: Saga, C> SagaManagerProps<S, C, SubscriptionUnset> {
-    /// Subscribe the manager to an upstream `EventStore`.
-    ///
-    /// This is the only subscription in the whole fan-out: the manager runs one
-    /// `DirectPollerProcess` and decodes each upstream record once, then routes
-    /// the decoded event by [`Saga::correlate`].
-    pub fn with_subscription(
-        self,
-        upstream_store: Arc<dyn EventStore>,
-        upstream_codec: Arc<dyn ErasedCodec<S::SubscribedEvent>>,
-        cursor: SequenceCursor,
-    ) -> SagaManagerProps<S, C, SubscriptionSet<S>> {
-        SagaManagerProps {
-            store: self.store,
-            producer: self.producer,
-            codec: self.codec,
-            subscription: SubscriptionSet {
-                upstream_store,
-                upstream_codec,
-                cursor,
+            delivery: self.delivery,
+            host: SagaHosted {
+                system: Hosted::new(host),
+                _saga: PhantomData,
             },
-            instance_idle_timeout: self.instance_idle_timeout,
-            scheduler: self.scheduler,
-            enqueue_policy: self.enqueue_policy,
-            dead_letter_subscriber: self.dead_letter_subscriber,
-            crash_restart_factory: self.crash_restart_factory,
-            decode_failure_route_fn: self.decode_failure_route_fn,
         }
     }
 }
 
-impl<S: Saga, C, Sub> SagaManagerProps<S, C, Sub> {
+impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
+    /// Name the delivery host this saga starts, so its recorded progress is
+    /// filed under `id`.
+    ///
+    /// What the identifier is for, and what it defaults to, is stated on
+    /// [`SagaDeliveryProps::with_delivery_id`].
+    pub fn with_delivery_id(mut self, id: SagaDeliveryId) -> Self {
+        self.delivery = self.delivery.with_delivery_id(id);
+        self
+    }
+
+    /// Spread this saga's delivery host over `partitions` independent
+    /// processes.
+    ///
+    /// What a partition bounds, and what changing the count costs, is stated on
+    /// [`SagaDeliveryProps::with_partitions`] and on [`SagaDeliveryProps`].
+    pub fn with_partitions(mut self, partitions: NonZeroUsize) -> Self {
+        self.delivery = self.delivery.with_partitions(partitions);
+        self
+    }
+
+    /// Have this saga's delivery host ask the journal no more often than every
+    /// `interval` — see [`SagaDeliveryProps::with_poll_interval`].
+    ///
+    /// This is the *delivery* side's cadence, on the saga's own decisions. How
+    /// often an observed source is asked is that source's own
+    /// [`Subscription::with_poll_interval`], named per source on
+    /// [`observing`](Self::observing).
+    pub fn with_delivery_poll_interval(mut self, interval: Duration) -> Self {
+        self.delivery = self.delivery.with_poll_interval(interval);
+        self
+    }
+}
+
+impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
+    /// Observe the declared source `E` through the records `subscription`
+    /// selects, decoded with the codec `E` names.
+    ///
+    /// One call per source the saga's alphabet declares, and one call only: the
+    /// slot this moves has moved, so binding a source twice and binding a
+    /// source the alphabet never declared are both compile errors, and
+    /// [`spawn`](Self::spawn) does not exist while any slot is still unbound.
+    ///
+    /// These are the only subscriptions in the fan-out: the manager runs one
+    /// `DirectPollerProcess` per declared source and decodes each record once,
+    /// then routes it by [`Saga::correlate`].  An instance the manager spawns
+    /// opens none of its own — which is also why a source's cursor starts
+    /// exactly where `subscription` says: it is spoken for by no single
+    /// instance's consumed position, and the sweep from there is what activates
+    /// the instances that are not resident.  Each instance still drops the
+    /// records its own stream names as consumed, so the sweep costs no second
+    /// decision.
+    ///
+    /// Which of the delivered events an instance acts on is decided by
+    /// [`Saga::correlate`], not here — correlation is domain knowledge carried
+    /// by the saga type.
+    pub fn observing<E>(
+        self,
+        subscription: Subscription,
+    ) -> SagaManagerProps<S, <B as BindSource<E>>::Bound, H>
+    where
+        E: Event,
+        B: BindSource<E>,
+    {
+        SagaManagerProps {
+            producer: self.producer,
+            bindings: <B as BindSource<E>>::bind(self.bindings, subscription.into_binding()),
+            instance_idle_timeout: self.instance_idle_timeout,
+            delivery: self.delivery,
+            host: self.host,
+        }
+    }
+
     /// Passivate an instance that has been idle for `after`.
     ///
     /// The instance is stopped and leaves the manager's registry; a later event
@@ -157,139 +212,51 @@ impl<S: Saga, C, Sub> SagaManagerProps<S, C, Sub> {
         self.instance_idle_timeout = IdleTimeout::After(after);
         self
     }
-
-    /// Inject the resident [`SchedulerProxy`](crate::SchedulerProxy) (from
-    /// [`crate::spawn_scheduler`]) so every instance this manager spawns has its
-    /// [`SagaEffect::schedule`](crate::SagaEffect::schedule) and
-    /// [`SagaEffect::cancel_schedule`](crate::SagaEffect::cancel_schedule)
-    /// effects drive real timers — the same wiring
-    /// [`SagaProps::with_scheduler`](crate::SagaProps::with_scheduler) gives a
-    /// standalone saga.
-    ///
-    /// Without it, schedule markers are still persisted on each instance's own
-    /// stream but no timer fires until a scheduler-equipped incarnation replays
-    /// them — which also means a manager whose `Saga::correlate` is constant
-    /// (the degenerate single-instance case) does not reproduce
-    /// `SagaProps::with_scheduler` unless this is called too.
-    pub fn with_scheduler(mut self, scheduler: SchedulerProxy) -> Self {
-        self.scheduler = Some(scheduler);
-        self
-    }
-
-    /// Filter which saga failures reach the DLQ, for every instance this
-    /// manager spawns — the same wiring
-    /// [`SagaProps::with_enqueue_policy`](crate::SagaProps::with_enqueue_policy)
-    /// gives a standalone saga.  Without it instances run the default policy,
-    /// which enqueues every failure kind.
-    ///
-    /// The policy is shared, not per-instance: it is handed the
-    /// [`SagaFailure`](crate::SagaFailure) alone, so an instance-specific
-    /// decision belongs in the failure's own data rather than in separate
-    /// policies.
-    pub fn with_enqueue_policy(mut self, policy: Arc<dyn EnqueuePolicy>) -> Self {
-        self.enqueue_policy = Some(policy);
-        self
-    }
-
-    /// Register a dead-letter subscriber process for every instance this
-    /// manager spawns — the same wiring
-    /// [`SagaProps::with_dead_letter_subscriber`](crate::SagaProps::with_dead_letter_subscriber)
-    /// gives a standalone saga.  Without it the dead letters instances write to
-    /// their own streams have no subscriber to reach.
-    ///
-    /// Each instance starts its own DLQ direct poller over its own stream, so
-    /// `subscriber` receives the dead letters of the whole fan-out and can tell
-    /// them apart by [`DeadLetterEvent::saga_id`](crate::DeadLetterEvent).  A
-    /// poller is a child of the instance it polls for, so passivating an
-    /// instance releases its subscription and a later revival re-opens it,
-    /// catching up on anything written meanwhile.
-    pub fn with_dead_letter_subscriber<P>(mut self, subscriber: ProcessProxy<P>) -> Self
-    where
-        P: Process + Receive<DeadLetterEvent, Response = ()> + 'static,
-    {
-        self.dead_letter_subscriber = Some(make_dlq_child_spawn::<SagaProcess<S>, P>(subscriber));
-        self
-    }
-
-    /// Register a factory for crash-restart re-dispatch on every instance this
-    /// manager spawns — the same wiring
-    /// [`SagaProps::with_crash_restart_factory`](crate::SagaProps::with_crash_restart_factory)
-    /// gives a standalone saga.
-    ///
-    /// This is what makes passivation lossless for in-flight tells: an instance
-    /// stopped mid-tell loses the in-memory intent, so when a later event
-    /// revives it the pending tell can only be reconstructed from its persisted
-    /// payload.  Without the factory replay records a synthetic
-    /// [`SagaFailure::TellFailed`](crate::SagaFailure) for it instead of
-    /// re-dispatching it.
-    pub fn with_crash_restart_factory<F>(mut self, factory: F) -> Self
-    where
-        F: Fn(&[u8]) -> Option<TellIntent> + Send + Sync + 'static,
-    {
-        self.crash_restart_factory = Some(Arc::new(factory));
-        self
-    }
-
-    /// Determine which spawned instance owns an upstream record the codec
-    /// could not decode, so that instance's
-    /// [`SagaFailure::DecodeFailed`](crate::SagaFailure::DecodeFailed) dead
-    /// letter is recorded on its own stream.
-    ///
-    /// A decode failure carries no typed event, so `Saga::correlate` cannot
-    /// name an owner for it the way it does for a decoded event.  Without this
-    /// call the manager has nowhere to attribute a corrupt record and skips it
-    /// — logged, the shared cursor still advances past it, same as an event
-    /// `Saga::correlate` claims for no instance.  Returning `Some(saga_id)`
-    /// routes the failure to that instance instead — spawning and replaying it
-    /// first if it is not resident — through the same
-    /// `SagaFailure::DecodeFailed` path a standalone
-    /// [`SagaProps`](crate::SagaProps) records.  Returning `None` skips the
-    /// record, same as leaving this unset.
-    pub fn with_decode_failure_route<F>(mut self, route: F) -> Self
-    where
-        F: Fn(&AggregateId, u64) -> Option<SagaId> + Send + Sync + 'static,
-    {
-        self.decode_failure_route_fn = Some(Arc::new(route));
-        self
-    }
 }
 
-impl<S: Saga> SagaManagerProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
-    /// Spawn the manager process.
+impl<S: Saga, B, H> SagaManagerProps<S, B, H>
+where
+    B: AllSourcesSubscribed<S::Subscribe>,
+{
+    /// The one road both entry points take: start the manager and the delivery
+    /// host that carries out what it decides, on `system`.
     ///
-    /// The upstream poller and every saga instance are runtime **children** of
-    /// the manager, so stopping the manager cascade-stops the whole fan-out.
-    pub async fn spawn(self, system: &ProcessSystem) -> SagaManagerProxy<S> {
-        let store = self.store;
-        // The proxy hands out dead letter queues over the very store the
-        // manager writes to, so it keeps its own handle to it.
-        let store_for_proxy = Arc::clone(&store);
-        let producer = self.producer;
-        let codec = self.codec.codec;
-        let upstream = upstream_subscription::<S>(
-            self.subscription.upstream_store,
-            self.subscription.upstream_codec,
-        );
-        let cursor = self.subscription.cursor;
-        let instance_idle_timeout = self.instance_idle_timeout;
-        let scheduler = self.scheduler;
-        let enqueue_policy = self.enqueue_policy.unwrap_or_else(default_enqueue_policy);
-        let dead_letter_subscriber = self.dead_letter_subscriber;
-        let crash_restart_factory = self.crash_restart_factory;
-        let decode_failure_route_fn = self.decode_failure_route_fn;
+    /// Every store comes from `system` here and nowhere else — the journal its
+    /// instances persist to and its sources are observed from, and the
+    /// saga-offset slot the host records its progress in — so the two spawn
+    /// forms cannot drift into reaching different destinations.
+    ///
+    /// The manager starts first: a delivery host reads what is already
+    /// journalled, so the order costs nothing either way, and the handle answers
+    /// for both halves only once both are running.
+    async fn start_on<St: SagaOffsetSlot>(
+        self,
+        system: &EventSourceSystem<St>,
+    ) -> SagaHostProxy<S> {
+        let store = system.persistence().event_store();
+        let offsets = system.persistence().saga_offsets();
+        let host = system.erase_store();
+        let ps = system.process_system();
 
+        let producer = self.producer;
+        let upstream: Vec<_> = self
+            .bindings
+            .into_sources()
+            .into_iter()
+            .map(saga_process::source_subscription)
+            .collect();
+        let instance_idle_timeout = self.instance_idle_timeout;
+        let scheduler = scheduler::resolve_for::<S>(ps).await;
+
+        let manager_host = host.clone();
+        let manager_store = store.clone();
         let props = Props::new(move || SagaManagerProcess::<S> {
-            store: Arc::clone(&store),
+            store: manager_store.clone(),
             producer: Arc::clone(&producer),
-            codec: Arc::clone(&codec),
-            enqueue_policy: Arc::clone(&enqueue_policy),
+            host: manager_host.clone(),
             upstream: upstream.clone(),
-            cursor: cursor.clone(),
             instance_idle_timeout,
             scheduler: scheduler.clone(),
-            dlq_child_spawn: dead_letter_subscriber.clone(),
-            crash_restart_factory: crash_restart_factory.clone(),
-            decode_failure_route_fn: decode_failure_route_fn.clone(),
             instances: HashMap::new(),
         })
         // An instance that could not settle a record is reported by holding the
@@ -298,11 +265,395 @@ impl<S: Saga> SagaManagerProps<S, CodecSet<S::Event>, SubscriptionSet<S>> {
         .with_supervision_strategy(SupervisionStrategy::Resume)
         // Idleness is a per-instance signal — `with_instance_passivation` is
         // what acts on it.  The manager itself is the sole owner of the
-        // subscription and the registry with nothing left to revive it, so
+        // subscriptions and the registry with nothing left to revive it, so
         // letting a system-wide default idle timeout reach it would silently
         // and permanently stop the whole fan-out during a quiet upstream.
         .with_idle_timeout(IdleTimeout::Persistent);
 
-        SagaManagerProxy::new(system.spawn(props).await, store_for_proxy)
+        let manager = SagaManagerProxy::new(ps.spawn(props).await);
+        let delivery = self.delivery.start_on(store, offsets, host).await;
+
+        SagaHostProxy::new(manager, delivery)
+    }
+}
+
+impl<S: Saga, B> SagaManagerProps<S, B, Unhosted>
+where
+    B: AllSourcesSubscribed<S::Subscribe>,
+{
+    /// Spawn the manager, and the delivery host that carries out what it
+    /// decides, on `system`.
+    ///
+    /// Every declared source's poller and every saga instance are runtime
+    /// **children** of the manager, so stopping the manager cascade-stops the
+    /// whole fan-out.
+    ///
+    /// A saga whose alphabet declares a deadline also has the system's one
+    /// resident timer core resolved here, and every instance the manager spawns
+    /// is handed it — which is the whole of a saga's deadline wiring, however
+    /// many instances the correlation fans out to.
+    ///
+    /// Every instance the manager spawns is handed `system` through
+    /// [`SagaComponents::system`](crate::SagaComponents::system).
+    ///
+    /// # Typestate
+    ///
+    /// Because a spawn always starts a host, this requires the store to hold the
+    /// saga-offset slot that host records its progress in. A store that holds
+    /// none is refused here, while the wiring is compiled, rather than when the
+    /// host first tries to record where it got to:
+    ///
+    /// ```compile_fail
+    /// # use async_trait::async_trait;
+    /// # use bytes::Bytes;
+    /// # use nitinol_eventsource::codec::Codec;
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_eventsource::Event;
+    /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+    /// # use nitinol_persistence::store::InMemoryEventStore;
+    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # use nitinol_saga::{
+    /// #     Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, Subscription,
+    /// # };
+    /// # struct DocCodec;
+    /// # #[derive(Clone)] struct OrderPlaced;
+    /// # #[derive(Clone)] struct ReservationRequested;
+    /// # impl Codec<OrderPlaced> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<OrderPlaced, Self::Error> { Ok(OrderPlaced) }
+    /// # }
+    /// # impl Codec<ReservationRequested> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &ReservationRequested) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<ReservationRequested, Self::Error> { Ok(ReservationRequested) }
+    /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for ReservationRequested {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # use nitinol::saga::SagaSubscribe;
+    /// # #[derive(SagaSubscribe)] enum Observed { Order(OrderPlaced) }
+    /// # struct ReservationSaga;
+    /// # #[async_trait]
+    /// # impl Saga for ReservationSaga {
+    /// #     type Subscribe = Observed;
+    /// #     type Event = ReservationRequested;
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn correlate(_: &Observed) -> Option<SagaId> { Some(SagaId::new("reservation")) }
+    /// #     async fn handle(&mut self, _: Observed, _: &mut SagaContext)
+    /// #         -> Result<SagaEffect<ReservationRequested>, Self::Error> { Ok(SagaEffect::None) }
+    /// # }
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// // no `saga_offsets` — this store has no saga slot
+    /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
+    /// let system = EventSourceSystem::builder(ps)
+    ///     .with_persistence(PersistenceProvider::new(store))
+    ///     .build();
+    /// SagaManagerProps::<ReservationSaga>::new(|_| ReservationSaga)
+    ///     .observing::<OrderPlaced>(Subscription::stream(&AggregateId::new("order")))
+    ///     .spawn(&system)
+    ///     .await;
+    /// # }
+    /// ```
+    ///
+    /// And a spawn names a system rather than a process system: the stores a
+    /// saga needs come from a supplier, which a bare
+    /// [`ProcessSystem`](nitinol_runtime::ProcessSystem) has none of.
+    pub async fn spawn<St: SagaOffsetSlot>(
+        self,
+        system: &EventSourceSystem<St>,
+    ) -> SagaHostProxy<S> {
+        self.start_on(system).await
+    }
+}
+
+impl<S, B, St> SagaManagerProps<S, B, SagaHosted<S, St>>
+where
+    S: Saga,
+    B: AllSourcesSubscribed<S::Subscribe>,
+    St: SagaOffsetSlot,
+{
+    /// Spawn the manager process, and the delivery host that carries out what
+    /// it decides, on the system these props came from.
+    ///
+    /// Nothing is named here, and every instance the manager spawns is handed
+    /// that system through
+    /// [`SagaComponents::system`](crate::SagaComponents::system).  The manager
+    /// starts first: a delivery host reads what is already journalled, so the
+    /// order costs nothing either way, and the handle answers for both halves
+    /// only once both are running.
+    ///
+    /// Spawning before every declared source is bound is a **compile error** —
+    /// including the degenerate case of binding nothing at all:
+    ///
+    /// ```compile_fail
+    /// # use async_trait::async_trait;
+    /// # use bytes::Bytes;
+    /// # use nitinol_eventsource::codec::Codec;
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_eventsource::Event;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
+    /// # use nitinol_persistence::{EventType, Family, TypeName};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt};
+    /// # struct DocCodec;
+    /// # #[derive(Clone)] struct OrderPlaced;
+    /// # #[derive(Clone)] struct ReservationRequested;
+    /// # impl Codec<OrderPlaced> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<OrderPlaced, Self::Error> { Ok(OrderPlaced) }
+    /// # }
+    /// # impl Codec<ReservationRequested> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &ReservationRequested) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<ReservationRequested, Self::Error> { Ok(ReservationRequested) }
+    /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for ReservationRequested {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # use nitinol::saga::SagaSubscribe;
+    /// # #[derive(SagaSubscribe)] enum Observed { Order(OrderPlaced) }
+    /// # struct ReservationSaga;
+    /// # #[async_trait]
+    /// # impl Saga for ReservationSaga {
+    /// #     type Subscribe = Observed;
+    /// #     type Event = ReservationRequested;
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn correlate(_: &Observed) -> Option<SagaId> { Some(SagaId::new("reservation")) }
+    /// #     async fn handle(&mut self, _: Observed, _: &mut SagaContext)
+    /// #         -> Result<SagaEffect<ReservationRequested>, Self::Error> { Ok(SagaEffect::None) }
+    /// # }
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// # let system = EventSourceSystem::builder(ps)
+    /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+    /// #     .build();
+    /// system
+    ///     .host::<ReservationSaga>(|_| ReservationSaga)
+    ///     .spawn()
+    ///     .await;
+    /// # }
+    /// ```
+    ///
+    /// So is binding only *some* of the declared sources.  The alphabet below
+    /// declares two, and the builder is handed one:
+    ///
+    /// ```compile_fail
+    /// # use async_trait::async_trait;
+    /// # use bytes::Bytes;
+    /// # use nitinol_eventsource::codec::Codec;
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_eventsource::Event;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
+    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt, Subscription};
+    /// # struct DocCodec;
+    /// # #[derive(Clone)] struct OrderPlaced;
+    /// # #[derive(Clone)] struct StockReserved;
+    /// # #[derive(Clone)] struct ReservationRequested;
+    /// # impl Codec<OrderPlaced> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<OrderPlaced, Self::Error> { Ok(OrderPlaced) }
+    /// # }
+    /// # impl Codec<StockReserved> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &StockReserved) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<StockReserved, Self::Error> { Ok(StockReserved) }
+    /// # }
+    /// # impl Codec<ReservationRequested> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &ReservationRequested) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<ReservationRequested, Self::Error> { Ok(ReservationRequested) }
+    /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for StockReserved {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("StockReserved"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for ReservationRequested {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # use nitinol::saga::SagaSubscribe;
+    /// # #[derive(SagaSubscribe)] enum Observed { Order(OrderPlaced), Stock(StockReserved) }
+    /// # struct ReservationSaga;
+    /// # #[async_trait]
+    /// # impl Saga for ReservationSaga {
+    /// #     type Subscribe = Observed;
+    /// #     type Event = ReservationRequested;
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn correlate(_: &Observed) -> Option<SagaId> { Some(SagaId::new("reservation")) }
+    /// #     async fn handle(&mut self, _: Observed, _: &mut SagaContext)
+    /// #         -> Result<SagaEffect<ReservationRequested>, Self::Error> { Ok(SagaEffect::None) }
+    /// # }
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// # let system = EventSourceSystem::builder(ps)
+    /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+    /// #     .build();
+    /// # let order_id = AggregateId::new("order");
+    /// // `StockReserved` is declared and never bound, so `spawn` does not exist
+    /// system
+    ///     .host::<ReservationSaga>(|_| ReservationSaga)
+    ///     .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    ///     .spawn()
+    ///     .await;
+    /// # }
+    /// ```
+    ///
+    /// Binding one source twice is a compile error too — the slot has already
+    /// moved, so there is no transition left to apply:
+    ///
+    /// ```compile_fail
+    /// # use async_trait::async_trait;
+    /// # use bytes::Bytes;
+    /// # use nitinol_eventsource::codec::Codec;
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_eventsource::Event;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
+    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt, Subscription};
+    /// # struct DocCodec;
+    /// # #[derive(Clone)] struct OrderPlaced;
+    /// # #[derive(Clone)] struct ReservationRequested;
+    /// # impl Codec<OrderPlaced> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<OrderPlaced, Self::Error> { Ok(OrderPlaced) }
+    /// # }
+    /// # impl Codec<ReservationRequested> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &ReservationRequested) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<ReservationRequested, Self::Error> { Ok(ReservationRequested) }
+    /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for ReservationRequested {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # use nitinol::saga::SagaSubscribe;
+    /// # #[derive(SagaSubscribe)] enum Observed { Order(OrderPlaced) }
+    /// # struct ReservationSaga;
+    /// # #[async_trait]
+    /// # impl Saga for ReservationSaga {
+    /// #     type Subscribe = Observed;
+    /// #     type Event = ReservationRequested;
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn correlate(_: &Observed) -> Option<SagaId> { Some(SagaId::new("reservation")) }
+    /// #     async fn handle(&mut self, _: Observed, _: &mut SagaContext)
+    /// #         -> Result<SagaEffect<ReservationRequested>, Self::Error> { Ok(SagaEffect::None) }
+    /// # }
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// # let system = EventSourceSystem::builder(ps)
+    /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+    /// #     .build();
+    /// # let order_id = AggregateId::new("order");
+    /// system
+    ///     .host::<ReservationSaga>(|_| ReservationSaga)
+    ///     .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    ///     .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    ///     .spawn()
+    ///     .await;
+    /// # }
+    /// ```
+    ///
+    /// And so is binding a source the alphabet never declared:
+    ///
+    /// ```compile_fail
+    /// # use async_trait::async_trait;
+    /// # use bytes::Bytes;
+    /// # use nitinol_eventsource::codec::Codec;
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_eventsource::Event;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
+    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSystemExt, Subscription};
+    /// # struct DocCodec;
+    /// # #[derive(Clone)] struct OrderPlaced;
+    /// # #[derive(Clone)] struct Undeclared;
+    /// # #[derive(Clone)] struct ReservationRequested;
+    /// # impl Codec<OrderPlaced> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &OrderPlaced) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<OrderPlaced, Self::Error> { Ok(OrderPlaced) }
+    /// # }
+    /// # impl Codec<Undeclared> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &Undeclared) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<Undeclared, Self::Error> { Ok(Undeclared) }
+    /// # }
+    /// # impl Codec<ReservationRequested> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &ReservationRequested) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<ReservationRequested, Self::Error> { Ok(ReservationRequested) }
+    /// # }
+    /// # impl Event for OrderPlaced {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("OrderPlaced"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for Undeclared {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("Undeclared"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # impl Event for ReservationRequested {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("ReservationRequested"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # use nitinol::saga::SagaSubscribe;
+    /// # #[derive(SagaSubscribe)] enum Observed { Order(OrderPlaced) }
+    /// # struct ReservationSaga;
+    /// # #[async_trait]
+    /// # impl Saga for ReservationSaga {
+    /// #     type Subscribe = Observed;
+    /// #     type Event = ReservationRequested;
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn correlate(_: &Observed) -> Option<SagaId> { Some(SagaId::new("reservation")) }
+    /// #     async fn handle(&mut self, _: Observed, _: &mut SagaContext)
+    /// #         -> Result<SagaEffect<ReservationRequested>, Self::Error> { Ok(SagaEffect::None) }
+    /// # }
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// # let system = EventSourceSystem::builder(ps)
+    /// #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+    /// #     .build();
+    /// # let order_id = AggregateId::new("order");
+    /// system
+    ///     .host::<ReservationSaga>(|_| ReservationSaga)
+    ///     .observing::<Undeclared>(Subscription::stream(&order_id))
+    ///     .spawn()
+    ///     .await;
+    /// # }
+    /// ```
+    pub async fn spawn(self) -> SagaHostProxy<S> {
+        let host = self.host.system.system().clone();
+        self.start_on(&host).await
     }
 }

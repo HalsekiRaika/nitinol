@@ -19,7 +19,6 @@
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
-use bytes::Bytes;
 use futures_core::future::BoxFuture;
 use futures_util::TryStreamExt;
 use tracing::field::{Field, Visit};
@@ -28,34 +27,23 @@ use tracing::{Level, Metadata, Subscriber};
 
 use nitinol_conformance::{
     Balance, Fault, Interpretation, Interpreted, Interpreter, Ledger, LedgerEvent, LedgerNotOpen,
-    LedgerRejection, MalformedLedgerEvent, Unanswered,
+    LedgerRejection, Unanswered,
 };
-use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event, ExecError, Query,
 };
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 
-// The kit's wire format, wired to this crate's codec
-
-/// Delegates to the kit's own encoding so both interpreters write bytes the
-/// kit can read back when it inspects a stream.
-pub struct LedgerCodec;
-
-impl Codec<LedgerEvent> for LedgerCodec {
-    type Error = MalformedLedgerEvent;
-
-    fn encode(event: &LedgerEvent) -> Result<Bytes, Self::Error> {
-        Ok(event.encode())
-    }
-
-    fn decode(payload: &[u8]) -> Result<LedgerEvent, Self::Error> {
-        LedgerEvent::decode(payload)
-    }
-}
+// The kit's wire format
+//
+// Neither interpreter states one: `LedgerEvent` names `LedgerCodec` itself, so
+// the activation reaches for it without being handed anything, and the direct
+// executor writes the same bytes by calling the kit's own encoding.
 
 // Capturing the records a told refusal is surfaced through
 
@@ -172,15 +160,18 @@ impl ActivationInterpretation {
 impl Interpretation for ActivationInterpretation {
     type Interpreter = ActivationInterpreter;
 
-    fn interpret(
-        &self,
-        ledger: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> BoxFuture<'_, Self::Interpreter> {
+    fn interpret(&self, ledger: AggregateId, store: Journal) -> BoxFuture<'_, Self::Interpreter> {
         Box::pin(async move {
-            let proxy = AggregateProps::<Ledger>::new(ledger.clone(), store)
-                .with_codec(Arc::new(LedgerCodec))
-                .spawn(&self.process_system)
+            // A system of its own per interpretation, over the journal the kit
+            // handed in: props take their store from the system they are
+            // spawned on, and a fresh system is what gives each interpretation
+            // its own activation of the ledger — which is what the kit asks for
+            // when it interprets one ledger twice.
+            let system = EventSourceSystem::builder(self.process_system.clone())
+                .with_persistence(PersistenceProvider::new(store))
+                .build();
+            let proxy = AggregateProps::<Ledger>::new(ledger.clone())
+                .spawn(&system)
                 .await;
             ActivationInterpreter {
                 proxy,
@@ -259,11 +250,7 @@ pub struct DirectInterpretation;
 impl Interpretation for DirectInterpretation {
     type Interpreter = DirectInterpreter;
 
-    fn interpret(
-        &self,
-        ledger: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> BoxFuture<'_, Self::Interpreter> {
+    fn interpret(&self, ledger: AggregateId, store: Journal) -> BoxFuture<'_, Self::Interpreter> {
         Box::pin(async move {
             let replayed = replay(&store, &ledger).await;
             DirectInterpreter {
@@ -291,7 +278,7 @@ enum Recorded {
     Failed(Fault),
 }
 
-async fn replay(store: &Arc<dyn EventStore>, ledger: &AggregateId) -> Replayed {
+async fn replay(store: &Journal, ledger: &AggregateId) -> Replayed {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(ledger))
         .await
@@ -319,7 +306,7 @@ const REFUSAL_LOCK: &str = "the refusal buffer guards only a push and a read, so
 
 pub struct DirectInterpreter {
     ledger: AggregateId,
-    store: Arc<dyn EventStore>,
+    store: Journal,
     writer: tokio::sync::Mutex<Replayed>,
     refusals: Mutex<Vec<String>>,
 }
@@ -338,7 +325,7 @@ impl DirectInterpreter {
             sequence += 1;
             appending.push(AppendingEvent {
                 sequence,
-                event_type: event.variant(),
+                event_type: <LedgerEvent as Event>::EVENT_TYPE,
                 payload: event.encode(),
                 occurred_at: jiff::Timestamp::now(),
             });

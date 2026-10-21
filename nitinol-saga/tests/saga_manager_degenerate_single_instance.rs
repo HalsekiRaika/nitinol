@@ -1,17 +1,46 @@
 //! The resident single-instance saga is expressible as a manager whose
 //! correlation is constant.
 //!
+//! ```gherkin
+//!   Scenario: one instance, reached through the one host entry point
+//!     Given a saga whose correlate always answers the same SagaId
+//!     And it is hosted with one declared source observed
+//!     When an order is placed
+//!     Then Saga::handle runs once, on the instance that id names
+//!     And the instance's own stream holds what a single resident saga writes:
+//!       the decision, then the fact settling the input it was decided from
+//!     And the wiring says nothing a fanned-out saga's would not: the same
+//!       `observing` per declared source and the same instance passivation
+//! ```
+//!
 //! This is the migration path check.  A `Saga::correlate` that always answers
-//! the same [`SagaId`] reduces the manager to exactly one instance, and the
-//! observable result must match what `SagaProps` produces today for the same
-//! scenario — the assertions mirror
-//! `nitinol-saga/tests/e2e_saga.rs::aggregate_event_drives_saga_to_command_target_aggregate`
-//! so a divergence in outbox ordering, sequences or configuration reach shows up
-//! here.
+//! the same [`SagaId`] reduces the host to exactly one instance, and what is
+//! then observable must be what a single resident saga produces for the same
+//! scenario — so the assertions below mirror the saga-side half of
+//! `nitinol-saga/tests/e2e_saga.rs::aggregate_event_drives_saga_to_command_target_aggregate`,
+//! and a divergence in the instance's identity, in its starting sequence, or in
+//! the rows it writes and their order shows up here.
+//!
+//! The wiring clause is the other half of "not a separate mechanism": the chain
+//! below is written with `host` / `observing` / `with_instance_passivation` and
+//! nothing else, which is the same chain a saga correlating to many instances
+//! is wired with.  A degenerate case that needed a setting of its own — or that
+//! could not take one the fanned-out case takes — would not compile here.
+//!
+//! What a persisted decision then causes elsewhere is a delivery host's doing,
+//! and a host reads decisions out of a store without caring which wiring put
+//! them there — it keeps no saga resident and cannot tell a managed instance
+//! from a resident one.  So it is pinned once, over in `e2e_saga.rs`, and this
+//! file stays on the one thing only the manager can get wrong: that constant
+//! correlation really does degenerate to a single instance indistinguishable
+//! from the resident one.
+//!
+//! Run with:
+//! `cargo test -p nitinol-saga --test saga_manager_degenerate_single_instance`.
 
 #[path = "common/helpers.rs"]
 mod common;
-use common::{outbox_kind_of, JsonCodec, OutboxKind};
+use common::{readable_consumed_fact_of, ConsumedFactPayload, JsonCodec, CONSUMED_MARKER};
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,14 +49,14 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{
-    system::EventSourceSystem, Aggregate, AggregateProxy, Decider, Decision, Event, Query,
-    SequenceCursor,
-};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_eventsource::{system::EventSourceSystem, Aggregate, Decider, Decision, Event, Never};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, LoadedEvent, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe, SagaSystemExt, Subscription,
+};
 
 /// The single instance every upstream event correlates to.  Constant
 /// correlation is what makes the manager degenerate to one resident saga.
@@ -43,16 +72,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.degenerate"), TypeName::new("OrderPlaced"));
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct Reserved {
-    sku: String,
-}
-
-impl Event for Reserved {
-    const EVENT_TYPE: EventType =
-        EventType::new(Family::new("mgr.degenerate"), TypeName::new("Reserved"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,6 +85,7 @@ impl Event for ReservationRequested {
         Family::new("mgr.degenerate"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 // Aggregates
@@ -74,6 +95,7 @@ struct Order;
 
 impl Aggregate for Order {
     type Event = OrderPlaced;
+    type Recover = Never;
 
     fn apply(&mut self, _event: OrderPlaced) {}
 }
@@ -91,108 +113,76 @@ impl Decider<PlaceOrder> for Order {
     }
 }
 
-#[derive(Default)]
-struct Inventory {
-    reserved_count: u64,
+// Saga under test
+
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
 }
 
-impl Aggregate for Inventory {
-    type Event = Reserved;
-
-    fn apply(&mut self, _event: Reserved) {
-        self.reserved_count += 1;
-    }
-}
-
-/// `Reserve` derives `Clone` + `Serialize` + `Deserialize` because
-/// `SagaEffect::tell` keeps the command across retry attempts and serializes it
-/// as the crash-restart payload of the `TellRequested` outbox marker.
-#[derive(Clone, Serialize, Deserialize)]
-struct Reserve {
+/// What one `Saga::handle` invocation saw.
+///
+/// The instance it ran on and the sequence that instance was at are the two
+/// observations the equivalence rests on: a manager that spawned a differently
+/// named instance, or one that handed `handle` a replayed instance's sequence,
+/// would not be the resident saga under another name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedContext {
+    saga_id: String,
+    sequence: u64,
     sku: String,
 }
 
-impl Decider<Reserve> for Inventory {
-    type Output = ();
-    type Rejection = std::convert::Infallible;
-
-    fn decide(&self, cmd: Reserve) -> Decision<Reserved, (), Self::Rejection> {
-        Decision::persist(vec![Reserved { sku: cmd.sku }]).output(())
-    }
-}
-
-struct GetReservedCount;
-
-impl Query<GetReservedCount> for Inventory {
-    type Response = u64;
-    type Error = std::convert::Infallible;
-
-    fn query(&self, _msg: GetReservedCount) -> Result<u64, Self::Error> {
-        Ok(self.reserved_count)
-    }
-}
-
-// Saga under test
-
-#[derive(Debug, Clone)]
-struct CapturedContext {
-    saga_id: SagaId,
-    sequence: u64,
-}
-
 struct ReservationSaga {
-    inventory: AggregateProxy<Inventory>,
     captured: Arc<Mutex<Vec<CapturedContext>>>,
 }
 
 #[async_trait]
 impl Saga for ReservationSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(RESIDENT_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.captured
             .lock()
             .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
             .push(CapturedContext {
-                saga_id: ctx.saga_id().clone(),
+                saga_id: ctx.saga_id().as_str().to_owned(),
                 sequence: ctx.sequence(),
+                sku: event.sku.clone(),
             });
 
-        let persist_own_event = SagaEffect::persist(ReservationRequested {
-            sku: event.sku.clone(),
-        });
-        let tell_inventory = SagaEffect::tell(self.inventory.clone(), Reserve { sku: event.sku });
-        Ok(persist_own_event.combine(tell_inventory))
+        Ok(SagaEffect::persist(ReservationRequested { sku: event.sku }))
     }
 }
 
 // Helpers
 
-fn count_user_events(events: &[LoadedEvent], expected: EventType) -> usize {
-    events.iter().filter(|e| e.event_type == expected).count()
-}
+/// How long a positive claim is given before the test calls it a failure.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn count_outbox_events(events: &[LoadedEvent], pred: impl Fn(&OutboxKind) -> bool) -> usize {
-    events
-        .iter()
-        .filter(|e| outbox_kind_of(e).as_ref().is_some_and(&pred))
-        .count()
-}
+/// How often a probe re-reads what it is waiting for.
+const PROBE_INTERVAL: Duration = Duration::from_millis(25);
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+/// The passivation window the wiring names.
+///
+/// Long enough that nothing is passivated inside this test: the clause the
+/// setting serves here is that the degenerate case takes it at all, and what
+/// passivation then does is pinned in `saga_manager_passivation.rs`.
+const INSTANCE_PASSIVATION: Duration = Duration::from_secs(300);
+
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -202,25 +192,56 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
         .expect("collect saga events must succeed")
 }
 
-async fn wait_until_outbox_acked(
-    store: &Arc<dyn EventStore>,
-    saga_id: &SagaId,
-) -> Vec<LoadedEvent> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+fn describe(events: &[LoadedEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| format!("{}@{}", e.event_type, e.sequence))
+        .collect()
+}
+
+fn captured_snapshot(captured: &Arc<Mutex<Vec<CapturedContext>>>) -> Vec<CapturedContext> {
+    captured
+        .lock()
+        .expect("captured mutex is never poisoned: no holder panics while the guard is alive")
+        .clone()
+}
+
+async fn wait_until_handled(
+    captured: &Arc<Mutex<Vec<CapturedContext>>>,
+    want: usize,
+) -> Vec<CapturedContext> {
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
+    loop {
+        let seen = captured_snapshot(captured);
+        if seen.len() >= want {
+            return seen;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {want} Saga::handle invocations; saw {seen:?}"
+        );
+        tokio::time::sleep(PROBE_INTERVAL).await;
+    }
+}
+
+/// The instance's own stream, once it holds the fact settling an input.
+///
+/// That row is the last of the batch the decision rides in, so waiting for it
+/// means the whole append has landed and the stream can be read in full.
+async fn wait_until_settled(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
     loop {
         let events = load_saga_events(store, saga_id).await;
-        if count_outbox_events(&events, |k| matches!(k, OutboxKind::TellAcked(_))) >= 1 {
+        if events.iter().any(|e| e.event_type == CONSUMED_MARKER) {
             return events;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "timed out waiting for TellAcked outbox event in saga stream (event_types: {:?})",
-            events
-                .iter()
-                .map(|e| e.event_type.to_string())
-                .collect::<Vec<_>>()
+            "timed out waiting for a `{CONSUMED_MARKER}` row on the instance's \
+             own stream; it held {:?}",
+            describe(&events)
         );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(PROBE_INTERVAL).await;
     }
 }
 
@@ -230,47 +251,33 @@ async fn wait_until_outbox_acked(
 async fn single_constant_correlation_reproduces_the_resident_saga() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .saga_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
         .build();
+    let journal = system.persistence().event_store();
 
-    let order_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let order_id = AggregateId::new("mgr-degenerate-order");
-    let order_proxy = system
-        .spawn_aggregate::<Order>(order_id.clone(), Arc::clone(&order_store))
-        .await;
+    let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
-    let inventory_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let inventory_proxy = system
-        .spawn_aggregate::<Inventory>(
-            AggregateId::new("mgr-degenerate-inventory"),
-            inventory_store,
-        )
-        .await;
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(RESIDENT_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedContext>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let inventory_for_producer = inventory_proxy.clone();
     let captured_for_producer = Arc::clone(&captured);
 
-    let _manager_proxy =
-        SagaManagerProps::<ReservationSaga>::new(Arc::clone(&saga_store), move || {
-            ReservationSaga {
-                inventory: inventory_for_producer.clone(),
-                captured: Arc::clone(&captured_for_producer),
-            }
+    // The one host entry point, with the one source this alphabet declares
+    // bound and the instances' passivation named — the chain a saga correlating
+    // to many instances is wired with, written for one that correlates to one.
+    let _manager_proxy = system
+        .host::<ReservationSaga>(move |_components| ReservationSaga {
+            captured: Arc::clone(&captured_for_producer),
         })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&order_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
+        .with_instance_passivation(INSTANCE_PASSIVATION)
+        .spawn()
         .await;
 
     order_proxy
@@ -280,87 +287,45 @@ async fn single_constant_correlation_reproduces_the_resident_saga() {
         .await
         .expect("ask(PlaceOrder) must succeed");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let reserved_count = loop {
-        let count = inventory_proxy
-            .exec(GetReservedCount)
-            .await
-            .expect("exec(GetReservedCount) must succeed");
-        if count >= 1 {
-            break count;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the manager's single instance must drive a Reserve into Inventory"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    };
     assert_eq!(
-        reserved_count, 1,
-        "Inventory must have received exactly one Reserve command, as it does \
-         under the resident SagaProps wiring"
+        wait_until_handled(&captured, 1).await,
+        vec![CapturedContext {
+            saga_id: RESIDENT_SAGA_ID.to_owned(),
+            sequence: 0,
+            sku: "SKU-001".to_owned(),
+        }],
+        "the host must route the upstream event to the one instance its \
+         constant correlation names, exactly once and at sequence 0 — the \
+         instance is indistinguishable from a single resident saga"
     );
 
-    let captured = {
-        let guard = captured
-            .lock()
-            .expect("captured mutex is never poisoned: no holder panics while the guard is alive");
-        guard.clone()
-    };
-    assert_eq!(
-        captured.len(),
-        1,
-        "Saga::handle must be invoked exactly once"
-    );
-    assert_eq!(
-        captured[0].saga_id.as_str(),
-        RESIDENT_SAGA_ID,
-        "SagaContext::saga_id must be the id Saga::correlate returned, so the \
-         manager's instance is indistinguishable from the resident one"
-    );
-    assert_eq!(
-        captured[0].sequence, 0,
-        "a fresh instance has sequence 0 before its first SagaEffect::Persist"
-    );
-
-    let saga_events = wait_until_outbox_acked(&saga_store, &saga_id).await;
+    let saga_events = wait_until_settled(&journal, &saga_id).await;
 
     assert_eq!(
-        count_user_events(&saga_events, ReservationRequested::EVENT_TYPE),
-        1,
-        "the instance must persist exactly one ReservationRequested user event"
-    );
-    assert_eq!(
-        count_outbox_events(&saga_events, |k| matches!(k, OutboxKind::TellRequested(_))),
-        1,
-        "Persist with one tell must append exactly one TellRequested outbox event"
-    );
-    assert_eq!(
-        count_outbox_events(&saga_events, |k| matches!(k, OutboxKind::TellAcked(_))),
-        1,
-        "a successful tell dispatch must result in exactly one TellAcked outbox event"
-    );
-    assert_eq!(
-        count_outbox_events(&saga_events, |k| matches!(k, OutboxKind::TellFailed(_))),
-        0,
-        "a successful tell must not produce a TellFailed event"
+        describe(&saga_events),
+        vec![
+            format!("{}@1", ReservationRequested::EVENT_TYPE),
+            format!("{CONSUMED_MARKER}@2"),
+        ],
+        "the instance writes what the resident wiring writes and in the same \
+         places: the decision at sequence 1 and the fact settling its input \
+         closing the batch at sequence 2. A manager that re-numbered the \
+         instance's stream, or added bookkeeping of its own to it, would not be \
+         a migration path"
     );
 
-    let user_event = saga_events
-        .iter()
-        .find(|e| e.event_type == ReservationRequested::EVENT_TYPE)
-        .expect("ReservationRequested user event must exist in saga stream");
-    let requested = saga_events
-        .iter()
-        .find(|e| matches!(outbox_kind_of(e), Some(OutboxKind::TellRequested(_))))
-        .expect("TellRequested outbox event must exist in saga stream");
     assert_eq!(
-        user_event.sequence, 1,
-        "the user event must be appended at sequence 1, as under SagaProps"
-    );
-    assert_eq!(
-        requested.sequence, 2,
-        "TellRequested must share the same atomic batch as the user event and \
-         land at sequence 2, as under SagaProps"
+        saga_events
+            .iter()
+            .filter_map(readable_consumed_fact_of)
+            .collect::<Vec<_>>(),
+        vec![ConsumedFactPayload {
+            source: order_id.as_str().to_owned(),
+            sequence: 1,
+            source_event_type: OrderPlaced::EVENT_TYPE.to_string(),
+        }],
+        "the position the manager's shared subscription settled is recorded on \
+         the instance's own stream, naming the same upstream stream, sequence \
+         and declared source a resident saga would have recorded"
     );
 }

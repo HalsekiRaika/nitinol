@@ -1,4 +1,5 @@
-//! Acceptance scenario "既存利用者の互換維持": moving the contract traits into
+//! Acceptance scenario "existing users keep compatibility": moving the
+//! contract traits into
 //! `nitinol-contract` must keep `nitinol::eventsource::{Event, Aggregate,
 //! Snapshotable}` denoting the *same* trait items as `nitinol::contract::{...}`,
 //! not look-alike wrappers.
@@ -12,17 +13,37 @@
 //! Run with: `cargo test -p nitinol --features eventsource`.
 #![cfg(feature = "eventsource")]
 
+use bytes::Bytes;
 use nitinol::persistence::{EventType, Family, TypeName};
 
-#[derive(Clone)]
+/// One codec for every fixture value here: the file is about trait identity
+/// across the two public paths, so a format is only needed to satisfy the
+/// association at all.
+struct IdentityCodec;
+
+impl<T: Default> nitinol::contract::Codec<T> for IdentityCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_value: &T) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<T, Self::Error> {
+        Ok(T::default())
+    }
+}
+
+#[derive(Clone, Default)]
 struct ContractPathEvent;
 
 impl nitinol::contract::Event for ContractPathEvent {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("identity"), TypeName::new("ContractPathEvent"));
+
+    type Codec = IdentityCodec;
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct EventsourcePathEvent;
 
 impl nitinol::eventsource::Event for EventsourcePathEvent {
@@ -30,6 +51,8 @@ impl nitinol::eventsource::Event for EventsourcePathEvent {
         Family::new("identity"),
         TypeName::new("EventsourcePathEvent"),
     );
+
+    type Codec = IdentityCodec;
 }
 
 #[derive(Default)]
@@ -37,16 +60,22 @@ struct ContractPathAggregate;
 
 impl nitinol::contract::Aggregate for ContractPathAggregate {
     type Event = ContractPathEvent;
+    // Named through the *other* path on purpose: the recovery marker is subject
+    // to the same identity claim as the traits, so a contract-path aggregate
+    // satisfying `Recovery<Self>` with the eventsource-path `Latest` is what
+    // says the two paths denote one marker.
+    type Recover = nitinol::eventsource::Latest;
 
     fn apply(&mut self, _event: ContractPathEvent) {}
 }
 
 impl nitinol::contract::Snapshotable for ContractPathAggregate {
     type Snapshot = ();
+    type Codec = IdentityCodec;
 
     fn capture(&self) {}
 
-    fn restore(_snapshot: ()) -> Self {
+    fn recover(_snapshot: ()) -> Self {
         ContractPathAggregate
     }
 }
@@ -56,16 +85,18 @@ struct EventsourcePathAggregate;
 
 impl nitinol::eventsource::Aggregate for EventsourcePathAggregate {
     type Event = EventsourcePathEvent;
+    type Recover = nitinol::contract::Latest;
 
     fn apply(&mut self, _event: EventsourcePathEvent) {}
 }
 
 impl nitinol::eventsource::Snapshotable for EventsourcePathAggregate {
     type Snapshot = ();
+    type Codec = IdentityCodec;
 
     fn capture(&self) {}
 
-    fn restore(_snapshot: ()) -> Self {
+    fn recover(_snapshot: ()) -> Self {
         EventsourcePathAggregate
     }
 }

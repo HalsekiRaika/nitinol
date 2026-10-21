@@ -13,27 +13,61 @@ use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::system::{EventSourceSystem, StoreSet};
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{AggregateProxy, Event};
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
+use nitinol_persistence::store::{
+    EventStore, EventStream, InMemoryOffsetStore, Journal, OffsetScope, OffsetStore,
+};
 use nitinol_persistence::{AggregateId, AppendOutcome, AppendingEvent, LoadQuery, LoadedEvent};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaDefaultStoreExt, SagaManagerProxy};
+use nitinol_saga::{SagaDeliveryId, SagaHostProxy, SagaSystemExt, Subscription};
 
-use saga_fanout_pattern::codec::JsonCodec;
-use saga_fanout_pattern::payroll_run::PayrollRun;
+use saga_fanout_pattern::payroll_run::{PayrollRun, PayrollRunApproved};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
 use saga_fanout_pattern::saga::{FanOutSaga, FanOutStarted};
+
+/// The store this example's deployment assembles: one in-memory journal, named
+/// by handing the backend handle over as itself, plus the saga-offset slot a
+/// host keeps its progress in.
+///
+/// Those two slots are exactly what hosting a saga needs, and naming the second
+/// one is what makes
+/// [`SagaSystemExt::host`](nitinol_saga::SagaSystemExt::host) exist on the
+/// system at all — hosting a saga starts the delivery host that carries out its
+/// decisions, so a deployment that named no store for that progress would not
+/// compile.  The snapshot and projection slots are left unprovided rather than
+/// filled with stores nothing here reads.
+///
+/// The journal has no type parameter here: the backend's type is written once,
+/// in the builder call that names it, and erased from there on.
+pub type ExampleStore = CustomStore<Unprovided, Unprovided, InMemoryOffsetStore>;
+
+/// The system this example's deployment assembles.
+pub type ExampleSystem = EventSourceSystem<ExampleStore>;
 
 /// Fan-out width the example is built around: one approval covers 32 employees.
 /// Every assertion that counts payslip streams is anchored to it, so an
 /// approval that silently narrows the fan-out fails.
 pub const EMPLOYEE_COUNT: usize = 32;
 
-/// Number of records the saga's own stream must hold for one decision: the
-/// decision event plus one outbox marker per dispatched tell.
-pub const DECISION_BLOCK_LEN: usize = 1 + EMPLOYEE_COUNT;
+/// Number of records the saga's own stream holds for one fan-out: the decision
+/// event, and the position of the upstream fact it was derived from — committed
+/// by the one append.
+///
+/// Two, and two whatever the fan-out's width is.  Nothing about the delivery of
+/// the 32 commands is persisted: they are re-derived from the decision by
+/// `FanOutSaga::dispatch` every time a host reads it, so there is no per-child
+/// row to count and no half-written block for a crash to leave behind.
+pub const DECISION_BLOCK_LEN: usize = 2;
+
+/// How often a delivery host in these tests asks the store what has been
+/// decided.
+///
+/// Named so that no assertion is tuned against a hidden default, and short
+/// enough that a wait below sees many ticks.
+pub const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// The employees an approved payroll run is expected to cover.
 ///
@@ -63,75 +97,179 @@ pub fn payslip_keys(payroll_run: &str, employees: &[String]) -> Vec<String> {
 /// Everything one incarnation of the example owns.
 ///
 /// `system` is kept because it is the handle to the `ProcessSystem` the
-/// aggregates and the manager run on; dropping the last handle early would take
-/// the incarnation down.
+/// aggregates, the manager and the delivery host run on; dropping the last
+/// handle early would take the incarnation down.
+///
+/// `offsets` is kept because a delivery host's progress is the thing these
+/// tests observe it by, and it is read as an operator or a second consumer would
+/// read it — through the store, not through the host.
+///
+/// `host` is one handle rather than two because one declaration started both
+/// halves: the manager is reached through
+/// [`manager()`](SagaHostProxy::manager) and the delivery host through
+/// [`delivery()`](SagaHostProxy::delivery).
 pub struct FanOutWorld {
-    pub system: EventSourceSystem<JsonCodec, StoreSet>,
+    pub system: ExampleSystem,
     pub payroll_run: AggregateProxy<PayrollRun>,
-    pub manager: SagaManagerProxy<FanOutSaga>,
+    pub host: SagaHostProxy<FanOutSaga>,
+    pub offsets: InMemoryOffsetStore,
 }
 
 /// Spawn a complete incarnation: a fresh `ProcessSystem`, the payroll run
-/// aggregate, and the saga manager subscribed to the run's stream.
+/// aggregate, the saga manager observing the run's stream, and a delivery host
+/// named `delivery_id`.
 ///
 /// One store serves every wiring point — the run aggregate, the payslips, the
-/// saga's journal and the manager's subscription.  `EventStore` is
-/// stream-keyed, so the run stream, the 32 payslip streams and the saga's own
-/// stream are tenants of the same instance and each owner still reads only its
-/// own key.
+/// saga's journal, the manager's subscription and the host's input.
+/// `EventStore` is stream-keyed, so the run stream, the 32 payslip streams and
+/// the saga's own stream are tenants of the same instance and each owner still
+/// reads only its own key.
 ///
-/// The store is a parameter because the crash/replay test hands the same durable
-/// state to two successive incarnations, wrapping the first one's in a
-/// fault-injecting decorator — which is what makes a partially completed fan-out
+/// Both the journal's backend and the offset store are parameters because the
+/// tests hand the same durable state to two successive incarnations — that is
+/// what makes "a restarted host resumes from the offset the dead one left" a
+/// thing a test can set up, and wrapping the journal in
+/// [`UnreachablePayslipStore`] is what makes an interrupted fan-out
 /// reproducible.
-pub async fn spawn_world(run_id: &AggregateId, store: Arc<dyn EventStore>) -> FanOutWorld {
+///
+/// The journal is named as the backend handle rather than as an erased
+/// [`Journal`]: naming a slot is what erases it, and an incarnation wired with
+/// the fault-injecting store is wired with that store itself.
+pub async fn spawn_world(
+    run_id: &AggregateId,
+    store: impl EventStore + 'static,
+    offsets: InMemoryOffsetStore,
+    delivery_id: &SagaDeliveryId,
+) -> FanOutWorld {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(store)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(store)
+                .saga_offsets(offsets.clone())
+                .build(),
+        ))
         .build();
 
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
-    let manager = spawn_manager(&system, run_id).await;
+    let host = spawn_saga(&system, run_id, delivery_id).await;
 
     FanOutWorld {
         system,
         payroll_run,
-        manager,
+        host,
+        offsets,
     }
 }
 
-/// Spawn (or re-spawn) the saga manager over an existing system.
+/// Spawn (or re-spawn) the saga over an existing system: the manager, and the
+/// delivery host filing its progress under `delivery_id`.
 ///
 /// The cursor starts at `after: 0` and lives in memory, so a manager spawned a
-/// second time over the same store replays the fact event — the at-least-once
-/// redelivery the pattern has to absorb.
+/// second time over the same store delivers the fact event again.  The saga
+/// instance it addresses drops that delivery — the position of the fact is on the
+/// instance's own stream, committed by the append that carried the decision — so
+/// a second incarnation does not decide the fan-out twice.
 ///
-/// Subscribing by the run's stream key is also what keeps the manager pointed at
+/// Observing by the run's stream key is also what keeps the manager pointed at
 /// the run's own stream while the payslip streams and the saga's journal share
 /// the same store.
-pub async fn spawn_manager(
-    system: &EventSourceSystem<JsonCodec, StoreSet>,
+///
+/// The producer ignores the components it is handed: this saga holds nothing,
+/// because it sends nothing.
+///
+/// Nothing is named for the delivery half but its settings: the journal it
+/// reads, the slot it records in and the system it delivers through are all the
+/// system's.  The identifier is named explicitly rather than left to the default
+/// derived from the saga's event type, because it is half of the offset key
+/// these tests read — see [`delivery_scope`].
+///
+/// Calling this beside a host that is already running is the shape of a second
+/// deployment: one more declaration, so one more manager and one more delivery
+/// host.  The delivery half holds no progress under its own identifier, so it
+/// reads the journal from the beginning and carries the commands of a decision
+/// the first host already finished with a second time; the manager half
+/// redelivers the fact event and the instance drops it, as the paragraph above
+/// describes.
+pub async fn spawn_saga(
+    system: &ExampleSystem,
     run_id: &AggregateId,
-) -> SagaManagerProxy<FanOutSaga> {
-    let system_for_producer = system.clone();
-    let system_for_factory = system.clone();
-
+    delivery_id: &SagaDeliveryId,
+) -> SagaHostProxy<FanOutSaga> {
     system
-        .saga_manager_props(system.subscription(run_id), move || {
-            FanOutSaga::new(system_for_producer.clone())
-        })
-        .with_crash_restart_factory(move |payload: &[u8]| {
-            FanOutSaga::crash_restart_intent(&system_for_factory, payload)
-        })
-        .spawn(system.process_system())
+        .host::<FanOutSaga>(|_components| FanOutSaga)
+        .observing::<PayrollRunApproved>(Subscription::stream(run_id))
+        .with_delivery_id(delivery_id.clone())
+        .with_delivery_poll_interval(DELIVERY_POLL_INTERVAL)
+        .spawn()
         .await
+}
+
+// The delivery host's progress
+
+/// The offset key the only partition of the host named `delivery_id`
+/// records under.
+///
+/// Progress is per partition, not per host; these tests leave the count at the
+/// default of one, so partition zero is the whole of it.
+pub fn delivery_scope(delivery_id: &SagaDeliveryId) -> OffsetScope {
+    delivery_id.offset_scope(0)
+}
+
+/// What the store holds for `scope`, as an operator would read it.
+///
+/// `None` is "this host has never finished a record", which is not the same as
+/// "it is at zero": the distinction is part of the offset contract, and it is
+/// what lets a test say "the interrupted host recorded no progress at all".
+pub async fn delivered_through(offsets: &InMemoryOffsetStore, scope: &OffsetScope) -> Option<u64> {
+    offsets
+        .load(scope)
+        .await
+        .expect("loading an in-memory offset must succeed")
+}
+
+/// Poll until `scope` holds at least `want`, then answer what it holds.
+///
+/// A host records the position of a record only once *every* delivery that
+/// record implied has landed, so this is the observable point that says "the
+/// whole fan-out was carried" — not a guessed settle window.
+pub async fn wait_for_delivery_through(
+    offsets: &InMemoryOffsetStore,
+    scope: &OffsetScope,
+    want: u64,
+    timeout: Duration,
+) -> u64 {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(held) = delivered_through(offsets, scope).await {
+            if held >= want {
+                return held;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for delivery progress to reach {want} on {} (held {:?})",
+                scope.as_str(),
+                delivered_through(offsets, scope).await
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Give a host a window in which it would have made progress if it were going
+/// to, so a test can assert that it did not.
+///
+/// Sized against [`DELIVERY_POLL_INTERVAL`] rather than a bare constant: it has
+/// to cover several ticks of the loop under test.
+pub async fn settle() {
+    tokio::time::sleep(DELIVERY_POLL_INTERVAL * 20).await;
 }
 
 // Store observation
 
-pub async fn load_stream(store: &Arc<dyn EventStore>, key: &str) -> Vec<LoadedEvent> {
+pub async fn load_stream(store: &Journal, key: &str) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(key))
         .await
@@ -149,7 +287,7 @@ pub async fn load_stream(store: &Arc<dyn EventStore>, key: &str) -> Vec<LoadedEv
 /// was rewritten with equal content".
 pub type StreamFingerprint = Vec<(u64, u64, Vec<u8>)>;
 
-pub async fn fingerprint(store: &Arc<dyn EventStore>, key: &str) -> StreamFingerprint {
+pub async fn fingerprint(store: &Journal, key: &str) -> StreamFingerprint {
     load_stream(store, key)
         .await
         .into_iter()
@@ -163,7 +301,7 @@ pub async fn fingerprint(store: &Arc<dyn EventStore>, key: &str) -> StreamFinger
         .collect()
 }
 
-pub async fn fingerprints(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<StreamFingerprint> {
+pub async fn fingerprints(store: &Journal, keys: &[String]) -> Vec<StreamFingerprint> {
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
         out.push(fingerprint(store, key).await);
@@ -172,7 +310,7 @@ pub async fn fingerprints(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<S
 }
 
 /// The subset of `keys` whose stream already holds at least one record.
-pub async fn issued(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<String> {
+pub async fn issued(store: &Journal, keys: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for key in keys {
         if !load_stream(store, key).await.is_empty() {
@@ -188,7 +326,7 @@ pub async fn issued(store: &Arc<dyn EventStore>, keys: &[String]) -> Vec<String>
 /// polling it — rather than sleeping for a guessed duration — is what makes the
 /// positive half of both tests deterministic.
 pub async fn wait_for_issued(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     keys: &[String],
     expected: usize,
     timeout: Duration,
@@ -210,28 +348,22 @@ pub async fn wait_for_issued(
     }
 }
 
-/// Poll the saga's own stream until it holds at least `expected` records of
-/// `FanOutStarted` — one per decision the saga committed.
-pub async fn wait_for_decisions(
-    store: &Arc<dyn EventStore>,
-    saga_key: &str,
+/// Poll the stream `key` until it holds at least `expected` records.
+pub async fn wait_for_records(
+    store: &Journal,
+    key: &str,
     expected: usize,
     timeout: Duration,
 ) -> Vec<LoadedEvent> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let events = load_stream(store, saga_key).await;
-        let decisions = events
-            .iter()
-            .filter(|event| event.event_type == FanOutStarted::EVENT_TYPE)
-            .count();
-        if decisions >= expected {
+        let events = load_stream(store, key).await;
+        if events.len() >= expected {
             return events;
         }
         if std::time::Instant::now() >= deadline {
             panic!(
-                "timed out waiting for {expected} FanOutStarted records on {saga_key} \
-                 (had {decisions} among {} records)",
+                "timed out waiting for {expected} records on {key} (had {})",
                 events.len()
             );
         }
@@ -239,17 +371,37 @@ pub async fn wait_for_decisions(
     }
 }
 
+/// The decisions the saga's own stream records, in stream order.
+pub fn decisions(events: &[LoadedEvent]) -> Vec<&LoadedEvent> {
+    events
+        .iter()
+        .filter(|event| event.event_type == FanOutStarted::EVENT_TYPE)
+        .collect()
+}
+
+/// The one decision on the saga's own stream, and the store-wide position it was
+/// committed at.
+///
+/// That position is what a delivery host's offset is compared against: a
+/// host that has recorded it has finished every delivery the decision implied.
+pub async fn decision_position(store: &Journal, saga_key: &str) -> u64 {
+    let stream = load_stream(store, saga_key).await;
+    let decisions = decisions(&stream);
+    assert_eq!(
+        decisions.len(),
+        1,
+        "the fan-out must have recorded exactly one decision (saga stream holds {} records)",
+        stream.len()
+    );
+    decisions[0].global_sequence
+}
+
 /// Round-trip a query through every payslip process's mailbox.
 ///
-/// `AggregateProxy::tell` returns once the command is queued, so a later `exec`
-/// through a reference to the same aggregate cannot be served before that
-/// command has been handled — both dispatches resolve to the one activation.
-/// Draining the mailbox this way is what stops "no duplicate was written" from
-/// passing merely because the redelivered command had not been processed yet.
-pub async fn drain_payslips(
-    system: &EventSourceSystem<JsonCodec, StoreSet>,
-    keys: &[String],
-) -> Vec<bool> {
+/// A delivery is an `ask`, so it has already been answered by the time the host
+/// records progress; this is the same round trip taken from the test's side, and
+/// it is what reads a payslip's state rather than its stream.
+pub async fn drain_payslips(system: &ExampleSystem, keys: &[String]) -> Vec<bool> {
     let mut out = Vec::with_capacity(keys.len());
     for key in keys {
         let proxy: AggregateProxy<Payslip> =
@@ -266,33 +418,50 @@ pub async fn drain_payslips(
 
 // Fault injection
 
-/// `EventStore` decorator that refuses `append` for the streams named in
-/// `refuses`, so a fan-out can be stopped part-way with no timing dependency.
+/// `EventStore` decorator that makes a chosen set of payslip streams
+/// permanently unwritable, with no timing dependency.
+///
+/// This is how an incarnation that cannot finish its fan-out is modelled.  Every
+/// append to a stream named in `unreachable` is refused, so those payslips go
+/// missing the way the ones a dying incarnation never reached do, and the
+/// delivery host hits one it cannot get carried out.  The refusal is never
+/// lifted: the host wrapped in this store can therefore *never* issue them, which
+/// is what makes "the second incarnation completed the fan-out" unambiguous —
+/// those 24 streams could have been written by nothing else.
 ///
 /// Refusing by name rather than allowing by name is what lets one store back the
-/// whole incarnation: the run's own stream and the saga's journal keep working,
-/// so the decision that drives the fan-out is still recorded, and only the
-/// payslips named here go missing.
+/// whole incarnation: the run's own stream and the saga's own journal keep
+/// working, so the decision that drives the fan-out is recorded exactly as in a
+/// healthy run.
 ///
-/// `load` always delegates: a payslip whose issue was refused must still be able
-/// to replay (and find itself empty) in a later incarnation.
-pub struct PartialFailurePayslipStore {
-    inner: Arc<dyn EventStore>,
-    refuses: HashSet<String>,
-    refused: Mutex<HashSet<String>>,
-    refused_changed: Notify,
+/// `load` always delegates: a later incarnation has to be able to read the
+/// journal this one wrote, and a payslip whose issue was refused must still be
+/// able to replay (and find itself empty).
+///
+/// Every field is shared rather than copied, because a store is distributed by
+/// being cloned: the handle this test keeps and the one the incarnation was
+/// wired with are the same store, or the refusals the test reads would be
+/// another store's.
+#[derive(Clone)]
+pub struct UnreachablePayslipStore {
+    inner: Journal,
+    /// Payslip streams this incarnation can never write.
+    unreachable: Arc<HashSet<String>>,
+    refused: Arc<Mutex<HashSet<String>>>,
+    refused_changed: Arc<Notify>,
 }
 
-impl PartialFailurePayslipStore {
-    pub fn new(inner: Arc<dyn EventStore>, refuses: HashSet<String>) -> Arc<Self> {
-        Arc::new(Self {
+impl UnreachablePayslipStore {
+    pub fn new(inner: Journal, unreachable: HashSet<String>) -> Self {
+        Self {
             inner,
-            refuses,
-            refused: Mutex::new(HashSet::new()),
-            refused_changed: Notify::new(),
-        })
+            unreachable: Arc::new(unreachable),
+            refused: Arc::new(Mutex::new(HashSet::new())),
+            refused_changed: Arc::new(Notify::new()),
+        }
     }
 
+    /// The payslip streams that have had an append refused.
     pub fn refused(&self) -> HashSet<String> {
         self.refused
             .lock()
@@ -300,40 +469,36 @@ impl PartialFailurePayslipStore {
             .clone()
     }
 
-    /// Wait until `expected` distinct streams have had an append refused.
+    /// Wait until at least one append has been refused, and answer every stream
+    /// that has had one.
     ///
-    /// Distinct streams, not attempts: the caller wants "the fan-out reached
-    /// every payslip it was going to fail on", and counting attempts would also
-    /// count a retry of the same payslip.
-    pub async fn wait_until_refused(&self, expected: usize, timeout: Duration) -> HashSet<String> {
+    /// Distinct streams, not attempts: the caller wants "the fan-out reached a
+    /// payslip it cannot write", and counting attempts would also count the
+    /// retries of the same one — which a held host makes forever.
+    pub async fn wait_until_refused(&self, timeout: Duration) -> HashSet<String> {
         tokio::time::timeout(timeout, async {
             loop {
                 let changed = self.refused_changed.notified();
                 let refused = self.refused();
-                if refused.len() >= expected {
+                if !refused.is_empty() {
                     return refused;
                 }
                 changed.await;
             }
         })
         .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "timed out waiting for {expected} refused payslip appends (had {:?})",
-                self.refused()
-            )
-        })
+        .unwrap_or_else(|_| panic!("timed out waiting for a refused payslip append"))
     }
 }
 
 #[async_trait]
-impl EventStore for PartialFailurePayslipStore {
+impl EventStore for UnreachablePayslipStore {
     async fn append(
         &self,
         key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError> {
-        if !self.refuses.contains(key) {
+        if !self.unreachable.contains(key) {
             return self.inner.append(key, events).await;
         }
         self.refused
@@ -342,7 +507,7 @@ impl EventStore for PartialFailurePayslipStore {
             .insert(key.to_owned());
         self.refused_changed.notify_one();
         Err(AppendError::Backend(Box::new(std::io::Error::other(
-            format!("fan-out interrupted before {key} was issued"),
+            format!("the incarnation issuing payslips cannot reach {key}"),
         ))))
     }
 

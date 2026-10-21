@@ -21,12 +21,15 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::codec::{Codec, ErasedCodec};
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_eventsource::codec::Codec;
+use nitinol_eventsource::{system::EventSourceSystem, Event};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 const INSTANCE_PREFIX: &str = "mgr-single-";
 
@@ -49,6 +52,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.single"), TypeName::new("OrderPlaced"));
+    type Codec = CountingUpstreamCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,6 +65,7 @@ impl Event for ReservationRequested {
         Family::new("mgr.single"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 /// JSON codec for the upstream event type that counts every decode.  Bound to
@@ -82,6 +87,12 @@ impl Codec<OrderPlaced> for CountingUpstreamCodec {
 
 // Saga under test
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 struct RecordingSaga {
     handled: Arc<Mutex<Vec<String>>>,
     notify: Arc<Notify>,
@@ -89,20 +100,21 @@ struct RecordingSaga {
 
 #[async_trait]
 impl Saga for RecordingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(format!("{INSTANCE_PREFIX}{}", event.order)))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Order(event) => {
+                Some(SagaId::new(format!("{INSTANCE_PREFIX}{}", event.order)))
+            }
+        }
     }
-
-    fn apply(&mut self, _event: Self::Event) {}
 
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         self.handled
@@ -117,7 +129,7 @@ impl Saga for RecordingSaga {
 // Helpers
 
 async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     upstream_key: &AggregateId,
     sequence: u64,
     order: &str,
@@ -177,17 +189,17 @@ async fn wait_for_handled(
 async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // One journal: the upstream stream and every instance's own stream are
+    // tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-single-orders");
     for (index, order) in UPSTREAM_ORDERS.iter().enumerate() {
         let sequence = u64::try_from(index + 1).expect("test sequence fits in u64");
-        append_order_placed(&upstream_store, &upstream_key, sequence, order).await;
+        append_order_placed(&journal, &upstream_key, sequence, order).await;
     }
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let handled: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -197,25 +209,16 @@ async fn upstream_decode_happens_once_per_event_regardless_of_instance_count() {
     let notify_for_producer = Arc::clone(&notify);
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let _manager_proxy =
-        SagaManagerProps::<RecordingSaga>::new(Arc::clone(&saga_store), move || {
-            spawned_for_producer.fetch_add(1, Ordering::SeqCst);
-            RecordingSaga {
-                handled: Arc::clone(&handled_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            Arc::new(CountingUpstreamCodec) as Arc<dyn ErasedCodec<OrderPlaced>>,
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<RecordingSaga>::new(move |_components| {
+        spawned_for_producer.fetch_add(1, Ordering::SeqCst);
+        RecordingSaga {
+            handled: Arc::clone(&handled_for_producer),
+            notify: Arc::clone(&notify_for_producer),
+        }
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
+    .spawn(&system)
+    .await;
 
     wait_for_handled(&handled, &notify, UPSTREAM_ORDERS.len()).await;
     // A per-instance poller would keep decoding after the last delivery, so

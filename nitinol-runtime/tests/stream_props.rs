@@ -133,7 +133,7 @@ async fn stream_props_spawned_stream_resumes_across_publishes() {
 
     // 50 consecutive publishes with no subscribers — each `recv` runs and
     // returns Ok(()). Even though there is no subscriber failure path here,
-    // each publish exercises the lifecycle loop and proves the Resume actor
+    // each publish exercises the lifecycle loop and proves the Resume process
     // is not exiting on its own.
     for i in 0..50u32 {
         stream

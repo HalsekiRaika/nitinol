@@ -1,27 +1,43 @@
-//! `AggregateProps::new` accepts `Arc<dyn EventStore>` directly.
+//! `AggregateProps::new` receives an identity and nothing else, and the
+//! aggregate process holds the journal its system distributes inline.
 //!
-//! Replaces the previous `EventPersistor` actor wiring.  The aggregate
-//! process now holds the store inline and calls `store.append` /
-//! `store.load` without crossing an actor boundary.
+//! ```gherkin
+//!   Scenario: the entry point receives an identity alone
+//!     Given a system over a journal the caller still holds
+//!     When props are built on three different aggregate ids of that system
+//!     Then all three compile
+//!     And every aggregate they spawn appends into the one journal
 //!
-//! Two complementary checks:
+//!   Scenario: the system's journal is what a replay reads
+//!     Given an aggregate that has decided twice
+//!     When a second system over the same journal starts that id again
+//!     Then it restores the state those decisions left
+//! ```
 //!
-//! 1. Compile-time type assertion — `AggregateProps::new` must accept
-//!    `Arc<dyn EventStore>` as its second argument.  Any regression to the
-//!    old proxy-based signature fails to compile.
-//! 2. Runtime integration — spawning + ask must succeed end-to-end with
-//!    the new direct-store wiring (no actor in between).
-
-use std::sync::Arc;
+//! A deployment names its journal once, where it builds its system; whichever
+//! form its wiring holds one in — a backend it constructed, a [`Journal`] a
+//! supplier answered with — is that supplier's business and never the props'.
+//! What the props carry is the identity, and the clause that matters is that
+//! every aggregate of one system shares one *destination* too — props that
+//! reached a store of their own would compile just as well and leave each
+//! aggregate writing somewhere else.
+//!
+//! The process boundary this replaced is gone: the aggregate calls
+//! `store.append` / `store.load` on the handle it holds rather than asking a
+//! persistor process to. Replay is the clause that pins it end to end.
 
 use bytes::Bytes;
 
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, Query,
+    codec::Codec, Aggregate, AggregateProps, Decider, Decision, Event, Never, Query,
 };
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
+
+use futures_util::TryStreamExt;
 
 // Minimal counter aggregate
 
@@ -35,10 +51,13 @@ struct Incremented;
 
 impl Event for Incremented {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
+
+    type Codec = PassThroughCodec;
 }
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
     }
@@ -79,105 +98,139 @@ impl Codec<Incremented> for PassThroughCodec {
     }
 }
 
-// Compile-time type assertion
-
-/// `AggregateProps::<Counter>::new` MUST have the signature
-/// `fn(AggregateId, Arc<dyn EventStore>) -> AggregateProps<Counter>`.
-///
-/// Not a `#[test]` — the compiler enforces the signature at build time.
-/// A regression to `EventPersistorProxy` (or any other type) causes a
-/// compile error.
-#[allow(dead_code)]
-fn _assert_sig_aggregate_props_new_accepts_arc_dyn_event_store() {
-    let _: fn(AggregateId, Arc<dyn EventStore>) -> AggregateProps<Counter> = AggregateProps::new;
+/// How many events `journal` holds under `key`.
+async fn appended_count(journal: &Journal, key: &AggregateId) -> usize {
+    let loaded: Vec<_> = journal
+        .load(LoadQuery::by_stream(key))
+        .await
+        .expect("loading a stream of a journal succeeds")
+        .try_collect()
+        .await
+        .expect("collecting a stream of a journal succeeds");
+    loaded.len()
 }
 
-// Runtime integration: spawn + ask succeeds with Arc<dyn EventStore>
+/// A system distributing `journal`, with a registry of its own.
+async fn system_over(journal: &Journal) -> EventSourceSystem<Journal> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(journal.clone()))
+        .build()
+}
 
-/// Spawning an AggregateProcess with Arc<dyn EventStore> succeeds, and the
-/// facts of an accepted decision reach `store.append` without going through an
-/// actor proxy.
+// Compile-time type assertion
+
+/// `AggregateProps::<Counter>::new` MUST receive the identity and nothing else.
+///
+/// Not a `#[test]` — the compiler enforces the signature at build time. A
+/// regression to a receiving shape that also takes a journal, a supplier or a
+/// persistor is a compile error here.
+#[allow(dead_code)]
+fn _assert_sig_aggregate_props_new_receives_an_identity_alone() {
+    let _: fn(AggregateId) -> AggregateProps<Counter> = AggregateProps::new;
+}
+
+// Runtime integration: every aggregate of one system reaches the one journal
+
+/// Spawning an `AggregateProcess` succeeds for every identity a system is asked
+/// for, and the facts of every accepted decision reach the one journal behind
+/// them.
+///
+/// The three streams are read back through the handle the test kept, so an
+/// aggregate that reached a destination of its own would leave its stream empty
+/// here while its own `ask` still succeeded.
 #[tokio::test]
-async fn aggregate_props_spawns_with_arc_dyn_event_store() {
-    // Given
-    let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+async fn every_aggregate_of_one_system_reaches_the_one_journal() {
+    // Given: one journal, named once, and a system distributing it
+    let journal = Journal::from(InMemoryEventStore::default());
+    let system = system_over(&journal).await;
+    let first = AggregateId::new("journal-one-first");
+    let second = AggregateId::new("journal-one-second");
+    let third = AggregateId::new("journal-one-third");
 
-    // When: AggregateProps takes the store directly (no EventPersistor::spawn)
-    let proxy = AggregateProps::<Counter>::new(AggregateId::new("direct-store-1"), store)
-        .with_codec(Arc::new(PassThroughCodec))
-        .spawn(&system)
-        .await;
+    // When: props are built on each identity and each aggregate decides once
+    for id in [first.clone(), second.clone(), third.clone()] {
+        let proxy = AggregateProps::<Counter>::new(id.clone())
+            .spawn(&system)
+            .await;
+        proxy
+            .ask(Increment)
+            .await
+            .unwrap_or_else(|error| panic!("ask on {} must succeed: {error:?}", id.as_str()));
+    }
 
-    // Then: ask succeeds — the process appends via the held store, and the
-    // applied fact has moved the state it can be queried for
-    proxy.ask(Increment).await.expect("ask must succeed");
+    // Then: all three streams are in the journal the test holds
     assert_eq!(
-        proxy.exec(GetCount).await.expect("exec must succeed"),
-        1,
-        "the accepted fact must have been persisted and applied"
+        (
+            appended_count(&journal, &first).await,
+            appended_count(&journal, &second).await,
+            appended_count(&journal, &third).await,
+        ),
+        (1, 1, 1),
+        "props name an identity and take their journal from the system, so each \
+         aggregate's fact is in the journal the test kept — props that reached a \
+         store of their own would each have a region and nothing would report it"
     );
 }
 
-// Runtime integration: state replay via direct store
+// Runtime integration: state replay via the system's journal
 
-/// After ask(Increment) on process 1, a second process sharing the same
-/// Arc<dyn EventStore> replays the stored event in on_start and observes
-/// the restored state.
+/// After two decisions on the first activation, a second system over the same
+/// journal replays the stored events in `on_start` and observes the restored
+/// state.
 ///
-/// This is the key behavior the refactor preserves: replay still works,
-/// but now without an EventPersistor actor in between.
+/// Two systems are what make this two activations: one system resolves an
+/// identity to one activation, so a second start of the id on it would reach
+/// the activation that is already there and replay nothing.
 #[tokio::test]
-async fn aggregate_replays_state_via_shared_arc_dyn_event_store() {
+async fn an_aggregate_replays_its_state_through_a_clone_of_the_journal() {
     // Given
-    let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = Journal::from(InMemoryEventStore::default());
+    let system = system_over(&journal).await;
     let id = AggregateId::new("direct-store-replay");
 
-    // Write 2 events through process 1
+    // Write 2 events through the first activation
     {
-        let proxy = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-            .with_codec(Arc::new(PassThroughCodec))
+        let proxy = AggregateProps::<Counter>::new(id.clone())
             .spawn(&system)
             .await;
         proxy.ask(Increment).await.expect("ask 1 must succeed");
         proxy.ask(Increment).await.expect("ask 2 must succeed");
     }
 
-    // When: spawn a fresh process for the same id with the same store
-    let proxy2 = AggregateProps::<Counter>::new(id, store)
-        .with_codec(Arc::new(PassThroughCodec))
-        .spawn(&system)
-        .await;
+    // When: a fresh system over the same journal starts the same id
+    let restarted = system_over(&journal).await;
+    let replayed = AggregateProps::<Counter>::new(id).spawn(&restarted).await;
 
-    // Then: replayed state == 2
-    let count = proxy2.exec(GetCount).await.expect("exec must succeed");
+    // Then
     assert_eq!(
-        count, 2,
-        "replay via direct-store wiring must restore state to 2"
+        replayed.exec(GetCount).await.expect("exec must succeed"),
+        2,
+        "replay reads the journal the first activation appended to, so the \
+         restored state is 2"
     );
 }
 
-// Multiple AggregateProcess can share one Arc<dyn EventStore>
+// Several aggregates over one journal
 
-/// Two AggregateProcess instances on different ids share the same
-/// Arc<dyn EventStore>.  Without the EventPersistor actor, the store itself
-/// is the synchronization point — its own thread-safe internals (Mutex)
-/// guarantee correctness.
+/// Two `AggregateProcess` instances on different ids run over clones of the one
+/// journal their system distributes.
+///
+/// Without a persistor process in between, the store itself is the
+/// synchronisation point — its own thread-safe internals are what make that
+/// sound, which is why identity is the backend's obligation rather than
+/// something the framework establishes by sharing a pointer.
 #[tokio::test]
-async fn multiple_aggregate_processes_share_single_arc_dyn_event_store() {
+async fn several_aggregate_processes_run_over_clones_of_one_journal() {
     // Given
-    let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = Journal::from(InMemoryEventStore::default());
+    let system = system_over(&journal).await;
 
-    // When: spawn two aggregates that share the store
-    let proxy_a = AggregateProps::<Counter>::new(AggregateId::new("share-a"), Arc::clone(&store))
-        .with_codec(Arc::new(PassThroughCodec))
+    // When: two aggregates are spawned on the one system
+    let proxy_a = AggregateProps::<Counter>::new(AggregateId::new("share-a"))
         .spawn(&system)
         .await;
 
-    let proxy_b = AggregateProps::<Counter>::new(AggregateId::new("share-b"), Arc::clone(&store))
-        .with_codec(Arc::new(PassThroughCodec))
+    let proxy_b = AggregateProps::<Counter>::new(AggregateId::new("share-b"))
         .spawn(&system)
         .await;
 
@@ -185,15 +238,14 @@ async fn multiple_aggregate_processes_share_single_arc_dyn_event_store() {
     proxy_b.ask(Increment).await.expect("b 1 must succeed");
     proxy_a.ask(Increment).await.expect("a 2 must succeed");
 
-    // Then: each stream has the expected count, independently
+    // Then: each stream shows its own count, independently
     assert_eq!(
-        proxy_a.exec(GetCount).await.expect("exec a"),
-        2,
-        "stream a must show 2 increments"
-    );
-    assert_eq!(
-        proxy_b.exec(GetCount).await.expect("exec b"),
-        1,
-        "stream b must show 1 increment"
+        (
+            proxy_a.exec(GetCount).await.expect("exec a"),
+            proxy_b.exec(GetCount).await.expect("exec b"),
+        ),
+        (2, 1),
+        "clones of one journal are one journal, and the streams within it stay \
+         their own"
     );
 }

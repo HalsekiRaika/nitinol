@@ -19,11 +19,14 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 /// Prefix of every instance id [`TracingSaga::correlate`] derives.  The order
 /// key is appended verbatim, so one upstream stream fans out to one instance
@@ -40,6 +43,7 @@ struct OrderPlaced {
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.lazy"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,6 +56,7 @@ impl Event for ReservationRequested {
         Family::new("mgr.lazy"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
 }
 
 // Saga under test
@@ -74,15 +79,24 @@ impl TracingSaga {
     }
 }
 
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
+
 #[async_trait]
 impl Saga for TracingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(event: &Self::SubscribedEvent) -> Option<SagaId> {
-        Some(SagaId::new(format!("{INSTANCE_PREFIX}{}", event.order)))
+    fn correlate(input: &Self::Subscribe) -> Option<SagaId> {
+        match input {
+            Observed::Order(event) => {
+                Some(SagaId::new(format!("{INSTANCE_PREFIX}{}", event.order)))
+            }
+        }
     }
 
     fn apply(&mut self, event: Self::Event) {
@@ -91,9 +105,10 @@ impl Saga for TracingSaga {
 
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         self.record(format!("handle:{}:{}", ctx.saga_id().as_str(), event.order));
         Ok(SagaEffect::None)
     }
@@ -102,7 +117,7 @@ impl Saga for TracingSaga {
 // Helpers
 
 async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
     upstream_key: &AggregateId,
     sequence: u64,
     order: &str,
@@ -128,12 +143,7 @@ async fn append_order_placed(
 
 /// Seed one of the saga's *own* domain events so the instance the manager
 /// lazily spawns has something to replay before the upstream event reaches it.
-async fn seed_saga_domain_event(
-    store: &Arc<dyn EventStore>,
-    saga_id: &SagaId,
-    sequence: u64,
-    order: &str,
-) {
+async fn seed_saga_domain_event(store: &Journal, saga_id: &SagaId, sequence: u64, order: &str) {
     let payload = serde_json::to_vec(&ReservationRequested {
         order: order.to_owned(),
     })
@@ -192,15 +202,16 @@ async fn wait_for_trace_len(
 async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // One journal: the upstream stream and each instance's own stream are
+    // tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-lazy-spawn-orders");
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let instance_id = SagaId::new(format!("{INSTANCE_PREFIX}A"));
-    seed_saga_domain_event(&saga_store, &instance_id, 1, "A").await;
+    seed_saga_domain_event(&journal, &instance_id, 1, "A").await;
 
     let trace: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -208,24 +219,15 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
     let trace_for_producer = Arc::clone(&trace);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _manager_proxy =
-        SagaManagerProps::<TracingSaga>::new(Arc::clone(&saga_store), move || TracingSaga {
-            trace: Arc::clone(&trace_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<TracingSaga>::new(move |_components| TracingSaga {
+        trace: Arc::clone(&trace_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
+    .spawn(&system)
+    .await;
 
-    append_order_placed(&upstream_store, &upstream_key, 1, "A").await;
+    append_order_placed(&journal, &upstream_key, 1, "A").await;
 
     wait_for_trace_len(&trace, &notify, 2).await;
 
@@ -245,13 +247,11 @@ async fn unknown_correlation_id_lazy_spawns_and_delivers_after_replay() {
 async fn known_correlation_id_reuses_the_running_instance() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-lazy-reuse-orders");
-
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let trace: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -261,27 +261,19 @@ async fn known_correlation_id_reuses_the_running_instance() {
     let notify_for_producer = Arc::clone(&notify);
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let _manager_proxy = SagaManagerProps::<TracingSaga>::new(Arc::clone(&saga_store), move || {
+    let _manager_proxy = SagaManagerProps::<TracingSaga>::new(move |_components| {
         spawned_for_producer.fetch_add(1, Ordering::SeqCst);
         TracingSaga {
             trace: Arc::clone(&trace_for_producer),
             notify: Arc::clone(&notify_for_producer),
         }
     })
-    .with_codec(system.codec::<ReservationRequested>())
-    .with_subscription(
-        Arc::clone(&upstream_store),
-        system.codec::<OrderPlaced>(),
-        SequenceCursor::Stream {
-            key: upstream_key.as_str().to_owned(),
-            after: 0,
-        },
-    )
-    .spawn(system.process_system())
+    .observing::<OrderPlaced>(Subscription::stream(&upstream_key))
+    .spawn(&system)
     .await;
 
-    append_order_placed(&upstream_store, &upstream_key, 1, "B").await;
-    append_order_placed(&upstream_store, &upstream_key, 2, "B").await;
+    append_order_placed(&journal, &upstream_key, 1, "B").await;
+    append_order_placed(&journal, &upstream_key, 2, "B").await;
 
     wait_for_trace_len(&trace, &notify, 2).await;
     // A per-event respawn would land after the second handle, so settle past one

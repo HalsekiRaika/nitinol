@@ -30,25 +30,6 @@ impl Driver<DummyProcess> for IntDriver {
     }
 }
 
-struct AlwaysFailingDriver;
-
-impl Driver<DummyProcess> for AlwaysFailingDriver {
-    type Event = ();
-
-    async fn next(&mut self) -> Option<Self::Event> {
-        Some(())
-    }
-
-    async fn apply(
-        &mut self,
-        _state: &mut DummyProcess,
-        _ctx: &mut ProcessContext<DummyProcess>,
-        _ev: Self::Event,
-    ) -> Result<(), HandlerError> {
-        Err(HandlerError)
-    }
-}
-
 struct NeverIdleDriver;
 
 impl Driver<DummyProcess> for NeverIdleDriver {
@@ -91,35 +72,27 @@ impl Driver<DummyProcess> for DefaultDriver {
     }
 }
 
-#[test]
-fn driver_trait_is_visible_from_sibling_crate() {
-    let (_tx, rx) = mpsc::channel::<i32>(4);
-    let _driver = IntDriver { rx };
-}
-
-#[test]
-fn handler_error_is_visible_from_sibling_crate() {
-    let _err: HandlerError = HandlerError;
-}
-
-#[test]
-fn external_driver_can_return_handler_error_from_apply() {
-    let _driver = AlwaysFailingDriver;
-}
-
 fn assert_send<T: Send>() {}
 fn assert_static<T: 'static>() {}
 
-#[test]
-fn driver_impl_satisfies_send_and_static_bounds() {
+/// A `Driver` impl written outside the runtime crate is `Send + 'static`, so it
+/// can be moved into the spawned process task.
+///
+/// Not a `#[test]` — the compiler enforces the bounds at build time.
+#[allow(dead_code)]
+fn _assert_driver_impl_satisfies_send_and_static_bounds() {
     assert_send::<IntDriver>();
     assert_static::<IntDriver>();
     assert_send::<NeverIdleDriver>();
     assert_static::<NeverIdleDriver>();
 }
 
-#[test]
-fn driver_event_associated_type_is_send() {
+/// A `Driver`'s `Event` is `Send`, so it can cross the await point between
+/// `next()` and `apply()`.
+///
+/// Not a `#[test]` — the compiler enforces the bound at build time.
+#[allow(dead_code)]
+fn _assert_driver_event_associated_type_is_send() {
     assert_send::<<IntDriver as Driver<DummyProcess>>::Event>();
     assert_send::<<NeverIdleDriver as Driver<DummyProcess>>::Event>();
 }

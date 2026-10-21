@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
-use nitinol_persistence::store::{CheckpointStore, DeliveryMode};
-use nitinol_persistence::{AggregateId, LoadedEvent, ProjectionId};
+use nitinol_persistence::store::{DeliveryMode, Journal, OffsetScope, OffsetStore};
+use nitinol_persistence::{AggregateId, LoadedEvent};
+
+use crate::projection::ProjectionId;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::durable_stream::{DurableSubscription, SequenceCursor};
-use crate::projection::delivery;
+use crate::error::ProjectionNotSettled;
+use crate::projection::delivery::{self, ApplyOutcome, ProjectionIdentity};
 use crate::projection::handler::EventTypeHandler;
 use crate::projection::tx_provider::ErasedTxProvider;
 
-/// Specifies which sequence dimension drives checkpoint advancement.
+/// Specifies which sequence dimension drives offset advancement.
 #[derive(Clone)]
 pub(crate) enum CatchupOrigin {
     /// Use the per-aggregate `sequence` (stream-scoped cursor).
@@ -21,12 +24,21 @@ pub(crate) enum CatchupOrigin {
 pub struct ProjectorProcess<P, Cs, Tx = ()> {
     pub(crate) projector: P,
     pub(crate) projection_id: ProjectionId,
-    pub(crate) checkpoint_store: Arc<Cs>,
+    /// Built once, when this projector is spawned: the key its position is
+    /// filed under never changes while it runs.
+    pub(crate) offset_scope: OffsetScope,
+    /// The journal this projection follows, as the system it was spawned on
+    /// distributes it.
+    ///
+    /// Held so the poller started in `on_start` is handed the destination the
+    /// spawn resolved, rather than one the subscription carries.
+    pub(crate) store: Journal,
+    pub(crate) offset_store: Cs,
     pub(crate) delivery_mode: DeliveryMode,
     pub(crate) catchup_origin: CatchupOrigin,
     pub(crate) handlers: Vec<Arc<dyn EventTypeHandler<P, Tx>>>,
     pub(crate) tx_provider: Option<Arc<dyn ErasedTxProvider<Tx> + Send + Sync>>,
-    pub(crate) checkpoint_sequence: u64,
+    pub(crate) offset_sequence: u64,
     pub(crate) upstream_config: DurableSubscription<LoadedEvent>,
     pub(crate) upstream_cursor: SequenceCursor,
 }
@@ -34,12 +46,12 @@ pub struct ProjectorProcess<P, Cs, Tx = ()> {
 impl<P, Cs, Tx> Process for ProjectorProcess<P, Cs, Tx>
 where
     P: Send + Sync + 'static,
-    Cs: CheckpointStore<Tx = Tx> + Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
     Tx: Send + 'static,
 {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
         self.upstream_config
-            .spawn_child(ctx, self.upstream_cursor.clone())
+            .spawn_child(ctx, self.store.clone(), self.upstream_cursor.clone())
             .await;
     }
 }
@@ -47,33 +59,42 @@ where
 impl<P, Cs, Tx> Receive<LoadedEvent> for ProjectorProcess<P, Cs, Tx>
 where
     P: Send + Sync + 'static,
-    Cs: CheckpointStore<Tx = Tx> + Send + Sync + 'static,
+    Cs: OffsetStore<Tx = Tx> + Send + Sync + 'static,
     Tx: Send + 'static,
 {
     type Response = ();
-    type Error = std::convert::Infallible;
+    /// Returning `Err` stops the `DirectPoller` (via `ask()`) from advancing the
+    /// subscription cursor, so an event this projector could not apply is
+    /// redelivered rather than skipped for good.
+    type Error = ProjectionNotSettled;
 
     async fn recv(
         &mut self,
         loaded: LoadedEvent,
         _ctx: &mut ProcessContext<Self>,
-    ) -> Result<(), std::convert::Infallible> {
+    ) -> Result<(), ProjectionNotSettled> {
         let event_sequence = match &self.catchup_origin {
             CatchupOrigin::Aggregate(_) => loaded.sequence,
             CatchupOrigin::Global => loaded.global_sequence,
         };
 
-        if event_sequence <= self.checkpoint_sequence {
+        // Already applied by this or an earlier incarnation.  Nothing is owed
+        // for it, and reporting it as unsettled would hold the cursor on a
+        // redelivery that can never produce anything new.
+        if event_sequence <= self.offset_sequence {
             return Ok(());
         }
 
         let handler = match self
             .handlers
             .iter()
-            .find(|h| h.event_type().type_key() == loaded.event_type.type_key())
+            .find(|h| h.event_type() == loaded.event_type)
         {
             Some(h) => Arc::clone(h),
             None => {
+                // No handler is registered for this type, so there is no
+                // application to fail and nothing a redelivery would change.
+                // Holding the cursor here would stall every event behind it.
                 tracing::debug!(
                     event_type = ?loaded.event_type,
                     "skipping unregistered event type",
@@ -84,25 +105,37 @@ where
 
         let projection_id = self.projection_id.clone();
         let delivery_mode = self.delivery_mode;
-        let checkpoint_store = Arc::clone(&self.checkpoint_store);
-        let current_checkpoint = self.checkpoint_sequence;
+        let offset_store = &self.offset_store;
+        let current_offset = self.offset_sequence;
         let payload = loaded.payload;
+        let offset_scope = &self.offset_scope;
         let projector = &mut self.projector;
         let tx_provider = self.tx_provider.as_deref();
 
-        self.checkpoint_sequence = delivery::apply(
+        let outcome = delivery::apply(
             delivery_mode,
-            checkpoint_store.as_ref(),
-            &projection_id,
-            current_checkpoint,
+            offset_store,
+            ProjectionIdentity {
+                id: &projection_id,
+                scope: offset_scope,
+            },
+            current_offset,
             event_sequence,
             tx_provider,
             |ctx| handler.handle(projector, payload, ctx),
         )
         .await;
 
+        // Both the offset this projector carries forward and the answer the
+        // poller reads come from this one outcome.  Deciding them separately is
+        // how the cursor came to move past events the offset had not.
+        self.offset_sequence = outcome.offset();
+
         tokio::task::yield_now().await;
 
-        Ok(())
+        match outcome {
+            ApplyOutcome::Settled { .. } => Ok(()),
+            ApplyOutcome::Retry { .. } => Err(ProjectionNotSettled),
+        }
     }
 }

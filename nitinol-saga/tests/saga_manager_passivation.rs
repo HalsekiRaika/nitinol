@@ -28,11 +28,14 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 /// The one instance every `Ping` correlates to.
 const INSTANCE_ID: &str = "mgr-passivation-instance";
@@ -56,6 +59,7 @@ struct Ping {
 impl Event for Ping {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.passivation"), TypeName::new("Ping"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,9 +68,20 @@ struct Counted;
 impl Event for Counted {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mgr.passivation"), TypeName::new("Counted"));
+    type Codec = JsonCodec;
 }
 
 // Saga under test
+
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+// The observed payload is decoded and delivered as the variant it belongs to;
+// what this saga decides does not read it, which `dead_code` cannot tell apart
+// from a field nothing fills.
+#[allow(dead_code)]
+#[derive(SagaSubscribe)]
+enum Observed {
+    Ping(Ping),
+}
 
 /// Counts the `Counted` events it has seen.  Because the count is rebuilt only
 /// by `apply`, the value `handle` observes on a revisit is evidence of whether
@@ -79,12 +94,11 @@ struct CountingSaga {
 
 #[async_trait]
 impl Saga for CountingSaga {
-    type SubscribedEvent = Ping;
+    type Subscribe = Observed;
     type Event = Counted;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(INSTANCE_ID))
     }
 
@@ -94,7 +108,7 @@ impl Saga for CountingSaga {
 
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         self.observed
@@ -108,7 +122,7 @@ impl Saga for CountingSaga {
 
 // Helpers
 
-async fn append_ping(store: &Arc<dyn EventStore>, upstream_key: &AggregateId, sequence: u64) {
+async fn append_ping(store: &Journal, upstream_key: &AggregateId, sequence: u64) {
     let payload = serde_json::to_vec(&Ping { nonce: sequence })
         .map(Bytes::from)
         .expect("encode Ping must succeed");
@@ -165,12 +179,13 @@ async fn wait_for_observed(
 async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // One journal: the pings the saga observes and the instance's own stream
+    // are tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-passivation-pings");
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -180,29 +195,20 @@ async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
     let notify_for_producer = Arc::clone(&notify);
     let spawned_for_producer = Arc::clone(&instances_spawned);
 
-    let _manager_proxy =
-        SagaManagerProps::<CountingSaga>::new(Arc::clone(&saga_store), move || {
-            spawned_for_producer.fetch_add(1, Ordering::SeqCst);
-            CountingSaga {
-                seen: 0,
-                observed: Arc::clone(&observed_for_producer),
-                notify: Arc::clone(&notify_for_producer),
-            }
-        })
-        .with_codec(system.codec::<Counted>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .with_instance_passivation(PASSIVATE_AFTER)
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<CountingSaga>::new(move |_components| {
+        spawned_for_producer.fetch_add(1, Ordering::SeqCst);
+        CountingSaga {
+            seen: 0,
+            observed: Arc::clone(&observed_for_producer),
+            notify: Arc::clone(&notify_for_producer),
+        }
+    })
+    .observing::<Ping>(Subscription::stream(&upstream_key))
+    .with_instance_passivation(PASSIVATE_AFTER)
+    .spawn(&system)
+    .await;
 
-    append_ping(&upstream_store, &upstream_key, 1).await;
+    append_ping(&journal, &upstream_key, 1).await;
     wait_for_observed(
         &observed,
         &notify,
@@ -216,7 +222,7 @@ async fn idle_instance_is_passivated_and_restored_by_replay_on_revisit() {
     // the wait well clear of the runtime's idle-timer granularity.
     tokio::time::sleep(PASSIVATE_AFTER * 4).await;
 
-    append_ping(&upstream_store, &upstream_key, 2).await;
+    append_ping(&journal, &upstream_key, 2).await;
     wait_for_observed(
         &observed,
         &notify,
@@ -255,41 +261,31 @@ async fn manager_outlives_a_system_default_idle_timeout_during_a_quiet_upstream(
         .build()
         .await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let upstream_key = AggregateId::new("mgr-quiet-upstream-pings");
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
 
     let observed: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
     let observed_for_producer = Arc::clone(&observed);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _manager_proxy =
-        SagaManagerProps::<CountingSaga>::new(Arc::clone(&saga_store), move || CountingSaga {
-            seen: 0,
-            observed: Arc::clone(&observed_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .with_codec(system.codec::<Counted>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            system.codec::<Ping>(),
-            SequenceCursor::Stream {
-                key: upstream_key.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _manager_proxy = SagaManagerProps::<CountingSaga>::new(move |_components| CountingSaga {
+        seen: 0,
+        observed: Arc::clone(&observed_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<Ping>(Subscription::stream(&upstream_key))
+    .spawn(&system)
+    .await;
 
     // Nothing is appended until the default idle timeout has had time to fire:
     // the quiet upstream is the condition under test.
     tokio::time::sleep(SYSTEM_IDLE_DEFAULT * 4).await;
 
-    append_ping(&upstream_store, &upstream_key, 1).await;
+    append_ping(&journal, &upstream_key, 1).await;
     wait_for_observed(
         &observed,
         &notify,

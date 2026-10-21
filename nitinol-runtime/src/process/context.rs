@@ -259,7 +259,7 @@ impl<P: Process> ProcessContext<P> {
         }
     }
 
-    /// Pipe the future `fut`'s result back into this actor as a typed message.
+    /// Pipe the future `fut`'s result back into this process as a typed message.
     ///
     /// The future is polled by the owning process's `PipeDriver` inside the
     /// same lifecycle loop task (single-threaded). When the future resolves
@@ -275,7 +275,7 @@ impl<P: Process> ProcessContext<P> {
     /// # Panic capture
     ///
     /// A panic during the future's poll is caught and surfaced as
-    /// `Err(PipePanic)` — the actor stays alive. CPU-bound or blocking
+    /// `Err(PipePanic)` — the process stays alive. CPU-bound or blocking
     /// futures are NOT supported and will stall the lifecycle loop.
     ///
     /// # No abort
@@ -287,7 +287,7 @@ impl<P: Process> ProcessContext<P> {
     ///
     /// Enqueue is `try_send` over the `PipeDriver`'s bounded channel: when
     /// the buffer is full or the channel is closed, the future is dropped
-    /// silently and the actor stays alive.
+    /// silently and the process stays alive.
     pub fn pipe_to_self<F, M, U>(&self, fut: F, map: U)
     where
         F: Future + Send + 'static,

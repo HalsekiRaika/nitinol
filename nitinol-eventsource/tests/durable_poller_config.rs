@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::{DurableSubscription, Event, EventEnvelope, SequenceCursor};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadedEvent, TypeName};
 use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::{Process, ProcessContext, Props, Receive};
@@ -28,9 +29,27 @@ use nitinol_runtime::ProcessSystem;
 #[derive(Clone)]
 struct Evt;
 
+/// The codec `Evt` names. These tests append payloads by hand and turn loaded
+/// events into envelopes themselves, so the format only has to exist.
+struct UnitCodec;
+
+impl Codec<Evt> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_: &Evt) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_: &[u8]) -> Result<Evt, Self::Error> {
+        Ok(Evt)
+    }
+}
+
 impl Event for Evt {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new(""), TypeName::new("DurableSubscriptionEvt"));
+
+    type Codec = UnitCodec;
 }
 
 fn to_envelope(loaded: LoadedEvent) -> Option<EventEnvelope<Evt>> {
@@ -66,6 +85,7 @@ const TEST_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 struct SubscriberViaConfig {
     config: DurableSubscription<EventEnvelope<Evt>>,
+    journal: Journal,
     cursor: SequenceCursor,
     count: Arc<AtomicUsize>,
     notify: Arc<Notify>,
@@ -76,10 +96,11 @@ struct SubscriberViaConfig {
 impl Process for SubscriberViaConfig {
     fn on_start(&mut self, ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send {
         let config = self.config.clone();
+        let journal = self.journal.clone();
         let cursor = self.cursor.clone();
         let child_pid_out = self.child_pid_out.clone();
         async move {
-            config.spawn_child(ctx, cursor).await;
+            config.spawn_child(ctx, journal, cursor).await;
             // Record the child Pid right after spawn.
             let pid = ctx.children().iter().next().copied();
             *child_pid_out.lock().await = pid;
@@ -143,18 +164,16 @@ async fn wait_for_child_pid(slot: &Arc<tokio::sync::Mutex<Option<Pid>>>) -> Pid 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_poller_config_delivers_catchup_events_to_subscriber() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg = AggregateId::new("dpc-catchup-agg");
 
     append_evt(&store, agg.as_str(), 1).await;
     append_evt(&store, agg.as_str(), 2).await;
     append_evt(&store, agg.as_str(), 3).await;
 
-    let config = DurableSubscription::<EventEnvelope<Evt>>::new(
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        to_envelope,
-    )
-    .with_poll_interval(TEST_POLL_INTERVAL);
+    let journal = Journal::from(store.clone());
+    let config = DurableSubscription::<EventEnvelope<Evt>>::new(to_envelope)
+        .with_poll_interval(TEST_POLL_INTERVAL);
 
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
@@ -171,6 +190,7 @@ async fn durable_poller_config_delivers_catchup_events_to_subscriber() {
             };
             Props::new(move || SubscriberViaConfig {
                 config: config.clone(),
+                journal: journal.clone(),
                 cursor: cursor.clone(),
                 count: c.clone(),
                 notify: n.clone(),
@@ -188,14 +208,12 @@ async fn durable_poller_config_delivers_catchup_events_to_subscriber() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_poller_config_registers_poller_as_child() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg = AggregateId::new("dpc-child-agg");
 
-    let config = DurableSubscription::<EventEnvelope<Evt>>::new(
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        to_envelope,
-    )
-    .with_poll_interval(TEST_POLL_INTERVAL);
+    let journal = Journal::from(store.clone());
+    let config = DurableSubscription::<EventEnvelope<Evt>>::new(to_envelope)
+        .with_poll_interval(TEST_POLL_INTERVAL);
 
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
@@ -212,6 +230,7 @@ async fn durable_poller_config_registers_poller_as_child() {
             };
             Props::new(move || SubscriberViaConfig {
                 config: config.clone(),
+                journal: journal.clone(),
                 cursor: cursor.clone(),
                 count: c.clone(),
                 notify: n.clone(),
@@ -235,14 +254,12 @@ async fn durable_poller_config_registers_poller_as_child() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn durable_poller_config_poller_stops_with_subscriber() {
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
     let agg = AggregateId::new("dpc-stop-agg");
 
-    let config = DurableSubscription::<EventEnvelope<Evt>>::new(
-        Arc::clone(&store) as Arc<dyn EventStore>,
-        to_envelope,
-    )
-    .with_poll_interval(TEST_POLL_INTERVAL);
+    let journal = Journal::from(store.clone());
+    let config = DurableSubscription::<EventEnvelope<Evt>>::new(to_envelope)
+        .with_poll_interval(TEST_POLL_INTERVAL);
 
     let count = Arc::new(AtomicUsize::new(0));
     let notify = Arc::new(Notify::new());
@@ -259,6 +276,7 @@ async fn durable_poller_config_poller_stops_with_subscriber() {
             };
             Props::new(move || SubscriberViaConfig {
                 config: config.clone(),
+                journal: journal.clone(),
                 cursor: cursor.clone(),
                 count: c.clone(),
                 notify: n.clone(),
@@ -309,7 +327,7 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
     use nitinol_runtime::{IdleTimeout, SupervisionStrategy, Terminated};
 
     let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemoryEventStore::default());
+    let store = InMemoryEventStore::default();
 
     let on_terminated_called = Arc::new(AtomicBool::new(false));
     let on_start_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -320,6 +338,7 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
 
     struct RestartableSubscriber {
         config: DurableSubscription<EventEnvelope<Evt>>,
+        journal: Journal,
         on_terminated_called: Arc<AtomicBool>,
         on_start_count: Arc<std::sync::atomic::AtomicUsize>,
         child_pids: Arc<TokioMutex<Vec<Pid>>>,
@@ -331,11 +350,12 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
             ctx: &mut ProcessContext<Self>,
         ) -> impl std::future::Future<Output = ()> + Send {
             let config = self.config.clone();
+            let journal = self.journal.clone();
             let child_pids = self.child_pids.clone();
             let count = self.on_start_count.clone();
             async move {
                 let cursor = SequenceCursor::Global { after: 0 };
-                config.spawn_child(ctx, cursor).await;
+                config.spawn_child(ctx, journal, cursor).await;
                 let pid = ctx.children().iter().next().copied();
                 child_pids.lock().await.push(pid.expect("child spawned"));
                 count.fetch_add(1, Ordering::SeqCst);
@@ -380,17 +400,16 @@ async fn poller_child_restart_does_not_accumulate_stale_watchers() {
         }
     }
 
-    let config = DurableSubscription::<EventEnvelope<Evt>>::new(
-        Arc::clone(&store) as Arc<dyn nitinol_persistence::store::EventStore>,
-        to_envelope,
-    )
-    .with_poll_interval(TEST_POLL_INTERVAL);
+    let journal = Journal::from(store.clone());
+    let config = DurableSubscription::<EventEnvelope<Evt>>::new(to_envelope)
+        .with_poll_interval(TEST_POLL_INTERVAL);
 
     let otc = on_terminated_called.clone();
     let osc = on_start_count.clone();
     let cpas = child_pids_after_start.clone();
     let props = Props::new(move || RestartableSubscriber {
         config: config.clone(),
+        journal: journal.clone(),
         on_terminated_called: otc.clone(),
         on_start_count: osc.clone(),
         child_pids: cpas.clone(),

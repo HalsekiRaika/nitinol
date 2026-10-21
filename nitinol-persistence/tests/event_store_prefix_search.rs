@@ -1,4 +1,9 @@
 //! Integration tests for [`LoadQuery`] hierarchical prefix search.
+//!
+//! The selection rule is unchanged: `event_type_prefix` selects the path itself
+//! and everything beneath it, on `.`-delimited segment boundaries. What changed
+//! is what a stored path can be — a family and a type name, with nothing after
+//! it — so the fixtures below are the shapes a column now holds.
 
 use std::borrow::Borrow;
 
@@ -7,7 +12,7 @@ use futures_util::TryStreamExt;
 use jiff::Timestamp;
 use nitinol_persistence::store::{EventStore, InMemoryEventStore};
 use nitinol_persistence::{
-    AggregateId, AppendingEvent, EventType, Family, LoadQuery, MaterializedPath, TypeName, Variant,
+    AggregateId, AppendingEvent, EventType, Family, LoadQuery, MaterializedPath, TypeName,
 };
 
 fn make_event(sequence: u64, event_type: EventType, payload: &'static [u8]) -> AppendingEvent {
@@ -24,23 +29,20 @@ fn prefix(s: &str) -> MaterializedPath {
         .unwrap_or_else(|_| panic!("`{s}` must parse as a MaterializedPath"))
 }
 
-/// Order-domain event types sharing a family so hierarchy is exercised.
+/// Two sibling declarations of one family, so the family level has more than one
+/// descendant to gather.
 fn order_placed() -> EventType {
-    EventType::with_variant(
-        Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderPlaced"),
-    )
+    EventType::new(Family::new("saga.upstream"), TypeName::new("OrderPlaced"))
 }
 
 fn order_cancelled() -> EventType {
-    EventType::with_variant(
+    EventType::new(
         Family::new("saga.upstream"),
-        TypeName::new("OrderEvent"),
-        Variant::new("OrderCancelled"),
+        TypeName::new("OrderCancelled"),
     )
 }
 
+/// A declaration of a different family, which no `saga.upstream` prefix reaches.
 fn payment_captured() -> EventType {
     EventType::new(
         Family::new("saga.downstream"),
@@ -48,8 +50,8 @@ fn payment_captured() -> EventType {
     )
 }
 
-/// Append the three fixture events (two upstream OrderEvent arms + one
-/// downstream PaymentCaptured) to a single stream and return the store.
+/// Append the three fixture events (two upstream siblings + one downstream) to a
+/// single stream and return the store.
 async fn seeded_store(agg: &AggregateId) -> InMemoryEventStore {
     let store = InMemoryEventStore::default();
     store
@@ -73,8 +75,7 @@ async fn load_all(store: &InMemoryEventStore, query: LoadQuery) -> Vec<EventType
 }
 
 /// Given events under two families, When queried by a family-level prefix, Then
-/// only events within that family (all its type names and variants) are
-/// returned.
+/// only events declared within that family are returned.
 #[tokio::test]
 async fn prefix_search_by_family_returns_all_descendants() {
     // Given
@@ -88,33 +89,11 @@ async fn prefix_search_by_family_returns_all_descendants() {
     )
     .await;
 
-    // Then: both OrderEvent arms match; the downstream PaymentCaptured does not
+    // Then: both upstream declarations match; the downstream one does not
     assert_eq!(types.len(), 2);
     assert!(types.contains(&order_placed()));
     assert!(types.contains(&order_cancelled()));
     assert!(!types.contains(&payment_captured()));
-}
-
-/// Given enum-arm events sharing a type name, When queried by the type-level
-/// prefix (family + type name, no variant), Then every arm of that type is
-/// returned.
-#[tokio::test]
-async fn prefix_search_by_type_name_returns_all_variants() {
-    // Given
-    let agg = AggregateId::new("agg-1");
-    let store = seeded_store(&agg).await;
-
-    // When: query `saga.upstream.OrderEvent` (all arms)
-    let types = load_all(
-        &store,
-        LoadQuery::by_event_type_prefix(prefix("saga.upstream.OrderEvent")),
-    )
-    .await;
-
-    // Then: both OrderPlaced and OrderCancelled arms match
-    assert_eq!(types.len(), 2);
-    assert!(types.contains(&order_placed()));
-    assert!(types.contains(&order_cancelled()));
 }
 
 /// Given a prefix that shares a raw string prefix but crosses no segment
@@ -134,48 +113,36 @@ async fn prefix_search_respects_segment_boundaries() {
     assert!(types.is_empty());
 }
 
-/// Given a full-identity EventType with a variant, When queried via
-/// `by_event_type`, Then only that exact arm is returned and its sibling
-/// variant is excluded.
+/// Given an EventType, When queried via `by_event_type`, Then the rows carrying
+/// that event type are returned and its family siblings are not.
 ///
-/// `by_event_type` converts the EventType to its Materialized Path and uses
-/// it as a prefix. A full arm path such as `saga.upstream.OrderEvent.OrderPlaced`
-/// has no descendant paths in the store, so it degenerates to a single-match
-/// result.
+/// A canonical path is a family and a type name, so an event type's own path is
+/// what a row of it carries — there is no deeper path for the same declaration
+/// to hide under, and no shallower one that would gather its siblings too.
 #[tokio::test]
-async fn by_event_type_exact_match_with_variant() {
+async fn by_event_type_returns_the_rows_of_that_event_type_and_no_sibling() {
     // Given
     let agg = AggregateId::new("agg-1");
     let store = seeded_store(&agg).await;
 
-    // When: query the exact OrderPlaced identity
+    // When: query one declared identity
     let types = load_all(&store, LoadQuery::by_event_type(order_placed())).await;
 
-    // Then: only OrderPlaced matches — its sibling arm and the downstream event
-    // are excluded even though they share ancestors.
+    // Then: only that declaration's row is served
     assert_eq!(types, vec![order_placed()]);
 }
 
-/// Given a type-level (no-variant) EventType, When queried via `by_event_type`,
-/// Then all variant descendants of that type are returned (prefix semantics:
-/// `saga.upstream.OrderEvent` is an ancestor of every arm under that type).
+/// Given a family that no declaration in the store belongs to, When queried by
+/// that event type, Then nothing is returned.
 #[tokio::test]
-async fn by_event_type_type_level_returns_all_variant_descendants() {
-    // Given: store with two variant events (OrderPlaced, OrderCancelled) sharing
-    // a type name, plus a downstream event
+async fn by_event_type_returns_nothing_for_an_undeclared_identity() {
     let agg = AggregateId::new("agg-1");
     let store = seeded_store(&agg).await;
 
-    // When: query with the type-level identity (no variant)
-    let type_only = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderEvent"));
-    let types = load_all(&store, LoadQuery::by_event_type(type_only)).await;
+    let absent = EventType::new(Family::new("saga.upstream"), TypeName::new("OrderAmended"));
+    let types = load_all(&store, LoadQuery::by_event_type(absent)).await;
 
-    // Then: both arms match — `saga.upstream.OrderEvent` is an ancestor prefix
-    // of `saga.upstream.OrderEvent.OrderPlaced` and `…OrderCancelled`.
-    // The downstream PaymentCaptured is excluded (different family).
-    assert_eq!(types.len(), 2);
-    assert!(types.contains(&order_placed()));
-    assert!(types.contains(&order_cancelled()));
+    assert!(types.is_empty());
 }
 
 /// Given the prefix filter, When combined with `with_limit`, Then the limit is

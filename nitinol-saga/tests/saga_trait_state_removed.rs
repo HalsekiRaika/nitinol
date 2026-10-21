@@ -13,9 +13,40 @@
 
 use async_trait::async_trait;
 
+use bytes::Bytes;
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::{EventType, Family, TypeName};
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe};
+
+/// The format the events below name.  Nothing in this file writes to a store —
+/// `apply` is called directly — but `Event` names the codec that would write
+/// it, so one is declared.
+struct UnitCodec;
+
+impl Codec<Counted> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Counted) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Counted, Self::Error> {
+        Ok(Counted)
+    }
+}
+
+impl Codec<Upstream> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Upstream) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Upstream, Self::Error> {
+        Ok(Upstream)
+    }
+}
 
 #[derive(Clone)]
 struct Counted;
@@ -25,6 +56,7 @@ impl Event for Counted {
         Family::new("saga_trait_state_removed"),
         TypeName::new("Counted"),
     );
+    type Codec = UnitCodec;
 }
 
 #[derive(Clone)]
@@ -35,11 +67,18 @@ impl Event for Upstream {
         Family::new("saga_trait_state_removed"),
         TypeName::new("Upstream"),
     );
+    type Codec = UnitCodec;
 }
 
 /// Correlation rule of [`MinimalSaga`]: the single process instance every
 /// upstream event in this file belongs to.
 const MINIMAL_SAGA_ID: &str = "saga-trait-state-removed";
+
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Upstream(Upstream),
+}
 
 /// A saga that implements exactly the required trait items.  Its state is the
 /// `applied` field — no associated type participates in holding it.
@@ -50,12 +89,11 @@ struct MinimalSaga {
 
 #[async_trait]
 impl Saga for MinimalSaga {
-    type SubscribedEvent = Upstream;
+    type Subscribe = Observed;
     type Event = Counted;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(MINIMAL_SAGA_ID))
     }
 
@@ -65,7 +103,7 @@ impl Saga for MinimalSaga {
 
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         Ok(SagaEffect::None)

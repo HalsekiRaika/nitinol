@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Decider, Decision, Query};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Never, Query};
+
+use crate::codec::JsonCodec;
 
 // Events
 
@@ -25,11 +27,12 @@ pub struct Withdrawn {
 // An aggregate has exactly one event type, so a wallet that records two kinds of
 // fact names them as variants of one enum and folds both in `apply`.  A single
 // decision may state several of them at once — `Decision::persist` takes a `Vec`
-// — and they reach the stream as one atomic append.
+// — and they reach the stream as one atomic append.  One event type also means
+// one format: the enum names the codec once, for every variant.
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Event)]
 #[serde(tag = "kind")]
-#[event(family = "multiple_deciders.wallet")]
+#[event(family = "multiple_deciders.wallet", codec = JsonCodec)]
 pub enum WalletEvent {
     Deposited(Deposited),
     Withdrawn(Withdrawn),
@@ -44,6 +47,7 @@ pub struct Wallet {
 
 impl Aggregate for Wallet {
     type Event = WalletEvent;
+    type Recover = Never;
 
     fn apply(&mut self, event: WalletEvent) {
         match event {

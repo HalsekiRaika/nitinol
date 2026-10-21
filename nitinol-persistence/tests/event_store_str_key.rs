@@ -3,7 +3,8 @@
 //! Verifies the redesigned event-store key abstraction:
 //!
 //! 1. `EventStore::append` accepts `&str` (not `&AggregateId`) so the trait
-//!    remains dyn-compatible (`Arc<dyn EventStore>` keeps working).
+//!    remains dyn-compatible (`Journal`, the framework's erased handle, keeps
+//!    working).
 //! 2. `AggregateId` implements `Borrow<str>`, so callers continue to write
 //!    `store.append(id.borrow(), events)` ergonomically.
 //! 3. `LoadQuery` exposes `stream_key: Option<String>` (renamed from
@@ -21,13 +22,12 @@
 //! Compile and pass after the EventStore refactor lands.
 
 use std::borrow::Borrow;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use jiff::Timestamp;
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{EventStore, InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
 
 // Helpers
@@ -266,15 +266,16 @@ async fn empty_batch_with_str_key_is_noop() {
     assert_eq!(outcome.stream_version, 0);
 }
 
-// Arc<dyn EventStore>: the trait remains dyn-compatible after the refactor
+// Journal: the trait remains dyn-compatible after the refactor
 
 /// EventStore is dyn-compatible — the change to `&str`-keyed methods must NOT
-/// regress the ability to use `Arc<dyn EventStore>`.  This is the central
-/// design constraint that justifies `&str` over `<K: Borrow<str>>` generics.
+/// regress the ability to erase a backend behind `Journal`.  This is the
+/// central design constraint that justifies `&str` over `<K: Borrow<str>>`
+/// generics.
 #[tokio::test]
 async fn event_store_is_dyn_compatible() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));
 
     // When
@@ -302,7 +303,7 @@ async fn event_store_is_dyn_compatible() {
 #[tokio::test]
 async fn distinct_stream_keys_coexist_in_one_store() {
     // Given
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let agg = AggregateId::new("coexist-agg");
     let saga_key: &str = "coexist-saga";
     let et = EventType::new(Family::new(""), TypeName::new("TestEvent"));

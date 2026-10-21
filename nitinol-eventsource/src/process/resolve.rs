@@ -48,8 +48,28 @@
 //!   [`tell`](crate::AggregateProxy::tell) escapes the store's arbitration, so a
 //!   duplicate activation can perform it twice.  A side effect that must be
 //!   cluster-safe belongs behind a persisted record — the events of a
-//!   [`Decision`](crate::Decision), or a saga outbox — whose own stream OCC
-//!   decides whether it happened at all.
+//!   [`Decision`](crate::Decision), or a saga's own decision carried by a
+//!   delivery host — whose own stream OCC decides whether it happened at all.
+//!
+//! Putting the side effect behind a saga's decision is what the second bullet
+//! recommends, and it is worth being precise about what that buys: the decision
+//! is durable before anything is carried out, and what carries it is a separate
+//! consumer of that stream whose progress is a checkpoint.  Delivery is
+//! therefore at-least-once, with no mode to pick: the window between a delivery
+//! and the checkpoint behind it is what a repeat comes out of.  That contract —
+//! where at-least-once comes from, what a held partition means, and which
+//! failures are the framework's to retry as opposed to the domain's to observe
+//! — is stated once, on `nitinol_saga::SagaDeliveryProps`, and a receiver that
+//! must not carry an operation out twice is the one that has to recognise the
+//! repeat.
+//!
+//! This clause is why that matters at all.  With duplicate activations a normal
+//! occurrence, a saga instance can be activated on two nodes, lose the append
+//! race on one, and be re-activated and replayed — so the replay window this
+//! clause makes routine is also what raises how often an upstream record is
+//! handled again.  The saga's own consumed positions are what stop a second
+//! decision coming out of that, and the receiver's idempotency is what stops a
+//! second delivery of the first one mattering.
 //!
 //! Not fixed by a test: this clause is the *absence* of a guarantee, and a node
 //! cannot exhibit the cluster-wide behaviour it declines to promise.  What is
@@ -66,7 +86,7 @@
 //!
 //! Fixed by `second_spawn_aggregate_addresses_the_same_aggregate`,
 //! `aggregate_props_spawn_addresses_the_same_aggregate` and
-//! `aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate` in
+//! `aggregate_props_for_a_recovering_aggregate_addresses_the_same_aggregate` in
 //! `nitinol-eventsource/tests/aggregate_resolve.rs`, and by
 //! `synchronously_built_reference_addresses_the_same_aggregate` in
 //! `nitinol-eventsource/tests/aggregate_proxy_sync_entry.rs`.
@@ -82,9 +102,12 @@
 //! into `spawn` would make starting a lifecycle indistinguishable from resolving
 //! an identity and would silently change what every existing `spawn` caller gets.
 //!
-//! The same split shows on the reference: props built through an
-//! [`EventSourceSystem`](crate::system::EventSourceSystem) resolve, while props
-//! built directly start a lifecycle and stay pinned to what they started.
+//! The split is between the two layers rather than between two kinds of props:
+//! every aggregate entry point resolves, whether the props were taken from an
+//! [`EventSourceSystem`](crate::system::EventSourceSystem) or built directly
+//! and spawned on one. There is no entry point that starts a lifecycle of an
+//! aggregate and stays pinned to it, because a second activation of one stream
+//! is what R-1 exists to prevent.
 //!
 //! Fixed by `spawn_starts_a_new_process_for_every_call` and
 //! `spawn_under_a_taken_name_still_starts_a_new_process` in
@@ -181,24 +204,63 @@ impl ResolveKey {
     }
 }
 
+/// What the table needs of an activation whose aggregate type it has forgotten:
+/// the pid it is evicted by, and the typed handle a resolve is answered with.
+///
+/// The erasure is this narrow on purpose. [`Any`] is reached only through
+/// [`as_any`][ErasedIncarnation::as_any] and only to recover the one type the
+/// key already names, so the table cannot hold something no key accounts for.
+///
+/// `Box` with a `clone_box` rather than an `Arc`: an [`Incarnation`] is a
+/// process handle and already cheap to clone, so sharing one behind a second
+/// handle would name the same channels twice over.
+trait ErasedIncarnation: Send + Sync {
+    fn pid(&self) -> Pid;
+    fn as_any(&self) -> &dyn Any;
+    fn clone_box(&self) -> Box<dyn ErasedIncarnation>;
+}
+
+impl<A: Aggregate> ErasedIncarnation for Incarnation<A> {
+    fn pid(&self) -> Pid {
+        ProcessProxy::pid(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn ErasedIncarnation> {
+        Box::new(self.clone())
+    }
+}
+
 /// A resolved activation, type-erased so one table holds every aggregate type.
-#[derive(Clone)]
 struct Resident {
-    pid: Pid,
-    /// An `Arc<Incarnation<A>>` for the `A` whose [`TypeId`] the key carries.
-    incarnation: Arc<dyn Any + Send + Sync>,
+    incarnation: Box<dyn ErasedIncarnation>,
+}
+
+impl Clone for Resident {
+    fn clone(&self) -> Self {
+        Self {
+            incarnation: self.incarnation.clone_box(),
+        }
+    }
 }
 
 impl Resident {
     fn of<A: Aggregate>(incarnation: &Incarnation<A>) -> Self {
         Self {
-            pid: incarnation.pid(),
-            incarnation: Arc::new(incarnation.clone()),
+            incarnation: Box::new(incarnation.clone()),
         }
+    }
+
+    fn pid(&self) -> Pid {
+        self.incarnation.pid()
     }
 
     fn downcast<A: Aggregate>(&self) -> Incarnation<A> {
         self.incarnation
+            .as_any()
             .downcast_ref::<Incarnation<A>>()
             .expect("a key carries the aggregate's TypeId, so its resident is that aggregate's")
             .clone()
@@ -218,15 +280,22 @@ enum Slot {
 /// which replays the aggregate's stream and is unbounded in time.  That is what
 /// the [`Slot::Pending`] placeholder buys: latecomers find the key taken and
 /// wait on the winner's result instead of racing it (R-1).
+///
+/// A clone is another name for the one table, so the system, every clone of it,
+/// the handle its store type is erased from, each [`ResolveHandle`] and each
+/// in-flight [`Activating`] hold this by value rather than sharing one through a
+/// holder of their own.  Two tables over one node would be two writers per key,
+/// which is the state R-1 exists to prevent.
+#[derive(Clone)]
 pub(crate) struct AggregateRegistry {
-    slots: Mutex<HashMap<ResolveKey, Slot>>,
+    slots: Arc<Mutex<HashMap<ResolveKey, Slot>>>,
 }
 
 impl AggregateRegistry {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            slots: Mutex::new(HashMap::new()),
-        })
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     fn slots(&self) -> MutexGuard<'_, HashMap<ResolveKey, Slot>> {
@@ -236,7 +305,7 @@ impl AggregateRegistry {
     }
 
     /// Take the key: join what is there, or claim the right to activate it.
-    fn claim(self: &Arc<Self>, key: &ResolveKey) -> Claim {
+    fn claim(&self, key: &ResolveKey) -> Claim {
         let mut slots = self.slots();
         match slots.entry(key.clone()) {
             Entry::Occupied(entry) => match entry.get() {
@@ -247,7 +316,7 @@ impl AggregateRegistry {
                 let (publish, pending) = watch::channel(None);
                 entry.insert(Slot::Pending(pending));
                 Claim::Activate(Activating {
-                    registry: Arc::clone(self),
+                    registry: self.clone(),
                     key: key.clone(),
                     publish,
                     settled: false,
@@ -275,7 +344,7 @@ impl AggregateRegistry {
     /// from evicting the activation that replaced it.
     fn evict(&self, key: &ResolveKey, pid: Pid) {
         let mut slots = self.slots();
-        if matches!(slots.get(key), Some(Slot::Ready(resident)) if resident.pid == pid) {
+        if matches!(slots.get(key), Some(Slot::Ready(resident)) if resident.pid() == pid) {
             slots.remove(key);
         }
     }
@@ -295,7 +364,7 @@ enum Claim {
 /// cancelled task, a timed-out caller) can never leave waiters parked on a
 /// promise nobody will keep.
 struct Activating {
-    registry: Arc<AggregateRegistry>,
+    registry: AggregateRegistry,
     key: ResolveKey,
     publish: watch::Sender<Option<Resident>>,
     settled: bool,
@@ -323,7 +392,7 @@ impl Drop for Activating {
 /// The system-side wiring a reference needs to resolve itself later.
 #[derive(Clone)]
 pub(crate) struct ResolveHandle {
-    registry: Arc<AggregateRegistry>,
+    registry: AggregateRegistry,
     /// Held because activation happens at dispatch time, long after the entry
     /// point that produced the reference has returned.  A [`ProcessSystem`] is
     /// itself a handle to one instance, so holding it here shares the caller's
@@ -332,7 +401,7 @@ pub(crate) struct ResolveHandle {
 }
 
 impl ResolveHandle {
-    pub(crate) fn new(registry: Arc<AggregateRegistry>, system: ProcessSystem) -> Self {
+    pub(crate) fn new(registry: AggregateRegistry, system: ProcessSystem) -> Self {
         Self { registry, system }
     }
 }

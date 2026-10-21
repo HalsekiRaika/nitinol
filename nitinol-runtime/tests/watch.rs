@@ -507,41 +507,6 @@ async fn watch_persists_across_restart() {
     assert_eq!(terminated.why, TerminatedReason::Stopped);
 }
 
-/// TerminatedReason implements PartialEq: same variants are equal, different are not.
-#[tokio::test]
-async fn terminated_reason_partial_eq() {
-    // Given / When / Then
-    assert_eq!(TerminatedReason::Stopped, TerminatedReason::Stopped);
-    assert_eq!(TerminatedReason::NotFound, TerminatedReason::NotFound);
-    assert_ne!(TerminatedReason::Stopped, TerminatedReason::NotFound);
-}
-
-/// TerminatedReason is Copy: a copy leaves the original intact.
-#[tokio::test]
-async fn terminated_reason_is_copy() {
-    // Given: a TerminatedReason value
-    let original = TerminatedReason::Stopped;
-
-    // When: a copy is made
-    let copy = original;
-
-    // Then: original is still usable (Copy semantics)
-    assert_eq!(original, copy);
-}
-
-/// Terminated is Clone: cloning produces an independent value with the same fields.
-#[tokio::test]
-async fn terminated_is_clone() {
-    // Given: a Terminated value (constructed directly for type-property testing)
-    // We use the public constructor fields from the integration test below,
-    // but here we just confirm Clone compiles — integration tests confirm field values.
-    // `Clone::clone` is called through UFCS rather than method syntax: the
-    // point of this test is to exercise the `Clone` impl itself, which method
-    // syntax would let `Copy` satisfy instead.
-    let _ = Clone::clone(&TerminatedReason::Stopped);
-    let _ = Clone::clone(&TerminatedReason::NotFound);
-}
-
 /// Poisoning a live process delivers Terminated{Poisoned} to its watcher
 /// and skips on_stop (no cleanup is performed).
 #[tokio::test]
@@ -587,53 +552,4 @@ async fn watch_live_process_receives_terminated_poisoned_on_poison() {
         !target_stopped.load(Ordering::SeqCst),
         "on_stop must not be called when a process is poisoned"
     );
-}
-
-/// TerminatedReason::Poisoned is distinct from Stopped (they are separate termination causes).
-#[tokio::test]
-async fn terminated_reason_poisoned_is_distinct_from_stopped() {
-    assert_ne!(TerminatedReason::Poisoned, TerminatedReason::Stopped);
-}
-
-/// TerminatedReason::Poisoned is distinct from NotFound.
-#[tokio::test]
-async fn terminated_reason_poisoned_is_distinct_from_not_found() {
-    assert_ne!(TerminatedReason::Poisoned, TerminatedReason::NotFound);
-}
-
-/// TerminatedReason::Poisoned is distinct from Timeout.
-#[tokio::test]
-async fn terminated_reason_poisoned_is_distinct_from_timeout() {
-    assert_ne!(TerminatedReason::Poisoned, TerminatedReason::Timeout);
-}
-
-/// TerminatedReason::Poisoned implements PartialEq: equal to itself.
-#[tokio::test]
-async fn terminated_reason_poisoned_is_equal_to_itself() {
-    assert_eq!(TerminatedReason::Poisoned, TerminatedReason::Poisoned);
-}
-
-/// TerminatedReason::Poisoned is Copy: a copy leaves the original intact.
-#[tokio::test]
-async fn terminated_reason_poisoned_is_copy() {
-    // Given: a Poisoned variant value
-    let original = TerminatedReason::Poisoned;
-
-    // When: an implicit copy is made (no explicit clone)
-    let copy = original;
-
-    // Then: both values are equal (original is still usable — Copy semantics)
-    assert_eq!(original, copy);
-}
-
-/// TerminatedReason::Poisoned is Clone: clone produces an equal value.
-#[tokio::test]
-async fn terminated_reason_poisoned_is_clone() {
-    // Given / When: clone the Poisoned variant. `Clone::clone` is called
-    // through UFCS rather than method syntax so the `Clone` impl is the thing
-    // under test, not the `Copy` impl that method syntax would resolve to.
-    let cloned = Clone::clone(&TerminatedReason::Poisoned);
-
-    // Then: the clone equals the original
-    assert_eq!(cloned, TerminatedReason::Poisoned);
 }

@@ -16,9 +16,40 @@
 
 use async_trait::async_trait;
 
+use bytes::Bytes;
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::{EventType, Family, TypeName};
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId};
+use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe};
+
+/// The format the events below name.  Nothing in this file writes to a store —
+/// the probes are called directly — but `Event` names the codec that would
+/// write it, so one is declared.
+struct UnitCodec;
+
+impl Codec<Probed> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Probed) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Probed, Self::Error> {
+        Ok(Probed)
+    }
+}
+
+impl Codec<Upstream> for UnitCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Upstream) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Upstream, Self::Error> {
+        Ok(Upstream)
+    }
+}
 
 const PROBE_CAPTURE: &str = "probe-capture";
 const PROBE_RESTORE: &str = "probe-restore";
@@ -31,6 +62,7 @@ impl Event for Probed {
         Family::new("saga_trait_snapshot_methods_removed"),
         TypeName::new("Probed"),
     );
+    type Codec = UnitCodec;
 }
 
 #[derive(Clone)]
@@ -41,11 +73,18 @@ impl Event for Upstream {
         Family::new("saga_trait_snapshot_methods_removed"),
         TypeName::new("Upstream"),
     );
+    type Codec = UnitCodec;
 }
 
 /// Correlation rule of [`ProbedSaga`]: the single process instance every
 /// upstream event in this file belongs to.
 const PROBED_SAGA_ID: &str = "saga-trait-snapshot-methods-removed";
+
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Upstream(Upstream),
+}
 
 #[derive(Default)]
 struct ProbedSaga {
@@ -54,20 +93,17 @@ struct ProbedSaga {
 
 #[async_trait]
 impl Saga for ProbedSaga {
-    type SubscribedEvent = Upstream;
+    type Subscribe = Observed;
     type Event = Probed;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(PROBED_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         Ok(SagaEffect::None)

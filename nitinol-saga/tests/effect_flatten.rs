@@ -39,7 +39,6 @@ fn flatten_of_persist_leaf_is_noop() {
         shape_of(&result),
         Shape::Persist {
             events: vec![99u32],
-            tells: 0,
             schedules: vec![],
         },
         "flatten(Persist) must return Persist unchanged"
@@ -56,12 +55,10 @@ fn flatten_of_flat_sequence_is_noop() {
         Shape::Sequence(vec![
             Shape::Persist {
                 events: vec![1u32],
-                tells: 0,
                 schedules: vec![],
             },
             Shape::Persist {
                 events: vec![2u32],
-                tells: 0,
                 schedules: vec![],
             },
         ]),
@@ -80,17 +77,14 @@ fn flatten_removes_nested_sequence() {
         Shape::Sequence(vec![
             Shape::Persist {
                 events: vec![1u32],
-                tells: 0,
                 schedules: vec![],
             },
             Shape::Persist {
                 events: vec![2u32],
-                tells: 0,
                 schedules: vec![],
             },
             Shape::Persist {
                 events: vec![3u32],
-                tells: 0,
                 schedules: vec![],
             },
         ]),
@@ -151,7 +145,6 @@ fn flatten_single_element_sequence_unwraps_to_child_persist() {
         shape_of(&flat),
         Shape::Persist {
             events: vec![123u32],
-            tells: 0,
             schedules: vec![],
         },
         "single-element Sequence must unwrap to its inner leaf"
@@ -183,13 +176,11 @@ fn flatten_sequence_with_end_keeps_end_inline() {
         Shape::Sequence(vec![
             Shape::Persist {
                 events: vec![1u32],
-                tells: 0,
                 schedules: vec![],
             },
             Shape::End,
             Shape::Persist {
                 events: vec![2u32],
-                tells: 0,
                 schedules: vec![],
             },
         ]),

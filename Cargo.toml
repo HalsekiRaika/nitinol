@@ -2,6 +2,7 @@
 members = [
   ".",
   "nitinol-*",
+  "providers/nitinol-sqlx",
   "examples/runtime/*",
   "examples/eventsource/*",
   "examples/saga/*"
@@ -30,10 +31,20 @@ repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
 [workspace.dependencies]
+# Defined once here so every crate's benchmarks are built with one version and
+# one feature set. `default-features = false` drops `plotters` and `rayon`: the
+# measurements are read from the terminal and compared with `--save-baseline`,
+# and the licence closure stays inside the set `deny.toml` allows.
+# `cargo_bench_support` is what lets `cargo bench` run these at all, and
+# `async_tokio` is what lets a benchmark await the framework's own entry points.
+criterion = { version = "0.7", default-features = false, features = [
+  "async_tokio",
+  "cargo_bench_support",
+] }
 
 [package]
 name = "nitinol"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]
@@ -47,9 +58,13 @@ runtime = ["dep:nitinol-runtime"]
 persistence = ["dep:nitinol-persistence"]
 # The runtime-free contract layer: the aggregate traits and `#[derive(Event)]`,
 # and nothing that would pull in Tokio.
-contract = ["dep:nitinol-contract", "dep:nitinol-macros", "persistence"]
+contract = ["dep:nitinol-contract", "dep:nitinol-macros", "dep:linkme", "persistence"]
 eventsource = ["dep:nitinol-eventsource", "dep:nitinol-macros", "contract", "runtime", "persistence"]
 saga = ["dep:nitinol-saga", "runtime", "persistence", "eventsource"]
+# A storage backend rather than a layer of the framework, so it stays out of
+# `full`: what that feature means is every part of nitinol, not a database
+# driver and the connections it opens.
+postgres = ["dep:nitinol-sqlx", "nitinol-sqlx/postgres", "persistence"]
 full = ["runtime", "persistence", "contract", "eventsource", "saga"]
 
 [dependencies]
@@ -59,8 +74,16 @@ nitinol-persistence = { path = "nitinol-persistence", optional = true }
 nitinol-eventsource = { path = "nitinol-eventsource", optional = true }
 nitinol-saga = { path = "nitinol-saga", optional = true }
 nitinol-macros = { path = "nitinol-macros", optional = true }
+nitinol-sqlx = { path = "providers/nitinol-sqlx", optional = true }
+# Reached only by the code `#[derive(Event)]` writes, through
+# `nitinol::__private::linkme`: deriving `Event` places an entry in the event
+# registry's collection slice, and a user is obliged to depend on `nitinol`
+# alone.
+linkme = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # Required by the `#[tokio::test]` attribute in umbrella integration tests.
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 nitinol-persistence = { path = "nitinol-persistence" }
+# `Codec` is stated in `Bytes`, so a test fixture that names a codec spells it.
+bytes = "1"

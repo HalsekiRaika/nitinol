@@ -1,145 +1,184 @@
-use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use crate::projection::ProjectionId;
 use nitinol_contract::Aggregate;
-use nitinol_persistence::store::EventStore;
-use nitinol_persistence::AggregateId;
+use nitinol_persistence::provider::{
+    PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
+};
+use nitinol_persistence::store::{Album, Journal};
+use nitinol_persistence::{AggregateId, LoadedEvent};
+use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::ProcessSystem;
+use tokio::sync::OnceCell;
 
-use crate::codec::{Codec, ErasedCodec};
+use crate::durable_stream::{CursorUnset, DurableStream};
 use crate::process::resolve::{AggregateRegistry, ResolveHandle};
+use crate::process::{RecoverOn, SnapshotPersistor, SnapshotPersistorProxy};
+use crate::projection::ProjectorProps;
 use crate::{AggregateProps, AggregateProxy};
 
-/// Marker type indicating no codec has been configured yet.
+/// Marker type indicating no persistence supplier has been supplied yet.
 ///
-/// `EventSourceSystem<Unset>` has no useful methods — use
-/// [`EventSourceSystem::builder`] followed by
-/// [`EventSourceSystemBuilder::with_codec`] to produce a configured system.
-pub struct Unset;
+/// A builder in this state has no [`build`][EventSourceSystemBuilder::build],
+/// so there is no way to reach a system whose stores nobody named.
+pub struct PersistenceUnset;
 
-/// Marker type indicating the system holds no default [`EventStore`].
+/// The system a handle onto any store erases to.
 ///
-/// Every spawn against a system in this state names its own store, exactly as
-/// before [`EventSourceSystemBuilder::with_event_store`] existed.
-#[derive(Clone)]
-pub struct StoreUnset;
+/// Wiring whose types are fixed before a deployment's store is known — a saga's
+/// dispatch mapping names the system type it delivers through when the mapping
+/// is written — names this one type for every store. It reaches the same
+/// process system, the same aggregate registry and the same journal the system
+/// it was erased from does.
+pub type SystemHandle = EventSourceSystem<Journal>;
 
-/// Marker type indicating the system holds the default [`EventStore`] it was
-/// built with, and carries it.
+/// Props that have not named the system they start on yet, so `spawn` takes
+/// one.
 ///
-/// This is the state in which the store-less
-/// [`spawn_aggregate`][EventSourceSystem::spawn_aggregate] exists: a spawn that
-/// names no store is served from here.
-#[derive(Clone)]
-pub struct StoreSet {
-    store: Arc<dyn EventStore>,
+/// This is the props-first form of every entry point: the wiring is assembled
+/// on its own and the system it is spawned on supplies the stores. The
+/// system-first form is [`Hosted`], which carries that system already.
+pub struct Unhosted;
+
+/// Props that carry the system they came from, so the spawn needs nothing
+/// re-injected.
+///
+/// Every entry point on [`EventSourceSystem`] produces props in this state.
+/// `St` is the system's own store type and is carried rather than erased, so a
+/// slot the store does not hold is refused at the `spawn` of these props the
+/// same way it is refused at the `spawn` of an [`Unhosted`] one.
+pub struct Hosted<St>(EventSourceSystem<St>);
+
+impl<St> Hosted<St> {
+    /// Carry `host` as where the props holding this start.
+    ///
+    /// Public because the saga entry points that produce hosted props live in
+    /// `nitinol-saga` — the dependency arrow points `saga -> eventsource`, so
+    /// `host` is an extension trait there rather than an inherent method here,
+    /// and it needs the same state this crate's own entry points put their
+    /// props in.
+    pub fn new(host: EventSourceSystem<St>) -> Self {
+        Self(host)
+    }
+
+    /// The system these props were taken from.
+    pub fn system(&self) -> &EventSourceSystem<St> {
+        &self.0
+    }
 }
 
 /// Builder for [`EventSourceSystem`].
 ///
-/// Obtained from [`EventSourceSystem::builder`]. Call
-/// [`with_codec`][Self::with_codec] to bind a codec type, optionally
-/// [`with_event_store`][Self::with_event_store] to bind a default store, then
-/// [`build`][EventSourceSystemBuilder::build] to produce an
-/// [`EventSourceSystem`].
+/// Obtained from [`EventSourceSystem::builder`]. Supply the deployment's store
+/// with [`with_persistence`][Self::with_persistence], then
+/// [`build`][EventSourceSystemBuilder::build].
+///
+/// There is no codec stage. Every event type names the codec that writes it, so
+/// a system has no format of its own to bind and no way to disagree with the
+/// events it spawns aggregates for.
 ///
 /// # Builder
-/// ```ignore
+/// ```rust,no_run
+/// # use nitinol_eventsource::system::EventSourceSystem;
+/// # use nitinol_persistence::provider::PersistenceProvider;
+/// # use nitinol_persistence::store::InMemoryStore;
+/// # use nitinol_runtime::ProcessSystem;
+/// # async fn wiring() {
+/// # let ps = ProcessSystem::new().await;
 /// let system = EventSourceSystem::builder(ps)
-///     .with_codec::<JsonCodec>()
-///     .with_event_store(store)
+///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
 ///     .build();
+/// # }
 /// ```
-pub struct EventSourceSystemBuilder<C = Unset, St = StoreUnset> {
+pub struct EventSourceSystemBuilder<P = PersistenceUnset> {
     ps: ProcessSystem,
-    store: St,
-    _codec: PhantomData<C>,
+    persistence: P,
 }
 
-impl EventSourceSystemBuilder<Unset, StoreUnset> {
+impl EventSourceSystemBuilder<PersistenceUnset> {
     fn new(ps: ProcessSystem) -> Self {
         Self {
             ps,
-            store: StoreUnset,
-            _codec: PhantomData,
+            persistence: PersistenceUnset,
         }
     }
-}
 
-impl<St> EventSourceSystemBuilder<Unset, St> {
-    /// Bind codec type `C` to this builder.
-    pub fn with_codec<C>(self) -> EventSourceSystemBuilder<C, St> {
-        EventSourceSystemBuilder {
-            ps: self.ps,
-            store: self.store,
-            _codec: PhantomData,
-        }
-    }
-}
-
-impl<C> EventSourceSystemBuilder<C, StoreUnset> {
-    /// Bind `store` as the system's default [`EventStore`].
+    /// Supply the store this system's wiring resolves from.
     ///
     /// # One store, every stream
     ///
-    /// [`EventStore`] is stream-keyed — `append(key, ..)` and
-    /// [`LoadQuery::by_stream`](nitinol_persistence::LoadQuery::by_stream) address one
-    /// stream at a time — so a single instance holds every aggregate's stream (and
-    /// every saga's journal) side by side, each owner still reading only its own
-    /// key.  That is what makes *one* default store sufficient rather than a
-    /// registry of named ones: splitting streams across store instances is a
-    /// deployment choice, and the per-spawn override below is how it is expressed.
+    /// [`EventStore`](nitinol_persistence::store::EventStore) is stream-keyed —
+    /// `append(key, ..)` and
+    /// [`LoadQuery::by_stream`](nitinol_persistence::LoadQuery::by_stream)
+    /// address one stream at a time — so the single journal a store supplies
+    /// holds every aggregate's stream (and every saga's journal) side by side,
+    /// each owner still reading only its own key. That is what makes *one*
+    /// supplier sufficient rather than a registry of named stores.
     ///
-    /// # Default and override
+    /// Placing one aggregate's stream in a different destination is therefore a
+    /// second supplier, assembled and named as such, and a second system built
+    /// on it. There is no per-spawn override and no props that carry a store of
+    /// their own: every entry point below, and every `spawn` that takes a
+    /// system, resolves the one supplier that system carries — so a deployment
+    /// cannot half-move a stream and leave two activations writing to two
+    /// worlds.
     ///
-    /// Once a default is bound, the store argument disappears from the spawn
-    /// entry points — [`spawn_aggregate`][EventSourceSystem::spawn_aggregate] and
-    /// [`aggregate_props`][EventSourceSystem::aggregate_props] resolve it here
-    /// instead of at every call site.  A spawn that must live elsewhere names its
-    /// own store through
-    /// [`spawn_aggregate_with_store`][EventSourceSystem::spawn_aggregate_with_store]
-    /// or
-    /// [`aggregate_props_with_store`][EventSourceSystem::aggregate_props_with_store],
-    /// which take precedence: the default receives nothing for that spawn.
-    pub fn with_event_store(
+    /// # What a supplier does not promise
+    ///
+    /// Nothing atomic across destinations. One supplier is not one transaction
+    /// — the clauses on [`Store`] state what it does and does not guarantee.
+    pub fn with_persistence<St: Store>(
         self,
-        store: Arc<dyn EventStore>,
-    ) -> EventSourceSystemBuilder<C, StoreSet> {
+        persistence: PersistenceProvider<St>,
+    ) -> EventSourceSystemBuilder<PersistenceProvider<St>> {
         EventSourceSystemBuilder {
             ps: self.ps,
-            store: StoreSet { store },
-            _codec: PhantomData,
+            persistence,
         }
     }
 }
 
-impl<C, St> EventSourceSystemBuilder<C, St> {
+impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
     /// Finalize construction and return the configured [`EventSourceSystem`].
-    pub fn build(self) -> EventSourceSystem<C, St> {
+    pub fn build(self) -> EventSourceSystem<St> {
         EventSourceSystem {
-            ps: self.ps,
-            registry: AggregateRegistry::new(),
-            store: self.store,
-            _codec: PhantomData,
+            inner: Arc::new(Inner {
+                persistence: self.persistence,
+                node: Node::new(self.ps),
+                erased: OnceLock::new(),
+            }),
         }
     }
 }
 
-/// System-level orchestrator that binds a [`ProcessSystem`] to a codec type `C`,
-/// and optionally to a default [`EventStore`].
+/// System-level orchestrator that binds a [`ProcessSystem`] to the store a
+/// deployment's records live in.
 ///
-/// The codec type is fixed at build time via [`EventSourceSystemBuilder::with_codec`]
-/// and must implement [`Codec<E>`] for every event and snapshot type used through
-/// this system.
+/// `St` is that store, and which wiring entry points exist is decided by the
+/// slots it holds — so a store nobody configured cannot be relied on:
 ///
-/// `St` records whether [`EventSourceSystemBuilder::with_event_store`] was
-/// called.  It decides which spawn entry points exist, so a store that was never
-/// configured cannot be relied on:
-///
-/// | State | Spawn entry points |
+/// | The store holds | Entry points |
 /// |---|---|
-/// | [`StoreUnset`] (the default) | [`spawn_aggregate(id, store)`][Self::spawn_aggregate] / [`aggregate_props(id, store)`][Self::aggregate_props] — the store is named per spawn |
-/// | [`StoreSet`] | [`spawn_aggregate(id)`][Self::spawn_aggregate] / [`aggregate_props(id)`][Self::aggregate_props] / [`aggregate_proxy(id)`][Self::aggregate_proxy] take the default; [`spawn_aggregate_with_store`][Self::spawn_aggregate_with_store] / [`aggregate_props_with_store`][Self::aggregate_props_with_store] override it |
+/// | the journal ([`Store`]) | [`spawn_aggregate`][Self::spawn_aggregate] / [`aggregate_props`][Self::aggregate_props] / [`aggregate_proxy`][Self::aggregate_proxy] / [`durable_stream`][Self::durable_stream] |
+/// | a snapshot store ([`SnapshotSlot`]) | [`snapshot_persistor`][Self::snapshot_persistor], and spawning an aggregate whose [`Recover`](Aggregate::Recover) is [`Latest`](nitinol_contract::Latest) |
+/// | projection offsets ([`ProjectionOffsetSlot`]) | [`projector_props`][Self::projector_props] |
+///
+/// A slot the store does not hold is a **compile error** at the wiring that
+/// needs it, rather than a failure at the first save — which is the whole of
+/// why the store is a type parameter here.
+///
+/// # Two ways to say one wiring
+///
+/// Every entry point above has a props-first twin that names no store either —
+/// [`AggregateProps::new`], [`ProjectorProps::new`], [`DurableStream::new`] —
+/// whose `spawn` takes a system and resolves the very same slots. The two forms
+/// meet on one private path per props, so which one a deployment writes is a
+/// matter of where the wiring reads better and nothing else: the registry, the
+/// journal and the activation are the same either way.
+///
+/// The wire format is not among the things a system settles: an aggregate's
+/// events name the codec that writes them, so two aggregates spawned from one
+/// system read and write their own streams in their own formats.
 ///
 /// # Resolving, not spawning
 ///
@@ -162,258 +201,279 @@ impl<C, St> EventSourceSystemBuilder<C, St> {
 ///   [`tell`](crate::AggregateProxy::tell) leaves the store's arbitration, so a
 ///   duplicate activation can perform it a second time and nothing detects it.
 ///   A side effect that must be cluster-safe is expressed as a persisted record
-///   — the events of a [`Decision`](crate::Decision), or a saga outbox — so that
-///   some stream's own OCC decides whether it happened at all.
+///   — the events of a [`Decision`](crate::Decision), or a saga's own decision
+///   carried by a delivery host — so that some stream's own OCC decides whether
+///   it happened at all.
 ///
-/// Starting a lifecycle explicitly, rather than resolving one, is
-/// [`AggregateProps::spawn`] on props built directly.
+/// There is no second kind of start to reach for: props built directly resolve
+/// through this same registry when they are spawned on a system, so one
+/// identity has one activation however its wiring was written.
 ///
 /// # A handle, not an instance
 ///
 /// Cloning an `EventSourceSystem` names the same instance rather than creating a
 /// second one: every clone resolves through the same aggregate registry, runs on
-/// the same [`ProcessSystem`], and carries the same default [`EventStore`].  The
-/// per-node at-most-one guarantee therefore holds across clones — two clones
-/// resolving one identity reach one activation — and callers share the system by
-/// cloning it rather than by wrapping it in an `Arc`.
+/// the same [`ProcessSystem`], carries the same supplier, and shares the one
+/// snapshot persistor process.  The per-node at-most-one guarantee therefore
+/// holds across clones — two clones resolving one identity reach one activation
+/// — and callers share the system by cloning it rather than by wrapping it in an
+/// `Arc`.
 ///
 /// The entry points stay by-reference so that whether to clone remains the
 /// caller's decision.  Configuration is fixed before any handle exists: the
-/// codec and the default store are bound on [`EventSourceSystemBuilder`], and
-/// [`build`][EventSourceSystemBuilder::build] settles them.
-pub struct EventSourceSystem<C, St = StoreUnset> {
+/// supplier is supplied on [`EventSourceSystemBuilder`], and
+/// [`build`][EventSourceSystemBuilder::build] settles it.
+///
+/// # What holds what
+///
+/// A system holds the one instance behind it: the supplier it was built with,
+/// the node state every handle onto it shares, and — once asked for — the
+/// erased handle it answers with. Nothing on the other side of those holds a
+/// system back. The registry keeps process proxies, a process proxy keeps a pid
+/// and a channel, and a persistor keeps a snapshot store, so there is no strong
+/// cycle to leak: a handle lives as long as the processes holding it, and is
+/// released when they stop.
+pub struct EventSourceSystem<St = PersistenceUnset> {
+    inner: Arc<Inner<St>>,
+}
+
+/// The instance every handle onto one system shares.
+struct Inner<St> {
+    /// Held by value: a [`Store`] is distributed by being cloned and owes the
+    /// identity of the records its clones reach, so a supplier over one is
+    /// already another name for the same store. Wrapping it here would prove
+    /// that property a second time and leave the sharing in the holder rather
+    /// than in the store.
+    persistence: PersistenceProvider<St>,
+    node: Node,
+    /// The handle this system erases to, built on the first
+    /// [`erase_store`][EventSourceSystem::erase_store] and named by every call
+    /// after it.
+    ///
+    /// Erasing is on the hosted spawn path — every entry point carries one into
+    /// the props it hands back — so the journal is taken out of the supplier
+    /// once per system rather than once per spawn.
+    erased: OnceLock<SystemHandle>,
+}
+
+/// The node state a system shares with its clones and with the handle its store
+/// type is erased from.
+///
+/// Cheap-clone for the reason [`ProcessSystem`] is, and separate from
+/// [`Inner`] for one reason: none of it depends on the store type, so the
+/// erased handle is a second [`Inner`] over the same node rather than a second
+/// node. That is what makes the activation registry one table for the typed
+/// system and the erased handle both — and the snapshot persistor one process.
+#[derive(Clone)]
+struct Node {
+    inner: Arc<NodeInner>,
+}
+
+struct NodeInner {
     /// A handle rather than an owned instance: a reference re-resolves its
     /// aggregate long after the entry point that produced it returned, and needs
     /// a system to activate on.
     ps: ProcessSystem,
-    registry: Arc<AggregateRegistry>,
-    store: St,
-    _codec: PhantomData<C>,
+    registry: AggregateRegistry,
+    /// The one snapshot persistor process a system distributes.
+    ///
+    /// Shared across clones and across the erased handle, because the snapshot
+    /// contract is written for a single consumer serialising its calls: a second
+    /// process over one store would be two.
+    snapshot_persistor: OnceCell<SnapshotPersistorProxy>,
 }
 
-/// Written out rather than derived: `C` is carried as [`PhantomData`] alone, so
-/// a derived impl's `C: Clone` bound would lock out every codec that is not
-/// itself `Clone` for nothing.
-impl<C, St: Clone> Clone for EventSourceSystem<C, St> {
+impl Node {
+    fn new(ps: ProcessSystem) -> Self {
+        Self {
+            inner: Arc::new(NodeInner {
+                ps,
+                registry: AggregateRegistry::new(),
+                snapshot_persistor: OnceCell::new(),
+            }),
+        }
+    }
+
+    fn process_system(&self) -> &ProcessSystem {
+        &self.inner.ps
+    }
+
+    /// What a reference needs to resolve, and re-resolve, an aggregate on this
+    /// node.
+    fn resolve_handle(&self) -> ResolveHandle {
+        ResolveHandle::new(self.inner.registry.clone(), self.inner.ps.clone())
+    }
+
+    /// This node's snapshot persistor, starting it on the first call.
+    ///
+    /// `snapshots` is the asking system's own snapshot store, and it is the same
+    /// one every time: a node is built with one supplier, clones carry it, and
+    /// the erased handle has no snapshot slot to ask through. So the process the
+    /// first caller starts is over the store every later caller would have
+    /// named.
+    async fn snapshot_persistor(&self, snapshots: Album) -> SnapshotPersistorProxy {
+        self.inner
+            .snapshot_persistor
+            .get_or_init(|| async { SnapshotPersistor::spawn(&self.inner.ps, snapshots).await })
+            .await
+            .clone()
+    }
+}
+
+/// What an activation that recovers from a snapshot resolves its persistor
+/// through.
+///
+/// An activation is built synchronously — [`EventSourceSystem::aggregate_proxy`]
+/// hands back a reference without awaiting anything — while starting the
+/// persistor is not, so the ingredients travel and the resolve happens in
+/// `on_start`. It is the node's own memoised cell either way, so an activation
+/// and a caller of
+/// [`snapshot_persistor`][EventSourceSystem::snapshot_persistor] reach one
+/// process.
+///
+/// The store type is already gone here: a snapshot store is an [`Album`], so
+/// nothing an activation holds depends on which deployment assembled it.
+#[derive(Clone)]
+pub(crate) struct SnapshotSource {
+    node: Node,
+    snapshots: Album,
+}
+
+impl SnapshotSource {
+    pub(crate) async fn resolve(&self) -> SnapshotPersistorProxy {
+        self.node.snapshot_persistor(self.snapshots.clone()).await
+    }
+}
+
+/// Written out rather than derived: `derive` would require `St: Clone`, and a
+/// builder's marker is not a store and has no clone to offer — so an assembly's
+/// choice of handle types would decide whether its system can be shared.
+///
+/// A clone is another name for the one instance: the same supplier, the same
+/// node, and the same erased handle.
+impl<St> Clone for EventSourceSystem<St> {
     fn clone(&self) -> Self {
         Self {
-            ps: self.ps.clone(),
-            registry: Arc::clone(&self.registry),
-            store: self.store.clone(),
-            _codec: PhantomData,
+            inner: Arc::clone(&self.inner),
         }
     }
 }
 
-impl EventSourceSystem<Unset> {
+impl EventSourceSystem<PersistenceUnset> {
     /// Begin building an [`EventSourceSystem`] backed by the given [`ProcessSystem`].
-    pub fn builder(ps: ProcessSystem) -> EventSourceSystemBuilder<Unset, StoreUnset> {
+    pub fn builder(ps: ProcessSystem) -> EventSourceSystemBuilder<PersistenceUnset> {
         EventSourceSystemBuilder::new(ps)
     }
 }
 
-impl<C, St> EventSourceSystem<C, St> {
+impl<St> EventSourceSystem<St> {
     /// Returns a reference to the underlying [`ProcessSystem`].
     pub fn process_system(&self) -> &ProcessSystem {
-        &self.ps
+        self.inner.node.process_system()
+    }
+
+    /// The supplier this system was built with.
+    ///
+    /// Wiring that takes a store as a value — an upstream subscription, a saga's
+    /// own journal — resolves it from here rather than keeping a second handle
+    /// alongside the system.
+    pub fn persistence(&self) -> &PersistenceProvider<St> {
+        &self.inner.persistence
     }
 
     /// What a reference needs to resolve, and re-resolve, its aggregate here.
-    fn resolve_handle(&self) -> ResolveHandle {
-        ResolveHandle::new(Arc::clone(&self.registry), self.ps.clone())
+    pub(crate) fn resolve_handle(&self) -> ResolveHandle {
+        self.inner.node.resolve_handle()
     }
 }
 
-impl<C> EventSourceSystem<C, StoreSet> {
-    /// The default [`EventStore`] this system was built with.
+impl<St: Store> EventSourceSystem<St> {
+    /// Resolve the aggregate `id`, activating it if this node has no activation
+    /// for it, and return a reference to it.
     ///
-    /// Wiring that takes a store as a value — a
-    /// [`ProjectorProps`](crate::ProjectorProps), an upstream subscription —
-    /// reads it from here rather than keeping a second `Arc` alongside the
-    /// system.
-    pub fn event_store(&self) -> &Arc<dyn EventStore> {
-        &self.store.store
-    }
-}
-
-impl<C, St> EventSourceSystem<C, St>
-where
-    C: Default + Send + Sync + 'static,
-{
-    /// Return a type-erased codec for type `E`.
-    ///
-    /// Creates a default-constructed `C` and wraps it as `Arc<dyn ErasedCodec<E>>`.
-    pub fn codec<E>(&self) -> Arc<dyn ErasedCodec<E>>
-    where
-        C: Codec<E>,
-        E: Send + Sync + 'static,
-    {
-        Arc::new(C::default())
-    }
-
-    /// [`AggregateProps`] for `id` on `store`, pre-wired with the system codec.
-    ///
-    /// The one place a store and the system's codec are joined into props, so
-    /// the default and the override resolve to the same wiring.
-    fn props_on<A>(
-        &self,
-        id: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> AggregateProps<A, crate::CodecSet<A::Event>>
-    where
-        A: Aggregate,
-        C: Codec<A::Event>,
-    {
-        AggregateProps::<A>::new(id, store).with_codec(self.codec::<A::Event>())
-    }
-
-    /// The same props, wired to resolve through this system's registry rather
-    /// than to activate per call.
-    fn resolving_props_on<A>(
-        &self,
-        id: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> AggregateProps<A, crate::CodecSet<A::Event>>
-    where
-        A: Aggregate,
-        C: Codec<A::Event>,
-    {
-        self.props_on::<A>(id, store)
-            .with_resolve(self.resolve_handle())
-    }
-
-    /// A reference to the aggregate `id` on `store`, resolved at dispatch time.
-    fn reference_on<A>(&self, id: AggregateId, store: Arc<dyn EventStore>) -> AggregateProxy<A>
-    where
-        A: Aggregate,
-        C: Codec<A::Event>,
-    {
-        self.props_on::<A>(id, store)
-            .into_reference(self.resolve_handle())
-    }
-}
-
-impl<C> EventSourceSystem<C, StoreUnset>
-where
-    C: Default + Send + Sync + 'static,
-{
-    /// Resolve the aggregate `id` on `store`, activating it if this node has no
-    /// activation for it, and return a reference to it.
-    ///
-    /// This system holds no default store, so the store is named here.  Binding
-    /// one with [`EventSourceSystemBuilder::with_event_store`] makes the argument
-    /// unnecessary — see [`EventSourceSystem<C, StoreSet>`][EventSourceSystem].
-    ///
-    /// `store` configures the activation this call may start.  Resolving an
-    /// identifier that is already activated joins that activation, whatever store
-    /// it was given — two activations of one stream on one node is the state
-    /// resolve exists to prevent, so identity wins over per-call wiring.
-    pub async fn spawn_aggregate<A>(
-        &self,
-        id: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> AggregateProxy<A>
-    where
-        A: Aggregate,
-        C: Codec<A::Event>,
-    {
-        self.resolving_props_on::<A>(id, store)
-            .spawn(&self.ps)
-            .await
-    }
-
-    /// Return an [`AggregateProps`] on `store`, pre-wired with the system event codec.
-    ///
-    /// Use this when additional configuration (e.g., snapshot persistor) is needed
-    /// before spawning.  Its `spawn` resolves exactly as
-    /// [`spawn_aggregate`][Self::spawn_aggregate] does.
-    pub fn aggregate_props<A>(
-        &self,
-        id: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> AggregateProps<A, crate::CodecSet<A::Event>>
-    where
-        A: Aggregate,
-        C: Codec<A::Event>,
-    {
-        self.resolving_props_on::<A>(id, store)
-    }
-}
-
-impl<C> EventSourceSystem<C, StoreSet>
-where
-    C: Default + Send + Sync + 'static,
-{
-    /// Spawn an aggregate process onto the system's default [`EventStore`],
-    /// pre-wired with the system event codec.
-    ///
-    /// The aggregate's stream lives under `id` in the default store; other
-    /// aggregates, and any saga journalling through this system, are tenants of
-    /// the same instance under their own keys.
-    ///
-    /// To place this one aggregate elsewhere, name its store with
-    /// [`spawn_aggregate_with_store`][Self::spawn_aggregate_with_store].
+    /// The aggregate's stream lives under `id` in the journal the store holds;
+    /// other aggregates, and any saga journalling through this system, are
+    /// tenants of the same instance under their own keys.
     ///
     /// # Typestate
     ///
-    /// This store-less form exists only once
-    /// [`with_event_store`][EventSourceSystemBuilder::with_event_store] has
-    /// supplied a default.  Calling it on a system built without one is a
-    /// **compile error** rather than a spawn-time failure:
+    /// There is no form of this that names a store, and no system without a
+    /// supplier to resolve one from — a builder that was never handed one has
+    /// no `build`, so the call below is a **compile error**:
     ///
     /// ```compile_fail
-    /// # use std::sync::Arc;
-    /// # use bytes::Bytes;
-    /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::system::EventSourceSystem;
-    /// # use nitinol_eventsource::{Aggregate, Event};
-    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
-    /// # #[derive(Default)] struct DocCodec;
-    /// # #[derive(Clone)] struct Bumped;
-    /// # impl Event for Bumped { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("Bumped")); }
-    /// # impl Codec<Bumped> for DocCodec {
-    /// #     type Error = std::convert::Infallible;
-    /// #     fn encode(_: &Bumped) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
-    /// #     fn decode(_: &[u8]) -> Result<Bumped, Self::Error> { Ok(Bumped) }
-    /// # }
-    /// # #[derive(Default)] struct Counter;
-    /// # impl Aggregate for Counter { type Event = Bumped; fn apply(&mut self, _: Bumped) {} }
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// // no `with_event_store` — there is no default store to spawn onto
-    /// let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
-    /// system.spawn_aggregate::<Counter>(AggregateId::new("counter")).await;
+    /// // no `with_persistence` — there are no stores to spawn onto
+    /// let system = EventSourceSystem::builder(ps).build();
     /// # }
     /// ```
     ///
-    /// The same wiring with a default store bound compiles:
+    /// Nor is there a per-spawn override to reach a second destination with.
+    /// The entry point that took one is gone:
     ///
-    /// ```rust,no_run
-    /// # use std::sync::Arc;
+    /// ```compile_fail
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_persistence::store::InMemoryEventStore;
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// # let store = InMemoryEventStore::default();
+    /// // `with_event_store` does not exist: the stores come from a supplier
+    /// let system = EventSourceSystem::builder(ps).with_event_store(store).build();
+    /// # }
+    /// ```
+    ///
+    /// An aggregate whose type says it recovers from the newest snapshot asks
+    /// this system for a snapshot store, so one whose store holds none is a
+    /// **compile error** here rather than an activation that silently replays
+    /// from the beginning:
+    ///
+    /// ```compile_fail
     /// # use bytes::Bytes;
     /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::system::EventSourceSystem;
-    /// # use nitinol_eventsource::{Aggregate, Event};
-    /// # use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+    /// # use nitinol_eventsource::{Aggregate, Event, Latest, Snapshotable};
+    /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+    /// # use nitinol_persistence::store::InMemoryEventStore;
     /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
     /// # use nitinol_runtime::ProcessSystem;
-    /// # #[derive(Default)] struct DocCodec;
-    /// # #[derive(Clone)] struct Bumped;
-    /// # impl Event for Bumped { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("Bumped")); }
-    /// # impl Codec<Bumped> for DocCodec {
+    /// # struct DocCodec;
+    /// # #[derive(Clone)] struct Counted;
+    /// # impl Codec<Counted> for DocCodec {
     /// #     type Error = std::convert::Infallible;
-    /// #     fn encode(_: &Bumped) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
-    /// #     fn decode(_: &[u8]) -> Result<Bumped, Self::Error> { Ok(Bumped) }
+    /// #     fn encode(_: &Counted) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<Counted, Self::Error> { Ok(Counted) }
     /// # }
-    /// # #[derive(Default)] struct Counter;
-    /// # impl Aggregate for Counter { type Event = Bumped; fn apply(&mut self, _: Bumped) {} }
+    /// # impl Codec<u64> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &u64) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<u64, Self::Error> { Ok(0) }
+    /// # }
+    /// # impl Event for Counted {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("Counted"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # #[derive(Default)] struct Counter { value: u64 }
+    /// # impl Aggregate for Counter {
+    /// #     type Event = Counted;
+    /// #     type Recover = Latest;
+    /// #     fn apply(&mut self, _: Counted) { self.value += 1; }
+    /// # }
+    /// # impl Snapshotable for Counter {
+    /// #     type Snapshot = u64;
+    /// #     type Codec = DocCodec;
+    /// #     fn capture(&self) -> u64 { self.value }
+    /// #     fn recover(snapshot: u64) -> Self { Self { value: snapshot } }
+    /// # }
     /// # async fn wiring() {
     /// # let ps = ProcessSystem::new().await;
-    /// # let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    /// // no `snapshot` — this store has no snapshot slot
+    /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
     /// let system = EventSourceSystem::builder(ps)
-    ///     .with_codec::<DocCodec>()
-    ///     .with_event_store(store)
+    ///     .with_persistence(PersistenceProvider::new(store))
     ///     .build();
     /// system.spawn_aggregate::<Counter>(AggregateId::new("counter")).await;
     /// # }
@@ -421,59 +481,38 @@ where
     pub async fn spawn_aggregate<A>(&self, id: AggregateId) -> AggregateProxy<A>
     where
         A: Aggregate,
-        C: Codec<A::Event>,
+        A::Recover: RecoverOn<A, St>,
     {
-        self.spawn_aggregate_with_store::<A>(id, Arc::clone(self.event_store()))
-            .await
+        self.aggregate_props::<A>(id).spawn().await
     }
 
-    /// Return an [`AggregateProps`] on the system's default [`EventStore`],
-    /// pre-wired with the system event codec.
+    /// Return an [`AggregateProps`] carrying this system as where it starts.
     ///
-    /// Use this when additional configuration (e.g., snapshot persistor) is needed
-    /// before spawning; [`aggregate_props_with_store`][Self::aggregate_props_with_store]
-    /// is the same builder on a store named here instead.
+    /// Nothing is handed over here and nothing is left to configure: the
+    /// journal, the registry and — for an aggregate that recovers from one —
+    /// the snapshot persistor are all taken from this system at the spawn. Its
+    /// `spawn` takes no argument and resolves exactly as
+    /// [`spawn_aggregate`][Self::spawn_aggregate] does.
+    pub fn aggregate_props<A: Aggregate>(&self, id: AggregateId) -> AggregateProps<A, Hosted<St>> {
+        AggregateProps::<A>::new(id).hosted(self.clone())
+    }
+
+    /// Return a [`DurableStream`] over the journal the store holds, carrying
+    /// this system as where it starts.
     ///
-    /// # Typestate
-    ///
-    /// Like [`spawn_aggregate`][Self::spawn_aggregate], this store-less form
-    /// exists only on a system that was given a default store — the call below is
-    /// a **compile error**:
-    ///
-    /// ```compile_fail
-    /// # use std::sync::Arc;
-    /// # use bytes::Bytes;
-    /// # use nitinol_eventsource::codec::Codec;
-    /// # use nitinol_eventsource::system::EventSourceSystem;
-    /// # use nitinol_eventsource::{Aggregate, Event};
-    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # #[derive(Default)] struct DocCodec;
-    /// # #[derive(Clone)] struct Bumped;
-    /// # impl Event for Bumped { const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("Bumped")); }
-    /// # impl Codec<Bumped> for DocCodec {
-    /// #     type Error = std::convert::Infallible;
-    /// #     fn encode(_: &Bumped) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
-    /// #     fn decode(_: &[u8]) -> Result<Bumped, Self::Error> { Ok(Bumped) }
-    /// # }
-    /// # #[derive(Default)] struct Counter;
-    /// # impl Aggregate for Counter { type Event = Bumped; fn apply(&mut self, _: Bumped) {} }
-    /// # async fn wiring() {
-    /// # let ps = ProcessSystem::new().await;
-    /// // no `with_event_store` — there is no default store to build props on
-    /// let system = EventSourceSystem::builder(ps).with_codec::<DocCodec>().build();
-    /// system.aggregate_props::<Counter>(AggregateId::new("counter"));
-    /// # }
-    /// ```
-    pub fn aggregate_props<A>(
+    /// The props-first form of the same wiring is
+    /// [`DurableStream::new`], which names no journal either and takes this
+    /// system at its `spawn`.
+    pub fn durable_stream<T, F>(
         &self,
-        id: AggregateId,
-    ) -> AggregateProps<A, crate::CodecSet<A::Event>>
+        topic: ProcessName,
+        transform: F,
+    ) -> DurableStream<T, CursorUnset, Hosted<St>>
     where
-        A: Aggregate,
-        C: Codec<A::Event>,
+        T: Send + Sync + 'static,
+        F: Fn(LoadedEvent) -> Option<T> + Send + Sync + 'static,
     {
-        self.aggregate_props_with_store::<A>(id, Arc::clone(self.event_store()))
+        DurableStream::<T>::new(topic, transform).hosted(self.clone())
     }
 
     /// A reference to the aggregate `id`, built without awaiting and without
@@ -482,8 +521,8 @@ where
     /// The aggregate is resolved on the reference's first dispatch, and resolved
     /// again after the activation it reached dies — the same reference the
     /// awaited entry points hand back, obtained where awaiting is not possible: a
-    /// `fold` over a decision, a crash-restart factory rebuilding a target from a
-    /// stored marker.
+    /// `fold` over a decision, or a saga's delivery addressing a target it has
+    /// not yet activated.
     ///
     /// Deferring the activation is what makes that sound.  A reference names the
     /// aggregate, not a process, so building one commits to nothing that could
@@ -491,45 +530,148 @@ where
     pub fn aggregate_proxy<A>(&self, id: AggregateId) -> AggregateProxy<A>
     where
         A: Aggregate,
-        C: Codec<A::Event>,
+        A::Recover: RecoverOn<A, St>,
     {
-        self.reference_on::<A>(id, Arc::clone(self.event_store()))
+        self.aggregate_props::<A>(id).into_reference()
     }
 
-    /// Resolve the aggregate `id` on `store` instead of on the system default.
+    /// The same system, with the store's type erased.
     ///
-    /// The default receives nothing for this aggregate: `store` is where the
-    /// activation this call may start writes and replays.  Resolving an
-    /// identifier that already has an activation joins it and leaves `store`
-    /// unused — identity decides which aggregate, and only the first resolve of
-    /// an identity decides its wiring.
-    pub async fn spawn_aggregate_with_store<A>(
-        &self,
-        id: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> AggregateProxy<A>
-    where
-        A: Aggregate,
-        C: Codec<A::Event>,
-    {
-        self.resolving_props_on::<A>(id, store)
-            .spawn(&self.ps)
-            .await
+    /// It is a handle, not a copy: the same process system, the same aggregate
+    /// registry, the same journal and the same snapshot persistor. Resolving an
+    /// identity through the erased handle reaches the activation the original
+    /// would.
+    ///
+    /// One handle per system, built here on the first call and cloned by every
+    /// call after it — including the ones the hosted entry points make on the
+    /// caller's behalf, so a spawn takes nothing out of the supplier.
+    ///
+    /// Only the journal survives the erasure — a [`Journal`] *is* the store
+    /// holding the journal alone, and it holds no other slot — so a slot a
+    /// deployment did not supply stays a compile error rather than becoming
+    /// reachable through a handle that lost the type saying so:
+    ///
+    /// ```compile_fail
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_persistence::provider::PersistenceProvider;
+    /// # use nitinol_persistence::store::InMemoryStore;
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// let system = EventSourceSystem::builder(ps)
+    ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+    ///     .build();
+    /// // the erased handle has no snapshot slot, whatever the store it came
+    /// // from supplied
+    /// system.erase_store().snapshot_persistor().await;
+    /// # }
+    /// ```
+    ///
+    /// The same applies to an aggregate whose [`Recover`](Aggregate::Recover) is
+    /// [`Latest`](nitinol_contract::Latest): it asks its system for a snapshot
+    /// store, and a handle that lost the type saying there is one cannot answer.
+    /// Such an aggregate is resolved through the typed system it was built on;
+    /// wiring written against the erased handle — a saga's dispatch mapping,
+    /// say — addresses aggregates that replay their streams.
+    pub fn erase_store(&self) -> SystemHandle {
+        self.inner
+            .erased
+            .get_or_init(|| EventSourceSystem {
+                inner: Arc::new(Inner {
+                    persistence: PersistenceProvider::new(self.inner.persistence.event_store()),
+                    node: self.inner.node.clone(),
+                    erased: OnceLock::new(),
+                }),
+            })
+            .clone()
+    }
+}
+
+impl<St: SnapshotSlot> EventSourceSystem<St> {
+    /// The handle onto this system's snapshot persistor, starting it on the
+    /// first call.
+    ///
+    /// One process per system, shared by every caller and every clone: the
+    /// snapshot contract is written for a single consumer serialising its calls,
+    /// and two processes over one store would be two consumers.
+    ///
+    /// # Typestate
+    ///
+    /// This exists only where the store holds a snapshot store. One that holds
+    /// none is refused here rather than at the first save:
+    ///
+    /// ```compile_fail
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+    /// # use nitinol_persistence::store::InMemoryEventStore;
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// // no `snapshot` — this store has no snapshot slot
+    /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
+    /// let system = EventSourceSystem::builder(ps)
+    ///     .with_persistence(PersistenceProvider::new(store))
+    ///     .build();
+    /// system.snapshot_persistor().await;
+    /// # }
+    /// ```
+    pub async fn snapshot_persistor(&self) -> SnapshotPersistorProxy {
+        self.snapshot_source().resolve().await
     }
 
-    /// Return an [`AggregateProps`] on `store`, overriding the system default.
+    /// What an activation of a `Recover = Latest` aggregate resolves this
+    /// system's one persistor through, once it is running.
+    pub(crate) fn snapshot_source(&self) -> SnapshotSource {
+        SnapshotSource {
+            node: self.inner.node.clone(),
+            snapshots: self.inner.persistence.snapshot_store(),
+        }
+    }
+}
+
+impl<St: ProjectionOffsetSlot> EventSourceSystem<St> {
+    /// Return a [`ProjectorProps`] over the journal and the projection
+    /// offsets the store holds, carrying this system as where it starts.
     ///
-    /// The same override, and the same resolve semantics, as
-    /// [`spawn_aggregate_with_store`][Self::spawn_aggregate_with_store].
-    pub fn aggregate_props_with_store<A>(
+    /// Both slots are resolved here, so a projector built from a system follows
+    /// the same journal its aggregates write to and records its position where
+    /// the deployment's other projections record theirs.
+    ///
+    /// # Typestate
+    ///
+    /// This exists only where the store holds projection offsets:
+    ///
+    /// ```compile_fail
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+    /// # use nitinol_persistence::store::InMemoryEventStore;
+    /// # use nitinol_eventsource::ProjectionId;
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # struct ReadModel;
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// // no `projection_offsets` — this store has no projection slot
+    /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
+    /// let system = EventSourceSystem::builder(ps)
+    ///     .with_persistence(PersistenceProvider::new(store))
+    ///     .build();
+    /// system.projector_props(ProjectionId::new("read-model"), || ReadModel);
+    /// # }
+    /// ```
+    pub fn projector_props<Proj>(
         &self,
-        id: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> AggregateProps<A, crate::CodecSet<A::Event>>
+        projection_id: ProjectionId,
+        producer: impl Fn() -> Proj + Send + Sync + 'static,
+    ) -> ProjectorProps<
+        Proj,
+        (),
+        crate::projection::EventUnset,
+        crate::projection::OriginUnset,
+        Hosted<St>,
+    >
     where
-        A: Aggregate,
-        C: Codec<A::Event>,
+        Proj: Send + Sync + 'static,
     {
-        self.resolving_props_on::<A>(id, store)
+        ProjectorProps::new(projection_id, producer).hosted(self.clone())
     }
 }

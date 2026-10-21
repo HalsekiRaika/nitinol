@@ -1,8 +1,7 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::LoadedEvent;
 use nitinol_runtime::error::SendError;
 use nitinol_runtime::ident::{Pid, ProcessName};
@@ -13,7 +12,7 @@ use nitinol_runtime::{ProcessSystem, Props, Stream};
 
 use crate::durable_stream::cursor::SequenceCursor;
 use crate::durable_stream::poller::{
-    DirectPollerProcess, DurablePollerProcess, IntervalDriver, TransformFn,
+    DirectPollerProcess, DurablePollerProcess, IntervalDriver, SharedPollState, TransformFn,
 };
 
 const POLLER_RESTART_MAX_RETRIES: u32 = 5;
@@ -28,8 +27,15 @@ const POLLER_RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// process field keeps the shared poller alive for the process's lifetime —
 /// `DurableSubscription` avoids that by carrying only the ingredients for a
 /// direct poller, with no reference to the shared poller.
+///
+/// # No journal of its own
+///
+/// What this carries is how to read a record and how often to ask, not where to
+/// ask. The journal arrives at each spawn method, from whoever owns the wiring
+/// that is starting the poller — a stream handing out its own store, or a saga
+/// manager handing out the one its system supplied it. A subscription that kept
+/// a journal would be a second place a destination could be named.
 pub struct DurableSubscription<T> {
-    pub(crate) store: Arc<dyn EventStore>,
     pub(crate) transform: TransformFn<T>,
     pub(crate) poll_interval: Duration,
 }
@@ -37,7 +43,6 @@ pub struct DurableSubscription<T> {
 impl<T> Clone for DurableSubscription<T> {
     fn clone(&self) -> Self {
         Self {
-            store: Arc::clone(&self.store),
             transform: Arc::clone(&self.transform),
             poll_interval: self.poll_interval,
         }
@@ -48,12 +53,14 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
     /// Create a config with the default polling cadence (250 ms).
     ///
     /// Use [`Self::with_poll_interval`] to override the interval.
-    pub fn new<F>(store: Arc<dyn EventStore>, transform: F) -> Self
+    ///
+    /// No journal: it is supplied at the spawn, by the wiring that owns the
+    /// destination.
+    pub fn new<F>(transform: F) -> Self
     where
         F: Fn(LoadedEvent) -> Option<T> + Send + Sync + 'static,
     {
         Self {
-            store,
             transform: Arc::new(transform),
             poll_interval: super::DEFAULT_POLL_INTERVAL,
         }
@@ -72,6 +79,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
     /// to any of these values are made exactly once.
     fn make_direct_poller_props<S>(
         &self,
+        journal: Journal,
         subscriber: ProcessProxy<S>,
         cursor: SequenceCursor,
         name: Option<ProcessName>,
@@ -79,7 +87,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
     where
         S: Process + Receive<T, Response = ()>,
     {
-        let store = Arc::clone(&self.store);
+        let store = journal;
         let transform = Arc::clone(&self.transform);
         let initial_cursor = cursor;
         let driver = IntervalDriver::<DirectPollerProcess<T, S>>::new(self.poll_interval);
@@ -87,7 +95,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
             SupervisionStrategy::restart(POLLER_RESTART_MAX_RETRIES, POLLER_RESTART_WITHIN)
                 .expect("POLLER_RESTART_WITHIN is a positive duration constant");
         let mut props = Props::new(move || DirectPollerProcess {
-            store: Arc::clone(&store),
+            store: store.clone(),
             subscriber: subscriber.clone(),
             transform: Arc::clone(&transform),
             cursor: initial_cursor.clone(),
@@ -100,18 +108,22 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         props
     }
 
-    /// Spawn a `DirectPollerProcess` as a runtime **child** of `ctx`'s
-    /// process.
+    /// Spawn a `DirectPollerProcess` over `journal` as a runtime **child** of
+    /// `ctx`'s process.
     ///
     /// The poller's lifetime is tied to the calling process: when the calling
     /// process stops for any reason the runtime cascade-stops the child poller
     /// automatically.
-    pub async fn spawn_child<S>(&self, ctx: &mut ProcessContext<S>, cursor: SequenceCursor)
-    where
+    pub async fn spawn_child<S>(
+        &self,
+        ctx: &mut ProcessContext<S>,
+        journal: Journal,
+        cursor: SequenceCursor,
+    ) where
         S: Process + Receive<T, Response = ()>,
     {
         let subscriber = ctx.self_proxy().clone();
-        let props = self.make_direct_poller_props(subscriber, cursor, None);
+        let props = self.make_direct_poller_props(journal, subscriber, cursor, None);
         ctx.spawn_child(props).await;
     }
 
@@ -130,6 +142,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
     pub async fn spawn_child_for<Parent, Sub>(
         &self,
         ctx: &mut ProcessContext<Parent>,
+        journal: Journal,
         subscriber: ProcessProxy<Sub>,
         cursor: SequenceCursor,
         name: ProcessName,
@@ -137,7 +150,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         Parent: Process,
         Sub: Process + Receive<T, Response = ()>,
     {
-        let props = self.make_direct_poller_props(subscriber, cursor, Some(name));
+        let props = self.make_direct_poller_props(journal, subscriber, cursor, Some(name));
         ctx.spawn_child(props).await;
     }
 
@@ -156,6 +169,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
     pub async fn spawn_from<S>(
         &self,
         system: &ProcessSystem,
+        journal: Journal,
         subscriber: ProcessProxy<S>,
         cursor: SequenceCursor,
         poller_name: ProcessName,
@@ -165,7 +179,7 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         if let Some(existing) = system.lookup_by_name(&poller_name).await {
             let _ = existing.stop().await;
         }
-        let props = self.make_direct_poller_props(subscriber, cursor, Some(poller_name));
+        let props = self.make_direct_poller_props(journal, subscriber, cursor, Some(poller_name));
         system.spawn(props).await;
     }
 }
@@ -184,11 +198,13 @@ pub(crate) fn direct_poller_name(subscriber_pid: Pid) -> ProcessName {
 /// released.
 pub struct DurableStreamProxy<T> {
     stream_proxy: ProcessProxy<Stream<T>>,
-    store: Arc<dyn EventStore>,
-    transform: TransformFn<T>,
+    store: Journal,
+    /// The state this handle and the shared poller both read: the transform a
+    /// direct subscription is spawned with, and the gate
+    /// [`subscribe`][Self::subscribe] opens.
+    shared: SharedPollState<T>,
     poll_interval: Duration,
     shared_poller: ProcessProxy<DurablePollerProcess<T>>,
-    start_open: Arc<AtomicBool>,
 }
 
 impl<T> Drop for DurableStreamProxy<T> {
@@ -204,18 +220,16 @@ where
     pub(crate) fn new(
         stream_proxy: ProcessProxy<Stream<T>>,
         shared_poller: ProcessProxy<DurablePollerProcess<T>>,
-        start_open: Arc<AtomicBool>,
-        store: Arc<dyn EventStore>,
-        transform: TransformFn<T>,
+        shared: SharedPollState<T>,
+        store: Journal,
         poll_interval: Duration,
     ) -> Self {
         Self {
             stream_proxy,
             store,
-            transform,
+            shared,
             poll_interval,
             shared_poller,
-            start_open,
         }
     }
 
@@ -228,7 +242,7 @@ where
         P: Process + Receive<T, Response = ()>,
     {
         self.stream_proxy.subscribe(proxy).await?;
-        self.start_open.store(true, Ordering::Release);
+        self.shared.open();
         Ok(())
     }
 
@@ -248,11 +262,15 @@ where
         }
 
         let config = DurableSubscription {
-            store: Arc::clone(&self.store),
-            transform: Arc::clone(&self.transform),
+            transform: Arc::clone(self.shared.transform()),
             poll_interval: self.poll_interval,
         };
-        let props = config.make_direct_poller_props(proxy, cursor, Some(direct_poller_name(pid)));
+        let props = config.make_direct_poller_props(
+            self.store.clone(),
+            proxy,
+            cursor,
+            Some(direct_poller_name(pid)),
+        );
         system.spawn(props).await;
 
         Ok(())

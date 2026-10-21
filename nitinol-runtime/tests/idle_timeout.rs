@@ -15,51 +15,7 @@ use common::{
     Increment, WatchPid,
 };
 
-// Type-property tests
-
-/// TerminatedReason::Timeout is a valid variant: PartialEq with itself.
-#[tokio::test]
-async fn terminated_reason_timeout_is_equal_to_itself() {
-    // Given / When / Then
-    assert_eq!(TerminatedReason::Timeout, TerminatedReason::Timeout);
-}
-
-/// TerminatedReason::Timeout is distinct from Stopped.
-#[tokio::test]
-async fn terminated_reason_timeout_is_distinct_from_stopped() {
-    assert_ne!(TerminatedReason::Timeout, TerminatedReason::Stopped);
-}
-
-/// TerminatedReason::Timeout is distinct from NotFound.
-#[tokio::test]
-async fn terminated_reason_timeout_is_distinct_from_not_found() {
-    assert_ne!(TerminatedReason::Timeout, TerminatedReason::NotFound);
-}
-
-/// TerminatedReason::Timeout is Copy: a copy leaves the original value intact.
-#[tokio::test]
-async fn terminated_reason_timeout_is_copy() {
-    // Given: a Timeout variant value
-    let original = TerminatedReason::Timeout;
-
-    // When: an implicit copy is made (no explicit clone)
-    let copy = original;
-
-    // Then: both values are equal (original is still usable — Copy semantics)
-    assert_eq!(original, copy);
-}
-
-/// TerminatedReason::Timeout is Clone: clone produces an equal value.
-#[tokio::test]
-async fn terminated_reason_timeout_is_clone() {
-    // Given / When: clone the Timeout variant. `Clone::clone` is called
-    // through UFCS rather than method syntax so the `Clone` impl is the thing
-    // under test, not the `Copy` impl that method syntax would resolve to.
-    let cloned = Clone::clone(&TerminatedReason::Timeout);
-
-    // Then: the clone equals the original
-    assert_eq!(cloned, TerminatedReason::Timeout);
-}
+// Configuration-shape tests
 
 /// IdleTimeout::Inherit is the Default value.
 #[tokio::test]
@@ -74,16 +30,6 @@ async fn idle_timeout_default_is_inherit() {
     );
 }
 
-/// IdleTimeout::Persistent variant exists and can be matched.
-#[tokio::test]
-async fn idle_timeout_persistent_variant_exists() {
-    // Given / When
-    let persistent = IdleTimeout::Persistent;
-
-    // Then
-    assert!(matches!(persistent, IdleTimeout::Persistent));
-}
-
 /// IdleTimeout::After(d) holds the provided Duration.
 #[tokio::test]
 async fn idle_timeout_after_holds_duration() {
@@ -96,20 +42,6 @@ async fn idle_timeout_after_holds_duration() {
         IdleTimeout::After(d) => assert_eq!(d, dur),
         _ => panic!("expected IdleTimeout::After"),
     }
-}
-
-/// Props::with_idle_timeout consumes self and returns Self, enabling chained configuration.
-#[tokio::test]
-async fn props_with_idle_timeout_builder_is_chainable() {
-    // Given: freshly created Props
-    let (started, stopped, counter) = tracked_state();
-    let props = test_props(started, stopped, counter);
-
-    // When: with_idle_timeout is called as a self-consuming builder method
-    let result = props.with_idle_timeout(IdleTimeout::After(Duration::from_secs(10)));
-
-    // Then: the return type is Props (self-consuming; compiles and does not panic)
-    let _ = result;
 }
 
 // The shape of `with_default_idle_timeout` itself — a consuming builder method,
@@ -383,7 +315,7 @@ async fn dead_letter_stream_survives_system_default_idle_timeout() {
     );
 }
 
-/// The `$dead-letter` actor process is NOT affected by the system default idle timeout;
+/// The `$dead-letter` process is NOT affected by the system default idle timeout;
 /// it remains registered and alive after the system default timeout period elapses.
 #[tokio::test]
 async fn dead_letter_process_survives_system_default_idle_timeout() {
@@ -396,11 +328,11 @@ async fn dead_letter_process_survives_system_default_idle_timeout() {
     // When: the timeout period passes with no messages sent to $dead-letter
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Then: the $dead-letter actor process is still registered in the registry
+    // Then: the $dead-letter process is still registered in the registry
     let dead_letter_name = ProcessName::new("$dead-letter");
     let found = system.lookup_by_name(&dead_letter_name).await;
     assert!(
         found.is_some(),
-        "$dead-letter actor must remain alive regardless of system default idle timeout"
+        "$dead-letter process must remain alive regardless of system default idle timeout"
     );
 }

@@ -9,6 +9,425 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (workspace): criterion benchmarks for the single-node paths, and
+  `BENCHMARKS.md` beside them. `nitinol-persistence/benches` measures
+  `InMemoryEventStore::append` (one record, and a batch of a hundred) and
+  `load` by stream and from the global order over streams of 1, 100 and 1000;
+  `nitinol-eventsource/benches` measures bringing an aggregate back by replay
+  and from a snapshot at the same three lengths, and a projection catching up
+  with a stream written before it existed; `nitinol-saga/benches` measures one
+  trip from a placed order through a saga's decision to the reservation a
+  delivery host carries to an inventory, with both poll intervals named;
+  `providers/nitinol-sqlx/benches` measures `PostgresEventStore::append` and an
+  offset save inside the caller's transaction.
+
+  Run with `cargo bench -p <crate>`. The provider's benchmarks need a
+  `DATABASE_URL`: with none they say so on stderr and exit successfully,
+  having registered no benchmark — a database started per run measures that
+  database's cold caches rather than this backend.
+
+  No library gained a dependency: criterion is a dev-dependency, defined once
+  in the workspace's `[workspace.dependencies]` with `plotters` and `rayon`
+  left out, so there are no HTML reports and the licence closure stays inside
+  the set `deny.toml` allows. `BENCHMARKS.md` carries what each benchmark
+  times, how to save and compare a baseline, the first measurements taken and
+  the machine they were taken on, and how to reach a flame graph or
+  tokio-console from here.
+
+- (`nitinol-sqlx`): `PostgresSnapshotStore`, a `SnapshotStore` over a Postgres
+  table, and the migration `0004_create_snapshot.sql` that creates it. The
+  table is part of the crate's schema, so `PostgresEventStore::migrate` applies
+  it with everything else and there is no second migration step to forget.
+
+  One aggregate is one row, keyed by the aggregate alone: a save replaces the
+  snapshot before it rather than accumulating beside it, so `load_latest`
+  answers with the save that came last. That holds for a save at a position the
+  stored snapshot has already reached, or behind it — the `SnapshotStore`
+  contract leaves that clause to a backend, and this one answers it the way
+  `InMemorySnapshotStore` does, so moving a deployment between the two does not
+  change how its snapshots behave. `created_at` is stored as the caller handed
+  it over, the way an event's `occurred_at` is.
+
+- (`nitinol-sqlx`): `PostgresStore` implements `SnapshotSlot`, so it is now this
+  backend as **every** slot — the journal, the snapshot store and both offset
+  slots — over one database.
+
+  An aggregate whose `Recover` is `Latest` requires the system it is spawned on
+  to hold a snapshot slot, so such an aggregate now compiles on an
+  `EventSourceSystem<PostgresStore>` with no second backend beside it. A
+  deployment on Postgres that previously had to name each handle in a
+  `CustomStore` to have snapshots at all can name one store; mixing backends
+  stays possible and is now a choice rather than the only way.
+
+- (`nitinol-saga`): `SagaDeliveryProxy<S>: Clone` and `SagaHostProxy<S>: Clone`,
+  so both halves of the handle a hosted declaration answers with are shared by
+  cloning rather than by being wrapped.
+
+  A clone names the host it was taken from: the same manager process, so
+  `manager().stop()` through any clone stops the one manager, and the same
+  running partitions, so a position moved with `delivery().advance_offset`
+  through one clone is the position every other clone reads. Nothing is
+  re-spawned, and dropping a clone still stops nothing.
+
+- (`nitinol-saga`): `SagaHostProxy<S>` is the handle one hosted saga
+  declaration answers with, and reaches both halves it started:
+  `manager() -> &SagaManagerProxy<S>` and `delivery() -> &SagaDeliveryProxy<S>`,
+  which is where the operator entries `delivery_id` and `advance_offset` are.
+
+  Stopping is asked for half by half, because the halves outlive each other for
+  a reason: `manager().stop()` takes the deciding side down — its upstream
+  pollers and its resident instances with it — and leaves the delivery host
+  running, since a decision that was journalled is owed to its target whether or
+  not the instance that made it is still resident. A delivery host has no stop
+  at all, which is the contract `SagaDeliveryProxy` already carried. Dropping
+  the handle stops nothing.
+
+- (`nitinol-saga`): the delivery host's settings are named on the builder
+  `SagaSystemExt::host` hands back —
+  `SagaManagerProps::with_delivery_id(SagaDeliveryId)`,
+  `with_partitions(NonZeroUsize)` and
+  `with_delivery_poll_interval(Duration)` — with the same defaults
+  `SagaDeliveryProps` has, which is still where each one's contract is written
+  down.
+
+  `with_delivery_poll_interval` is the delivery side's cadence, on the saga's
+  own decisions. How often an observed *source* is asked is that source's own
+  `Subscription::with_poll_interval`, named per source on `observing`.
+
+- (`nitinol-saga`): `SagaSystemExt::Store` is the hosting system's own store
+  type, and `SagaHosted<S, St>` is the typestate the system-first builder starts
+  in — it carries that system, which is why both are public and re-exported.
+  Carrying the store type rather than erasing it is what keeps the saga-offset
+  slot a requirement of the returned props' `spawn`, exactly as it is of the
+  props-first form's.
+
+- (`nitinol-persistence`): the journal and the snapshot store a supplier hands
+  out are named types — `store::Journal` and `store::Album` — so a wiring point
+  holds the store a deployment registered rather than a handle the framework
+  made for it.
+
+  What is inside each is the registered backend's own clone with its type
+  erased: a `Box<dyn EventStore>` and a `Box<dyn SnapshotStore>` behind a
+  newtype that is `Clone`, `Debug` and `Send + Sync + 'static`. Erasing a
+  backend is `Journal::from(backend)` and cloning a journal is
+  `Journal::from(&journal)`; there is no third constructor. `append` and `load`
+  on a journal, and `save` and `load_latest` on an album, are inherent methods
+  handing the call to the registered store and its answer back, so a handle
+  reads the way the store it came from does.
+
+  Neither implements the trait it erases, and that is what makes two things
+  true at once. `impl<E: EventStore + 'static> From<E> for Journal` stands
+  beside `core`'s reflexive conversion rather than overlapping it, so one entry
+  point accepts a backend handle *and* a journal; and erasing an erased handle
+  is a type error instead of a `Box<Box<_>>`.
+
+  `impl Store for Journal` is the store that holds the journal alone, which is
+  what `nitinol_eventsource::system::SystemHandle` names. It implements no slot
+  beyond the journal, so wiring that needs a snapshot store or an offset store
+  is still refused while it is compiled (`PRV-3`) rather than at the first save.
+
+- (`nitinol-persistence`): `store::EventStoreClone` and
+  `store::SnapshotStoreClone` carry a store's own `Clone` through the erasure.
+
+  Each has one method, `clone_box`, implemented once by a blanket
+  `impl<T: EventStore + Clone + 'static>` and its snapshot counterpart, and used
+  by `impl Clone for Box<dyn EventStore>` and `impl Clone for Box<dyn
+  SnapshotStore>`. They are supertraits of `EventStore` and `SnapshotStore`, so
+  a backend author derives `Clone` and writes nothing else; they are public only
+  because a public trait's supertrait has to be. No `dyn-clone`-style dependency
+  is taken on for it — what such a crate generates is this.
+
+- (`nitinol-persistence`): one supplier hands out the stores a deployment runs
+  on, so an operator names each logical destination once instead of handing the
+  same store to every wiring point by hand.
+
+  Three responsibilities, kept apart. `provider::Store` is the storage itself,
+  as one cloneable handle: it owes the journal, and `provider::SnapshotSlot`,
+  `provider::ProjectionCheckpointSlot` and
+  `provider::DeliveryCheckpointSlot` are the slots beyond it. A store with no
+  resource for a slot does not implement that slot's trait, so the wiring
+  needing it does not compile — a store nobody configured cannot be relied on,
+  and cannot be filled quietly from somewhere else either.
+  `provider::CustomStore` is the assembly a mixture is written down in:
+  `CustomStore::builder()`, then `eventstore` for the journal and one of
+  `snapshot` / `projection_checkpoints` / `delivery_checkpoints` /
+  `checkpoints` per further slot, each existing only while that slot is
+  `Unprovided`, and `build` existing only once a journal has been named.
+  `checkpoints` names one handle for both checkpoint slots, which is the
+  single-table deployment. `store::InMemoryStore` is every slot over the
+  in-memory reference stores, and `provider::PersistenceProvider::new(store)`
+  is what distributes whichever of them the store holds to the framework's
+  wiring.
+
+  The handles themselves are now `Clone`, and cloning one names the same data
+  region: `store::InMemoryEventStore`, `store::InMemorySnapshotStore` and
+  `store::InMemoryCheckpointStore` share their state, while `Default` still
+  constructs a destination of its own. A store that is not a cloneable value of
+  its own is named through an `Arc`, which the three store traits now implement
+  for `Arc<T>` — the `Tx` of a checkpoint store included, so a projector's
+  transaction stays visible through it.
+
+  The clauses a store reproduces are labelled the way the other store contracts
+  are and stable in the same sense. `PRV-1`: distribution and duplication are
+  idempotent — for every slot held, handles taken twice from one store, from a
+  clone of the store handle, and from a supplier over either, reach one set of
+  records. `PRV-2`: identity is of the data region rather than of the
+  connection, so sharing a pool is neither necessary nor sufficient and the
+  pool half is the implementor's obligation rather than a suite's to judge.
+  `PRV-3`: a mixture of backends is assembled explicitly or not at all.
+  `PRV-4`: a projection's position and a delivery host's progress are two
+  slots, independently configured, initialised and recovered — naming both with
+  one handle is allowed, and what keeps them apart there is the key each
+  consumer renders. `PRV-5`: **a supplier is not a transaction** — one store is
+  not one atomic unit, and there is no transaction spanning the journal, the
+  snapshots and the checkpoints, nor spanning the two checkpoint slots. The
+  atomic units stay the ones stated elsewhere (`OCC-3`, and `CKP-6` driven by a
+  projector's transaction provider), and `PRV-5` is stated because the name
+  invites the opposite reading. It is the one clause no test fixes, and says so
+  with the reason.
+
+> **Note on the entries below.** Several of them refine the saga's outbox push
+> delivery and its persistent dead letter queue — `SagaEffect::tell_intent`,
+> the `EnqueuePolicy` filter, the crash-restart factory, the DLQ pull API and
+> the records behind them. Both mechanisms are **withdrawn** in this same
+> release; see the two "withdrawn" entries under *Removed*, which supersede
+> every earlier mention of them here. Nothing they describe reaches 0.5.0.
+
+- (`nitinol-store-conformance`): `provider::verify` puts a whole store through
+  its clauses, beside the per-store suites. A backend implements
+  `provider::ProviderUnderTest` — a `bring_up` handing back a `Store` holding
+  nothing, as the other suites take a single store — and the per-slot entry
+  points (`verify_event_store`, `verify_snapshot_store`,
+  `verify_projection_checkpoints`, `verify_delivery_checkpoints`) each observe
+  `PRV-1` for that slot across a repeated take *and* across a clone of the
+  store handle, then delegate to the store contract behind it — so a backend
+  holding one slot runs that slot's entry point and owes the others nothing.
+  The clone path is read rather than left to the `Clone` bound, because a
+  `Clone` that constructs fresh state satisfies the bound and still splits the
+  deployment in two. `verify_checkpoint_independence` is `PRV-4`, read as "each
+  slot keeps the answer filed under its own key" — which is what a single-table
+  deployment satisfies. The crate still depends on no async runtime.
+
+- (`nitinol-sqlx`): `PostgresStore::new(pool)` assembles this backend as one
+  `Store` — the journal and both checkpoint slots over one database, the two
+  checkpoint slots answering with one store over one table. `PostgresEventStore`
+  and `PostgresCheckpointStore` are `Clone`, copying the pool handle, so a clone
+  reaches the same rows. The snapshot slot is left unimplemented, because this
+  crate has no Postgres `SnapshotStore`: wiring that needs snapshots is refused
+  while it is compiled, rather than filled from a different backend behind the
+  operator's back. The supplier conformance entry points are run against it
+  where a database can be reached.
+
+- (`nitinol-saga`): a delivery host carries what a saga decided to the
+  aggregates it addressed, as a partitioned pull consumer of the saga's own
+  stream.
+
+  `Saga::dispatch` is the declaration: a pure associated function from one of
+  the saga's own events to the commands it implies, each with the stream key it
+  is addressed to. It is the counterpart of `Saga::apply` — that one says what
+  a decision means to the saga, this one what it means for everybody else — and
+  it is defaulted, so a saga written before it existed keeps compiling and
+  delivers nothing. `SagaDeliveryProps` starts the host that consumes it;
+  polling, the cursor, the recorded progress, holding and backing off are the
+  framework's, and the receiving aggregate needs nothing of the host's on it.
+
+  The subscription is the declared event type as a store-side prefix together
+  with the position finished with, so a host of a saga type crosses every
+  instance of it — one stream per instance — and no row of another type is
+  fetched to be discarded. Delivery is by `ask`, because the receiver's answer
+  is the only thing that says a command was carried out: a refusal is observed
+  and held, and a collision with an aggregate that already exists is **not**
+  read as success, since what such a collision carries says nothing about which
+  operation took the position.
+
+  A record counts as finished only once every delivery it implied has landed,
+  and nothing is ever passed over for failing — a transient failure is retried
+  with a growing pause, a permanent refusal is held and reported with the
+  partition, position, target and classification an operator needs.
+  `SagaDeliveryProps::with_partitions` spreads the subscription over
+  independent processes keyed by `hash(stream key) % N`, so an instance's
+  decisions stay in order in one partition and a hold stops that partition
+  alone; each has its own recorded progress.
+  `SagaDeliveryProxy::advance_checkpoint` is the way past a hold, and it is
+  deliberately a person's to take: it declares that the deliveries passed over
+  will not be made. `with_poll_interval` and `with_delivery_id` are the other
+  deployment choices; the identifier otherwise derives from the declared event
+  type. Delivery is at-least-once with no mode to choose, and the host runs
+  beside the existing tell path rather than replacing it.
+
+- (`nitinol-persistence`): `SnapshotStore` and `CheckpointStore` now state
+  behavioural clauses of their own, labelled the way `EventStore`'s OCC clauses
+  are and stable in the same sense. `SNAP-1` … `SNAP-4`: an aggregate nothing
+  was saved for is a condition rather than a failure, one save reads back whole
+  — the position and the state it was taken at, together, never a pair no save
+  wrote — the save that came last is what a load answers with, and one
+  aggregate's snapshot is never another's. `CKP-1` … `CKP-6`: never started is
+  not the same as at zero, a saved position is what a load answers with, a move
+  forward is taken however far it reaches, a save that is not a move forward is
+  the backend's to answer, the rendered key is the whole of what a store is
+  told — reserved-namespace keys included — and a save handed a transaction
+  belongs to it.
+
+  Each clause names what fixes it, and the two that no suite can fix say so
+  with the reason: `CKP-4` because the contract leaves two answers open and
+  `CheckpointError` has no variant that would tell them apart, `CKP-6` because
+  a kit can make no backend's transaction. Both are fixed by the tests of a
+  backend that has one.
+
+  What the clauses fix is each store alone. Settling a projection's result and
+  the checkpoint covering it in one transaction is a contract of a store *and*
+  the projector driving it, and the trait documentation says so and names where
+  that is fixed instead.
+
+- (`nitinol-store-conformance`): the snapshot and checkpoint clauses as suites,
+  beside the OCC one. `snapshot::verify` has one entry point and no concurrency
+  half, because the framework's only consumer of a snapshot store serialises
+  every call through one process; `checkpoint::verify_deterministic`,
+  `checkpoint::verify_under_concurrency` and `checkpoint::verify` keep the same
+  division the OCC suite does, the concurrent half putting several writers
+  under keys of their own at once — which is how a partitioned delivery host
+  reaches a store, and the one path that puts a provider's connection pool
+  under more than one writer. A provider implements
+  `snapshot::SnapshotStoreUnderTest` or `checkpoint::CheckpointStoreUnderTest`
+  and keeps the existing conventions: a `bring_up` that hands back a store
+  holding nothing, and the caller's own runtime borrowed through `Executor`.
+  The crate still depends on no async runtime. The in-memory reference stores
+  and the Postgres `CheckpointStore` are run through them.
+
+- (`nitinol-persistence`): `EventStore::load` now states `LOAD-1` — a query's
+  conditions are a conjunction, so an event-type prefix and a global position
+  named together serve what satisfies both, in ascending global order, and the
+  position includes the row it names. `nitinol-store-conformance` runs it
+  against any backend, from both directions: a prefix every stored row is
+  within still excludes the rows below the position, and a prefix no stored row
+  is within serves nothing whatever the position.
+
+- (`nitinol-sqlx`): an index on the journal's event type together with its
+  global position (`0003_index_journal_event_type.sql`), which is what a
+  consumer of one event type asks against. The prefix condition is now asked as
+  a half-open range over the column rather than as a function of it, because a
+  function of a column cannot reach an index; the range selects exactly the same
+  rows, and `COLLATE "C"` — named both in the statement and on the index — is
+  what makes that so, since the adjacency of the separator and the byte above
+  it is a fact about bytes rather than about a locale.
+
+- (`nitinol-saga`): a saga records the upstream positions it has consumed on its
+  own journal, so de-duplicating its input stops being the user's job.
+
+  `nitinol.saga.consumed_position` is a reserved record naming one upstream
+  stream and the highest sequence of it the saga has consumed. One `handle`
+  call can reach the store as more than one atomic append — a `CancelSchedule`
+  or `End` is a boundary the interpreter never merges across — so the position
+  rides only the append that closes the input's interpretation out, and is
+  never durable before every append that input required is. The position goes
+  last in the batch it does ride, which is what leaves every `tell_id` equal to
+  the stream sequence of its own `TellRequested` marker.
+
+  Replay rebuilds those positions from the journal alone — highest per source
+  wins, and a row that cannot be read is skipped rather than read as a position
+  of its own. A redelivered record at or below the position recorded for its own
+  source is then dropped before `Saga::handle`, so a saga whose `handle` is not
+  idempotent is covered too. A stream subscription additionally resumes past the
+  folded position, which takes restart cost off the length of the upstream
+  history; the configured `after` still holds as a floor, and a `Global` cursor
+  is left exactly as configured, since a per-source sequence cannot be
+  translated into a store-wide ordering.
+
+  Where the guarantee stops is deliberate and stated on `Saga::handle`: an
+  input is consumed only once *every* append it required has landed, so a
+  decision can be durable while its input is not — the reverse never happens.
+  A batch that never landed writes no position (its input is handled again,
+  at-least-once), and when the append that never landed comes before the one
+  that would have closed the input out, that later append is withheld too,
+  closing marker included: `End` never durably terminates a saga around a
+  decision that input owes but no store holds. A record is also consumed
+  without ever producing a `handle` decision at all: one whose upstream bytes
+  fail to decode, one that arrives while an earlier correlated record is
+  already draining to a dead letter, and one for which `handle` returns an
+  error, are each settled by a dead-letter append that carries the same
+  position instead, so none of them is redelivered to `handle` either. The
+  dead letter that reports a failed persist batch is the exception: it
+  deliberately carries no position, because the batch that would have
+  carried one is exactly what never landed. An effect that writes nothing
+  else still commits a consumed-position-only append when its input has one
+  pending, so a no-op decision is not redelivered either; only the entry
+  points with no input to consume — a timer firing, and the tell-failure
+  hook — commit no position, because they have none to commit. A manager's
+  shared cursor is unchanged — it is shared by every instance it fronts, so no
+  one instance's position can speak for it — and each instance still drops what
+  it has consumed.
+
+  One consequence is worth stating for callers who leaned on redelivery: work an
+  interrupted incarnation left unfinished is no longer re-driven by the upstream
+  record arriving again, because that record is consumed. It is re-driven by the
+  outbox markers the same append made durable — a tell still pending at a restart
+  is re-dispatched from its own marker, which is what the fan-out and
+  idempotent-receive examples now demonstrate.
+
+- (`nitinol-runtime`): `ProcessSystem::spawn_resident::<P>()`, which resolves a
+  process by its type rather than starting one — the mechanism a crate needs to
+  keep a singleton of its own running inside a system.
+
+  A type opts in by implementing `Resident`, whose one method states the `Props`
+  it is started from. The first ask starts that lifecycle; every later ask
+  through the system, or through any clone of it, hands back a proxy to the same
+  process, and callers racing on the first ask converge on one lifecycle rather
+  than one each. This is the complement of `spawn`, which stays what it was: a
+  lifecycle call that starts a process every time and never resolves a running
+  one.
+
+  A resident is persistent, and `spawn_resident` is what makes it so — neither
+  the system default idle timeout nor an `IdleTimeout` the declaration set for
+  itself will reap it. That the guarantee lives in the call and not in the
+  declaration is what lets a resident's author leave idling alone instead of
+  having to remember it.
+
+  The runtime supplies the mechanism and no residents: it names no resident type
+  of its own, so the crate that declares one keeps its own dependency direction.
+  The dead-letter stream and process the runtime already keeps alive are
+  unchanged and are not routed through this API.
+
+- (`nitinol-macros`, `nitinol-persistence`): a declaration now claims its
+  canonical path with an exported symbol, so two declarations claiming one path
+  fail the build instead of reaching a deployment.
+
+  `#[derive(Event)]` writes one symbol per declaring type, named
+  `_nitinol_event_` followed by the path itself. Within a crate the second
+  declaration is `error: symbol ... is already defined`, reported at the derive
+  that wrote it; across crates it is the linker's duplicate-symbol error. The
+  encoding is injective — `shop.registry.sub.Leaf` and `shop.registry_sub.Leaf`
+  are two symbols, not one — and stays inside the character set a linker
+  accepts: a byte that is not ASCII alphanumeric, `_` or `.` is written as `..`
+  and two hex digits, which no path produces on its own. The symbol carries the
+  path and nothing else, so what a linker error and a debugger have to show
+  stays short.
+
+  The registry's own refusal is unchanged and is not redundant: link-time
+  detection has holes (static libraries linked together need not report a
+  duplicate), and an entry placed by hand rather than derived carries no symbol
+  at all. The derive's rustdoc carries both messages and the two layers.
+
+- (`nitinol-saga`): a structured `tracing` record at every point the saga
+  writes a framework record of its own, carrying `event_type` (the canonical
+  path the row was written under), `arm` (which arm of that declaration the
+  record holds, from the family's own fixed set) and `stream_id`, plus the
+  context of the write — a tell id, a timer, the sequence a dead letter
+  occupies.
+
+  The `event_type` column now names the declaration and nothing finer, so the
+  arm a framework record holds is no longer legible from a stored row. Shipping
+  the records in the same release as that change is what keeps arm-level
+  visibility from having a gap: an operator reads `tell_requested` against
+  `tell_failed`, or `scheduled` against `fired`, in the place they already
+  watch. Each record is emitted after its append succeeds — one claiming a
+  write that never happened would be worse than none.
+
+  A user's own events are not reported. The framework reports what it wrote
+  itself, so a deployment's records do not grow with every domain event a saga
+  persists; arm-level measurement of a user's events is the user's to add.
+  Nothing is added to the dependency tree: `tracing` was already a dependency
+  of the crate.
+
 - (`nitinol-conformance`): a conformance suite that makes the laws of the
   contract (L-1 to L-9) executable for *any* interpreter.
   `nitinol_conformance::verify(&my_interpretation).await` drives one clause per
@@ -24,8 +443,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so no clause depends on an interpreter agreeing with its own account of what
   it did. Wiring an interpreter up means implementing `Interpretation` and
   `Interpreter`: classify each raw outcome into `Interpreted` / `Unanswered`
-  once at your own boundary, delegate your codec to `LedgerEvent::encode` /
-  `LedgerEvent::decode`, and give `quiesce` a real synchronisation point.
+  once at your own boundary, and give `quiesce` a real synchronisation point.
+  The format needs no wiring at all — `LedgerEvent` names `LedgerCodec` as the
+  codec that writes it, so an interpreter reaches the suite's bytes through the
+  event type itself.
 
   The crate reaches no interpreter and no async runtime — neither
   `nitinol-eventsource`, `nitinol-runtime` nor `tokio` is in its dependency
@@ -108,8 +529,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aggregate_props::<A>(id)` on the aggregate side, and — through the new
   `SagaDefaultStoreExt` — `spawn_saga(saga_id, producer)` for a saga's own
   journal, `system.subscription(&key)` for the upstream it polls, and
-  `system.saga_manager_props(subscription, producer)` for both at once on a
-  manager. `EventStore` is stream-keyed (`append(key, ..)`,
+  `system.saga_manager_props(producer)` for a manager's journal, with each
+  observed source bound on the returned builder via
+  `.subscribed_to::<E>(system.subscription(&key))`. `EventStore` is
+  stream-keyed (`append(key, ..)`,
   `LoadQuery::by_stream`), so one instance holds every aggregate's stream and
   every saga's journal side by side under their own keys, which is what makes a
   single default sufficient rather than a registry of named stores.
@@ -121,23 +544,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SagaManagerProps::new(store, producer)`.
 
   Whether a default exists is a typestate on the system
-  (`EventSourceSystem<C, StoreUnset>` / `EventSourceSystem<C, StoreSet>`), in
-  the same style as the codec marker: the store-less forms exist only on a
-  system that was given one, so relying on a store that was never configured is
-  a compile error rather than a failure at the first spawn. The parameter
+  (`EventSourceSystem<StoreUnset>` / `EventSourceSystem<StoreSet>`): the
+  store-less forms exist only on a system that was given one, so relying on a
+  store that was never configured is a compile error rather than a failure at
+  the first spawn. The parameter
   defaults to `StoreUnset`, and a system built without `with_event_store` keeps
   exactly the previous surface — `spawn_aggregate(id, store)`,
   `aggregate_props(id, store)` and `SagaSystemExt::spawn_saga(saga_id, store,
   producer)` — so existing wiring compiles unchanged.
 
+  Superseded before release: the store a system holds now comes from a
+  persistence supplier, so `with_persistence` replaces `with_event_store` and
+  the per-spawn overrides are gone. See the Changed and Removed entries for the
+  supplier.
+
 - (`nitinol-saga`): `SagaSystemExt` / `Subscription` — spawning a saga from an
   `EventSourceSystem`, symmetrically to `EventSourceSystem::spawn_aggregate`.
-  An aggregate spawn already resolved its codec from the system, while a saga
-  spawn went straight to `ProcessSystem` and had the caller hand over
-  `system.codec::<E>()` twice plus a hand-built `SequenceCursor`.
-  `system.spawn_saga(saga_id, store, producer).subscribed_to(subscription)`
-  takes those from the system instead: the codec for the saga's own events, the
-  codec for the events it subscribes to, and the `ProcessSystem` to spawn into.
+  An aggregate spawn already went through the system, while a saga spawn went
+  straight to `ProcessSystem` and had the caller hand over a hand-built
+  `SequenceCursor`.
+  `system.spawn_saga(saga_id, producer).subscribed_to(subscription)` takes the
+  `ProcessSystem` from the system instead, and the saga's journal comes from
+  the system's persistence provider.
   `Subscription::stream(&store, &key)` folds the upstream store and its start
   position into one value and defaults to the beginning of the stream, so a
   saga catches up on what was written before it was spawned;
@@ -149,16 +577,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subscription requirement stays enforced at compile time: `spawn()` exists only
   after `subscribed_to()`.
 
-  `SagaProps` is unchanged and remains the entry point for a saga that needs
-  `with_scheduler`, `with_enqueue_policy`, `with_dead_letter_subscriber`,
-  `with_crash_restart_factory` or `with_decode_failure_route`.
+  `SagaProps` remains the entry point for a saga that needs
+  `with_enqueue_policy`, `with_dead_letter_subscriber` or
+  `with_crash_restart_factory`. A saga's own timer wiring is resolved from its
+  alphabet's `#[subscribe(deadline)]` declaration rather than a builder call,
+  and a record whose upstream bytes fail to decode is reported through
+  `tracing` and skipped rather than routed to a configurable handler.
 
 - (`nitinol-saga`): `SagaManagerProps` / `SagaManagerProxy` — a saga instance
   manager. Previously one `SagaProps` spawn meant one saga bound to one fixed
   `SagaId`, so running a process-manager instance per correlation id required
   pre-spawning every id, and each instance ran its own `DirectPollerProcess`
   over the shared upstream stream — `M` upstream records across `N` instances
-  cost `M × N` decodes. The manager holds a *single* upstream subscription and
+  cost `M × N` decodes. The manager holds one upstream subscription per
+  declared source, shared by every instance of the saga type, and
   interprets `Saga::correlate` at runtime: an id with no resident instance is
   spawned as a child and replays its own stream before the event that caused
   the spawn is delivered; an id already resident is handed the event directly.
@@ -166,37 +598,733 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has been idle for `after`, and a later event for the same id spawns it again
   with its state restored by replay. Every instance-level setting `SagaProps`
   accepts has a counterpart on the manager, which hands it to each instance it
-  spawns: `with_scheduler`, `with_enqueue_policy`,
-  `with_dead_letter_subscriber`, `with_crash_restart_factory` and
-  `with_decode_failure_route`. Without them a manager whose `Saga::correlate` is
-  constant (the degenerate single-instance case below) would not reproduce what
-  `SagaProps` gives a resident saga: no timer would fire for
-  `SagaEffect::schedule`, the dead letters its instances write would have no
-  subscriber, the configured DLQ filter would be ignored, a tell left in flight
-  across a passivation could not be reconstructed, and a corrupt upstream record
-  no `Saga::correlate` can claim would have no owner to be attributed to.
+  spawns: `with_enqueue_policy`, `with_dead_letter_subscriber` and
+  `with_crash_restart_factory`. A saga's own timer wiring needs no counterpart
+  here: the host resolves the resident timer core from the saga's alphabet, so
+  a manager's instances get their deadlines on exactly the same terms a
+  standalone saga does. Without the counterparts above a manager whose
+  `Saga::correlate` is constant (the degenerate single-instance case below)
+  would not reproduce what `SagaProps` gives a resident saga: the dead letters
+  its instances write would have no subscriber, the configured DLQ filter
+  would be ignored, and a tell left in flight across a passivation could not
+  be reconstructed. A record no `Saga::correlate` claims has its source's
+  shared cursor advanced past it rather than attributed to any instance.
 
   The manager process itself is spawned as persistent: idleness is a
   per-instance signal that `with_instance_passivation` acts on, whereas a
-  system-wide default idle timeout reaching the manager — the sole owner of the
-  subscription and the registry, with nothing left to revive it — would silently
-  stop the whole fan-out during a quiet upstream.
+  system-wide default idle timeout reaching the manager — the sole owner of
+  every source's subscription and the registry, with nothing left to revive
+  it — would silently stop the whole fan-out during a quiet upstream.
 
-  Collapsing `N` subscriptions into one moves the cursor decision to the
-  manager: it withholds the shared cursor when the addressed instance could not
-  settle a record (so the record is redelivered), and advances past a record
-  that correlates to no instance, so one unclaimed record cannot starve every
-  instance behind it. A record addressed to an instance whose stream already
-  carries the durable `Ended` marker is recorded as
+  Collapsing each source's per-instance subscriptions into one moves that
+  source's cursor decision to the manager: it withholds that source's cursor
+  when the addressed instance could not settle a record (so the record is
+  redelivered), and advances past a record that correlates to no instance, so
+  one unclaimed record cannot starve every instance behind it. Each declared
+  source keeps its own cursor, independent of every other source's, exactly as
+  under a standalone saga. A record addressed to an instance whose stream
+  already carries the durable `Ended` marker is recorded as
   `SagaFailure::EndedSagaReceivedMessage` on that instance's own stream and the
   cursor moves on.
 
-  `SagaProps` is unchanged and remains the way to spawn a saga that owns its
-  subscription. A `Saga::correlate` that always answers the same `SagaId`
-  reduces the manager to exactly one instance, which is the migration path from
-  the resident single-saga wiring.
+  `SagaProps` remains the way to spawn a saga that owns its own subscriptions
+  — one per declared source. A `Saga::correlate` that always answers the same
+  `SagaId` reduces the manager to exactly one instance, which is the migration
+  path from the resident single-saga wiring.
+
+- (`nitinol-persistence`): `EventStore::append` states a fifth OCC clause,
+  `OCC-5`: once a reader has observed `global_sequence = N`, no event carrying
+  a `global_sequence` at or below `N` becomes newly visible afterwards. This is
+  a new obligation on every backend, not a restatement of an existing one — a
+  backend that assigns `global_sequence` outside the transaction that commits
+  the event (a plain auto-increment column taken before commit is the usual
+  way) can let a checkpoint-following reader pass an event that a slower,
+  earlier-numbered writer has not committed yet, so the reader never sees it.
+  Nothing about `OCC-1` through `OCC-4` catches this, because none of them puts
+  a reader and a writer at the same table. `OCC-3`'s note that the
+  concurrent-reader visibility clause is not fixed by a test is updated to
+  point at the new suite that now fixes it. Per #74, the OCC clauses are part
+  of `EventStore`'s documented rustdoc contract, so this addition follows
+  semver: an out-of-tree backend that has not been run through the new
+  conformance suite is not known to satisfy `OCC-5`, even though it compiles
+  and satisfies `OCC-1` through `OCC-4` unchanged.
+
+- (`nitinol-store-conformance`): a conformance suite that verifies any
+  `EventStore` implementation against the full `OCC-1`–`OCC-5` contract — the
+  store contract's counterpart to what `nitinol-conformance` is for the
+  interpreter contract, and to what Akka/Pekko's persistence TCK is for a
+  plugin author. `nitinol_store_conformance::verify(&store_under_test,
+  &executor).await` runs `verify_deterministic`, which constructs each
+  `OCC-1`–`OCC-4` situation itself and needs no executor, followed by
+  `verify_under_concurrency`, which spawns concurrent writers through the
+  caller-supplied `Executor` against a checkpoint-following reader and
+  requires it to observe every committed event exactly once — the one clause
+  that needs a reader and writers at the same time. A provider implements
+  `StoreUnderTest::bring_up` to hand back an empty store and an `Executor` so
+  the writers reach the backend independently of one another; a run whose
+  writers queue behind one connection proves nothing about concurrency even if
+  it passes.
+
+  The crate depends on no async runtime — neither `tokio` nor
+  `nitinol-eventsource` is in its dependency tree — so whichever runtime
+  `verify` is awaited on is the caller's choice.
+
+- (`nitinol-eventsource`): an activation whose append is refused because another
+  writer has taken its sequence now emits one `tracing` event before it stops,
+  under the target `nitinol_eventsource::occ` and the name
+  `non_genesis_sequence_conflict`, carrying `aggregate_id` and the `sequence`
+  the append was refused at. Losing that race is already handled — the
+  activation stops and the reference above it resolves a fresh one — so the
+  repair was invisible from the outside and its rate could not be measured,
+  which is the measurement that decides whether restricting an aggregate to a
+  single activation is worth its cost and whether an aggregate boundary is
+  drawing too many writers. Those two values are fixed as part of the crate's
+  API, because an operator's filter is written against them.
+
+  Nothing else that ends an append emits it: a refusal on the genesis sequence
+  is a creation command arriving twice and is still answered as
+  `AskError::AlreadyCreated`, a store that failed to answer says nothing about
+  who owns the stream, and a command the decider refused never reached the
+  store. No conflict semantics, error type or retryability classification
+  changed, and no dependency was added.
+
+  What the event counts is the refusal, not its cause — a second activation of
+  the same aggregate and an unrelated writer against the same store are
+  indistinguishable here.
 
 ### Changed
+
+- **BREAKING** (`nitinol-contract`, `nitinol-eventsource`, `nitinol-saga`,
+  `nitinol`): every spawn is on an `EventSourceSystem`, and takes every store it
+  needs from it. No public API names a store, a supplier or a persistor by hand.
+
+  There are two ways to start anything and no more: **props-first**,
+  `XProps::new(..)…spawn(&system)`, and **system-first**,
+  `system.x_props(..)…spawn()`. Both meet on one private path per props, so they
+  reach the same registry, the same journal and the same activation — which form
+  a deployment writes is a matter of where the wiring reads better and nothing
+  else. `system.spawn_aggregate` and `system.aggregate_proxy` are shorthands for
+  the system-first form rather than a third way.
+
+  What a props carried before was a destination a caller had taken out of a
+  supplier and handed back in. That made half of the framework's wiring
+  resolve the one store its system distributes and the other half name a store
+  of its own, and it let a deployment half-move a stream: two activations
+  writing to two worlds, with nothing in the types saying so. Reaching a second
+  destination is now a second supplier and a second system over it, which is
+  what reaching two destinations has to be.
+
+  | was | is |
+  |---|---|
+  | `AggregateProps::<A>::new(id, store)` | `AggregateProps::<A>::new(id)` |
+  | `AggregateProps…spawn(&process_system)` | `AggregateProps…spawn(&system)` |
+  | `ProjectorProps::new(id, &persistence, producer)` | `ProjectorProps::new(id, producer)` |
+  | `ProjectorProps…spawn(&process_system)` | `ProjectorProps…spawn(&system)` |
+  | `ProjectorProps<P, Cs, Tx, E, O, H>` | `ProjectorProps<P, Tx, E, O, H>` — the offset store is the system's |
+  | `with_tx_provider` required `Cs: OffsetStore<Tx = TP::Tx>` | the match is `St::ProjectionOffsets: OffsetStore<Tx = Tx>` at the `spawn`, where both are known |
+  | `DurableStream::new(topic, store, transform)` | `DurableStream::new(topic, transform)` |
+  | `DurableStream…spawn(&process_system)` | `DurableStream…spawn(&system)`, or `system.durable_stream(topic, transform)…spawn()` |
+  | `DurableSubscription::new(store, transform)` | `DurableSubscription::new(transform)`; the journal is an argument of `spawn_child` / `spawn_child_for` / `spawn_from` |
+  | `SagaManagerProps::<S>::new(store, producer)` | `SagaManagerProps::<S>::new(producer)` |
+  | `SagaManagerProps…spawn(&process_system) -> SagaManagerProxy<S>` | `SagaManagerProps…spawn(&system) -> SagaHostProxy<S>`, requiring `St: SagaOffsetSlot` — it starts the manager *and* the delivery host, as the system-first form already did |
+  | `Subscription::stream(store, &key)` | `Subscription::stream(&key)` |
+  | `Subscription::global(store)` | `Subscription::global()` |
+  | `Hosted` | `Hosted<St>`, carrying the typed `EventSourceSystem<St>`; `Hosted::new` takes it |
+  | `SagaHosted<S, Cs>` | `SagaHosted<S, St>` |
+  | `SagaSystemExt::SagaOffsets` | `SagaSystemExt::Store: SagaOffsetSlot` |
+  | `SagaComponents::system() -> Option<&SystemHandle>` | `-> &SystemHandle` |
+  | `SnapshotPersistor::spawn(&ps, &persistence)` | `system.snapshot_persistor().await` — one process per system |
+
+  Carrying the typed store into `Hosted<St>` rather than erasing it is what
+  keeps the two forms observationally identical: a slot the deployment's store
+  does not hold is the same trait-bound error at a system-first `spawn()` as at
+  a props-first `spawn(&system)`. A system-first form over an erased handle
+  would have moved that check to run time.
+
+  Migrating: build a system where a test or a wiring held a `ProcessSystem` and
+  a store —
+  `EventSourceSystem::builder(ps).with_persistence(PersistenceProvider::new(store)).build()`
+  — then drop the store argument from every constructor and spawn on the system.
+  `system.process_system()` hands the `ProcessSystem` back for the entries that
+  still take one (`DurableStreamProxy::subscribe_from` / `unsubscribe`, which
+  look a poller up by name rather than resolve a store). Wiring that needed
+  *two* activations of one stream — an optimistic-concurrency test — builds two
+  systems over the same store, which is what two writers of one stream now is.
+
+- **BREAKING** (`nitinol-contract`, `nitinol-eventsource`, `nitinol`):
+  `Aggregate` has a required associated type `Recover`, and whether an
+  activation starts from a snapshot is the aggregate type's own statement.
+
+  `type Recover: Recovery<Self>` names one of two markers. `Never` replays the
+  whole stream and asks its system for nothing but the journal, so it spawns on
+  any store. `Latest` recovers from the newest snapshot the system's persistor
+  holds and then replays only what was written after it; it is implemented only
+  where `Self: Snapshotable`, and spawning such an aggregate requires the store
+  to hold a snapshot slot. Both are exported from `nitinol_contract`,
+  `nitinol_eventsource`, `nitinol::contract` and `nitinol::eventsource`, and
+  `Recovery::POLICY` is a `RecoverPolicy` value for wiring that wants to report
+  the choice — the choice itself is the type, because only a type can change a
+  bound.
+
+  The declaration is on the aggregate because whether a snapshot exists to
+  recover from is a property of the type: the same type names the snapshot value
+  and the codec that writes it. Saying it again at the wiring would leave two
+  places to disagree, and saying it with a value would leave the mismatch
+  between a recovering aggregate and a store with no snapshots to show up as a
+  failure at the first load rather than as a compile error.
+
+  There is no default: `Aggregate` implementors add one line.
+
+  | was | is |
+  |---|---|
+  | `impl Aggregate for A { type Event = E; .. }` | `impl Aggregate for A { type Event = E; type Recover = Never; .. }` |
+  | a snapshotting aggregate + `props.with_snapshot_persistor(p)` | `type Recover = Latest;` and nothing at the wiring |
+  | `Snapshotable::restore(snapshot)` | `Snapshotable::recover(snapshot)` |
+
+  A consequence worth stating: `SagaDelivery::new::<A, C>` now requires
+  `A::Recover: RecoverOn<A, Journal>`. A saga's mapping is written once and
+  names one system type for every deployment, so a host addresses its targets
+  through the handle a system's store type is erased to — and only the journal
+  survives that erasure. A `Latest` aggregate cannot be a delivery target; it is
+  resolved through the typed system it was built on.
+
+  The vocabulary follows the mechanism: an event is **replayed**, a snapshot is
+  **recovered**. `restore` is not used for either.
+
+- **BREAKING** (`nitinol-saga`): `host::<S>` starts the delivery host too, and
+  requires a provider that supplies the saga-offset slot it records in.
+
+  A manager journals what it decided and nothing more: the commands a decision
+  implies reach their targets only because a delivery host reads that journal.
+  Declaring the two separately meant a saga took two declarations, and a wiring
+  that wrote the first and forgot the second ran, looked alive, and did nothing
+  — which neither the type system nor the runtime could report. There is no
+  wiring in which a hosted saga wants no delivery, so the host is not opt-in on
+  the builder either: it is what hosting a saga is.
+
+  Requiring the slot follows from that. A store with no saga slot is a store a
+  delivery host cannot record progress in, so a saga cannot be hosted on it, and
+  the refusal is at the wiring rather than at the host's first save — the same
+  way `EventSourceSystem::projector_props` refuses a provider with no projection
+  slot. Keeping the progress somewhere a restart cannot find it would weaken
+  at-least-once without saying so, so it is not offered.
+
+  | was | is |
+  |---|---|
+  | `system.deliver::<S>().with_poll_interval(d).spawn()` | `system.host::<S>(f)…with_delivery_poll_interval(d).spawn()` |
+  | `system.deliver::<S>().with_delivery_id(id).spawn()` | `system.host::<S>(f)…with_delivery_id(id).spawn()` |
+  | `system.deliver::<S>().with_partitions(n).spawn()` | `system.host::<S>(f)…with_partitions(n).spawn()` |
+  | `host(..)…spawn()` answers `SagaManagerProxy<S>` | answers `SagaHostProxy<S>`; `pid` and `stop` are `.manager()`'s |
+  | `host(..)` has type `SagaManagerProps<S, SourceBindings<S>, Hosted>` | `SagaManagerProps<S, SourceBindings<S>, SagaHosted<S, St>>` |
+  | `impl<St: Store> SagaSystemExt for EventSourceSystem<St>` | `impl<St: SagaOffsetSlot> …` — a journal-only store has no `host` |
+
+  Migrating: delete the `deliver` declaration and move its settings onto the
+  `host` chain, renaming `with_poll_interval` to `with_delivery_poll_interval`
+  there; reach the manager's `pid`/`stop` through `.manager()` and the
+  operator entries through `.delivery()`; and name a saga-offset store on the
+  provider — `CustomStore::builder().eventstore(..).saga_offsets(..)`, or
+  `InMemoryStore`, which supplies every slot.
+
+  The props-first form starts both halves on the same terms:
+  `SagaManagerProps::<S>::new(f)…spawn(&system)` requires the same slot and
+  answers the same `SagaHostProxy<S>`. There is no public way to start a
+  delivery host alone, and a second host beside a running one is a second
+  system over the supplier that holds its stores.
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-eventsource`, `nitinol-saga`,
+  `nitinol-store-conformance`, `nitinol-conformance`, `nitinol-sqlx`,
+  `nitinol`): a store is distributed by its backend's own `Clone`, and no part
+  of the framework wraps a store handle in an `Arc`.
+
+  The contract already said where identity comes from: cloning the store that
+  was registered first must not lose the data region it names (`PRV-1`), and a
+  shared pointer or a shared connection is neither necessary nor sufficient for
+  that (`PRV-2`). The implementation said something else. A supplier boxed every
+  slot it handed out into an `Arc`, every part's constructor asked for
+  `Arc<dyn EventStore>`, and a caller holding an `InMemoryEventStore` — itself a
+  handle over an `Arc<Mutex<_>>` — wrapped it again to be allowed to name it. A
+  second layer that proves the property the first one already owes is withdrawn
+  rather than deprecated: no alias and no hidden shim answers for an old shape,
+  so a reference to one is a compile error.
+
+  | was | is |
+  |---|---|
+  | `Arc<dyn EventStore>` | `store::Journal` |
+  | `Arc<dyn SnapshotStore>` | `store::Album` |
+  | `Store::Events` (associated type) | gone; `Store::events` answers with `Journal` |
+  | `SnapshotSlot::Snapshots` (associated type) | gone; `SnapshotSlot::snapshots` answers with `Album` |
+  | `PersistenceProvider::event_store` → `Arc<dyn EventStore>` | → `Journal` |
+  | `PersistenceProvider::snapshot_store` → `Arc<dyn SnapshotStore>` | → `Album` |
+  | `PersistenceProvider::projection_offsets` → `Arc<S::ProjectionOffsets>` | → `S::ProjectionOffsets` |
+  | `PersistenceProvider::saga_offsets` → `Arc<S::SagaOffsets>` | → `S::SagaOffsets` |
+  | `provider::CustomStore<E, S, P, Sg>` | `provider::CustomStore<S, P, Sg>` |
+  | `CustomStoreBuilder::eventstore<E: EventStore + Clone + 'static>` | `<E: EventStore + 'static>` |
+  | `CustomStoreBuilder::snapshot<S: SnapshotStore + Clone + 'static>` | `<S: SnapshotStore + 'static>` |
+  | `AggregateProps::new(id, Arc<dyn EventStore>)` | `(id, impl Into<Journal>)` |
+  | `SagaManagerProps::new(Arc<dyn EventStore>, producer)` | `(impl Into<Journal>, producer)` |
+  | `Subscription::stream(Arc<dyn EventStore>, key)` | `(impl Into<Journal>, key)` |
+  | `Subscription::global(Arc<dyn EventStore>)` | `(impl Into<Journal>)` |
+  | `DurableStream::new(topic, Arc<dyn EventStore>, transform)` | `(topic, impl Into<Journal>, transform)` |
+  | `DurableSubscription::new(Arc<dyn EventStore>, transform)` | `(impl Into<Journal>, transform)` |
+  | `system::SystemHandle = EventSourceSystem<DynStore>` | `EventSourceSystem<Journal>` |
+  | `SagaDeliveryExt::SagaOffsets: OffsetStore + 'static` | `: OffsetStore + Clone + 'static` |
+  | `StoreUnderTest::bring_up` → `Arc<dyn EventStore>` | → `Journal` |
+  | `SnapshotStoreUnderTest::bring_up` → `Arc<dyn SnapshotStore>` | → `Album` |
+  | `OffsetStoreUnderTest::bring_up` → `Arc<Self::Store>` | → `Self::Store`, with `Store: OffsetStore + Clone + 'static` |
+  | `Interpretation::interpret(ledger, Arc<dyn EventStore>)` | `(ledger, Journal)` |
+
+  **A backend author derives `Clone` and writes nothing else.** `EventStore` and
+  `SnapshotStore` now have the clone supertraits listed under *Added*, which is
+  what the erasure calls. The requirement is the one `PRV-1` already stated — a
+  clone of the registered store reaches the records the original does — so a
+  backend whose handle was already cloneable, which is every backend here and
+  the shape a connection pool takes, has nothing to change. One whose `Clone`
+  would construct fresh state fails the conformance clause it always failed.
+
+  **A wiring point passes the handle it holds.**
+  `CustomStore::builder().eventstore(InMemoryEventStore::default())` is the
+  whole of naming a journal, and the six entry points above take
+  `impl Into<Journal>`, so a backend handle, a `Journal` and a `&Journal` are
+  all accepted and all reach the one set of records. Where the framework needs
+  a handle of its own — one per spawned process, one per poller, one per
+  delivery partition — it calls `Journal::clone`, which is the backend's clone
+  one level down.
+
+  **The offset slots keep their associated types.** `OffsetStore::Tx` is an
+  associated type of its own, so erasing an offset store would take a backend's
+  transaction type out of sight. `ProjectionOffsetSlot::ProjectionOffsets` and
+  `SagaOffsetSlot::SagaOffsets` are unchanged; what changed is that the supplier
+  answers with them by value, and that the parts holding one
+  (`ProjectorProps`, `SagaDeliveryProps` and the processes they start) hold the
+  backend's handle rather than a shared wrapper around it.
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-eventsource`, `nitinol-saga`,
+  `nitinol-store-conformance`, `nitinol-sqlx`, `nitinol`): the store that keeps
+  an event consumer's progress is named for what it holds — an **offset** — and
+  its key is a concrete type rather than a trait.
+
+  What the store holds is a position in an order, which is what `offset` means
+  in this field. In event sourcing `checkpoint` is also the word for a saved
+  state, so a reader who took it that way would look for a snapshot. Nothing is
+  deprecated and no hidden compatible shim answers for an old name: a reference
+  to one is a compile error.
+
+  | was | is |
+  |---|---|
+  | `store::CheckpointStore` | `store::OffsetStore` |
+  | `store::CheckpointScope` (trait) | `store::OffsetScope` (struct) |
+  | `CheckpointScope::checkpoint_key` | `OffsetScope::as_str` |
+  | `error::CheckpointError` | `error::OffsetError` |
+  | `store::InMemoryCheckpointStore` | `store::InMemoryOffsetStore` |
+  | `store::checkpoint_store` (module) | `store::offset_store` |
+  | `provider::ProjectionCheckpointSlot` | `provider::ProjectionOffsetSlot` |
+  | `ProjectionCheckpointSlot::ProjectionCheckpoints` | `ProjectionOffsetSlot::ProjectionOffsets` |
+  | `ProjectionCheckpointSlot::projection_checkpoints` | `ProjectionOffsetSlot::projection_offsets` |
+  | `provider::DeliveryCheckpointSlot` | `provider::SagaOffsetSlot` |
+  | `DeliveryCheckpointSlot::DeliveryCheckpoints` | `SagaOffsetSlot::SagaOffsets` |
+  | `DeliveryCheckpointSlot::delivery_checkpoints` | `SagaOffsetSlot::saga_offsets` |
+  | `PersistenceProvider::projection_checkpoints` | `PersistenceProvider::projection_offsets` |
+  | `PersistenceProvider::delivery_checkpoints` | `PersistenceProvider::saga_offsets` |
+  | `CustomStoreBuilder::projection_checkpoints` | `CustomStoreBuilder::projection_offsets` |
+  | `CustomStoreBuilder::delivery_checkpoints` | `CustomStoreBuilder::saga_offsets` |
+  | `CustomStoreBuilder::checkpoints` | `CustomStoreBuilder::offsets` |
+  | `SagaDeliveryExt::DeliveryCheckpoints` | `SagaDeliveryExt::SagaOffsets` |
+  | `SagaDeliveryProxy::advance_checkpoint` | `SagaDeliveryProxy::advance_offset` |
+  | `nitinol_persistence::ProjectionId` | `nitinol_eventsource::ProjectionId` |
+  | `nitinol_sqlx::PostgresCheckpointStore` | `nitinol_sqlx::PostgresOffsetStore` |
+  | `nitinol_sqlx::CheckpointConflict` | `nitinol_sqlx::OffsetConflict` |
+  | clauses `CKP-1` … `CKP-6` | `OFS-1` … `OFS-6` |
+  | conformance `checkpoint` module | `offset` |
+  | `checkpoint::CheckpointStoreUnderTest` | `offset::OffsetStoreUnderTest` |
+  | `provider::verify_projection_checkpoints` | `provider::verify_projection_offsets` |
+  | `provider::verify_delivery_checkpoints` | `provider::verify_saga_offsets` |
+  | `provider::verify_checkpoint_independence` | `provider::verify_offset_independence` |
+  | table `nitinol_checkpoint (projection_id, sequence)` | `nitinol_offset (scope, sequence)` |
+
+  **The key is a concrete type.** `OffsetScope` owns the rendered key string and
+  derives `Debug` / `Clone` / `PartialEq` / `Eq` / `Hash`; `load` and `save`
+  take `&OffsetScope` rather than `&dyn CheckpointScope`. There are two ways to
+  one and no third: `OffsetScope::new(name)` is what a deployment names itself —
+  refused if the name is inside the reserved namespace, rendered verbatim
+  otherwise — and `OffsetScope::framework_owned(part, name, partition)` is what a
+  part of the framework names for one partition of one of its own consumers,
+  rendered inside the reserved namespace. That the two cannot collide, and that
+  the three elements render one key injectively whatever the name contains, is
+  argued once on `OffsetScope` and is what `OFS-5` now names as its obligation —
+  previously spread across each identifier type's own documentation. Consumers
+  build their scope once, when they start, and hold it; there is no
+  `AsRef<OffsetScope>`.
+
+  **`ProjectionId` moved.** It is `nitinol_eventsource::ProjectionId` and
+  `nitinol_eventsource::projection::ProjectionId`, beside the projector it
+  names, and is reached through `nitinol::eventsource::ProjectionId` from the
+  umbrella crate. It was in `nitinol-persistence` only because the offset
+  store's key type had to be. It still refuses the reserved namespace, through
+  `nitinol_persistence::reject_reserved_id` as `SagaId` does, and
+  `impl From<&ProjectionId> for OffsetScope` is the user-named constructor —
+  so a projection's key is still its identifier verbatim and every row written
+  under the old vocabulary is found under the same text.
+
+  **The two provider slots are a deployment choice, not a kind of consumer.**
+  `PRV-4` is restated on that axis: a projection's offset belongs beside the
+  read model it is building, which is the database an operator chose for *their*
+  read side, and the offsets of the framework's own attachments belong beside
+  the journal. `SagaOffsetSlot` is therefore the slot for **every** saga
+  attachment — the delivery host now, the manager and the deadline index as they
+  are written — rather than the delivery host's alone.
+
+  **`OFS-4` no longer describes its consumers.** A save that is not a move
+  forward is still the backend's to answer, refusing and taking both conforming,
+  and the suite still never makes one. What the clause now says such a save
+  *means* stops at "more than one writer holds that key": the steps each
+  consumer takes before and after are the consumer's. More than one writer is
+  something a clustered deployment reaches temporarily while the nodes' views of
+  the membership disagree, and it is a liveness event — more redelivery — rather
+  than corruption. Paired with it is the consumer's own obligation, stated for
+  the first time: **a refused save does not stop a consumer; it carries on and
+  saves again the next time it moves forward.** `nitinol-sqlx`'s `OffsetConflict`
+  is documented in the same terms.
+
+  **A `nitinol_checkpoint` table written before this change cannot be read.**
+  No migration tool is provided and `0002` is rewritten rather than altered.
+  Drop the old table, create the new one by migrating, and let each consumer
+  resume from the position it is configured with.
+
+- **BREAKING** (`nitinol-saga`, `nitinol`): the workspace is **0.5.0**, and a
+  saga stream written by 0.4 or earlier cannot be read by it.
+
+  A saga's own stream now holds four kinds of row and no more: a domain event —
+  the catch-all — plus the three facts the framework declares for itself,
+  `nitinol.saga.schedule`, `nitinol.saga.consumed` and
+  `nitinol.saga.lifecycle`. A row inside the reserved namespace matching none of
+  those three is a corrupted stream or a version mismatch, and `SagaPersisted`
+  refuses it: the load fails rather than reading past it. So every 0.4 stream
+  carrying an outbox marker, a dead letter, a disposition marker, or a position
+  under the old `nitinol.saga.consumed_position` name is unreadable, and so is
+  one carrying only the `Ended` arm of the outbox envelope.
+
+  That refusal is deliberate and there is no way round it. "Recognise it and
+  skip it" would mean keeping a reader for a mechanism that no longer exists,
+  and a withdrawn record's bytes may well decode cleanly as a domain event — so
+  reading past one would quietly fold a bygone mechanism's bookkeeping into the
+  saga's state. No migration tool, no skip switch and no quiescing procedure is
+  provided; development and test stores are wiped.
+
+- **BREAKING** (`nitinol-saga`): a saga terminates, consumes and refuses
+  through the three facts above.
+
+  `Ended` has a declaration of its own, `nitinol.saga.lifecycle`, instead of
+  sharing an envelope with a transport mechanism's transitions: "this saga
+  terminated" is a fact about the saga's own life, and reading it no longer
+  requires knowing that mechanism's grammar. The consumed position is
+  `nitinol.saga.consumed`, naming both the upstream stream it was read from and
+  the declared source it settled.
+
+  An input `Saga::handle` answers `Err` is now settled by a **position-only
+  append** — it was seen, it produced nothing, and that one row is all it
+  leaves — with the error itself reaching an operator through `tracing::error!`.
+  A record routed to a saga that has already terminated, a deadline firing that
+  cannot be read back, and a firing `handle` refuses are each reported and
+  dropped with nothing durable written: a terminated saga records no further
+  facts, and a firing carries no position to settle.
+
+- **BREAKING** (`nitinol-saga`): replay is a fold and nothing else.
+
+  `process::replay` restores the saga's state and its consumed positions and
+  reports the schedules still pending; it decides nothing and writes nothing.
+  The branches that decided a pending tell's fate — re-dispatch from a durable
+  marker, appending a synthetic `TellFailed`, writing a dead letter mid-replay —
+  are gone with the mechanism they served. What a restart still does is
+  idempotent reconnection: re-subscribe each declared source from the position
+  the journal records for it, and re-arm every unfired deadline.
+
+- (`nitinol-saga`, `nitinol-eventsource`): the delivery guarantee is written
+  down on `SagaDeliveryProps` rather than on the withdrawn `SagaEffect::tell`.
+
+  It states where at-least-once comes from — the host's checkpoint moves only
+  after every delivery a record implied has landed, and that window is the whole
+  of it — what a held partition means and what it costs, and the two layers a
+  failure belongs to: transport is the host's to retry, hold and report, while a
+  business failure reaches the saga the only way a domain fact can, as an input
+  (the answer the addressed aggregate recorded, or the saga's own deadline
+  firing when none came). `nitinol-eventsource`'s `R-2` resolve clause links
+  there instead of restating a per-stage contract.
+
+- **BREAKING** (`nitinol-eventsource`, `nitinol-saga`): every wiring point
+  resolves its stores from a supplier instead of being handed each store at the
+  call.
+
+  `EventSourceSystem::builder(ps).with_persistence(PersistenceProvider::new(store)).build()`
+  is how a system is built, and `build` exists only once a supplier has been
+  supplied, so there is no system whose stores nobody named. The store is the
+  system's type parameter, which is what decides the entry points it has:
+  `spawn_aggregate(id)` / `aggregate_props(id)` / `aggregate_proxy(id)` need
+  only the journal, `snapshot_persistor()` needs the snapshot slot, and
+  `projector_props(projection_id, producer)` needs the projection-checkpoint
+  slot. A slot the store does not hold is a compile error at the wiring that
+  needs it rather than a failure at the first save.
+  `system.snapshot_persistor()` hands out **one** persistor process per system,
+  shared across clones, because the snapshot contract is written for a single
+  consumer serialising its calls; `SnapshotPersistorProxy::pid` is how two
+  handles are told to be that one process.
+
+  `SnapshotPersistor::spawn(&ps, &persistence)`,
+  `ProjectorProps::new(projection_id, &persistence, producer)` and
+  `SagaDeliveryProps::new(&persistence)` take the supplier rather than the
+  stores, each resolving the slots it needs — a projector the journal together
+  with the projection slot, a delivery host the journal together with the
+  delivery slot — so the two halves of a wiring cannot come from two worlds.
+  `SagaSystemExt` is now one trait over any store, with
+  `spawn_saga(saga_id, producer)`, `subscription(key)` and
+  `saga_manager_props(producer)` journalling onto the supplier's store, and
+  `SagaDeliveryExt::saga_delivery_props::<S>()` is the delivery host's entry
+  point, separate because the delivery slot is one a store need not hold.
+
+  Props taken from a system now carry where they start, so
+  `.spawn().await` completes the wiring: `aggregate_props`, `projector_props`,
+  `spawn_saga`, `saga_manager_props` and `saga_delivery_props` all hand back
+  props in a `Hosted` state whose `spawn` takes no argument. Props built
+  directly are `Unhosted` and keep the argument they always took —
+  `AggregateProps::new(..).spawn(&ps)`, `SagaProps::new(..).spawn(&ps)`,
+  `SagaManagerProps::new(..).spawn(&ps)`,
+  `ProjectorProps::new(..).spawn(&ps)` and
+  `SagaDeliveryProps::new(..).spawn(&system)` — which replaces the call that
+  took a `ProcessSystem` and ignored it. `system::SystemHandle` is the system
+  with the store's type erased, and `EventSourceSystem::erase_store` is how a
+  caller gets one; only the journal survives the erasure, so a slot nobody
+  supplied stays unreachable through it.
+
+  `SagaComponents::system` hands a saga the system hosting it — the same
+  process system, the same aggregate registry and the same supplier — so a
+  producer that needs a reference to tell resolves it there rather than from a
+  clone of the system captured outside the spawn. It answers `Some` for every
+  incarnation a system's own entry point started and `None` for one built from
+  props on a store, which is the path that has no system to name.
+
+  The low-level entry points that name a store are unchanged and are how a
+  second destination is reached: `AggregateProps::new`, `SagaProps::new`,
+  `SagaManagerProps::new`, `Subscription::stream` / `Subscription::global` and
+  `DeadLetterQueue::new`. Reaching two destinations is therefore something an
+  operator writes down — a second supplier, assembled and named as such —
+  rather than a per-spawn argument at one call among many.
+
+- **BREAKING** (`nitinol-persistence`): `CheckpointStore::load` and
+  `CheckpointStore::save` take `&dyn CheckpointScope` instead of
+  `&ProjectionId`. A checkpoint store is the progress cache every event
+  consumer shares, and more than one kind of consumer now files progress in it.
+  `ProjectionId` implements `CheckpointScope` and renders **verbatim**, so
+  stored rows keep the keys they were written under and existing projection
+  behaviour is unchanged; `&ProjectionId` still coerces at the call site, so
+  callers pass what they already passed. Framework-owned consumers render
+  inside the reserved namespace, which every user-facing identifier constructor
+  refuses — so the two key spaces cannot collide and the provider's one table
+  is shared rather than duplicated. `nitinol-sqlx`'s `CheckpointConflict` names
+  the checkpoint key it refused rather than a projection.
+
+- **BREAKING** (`nitinol-saga`, `nitinol-macros`): `Saga::SubscribedEvent` and
+  `Saga::ScheduledMessage` / `Saga::on_scheduled` are replaced by one
+  associated type, `Saga::Subscribe: SagaSubscribe`, naming the saga's whole
+  alphabet of inputs — every external event type it observes, plus its own
+  time — instead of splitting them across a single upstream event type and a
+  separate timer entry point. A coordinator observes the reply of whoever it
+  addressed *and* the passing of its own deadline, which a trait naming only
+  one upstream event type could not express.
+
+  A user enum derives the alphabet with `#[derive(SagaSubscribe)]`: one
+  newtype variant per external event type, and at most one
+  `#[subscribe(deadline)]` variant naming the saga's own time as a
+  `DeadlineMessage`. `DeadlineMessage::Codec` self-describes how that message
+  is persisted, replacing the removed `ScheduledMessage: Serialize +
+  DeserializeOwned` bound — a schedule fact is written through the same `Codec`
+  discipline as every other persisted record, not through `serde_json` fixed
+  by the trait. `DeadlineMessage::TYPE_NAME` / `DeadlineMessage::CODEC_NAME`
+  carry that identity onto the wire itself: the `Scheduled` fact's
+  `message_type` / `message_codec` fields, alongside `payload`, so a firing is
+  checked against what the fact says rather than decoded under whatever
+  alphabet happens to be linked into the reader. A stored identity that
+  disagrees with the current declaration is refused (`ReadDeadlineError`)
+  instead of being decoded under the wrong `Codec`. `Saga::correlate` and
+  `Saga::handle` both `match` on
+  `Self::Subscribe`, so a source added to the alphabet without a reaction
+  leaves either `match` non-exhaustive at compile time.
+
+  Each external variant is observed as a source of its own — its own
+  `subscribed_to::<E>(subscription)` binding, its own cursor, its own runtime
+  `DirectPollerProcess` — so one source stalling never stops another from
+  progressing; there is deliberately no total order across sources. Binding
+  is a typestate the derive generates (`SourceBindings` / `BindSource` /
+  `AllSourcesSubscribed`): `spawn` exists only once every declared source has
+  been bound, generalizing the existing single-source enforcement
+  (`SubscriptionSet` / `SubscriptionUnset`) to an arbitrary alphabet. The
+  `#[subscribe(deadline)]` variant is allotted no binding slot — a deadline is
+  addressed to the instance that set it and never travels a subscription.
+
+  `Saga::apply` is downgraded to a default no-op, so a stateless translation
+  saga no longer writes an empty body to satisfy the trait. Its own event
+  stream stays mandatory regardless: the delivery host consumes it and
+  consumed positions are folded from it whether or not anything folds into
+  in-memory state.
+
+  The saga instance's producer changes from `Fn() -> S` to
+  `Fn(SagaComponents<S>) -> S`: capabilities the framework resolves — today,
+  `Deadline<M>` for an alphabet that declares `#[subscribe(deadline)]` —
+  arrive as an argument instead of being captured by a closure built before
+  the resolver that produces them exists. A saga using no capability writes
+  `|_| S::default()`.
+
+  Migration: replace `type SubscribedEvent = E;` with a
+  `#[derive(SagaSubscribe)] enum` naming `E` as a variant and set `type
+  Subscribe = ThatEnum;`. Replace a `type ScheduledMessage` / `on_scheduled`
+  pair with a `#[subscribe(deadline)]` variant naming a `DeadlineMessage`
+  type, and move timer wiring out of spawn builders (`with_scheduler`,
+  removed — see Removed below) into `SagaComponents::deadline::<M>()` inside
+  the producer, read and armed through `Deadline::pending` /
+  `Deadline::set` / `Deadline::cancel`. Drop an `apply` body that did nothing.
+  Update every producer closure to accept `SagaComponents<S>`.
+
+- (`nitinol-saga`): the resident scheduler keeps its deadlines in deadline
+  order and waits for the earliest one, instead of turning a hashed timing
+  wheel.
+
+  A wheel buys `O(1)` insertion and cancellation for millions of short-lived
+  timers, and pays for it with a tick that runs whether or not anything is
+  registered, a resolution quantised to that tick, and per-entry bookkeeping
+  for any deadline past one revolution. Saga deadlines are the opposite
+  regime — few, long-lived, and coarse, since delivery is already paced by the
+  subscription's polling interval — so the price bought nothing. What replaces
+  it is a `BTreeMap` keyed by deadline and a single `sleep_until` pointed at
+  the earliest one: a scheduler holding no deadline arms no sleep and wakes
+  never, a deadline hours or days out is just a later key with no revolutions
+  to count, and cancelling one is a lookup by name and a removal rather than a
+  stale entry filtered out later. Registration is `O(log n)`, which is the
+  trade this regime is glad to make.
+
+  A deadline's firing is now addressed to the saga *manager* together with the
+  instance's `SagaId`, rather than to a proxy for the incarnation that
+  registered it. A deadline outlives the instance that set it — that is what a
+  deadline is for — so an instance passivated by
+  `SagaManagerProps::with_instance_passivation` is restored from its own
+  stream and then handed the firing, where before the firing reached a process
+  that had already stopped. Such an instance consequently keeps its deadlines
+  armed when it passivates; a standalone `SagaProps` saga, which has no
+  manager to restore it, still releases its own as it stops.
+
+  Nothing about where a deadline durably lives changes: the `scheduled` marker
+  on the saga's own stream is still the record, written in the same atomic
+  batch as the decision that set it, and the scheduler is still a cache in
+  front of it that restores nothing of its own after a restart.
+
+- (`nitinol-persistence`, `nitinol-saga`): the framework's own records are
+  declared through one macro rather than four hand-written pieces each.
+
+  `nitinol_persistence::reserved_event!` writes the `EventType` constant, the
+  registry entry that puts the record in `EVENT_REGISTRY`, the symbol that
+  claims its canonical path, and — for a record whose payload is a `oneof` —
+  the arm name constants and the `arm()` that reports which one a value holds.
+  The saga's outbox, timer, dead-letter and dead-letter-disposition records go
+  through it, so the reserved constructors, the `#[distributed_slice]`
+  placement, and the hand-written `arm()` match are no longer spelled at each
+  declaration — and a framework record can no longer be given an identity
+  without being collected under it. Every reserved path and every arm name is
+  what it was; no stored row changes. `nitinol-saga` no longer depends on
+  `linkme` directly.
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-contract`,
+  `nitinol-eventsource`, `nitinol-saga`, `nitinol-macros`, `nitinol`): the
+  `event_type` column holds one grammar, and every declaration is written down
+  under exactly one path.
+
+  An `EventType` is a `Family` and a `TypeName`, and nothing else. A `TypeName`
+  is a single segment by construction, so a canonical path decomposes
+  structurally and without ambiguity: the last segment is the type name, and
+  every segment before it is the family. Which arm of an enum event a row holds
+  is carried by the payload — the codec the declaration names is what reads it
+  back — so the column names the declaration and the payload names the case.
+
+  What this fixes is a grammar that had two readings of one string. A row of a
+  struct event `C` in family `a.b` and a row of arm `C` of enum `b` in family
+  `a` were both written down as `a.b.C`, and nothing in the path said which of
+  the two a reader was holding. A registry refused to serve such a pair, so the
+  collision surfaced as a build failure rather than as a misrouted row — but it
+  surfaced at all only because two declarations could reach one path. They no
+  longer can; the collision class is gone from the type level, and the only
+  collision left is the one a reader could never disentangle anyway: two types
+  declaring one family and one type name between them.
+
+  **Journal migration.** Every row an enum event or a framework record wrote
+  carries a path that no declaration answers for any more — `a.b.OrderEvent.
+  Placed` where the declaration is now `a.b.OrderEvent`, and
+  `nitinol.saga.schedule.scheduled` where the record is now
+  `nitinol.saga.schedule`. Such a row fails its load as an unknown event type
+  rather than being restored, so an existing journal has to have its
+  `event_type` column rewritten to the declaring type's path before it is read
+  by this version. The payloads are untouched: which arm a framework record
+  holds was already in its `oneof`, and a user's enum arm was already in
+  whatever its codec wrote.
+
+  `LoadQuery::by_event_type` is unchanged in shape and narrower in effect: a
+  declaration has no descendant path of its own, so it now selects the rows of
+  that event type and no others. `by_event_type_prefix` is unchanged — a family
+  prefix still selects every declaration beneath it, on segment boundaries.
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-macros`): the `nitinol`
+  reserved namespace is refused by `Family::new` and `EventRegistryEntry::new`,
+  not by the derive alone.
+
+  Both constructors run inside the initializer of a `const`/`static`, so a
+  reserved family is a compile error rather than a condition a running
+  deployment discovers — and a hand-written `impl Event` is now bound by the
+  same rule the derive already enforced, where before it was documentation. The
+  root and the boundary rule stay defined once, beside `Family`;
+  `is_within_reserved_namespace` is a `const fn` so both enforcement points can
+  read it from there.
+
+  The framework's own records reach the names the framework reserved through
+  `nitinol_persistence::__private::{reserved_family,
+  reserved_event_registry_entry}`, which waive the namespace rule and nothing
+  else: a malformed family is still malformed. `__private` because it is not a
+  user surface.
+
+- **BREAKING** (`nitinol-contract`, `nitinol-eventsource`, `nitinol-saga`,
+  `nitinol-macros`, `nitinol`): an event names the codec that writes it down,
+  and codecs are no longer injected at wiring time.
+
+  `Codec<T>` moves to `nitinol-contract` — `nitinol_eventsource::codec::Codec`
+  and `nitinol::contract::Codec` both name it — and two traits gain an
+  associated type: `Event::Codec: Codec<Self>` and
+  `Snapshotable::Codec: Codec<Self::Snapshot>`. A hand-written impl adds one
+  line; a derived one adds one attribute key, `#[event(family = "...", codec =
+  MyCodec)]`, which is mandatory for the same reason `family` is — stable Rust
+  has no associated-type defaults, so an omitted `codec` would be reported as a
+  missing associated type instead of as the attribute its author left out.
+
+  Every injection point is gone with it: `EventSourceSystem::with_codec` and
+  the builder's `Unset` stage, `AggregateProps::with_codec` and its
+  `CodecSet`/`CodecUnset` typestate, the snapshot codec argument of
+  `AggregateProps::with_snapshot_persistor`, the codec argument of
+  `ProjectorProps::with_event::<E>`, `SagaProps::with_codec`,
+  `SagaManagerProps::with_codec` and their own `CodecSet`/`CodecUnset`, the
+  upstream codec argument of `with_subscription`, `EventSourceSystem::codec`,
+  and the `type Codec` of `SagaSystemExt` / `SagaDefaultStoreExt`.
+  `EventSourceSystem`, `EventSourceSystemBuilder` and `SagaSpawn` each lose a
+  type parameter as a result, and `SagaProps` / `SagaManagerProps` are left
+  with subscription state alone.
+
+  What the injection bought was the freedom to write one event type in two
+  formats, which is not a freedom a stream can survive: a codec chosen at the
+  wiring site has to agree with every other site that ever wrote or read that
+  stream, and nothing checked that it did. Naming the codec on the event makes
+  the agreement a property of the type — two aggregates spawned from one system
+  now read and write their own streams in their own formats, and a projector
+  subscribing to two event types decodes each with the codec its own type
+  named. The type list a projection follows stays explicit, because which
+  events it follows is a design statement; what reads them is not.
+
+  `ErasedCodec` and the blanket impl that promoted a `Codec<E>` into it are
+  removed — there is nothing left to erase a codec into. Classifying a codec
+  failure stays on the interpreter's side: `nitinol_eventsource::codec::encode`
+  and `::decode` call a named codec and report its failure as `CodecError`,
+  which is where `CodecError::Encode` / `Decode` are still produced.
 
 - **BREAKING** (`nitinol-eventsource`, `nitinol`): `AggregateProxy::ask` answers
   with the decision's output instead of the events it persisted. Its return
@@ -286,24 +1414,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from the umbrella crate as `nitinol::eventsource::AggregateTellTarget`, so
   any out-of-tree implementor of the trait must update at the next compile.
 
-- **BREAKING** (`nitinol-saga`): `SagaEffect::with_tells` and
-  `SagaEffect::with_schedules` are replaced by `SagaEffect::tell_intent(intent)`
-  and `SagaEffect::schedule_spec(spec)`. The two setters were only defined on
-  the `Persist` branch and panicked on every other receiver, so whether a call
-  was legal depended on the runtime variant the caller happened to hold. Once
+- **BREAKING** (`nitinol-saga`): `SagaEffect::with_tells` is replaced by
+  `SagaEffect::tell_intent(intent)`. The setter was only defined on the
+  `Persist` branch and panicked on every other receiver, so whether a call was
+  legal depended on the runtime variant the caller happened to hold. Once
   `combine` folds an adjacent `Persist × Persist` junction into one `Persist`,
-  attaching a tell or a schedule is composition, and composition is `combine`'s
-  job: the new constructors each build their own single-element `Persist`, so
-  there is no receiver left whose variant could make an attachment illegal and
-  no builder call that panics because of one. They keep the capability the
-  setters carried and the typed `tell` / `schedule` builders cannot express — a
-  `TellIntent::new` intent with no crash-restart payload, and a `ScheduleSpec`
-  whose `payload` bytes are given verbatim rather than serialized from a typed
-  message. Callers rewrite `persist(e).with_tells(vec![a, b])` as
-  `persist(e).combine(SagaEffect::tell_intent(a)).combine(SagaEffect::tell_intent(b))`,
-  and `with_schedules` likewise. Note the semantic change this carries:
-  `with_*` *set* the list, so a second call dropped what the first attached,
-  whereas `combine` concatenates and keeps both.
+  attaching a tell is composition, and composition is `combine`'s job:
+  `tell_intent` builds its own single-element `Persist`, so there is no
+  receiver left whose variant could make an attachment illegal and no builder
+  call that panics because of one. It keeps the capability the setter carried
+  and the typed `tell` builder cannot express — a `TellIntent::new` intent with
+  no crash-restart payload. Callers rewrite `persist(e).with_tells(vec![a, b])`
+  as `persist(e).combine(SagaEffect::tell_intent(a)).combine(SagaEffect::tell_intent(b))`.
+  Note the semantic change this carries: `with_tells` *set* the list, so a
+  second call dropped what the first attached, whereas `combine` concatenates
+  and keeps both.
+
+  `SagaEffect::with_schedules` had no equally-direct successor on `SagaEffect`
+  itself: arming a deadline stopped being something a `handle` body builds by
+  naming a `ScheduleSpec` of its own. `ScheduleSpec::new` is `pub(crate)` — the
+  only way to obtain one is through `Deadline::set`, reached from the
+  `Deadline<M>` component `SagaComponents::deadline` hands out, which already
+  returns the `Persist` branch carrying the schedule. Callers that built a
+  `ScheduleSpec` by hand move the timer's name, delay and message to a
+  `#[subscribe(deadline)]` variant and call `Deadline::set` instead.
 
 - (`nitinol-saga`): the `SagaEffect::persist_all` documentation now states what
   the interpreter does with an empty batch. It claimed an empty vector kept the
@@ -312,9 +1446,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same no-op path as `SagaEffect::None`. Behaviour is unchanged; what an empty
   vector still buys is structural — the value stays a `Persist` that `combine`
   can fold tells and schedules into. Emptiness of `events` alone was never the
-  condition, and is now documented as such: a branch carrying a tell or a
-  schedule but no user event is what `SagaEffect::tell` and
-  `SagaEffect::schedule` build, and it is always interpreted.
+  condition, and is now documented as such: a branch carrying a tell but no
+  user event is what `SagaEffect::tell` builds, a branch carrying a schedule
+  but no user event is what `Deadline::set` builds, and either is always
+  interpreted.
 
 - (`nitinol-saga`): a saga whose stream carries the durable `Ended` marker now
   records what is still routed to it instead of always stopping outright. It
@@ -328,20 +1463,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance's do.
 
 - **BREAKING** (`nitinol-saga`): correlation moved from the spawn wiring to the
-  `Saga` trait. `SagaProps::with_subscription` no longer takes a
-  `Fn(&SubscribedEvent) -> Option<SagaId>` argument; the new required associated
-  function `Saga::correlate(event: &Self::SubscribedEvent) -> Option<SagaId>`
-  answers it instead. Deriving a business process instance's identity from an
+  `Saga` trait. Subscribing to a source no longer takes a
+  `Fn(&Event) -> Option<SagaId>` argument; the new required associated
+  function `Saga::correlate(input: &Self::Subscribe) -> Option<SagaId>`
+  answers it instead, once for the saga's whole alphabet rather than once per
+  subscribed source. Deriving a business process instance's identity from an
   event is domain knowledge, not wiring, and it was previously duplicated at
-  every spawn site. Implementors add `correlate` to their `impl Saga` — returning
-  the instance's own `SagaId` reproduces the common closure — and drop the fourth
-  argument from every `with_subscription` call. There is deliberately no default
-  implementation: a defaulted `None` would silently discard every upstream event.
-  `SagaProps::with_decode_failure_route` is **kept on the builder**: a decode
-  failure has no typed event to correlate on, so attributing it is routing rather
-  than correlation, and it must stay per-instance so two instances of one saga
-  type on a shared upstream stream can attribute the same corrupt record
-  differently.
+  every spawn site. Implementors add `correlate` to their `impl Saga` —
+  returning the instance's own `SagaId` reproduces the common closure — and
+  drop the correlation closure from every subscription call. There is
+  deliberately no default implementation: a defaulted `None` would silently
+  discard every upstream event.
+
+  `SagaProps::with_decode_failure_route` is **removed**, not kept on the
+  builder: a decode failure has no typed input to correlate on, so there is no
+  instance — resident or routed — it could be attributed to; it is reported
+  through `tracing` and skipped, and its source's cursor advances past it.
+
+- **BREAKING** (`nitinol-saga`): a saga is started by one verb, `host`, and a
+  declared source is bound by one verb, `observing`.
+
+  `SagaSystemExt::host::<S>(factory)` hands back the manager builder, and
+  `SagaDeliveryExt::deliver::<S>()` its delivery-host counterpart. The two read
+  as the pair they are: one starts the saga, the other starts the host that
+  carries out what it decided. Binding a declared source is
+  `SagaManagerProps::observing::<E>(Subscription)` on both the hosted builder
+  and the store-bound one, so a wiring site says the same word wherever its
+  journal comes from.
+
+  There is one verb because there is one thing left to say. Everything the two
+  former entry points differed in has been withdrawn over this release — the
+  scheduler, the codec stage, the crash-restart factory, the enqueue policy,
+  the dead-letter subscriber, the decode-failure route — and what remains at a
+  wiring site is the binding of each declared source and the instances'
+  passivation, which is one builder's worth. With nothing left to configure
+  differently, a second entry point would only have been a second way to say
+  the same thing.
+
+  `host` always starts a manager. A saga whose `Saga::correlate` always answers
+  the same `SagaId` is that manager with a single instance — the degenerate
+  case rather than a separate mechanism — so that is how a process with one
+  instance is now run, with no `SagaId` named at the wiring and no difference
+  in what the instance does: same replay, same effect interpretation, same
+  append ordering, same deadlines. What a deployment *can* still say about an
+  instance is how long it stays resident, which is residency rather than
+  behaviour.
+
+  Migrating: `system.spawn_saga(id, producer).subscribed_to::<E>(sub)` becomes
+  `system.host::<S>(producer).observing::<E>(sub)` and the `SagaId` is deleted
+  (`correlate` already answers it); `system.saga_manager_props(producer)`
+  becomes `system.host::<S>(producer)`;
+  `system.saga_delivery_props::<S>()` becomes `system.deliver::<S>()`;
+  `SagaProps::new(id, store, producer)` becomes
+  `SagaManagerProps::new(store, producer)`; every `subscribed_to` becomes
+  `observing`. A handle is a `SagaManagerProxy<S>` rather than a
+  `SagaProxy<S>`, and carries the same `pid` and `stop`.
+
+  One consequence is worth naming on its own, because it is a behaviour change
+  and not a rename: a source's cursor is the manager's, so it starts where its
+  `Subscription` said rather than being carried forward to what the saga's own
+  stream records as consumed. That sweep from the configured position is what
+  activates the instances that are not resident, and it costs no second
+  decision — each instance still drops the records its own stream names as
+  consumed, before `Saga::handle`. A restart therefore re-reads upstream
+  history a standalone saga's own cursor used to skip. `Subscription::with_after`
+  is still a floor and is still honoured exactly.
+
+- (`nitinol-saga`): `Subscription::with_poll_interval(Duration)` names how
+  often one declared source is asked.
+
+  The observing side's counterpart of `SagaDeliveryProps::with_poll_interval`,
+  and a deployment's choice for the same reason: a pull consumer trades latency
+  for load on the store, and which way a deployment wants that is not something
+  the framework can know. It is named per source rather than per saga, because
+  the sources of one saga are observed independently and need not be read at
+  one cadence — a quiet stream polled rarely beside a busy one polled often.
+
+  A source that names no interval keeps the cadence `nitinol-eventsource`
+  already polls at, which stays the sole owner of that default: naming nothing
+  is not a way of naming something.
 
 - **BREAKING** (`nitinol-saga`): removed the `Saga::State` associated type. It
   was never read by the crate — a saga's state is the implementor itself, which
@@ -349,6 +1549,256 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `type State = ...;` line; no other change is required.
 
 ### Removed
+
+- **BREAKING** (`nitinol-contract`, `nitinol-eventsource`, `nitinol-saga`):
+  every public entry point that named a store, a supplier or a persistor by
+  hand is withdrawn. No alias and no deprecated shim answers for any of them, so
+  a reference to one is a compile error.
+
+  | withdrawn | what replaces it |
+  |---|---|
+  | `AggregateProps::<A>::with_snapshot_persistor(p)` | `type Recover = Latest;` on the aggregate — the system distributes the persistor |
+  | `SnapshotPersistor::spawn(&ps, &persistence)` | `system.snapshot_persistor().await`, which answers the one process the system holds |
+  | `SagaDeliveryProps::new(&persistence)` and its `spawn(&system)` | a saga's own spawn, which starts the manager and the host together |
+  | `SagaSubscriptionExt` and `system.subscription(&key)` | `Subscription::stream(&key)` — a subscription names a stream key and a position, and the journal is the system's |
+  | the store argument of `Subscription::stream` / `Subscription::global` | — |
+  | the store argument of `AggregateProps::new`, `ProjectorProps::new` (the supplier), `DurableStream::new`, `DurableSubscription::new`, `SagaManagerProps::new` | the system named at the spawn |
+  | `spawn(self, system: &ProcessSystem)` on `AggregateProps`, `ProjectorProps`, `DurableStream` and `SagaManagerProps` | `spawn(self, system: &EventSourceSystem<St>)` |
+  | pinned activations — the reference `AggregateProps::spawn` on directly-built props handed back | every aggregate entry point resolves through the system's registry, so one identity has one activation per node whatever form its wiring was written in |
+  | `Snapshotable::restore` | `Snapshotable::recover` |
+
+  A second persistor is not offered rather than merely discouraged: the snapshot
+  contract is written for a single consumer serialising its calls, so a path
+  that could start a second process over one store would contradict it.
+
+  A second activation of one stream is likewise not offered. It was reachable
+  before as an explicit lifecycle, and both activations believed they were the
+  only writer of their stream — so all but one of them lost an append and
+  stopped. Wiring that genuinely wants two writers of one store builds two
+  systems over it, which says so.
+
+- **BREAKING** (`nitinol-saga`): `SagaDeliveryExt` and `system.deliver::<S>()`
+  are withdrawn, and so is `SagaDeliveryProps<S, Cs, Hosted>` with its
+  argument-free `spawn()`.
+
+  They were the second half of a two-declaration saga. `deliver` was a trait of
+  its own only because the delivery host needed the saga-offset slot and `host`
+  did not; now that hosting a saga starts the host that carries out its
+  decisions, `host` needs the slot too and there is nothing left for a separate
+  trait to say. No public path starts a delivery host from a system alone.
+
+  No alias and no deprecated shim answers for either name, so a reference to one
+  is a compile error. A delivery host is started by the saga whose decisions it
+  carries, from either entry point, and by nothing else — see the removal of
+  `SagaDeliveryProps::new` / `spawn` below.
+
+- **BREAKING** (`nitinol-persistence`): `provider::DynStore` is withdrawn, and
+  the store that holds the journal alone is `store::Journal` itself.
+
+  It existed to give a name to "a store whose journal is all there is", which is
+  what wiring written before a deployment's store is known has to name — a
+  saga's dispatch mapping, and `nitinol_eventsource::system::SystemHandle`. It
+  held an `Arc<dyn EventStore>` and never called the backend's `Clone`, so it
+  was the erasure and the sharing layer at once. `impl Store for Journal` is the
+  same name with neither: `SystemHandle` is `EventSourceSystem<Journal>`, and
+  `EventSourceSystem::erase_store` builds it from
+  `PersistenceProvider::new(self.persistence.event_store())`.
+
+- **BREAKING** (`nitinol-persistence`): the three blanket implementations that
+  made a shared pointer a store — `impl<T: EventStore + ?Sized> EventStore for
+  Arc<T>` and the same for `SnapshotStore` and `OffsetStore` — are withdrawn.
+
+  Their stated motive was naming a store that is not `Clone`; what they became
+  was the ordinary route for naming one that is, which is how the second layer
+  of handle got everywhere. A backend is named by its own handle now, and
+  `Arc<SomeStore>` satisfies no store trait. Code that wrapped a handle to be
+  allowed to pass it drops the wrapper; code that wrapped one because its store
+  genuinely cannot be cloned derives `Clone` over the state it shares, which is
+  what `PRV-1` asks of it either way.
+
+- **BREAKING** (`nitinol-persistence`): the `store::CheckpointScope` trait is
+  withdrawn, with no replacement trait.
+
+  The key an offset is filed under is the concrete `store::OffsetScope`, which
+  owns the rendered string and is constructed one of two ways. A third-party
+  consumer that implemented the trait to render a key of its own now calls
+  `OffsetScope::new` with the name it was going to render; a framework-owned one
+  calls `OffsetScope::framework_owned`. With the trait goes
+  `CheckpointScope::checkpoint_key`, whose answer is `OffsetScope::as_str`, and
+  `impl CheckpointScope for ProjectionId`, whose job is
+  `impl From<&ProjectionId> for OffsetScope` in `nitinol-eventsource`.
+
+- **BREAKING** (`nitinol-saga`): `SagaDeliveryScope` is withdrawn.
+
+  It rendered a delivery partition's key and argued its own injectivity and
+  namespace separation, both of which `OffsetScope` now owns. A caller that
+  needs the key a partition records under — to seed a position, or to read one
+  as an operator would — calls `SagaDeliveryId::offset_scope(partition)`, which
+  asks `OffsetScope::framework_owned` for it. The rendered text has changed
+  (`nitinol.saga-delivery.{id}.{partition}`), which is of no consequence given
+  that the table it was written to cannot be read either.
+
+  `SagaDeliveryId` itself stays, constraint-free, and is still a distinct
+  newtype from `ProjectionId`.
+
+- **BREAKING** (`nitinol-saga`): outbox push delivery is withdrawn, with no
+  replacement surface of its own.
+
+  Gone: `SagaEffect::tell` and `SagaEffect::tell_intent`, the `tells` field of
+  `SagaEffect::Persist`, `TellIntent`, `CrashRestartFactory` with
+  `SagaProps::with_crash_restart_factory` and
+  `SagaManagerProps::with_crash_restart_factory`, the outbox executor process
+  and its appender, `Saga::on_tell_failed`, `SagaContext::failed_tell_ids`, and
+  the `nitinol.saga.outbox` declaration with every arm of it.
+
+  What replaces it is the subscription-based delivery host that already ran
+  beside it: `Saga::dispatch` is the pure mapping from one of the saga's own
+  events to the commands it implies and whom each is addressed to, and
+  `SagaDeliveryProps` starts the host that carries them. A saga therefore
+  persists decisions and sets its own deadlines, and nothing else — "send this
+  command" is no longer expressible from inside `handle`, which is what moves
+  the knowledge of delivery (polling, the checkpoint, holding on a failure) out
+  of the saga and into one owner.
+
+  The old mechanism persisted a duplicate byte copy of a command as an outbox
+  marker and asked the user to hand-write a `CrashRestartFactory` to rebuild it
+  after a crash — an unnamed payload plus a user-written restore hook, with no
+  precedent in the rest of the framework. Nothing takes its place because
+  nothing needs to: the decision is durable before anything is delivered, and
+  the host re-derives what follows from it on every read.
+
+  There is deliberately **no** replacement hook for a transport failure.
+  Notifying a saga that a command could not be carried out had it reacting to
+  the framework's own plumbing; what a saga reacts to is a domain fact — the
+  answer, or its own deadline passing.
+
+- **BREAKING** (`nitinol-saga`): the persistent dead letter queue is withdrawn.
+  The contract is not redefined elsewhere; it is abolished.
+
+  Gone: `DeadLetterQueue` with `list` / `mark_processed` / `evict`,
+  `SagaManagerProxy::dead_letter_queue`, `DeadLetterEvent`, `DeadLetterEntry`,
+  `DeadLetterQuery`, `DeadLetterQueueError`, `SagaFailure`, `SourceContext`,
+  `EnqueuePolicy`, `EnqueueDecision`, `SagaProps::with_enqueue_policy` and
+  `with_dead_letter_subscriber` with their `SagaManagerProps` counterparts, the
+  disposition mechanism, and the `nitinol.saga.dead_letter` /
+  `nitinol.saga.dead_letter_disposition` declarations.
+
+  It was a shop of type-less bytes kept for ever, and appending to it was a
+  single point of failure on the saga's own startup and subscription path: a
+  refused dead-letter append stopped a saga that was otherwise healthy. In its
+  place, failure has two layers and each is observable where it belongs — see
+  `SagaDeliveryProps` for the host's half, and `Saga::handle` for the saga's.
+
+  `nitinol-runtime`'s `DeadLetterProcess` is a different mechanism — an
+  in-memory, best-effort, system-wide signal for undeliverable messages — and
+  is untouched.
+
+- **BREAKING** (`nitinol-eventsource`, `nitinol-saga`): removed every entry
+  point that named a store at the call, now that one provider supplies them:
+  `EventSourceSystemBuilder::with_event_store`, the `StoreSet` / `StoreUnset`
+  typestate markers, `EventSourceSystem::event_store`, the store-taking forms
+  of `spawn_aggregate` and `aggregate_props`, `spawn_aggregate_with_store`,
+  `aggregate_props_with_store`, `SagaDefaultStoreExt` with
+  `spawn_saga_with_store`, and the store-taking form of
+  `SagaSystemExt::spawn_saga`.
+
+  The replacement is `with_persistence` on the builder and the supplier-resolved
+  entry points beside it, so a stream cannot be half-moved: a per-spawn
+  override only took effect on the first resolve of an identity, which left two
+  activations writing to two worlds with nothing reporting it. Placing one
+  aggregate's or one saga's stream in a different destination is now a second
+  supplier, named as such, with `AggregateProps::new` or `SagaProps::new` built
+  on the store it distributes. A system's own store is reached through
+  `system.persistence().event_store()` where a raw handle is what a caller
+  needs.
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-eventsource`, `nitinol-saga`,
+  `nitinol-sqlx`): removed the supplier that was a trait over assembled `Arc`s,
+  now that the store itself carries its identity: the `PersistenceProvider`
+  trait and its `SnapshotStoreProvider` / `ProjectionCheckpointProvider` /
+  `DeliveryCheckpointProvider` sub-traits, the `Persistence` assembly with
+  `with_snapshot_store` / `with_projection_checkpoints` /
+  `with_delivery_checkpoints` / `with_checkpoints`, the
+  `SnapshotStoreProvided` / `ProjectionCheckpointsProvided` /
+  `DeliveryCheckpointsProvided` slot markers, `InMemoryPersistence` with
+  `Persistence::in_memory`, `EventSourceSystem::erase_persistence`, and
+  `nitinol-sqlx`'s `postgres_persistence` with `PostgresPersistence`.
+
+  The replacement is the `Store` / `CustomStore` / `PersistenceProvider` trio
+  in the Added entry: `PersistenceProvider::new(InMemoryStore::default())` for
+  the in-memory reference stores,
+  `PersistenceProvider::new(PostgresStore::new(pool)?)` for Postgres, and
+  `PersistenceProvider::new(CustomStore::builder().eventstore(e)…build())`
+  where handles are named one by one. `erase_store` replaces
+  `erase_persistence`, and `Unprovided` keeps its name and its meaning.
+
+  Wrapping each store in an `Arc` inside the supplier made identity the
+  caller's to establish: nothing stopped a store from being constructed twice
+  and nothing said which of the two a wiring point had. A store that is
+  `Clone`, with `PRV-1` read across that clone, is where the obligation
+  belongs.
+
+- **BREAKING** (`nitinol-saga`): removed `spawn_scheduler`. The resident
+  scheduler is started by type, through `ProcessSystem::spawn_resident`, and
+  `SchedulerProcess` is exported so a caller can name it.
+
+  A spawn function of its own started a timer core on every call, so wiring
+  two sagas meant either threading one proxy through the whole startup or
+  silently running two cores. `spawn_resident` keys on the type: however many
+  places ask, the first ask starts the one scheduler and every later ask
+  resolves it.
+
+  ```rust
+  // before
+  let scheduler = nitinol_saga::spawn_scheduler(&system).await;
+  ```
+
+  There is no caller-facing `after` for that snippet: `SagaProps::with_scheduler`
+  and `SagaManagerProps::with_scheduler` are themselves removed, and
+  `SchedulerProxy` is `pub(crate)` rather than exported.
+  `spawn_resident::<SchedulerProcess>()` is now called by the framework alone,
+  at every saga and manager spawn whose alphabet declares a
+  `#[subscribe(deadline)]` variant, so a saga author never names
+  `SchedulerProxy` and never decides whether to wire one in.
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-sqlx`): removed
+  `EventRegistry::from_linked` and `EventRegistry::from_entries` from the
+  public API. Building the registry a store serves its loads out of is the
+  framework's own business: it is built once for the process, out of what the
+  binary linked, and a store refers to it rather than constructing one.
+  `EventRegistry::resolve`, `EventRegistryEntry` and `EVENT_REGISTRY` are
+  unchanged, and a declaration still places its entry exactly as before.
+
+  A caller that held a registry of its own has nothing to replace it with and
+  needs nothing: `PostgresEventStore::new(pool)` takes the same argument and
+  still refuses to open when two declarations claim one canonical path.
+  `EventRegistryError` is now `Clone`, which is how a store reports a refusal
+  it was handed by reference.
+
+  Both names are reachable inside the framework through
+  `nitinol_persistence::__private`, where the conformance suites judge the
+  validation on its own; nothing there is a user surface or carries a stability
+  promise.
+
+- **BREAKING** (`nitinol-persistence`, `nitinol-contract`,
+  `nitinol-eventsource`): removed every part of the event identity that named
+  an enum arm — `Variant`, `TypeKey`, `EventType::{with_variant, variant,
+  type_key}`, `ParsedEventType::variant` with its
+  `from_struct_path` / `try_from_enum_arm_path` pair (one
+  `ParsedEventType::from_path` replaces both, because a path now has one
+  reading), `Event::variant` and `SystemEvent::variant`.
+
+  A row carries the path of the type that wrote it, so there is no second
+  identity for an arm to occupy. `#[derive(Event)]` no longer generates a
+  `variant()` match and places one registry entry rather than one per arm; a
+  hand-written `impl Event` or `SystemEvent` loses the method with it.
+  Dispatch that compared `type_key()` — the projector's handler lookup and the
+  saga's upstream subscription filter — compares the event type itself, which
+  is the same comparison now that an identity has no third component.
+
+  Replacing `event.variant()` at a write site means naming the declaration:
+  `<E as Event>::EVENT_TYPE`, which is what `appending_system_event` and both
+  persist paths now write into the column.
 
 - **BREAKING** (`nitinol-eventsource`, `nitinol`): removed the effectful
   decision contract — `nitinol_eventsource::Decider`, the `Effect<E>` ADT
@@ -501,3 +1951,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nitinol_eventsource::Snapshotable`. Implementors that overrode either method
   delete their overrides; callers of `SagaSnapshot` have no replacement until
   that extension trait lands.
+
+- **BREAKING** (`nitinol-saga`): the standalone saga spawn path is withdrawn,
+  and with it the second entry point into the manager.
+
+  Gone: `SagaSystemExt::spawn_saga`, `SagaSystemExt::saga_manager_props`,
+  `SagaDeliveryExt::saga_delivery_props`, `SagaSpawn`, `SagaProps`, `SagaProxy`
+  and `SagaManagerProps::subscribed_to`. What replaces every one of them is
+  named in the `host` / `observing` / `deliver` entry under *Changed*, which
+  also carries the call-by-call migration.
+
+  A standalone spawn was a mechanism for something that was never a second
+  kind of saga. "One resident instance" is what a `Saga::correlate` answering a
+  single id already means, so the builder, the typestate carrier and the handle
+  that served it were a parallel path to a result the manager reaches anyway —
+  and the binding typestate was written out three times to keep them in step.
+  There is one of each now, and the semantics that mattered are kept where they
+  belong: the degenerate case is documented on `SagaManagerProps`, and the
+  compile errors that pin binding completeness (a declared source left unbound,
+  a partial binding, a double binding, an undeclared source) moved onto
+  `host`'s own `spawn`.
+
+  `nitinol-saga` keeps `SagaManagerProps::new(store, producer)` as the explicit
+  form for a deployment whose instances journal into a destination of their
+  own. `SagaProcess` itself is untouched as the manager's child.
+
+  One crate-private consequence, listed because it withdraws a route rather
+  than a name: `ScheduleDelivery::ToTheInstance` is gone with the builder that
+  was the only thing to produce it. A deadline firing has one route — addressed
+  to the manager with the instance's `SagaId` — and that is the route that
+  restores a passivated instance before handing the firing over, which the
+  withdrawn one could not do.
+
+### Fixed
+
+- (`nitinol-saga`): a deadline firing is no longer closed out before the
+  decision it produced is durable, so a firing whose decision could not be
+  persisted is tried again instead of being lost.
+
+  The `fired` fact of a schedule is to a firing what the consumed position is to
+  an observed record — the row that says the input is dealt with — but it was
+  appended *before* the deadline arm's effect was interpreted, to keep a
+  same-name reset ordered as `Scheduled → Fired → (new) Scheduled` on the
+  stream. Replay folds a `fired` fact by name, so once it landed the deadline
+  was gone from the journal: a decision whose append then failed — a crash, or
+  simply the staged retries running out — left the firing settled, the decision
+  in no store, and the saga waiting on an input that was never coming. Deadlines
+  were the one input delivered at-most-once, and the only way a saga observes
+  that an answer never came.
+
+  The firing's effect is now interpreted first, and the `fired` fact is appended
+  after it, only when there is something left to close out. It is withheld where
+  the effect's append did not land — the schedule fact stays unfired, so a later
+  activation re-arms the deadline (at once, its due time being past) and decides
+  it again — where the arm re-set the same `TimerName` and that fact landed,
+  since replacing a schedule by name already supersedes the old deadline, and
+  where the saga terminated on the firing. A same-name reset is judged by the
+  schedule fact that actually became durable rather than by what the effect
+  asked for, so a reset the store refused does not pass for one that took
+  effect.
+
+  Firing is therefore at-least-once: a stop between the decision landing and the
+  `fired` fact landing repeats the firing, and a deadline arm has to tolerate
+  seeing the same one twice. Nothing is retried while the failing incarnation is
+  still alive; the retry is a later activation.
+
+  Three firings that previously vanished are now settled once, matching how the
+  upstream path settles a record it cannot decide from: one the deadline arm
+  returns `Err` for, one whose schedule fact names a message identity the
+  alphabet no longer declares, and one whose effect writes nothing. Each used to
+  leave no `fired` fact and so was re-armed and repeated by every later
+  activation; each now leaves that fact and nothing else.
+
+- **BREAKING** (`nitinol-eventsource`, `nitinol-persistence`): a projector no
+  longer lets its subscription move past an event it failed to apply. Under
+  `AtLeastOnce` and `ExactlyOnce`, the delivery engine already declined to
+  advance the checkpoint on a failed application, but `ProjectorProcess::recv`
+  returned `Ok(())` regardless — its `Receive<LoadedEvent>::Error` was
+  `Infallible`, so it had no way to say otherwise — and the `DirectPoller`
+  advanced its cursor on that `Ok`. The failed event was then overtaken by the
+  next one, which saved a higher checkpoint, and the failed event was never
+  redelivered: a restart skipped it too, because it now sat below the
+  checkpoint. Events were lost permanently and silently.
+
+  `recv` now reports an unapplied event by returning
+  `error::ProjectionNotSettled`, which is what the poller already reads as
+  "hold the cursor". The projector is spawned with
+  `SupervisionStrategy::Resume` so that reporting a failure does not also stop
+  the projector and cascade-stop the poller that owes the retry.
+
+  The consequence is deliberate and worth planning for: under `AtLeastOnce` and
+  `ExactlyOnce`, an event that can never succeed — an undecodable payload, a
+  record the read model always rejects — now stops that projection rather than
+  being dropped from it. It is retried, and warned about, once per poll
+  interval, and nothing behind it is applied. `AtMostOnce` is unchanged: it
+  saves the checkpoint before the handler and still moves on from a failed one.
+
+  Two cases that previously had no stated answer now have one. `ExactlyOnce`
+  **without** a `TxProvider` takes the `Result` of `project()` as the whole
+  account of what happened — `Err` holds the cursor — while the framework still
+  saves no checkpoint in that mode. A failed `TxProvider::commit` is read as
+  **uncommitted**: `commit` consumes the transaction and answers with a single
+  `Err`, so a rejected commit and a commit whose reply was lost are
+  indistinguishable, and the reading that cannot lose the event is the one
+  taken. An `ExactlyOnce` projector therefore degrades to at-least-once across
+  an unknown commit.
+
+  `Receive<LoadedEvent>` for `ProjectorProcess` changes its `Error` associated
+  type from `std::convert::Infallible` to
+  `nitinol_eventsource::error::ProjectionNotSettled`. Code that spawns
+  projectors through `ProjectorProps` is unaffected; code that named that
+  associated type, or that called `ask` on a projector proxy and matched on the
+  resulting error, sees the new type.

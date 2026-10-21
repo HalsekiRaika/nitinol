@@ -6,11 +6,15 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
-use nitinol_persistence::store::{
-    CheckpointStore, EventStore, InMemoryCheckpointStore, InMemoryEventStore,
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::{
+    codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps,
 };
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::{
+    EventStore, InMemoryEventStore, InMemoryOffsetStore, OffsetScope, OffsetStore,
+};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 #[derive(Clone)]
@@ -18,6 +22,8 @@ struct Evt;
 
 impl Event for Evt {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Evt"));
+
+    type Codec = UnitCodec;
 }
 
 struct UnitCodec;
@@ -89,11 +95,18 @@ async fn wait_for_count(counter: &Arc<AtomicUsize>, notify: &Arc<Notify>, expect
 }
 
 #[tokio::test]
-async fn catchup_all_events_processed_from_empty_checkpoint() {
-    let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+async fn catchup_all_events_processed_from_empty_offset() {
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("cu-all-agg");
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
 
     for seq in 1..=3 {
         append_evt(&event_store, &agg_id, seq).await;
@@ -106,17 +119,14 @@ async fn catchup_all_events_processed_from_empty_checkpoint() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("cu-all"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || SequenceRecordingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("cu-all"), move || {
+        SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+        }
+    })
+    .with_event::<Evt>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -130,26 +140,33 @@ async fn catchup_all_events_processed_from_empty_checkpoint() {
     assert_eq!(
         seen,
         vec![1, 2, 3],
-        "all 3 events must be projected in order when there is no checkpoint"
+        "all 3 events must be projected in order when there is no offset"
     );
 }
 
 #[tokio::test]
-async fn catchup_skips_events_before_checkpoint() {
-    let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+async fn catchup_skips_events_before_offset() {
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("cu-skip-agg");
     let projection_id = ProjectionId::new("cu-skip");
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
 
     for seq in 1..=3 {
         append_evt(&event_store, &agg_id, seq).await;
     }
 
-    checkpoint_store
-        .save(&projection_id, 2, None)
+    offset_store
+        .save(&OffsetScope::from(&projection_id), 2, None)
         .await
-        .expect("pre-save checkpoint must succeed");
+        .expect("pre-save offset must succeed");
 
     let sequences = Arc::new(Mutex::new(Vec::<u64>::new()));
     let count = Arc::new(AtomicUsize::new(0));
@@ -158,17 +175,12 @@ async fn catchup_skips_events_before_checkpoint() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(
-        projection_id,
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || SequenceRecordingProjector {
-            sequences: Arc::clone(&seq_c),
-            count: Arc::clone(&count_c),
-            notify: Arc::clone(&notify_c),
-        },
-    )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    let _proxy = ProjectorProps::new(projection_id, move || SequenceRecordingProjector {
+        sequences: Arc::clone(&seq_c),
+        count: Arc::clone(&count_c),
+        notify: Arc::clone(&notify_c),
+    })
+    .with_event::<Evt>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;
@@ -183,32 +195,35 @@ async fn catchup_skips_events_before_checkpoint() {
     assert_eq!(
         seen,
         vec![3],
-        "only the event after the checkpoint (seq=3) must be projected"
+        "only the event after the offset (seq=3) must be projected"
     );
 }
 
 #[tokio::test]
 async fn catchup_empty_store_project_never_called() {
-    let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
+
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store)
+                .projection_offsets(offset_store)
+                .build(),
+        ))
+        .build();
 
     let count = Arc::new(AtomicUsize::new(0));
 
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("cu-empty"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        {
-            let count_c = Arc::clone(&count);
-            move || SequenceRecordingProjector {
-                sequences: Arc::new(Mutex::new(Vec::new())),
-                count: Arc::clone(&count_c),
-                notify: Arc::new(Notify::new()),
-            }
-        },
-    )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+    let _proxy = ProjectorProps::new(ProjectionId::new("cu-empty"), {
+        let count_c = Arc::clone(&count);
+        move || SequenceRecordingProjector {
+            sequences: Arc::new(Mutex::new(Vec::new())),
+            count: Arc::clone(&count_c),
+            notify: Arc::new(Notify::new()),
+        }
+    })
+    .with_event::<Evt>()
     .catchup_from_global()
     .spawn(&system)
     .await;
@@ -224,11 +239,18 @@ async fn catchup_empty_store_project_never_called() {
 
 #[tokio::test]
 async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
-    let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_a = AggregateId::new("cu-multi-a");
     let agg_b = AggregateId::new("cu-multi-b");
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
 
     append_evt(&event_store, &agg_a, 1).await;
     append_evt(&event_store, &agg_b, 1).await;
@@ -242,17 +264,14 @@ async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("cu-multi"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || SequenceRecordingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("cu-multi"), move || {
+        SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+        }
+    })
+    .with_event::<Evt>()
     .catchup_from_global()
     .spawn(&system)
     .await;
@@ -268,10 +287,17 @@ async fn catchup_multiple_aggregates_projected_in_global_sequence_order() {
 
 #[tokio::test]
 async fn catchup_then_live_append_is_projected_via_durable_stream() {
-    let system = ProcessSystem::new().await;
-    let event_store = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let event_store = InMemoryEventStore::default();
+    let offset_store = InMemoryOffsetStore::default();
     let agg_id = AggregateId::new("cu-then-live-agg");
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(event_store.clone())
+                .projection_offsets(offset_store.clone())
+                .build(),
+        ))
+        .build();
 
     for seq in 1..=2 {
         append_evt(&event_store, &agg_id, seq).await;
@@ -284,17 +310,14 @@ async fn catchup_then_live_append_is_projected_via_durable_stream() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("cu-then-live"),
-        Arc::clone(&event_store) as Arc<dyn EventStore>,
-        Arc::clone(&checkpoint_store),
-        move || SequenceRecordingProjector {
+    let _proxy = ProjectorProps::new(ProjectionId::new("cu-then-live"), move || {
+        SequenceRecordingProjector {
             sequences: Arc::clone(&seq_c),
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
-    .with_event::<Evt>(Arc::new(UnitCodec))
+        }
+    })
+    .with_event::<Evt>()
     .catchup_from_aggregate(agg_id.clone())
     .spawn(&system)
     .await;

@@ -4,7 +4,7 @@
 use nitinol::eventsource::Event;
 
 #[derive(Clone, Event)]
-#[event(family = "u")]
+#[event(family = "u", codec = ())]
 union Bad {
     a: u32,
     b: u32,

@@ -1,27 +1,41 @@
-// Integration tests for SnapshotPersistor actor.
+// Integration tests for the SnapshotPersistor process.
 //
-// SnapshotPersistor is a dedicated persistence actor that owns Arc<dyn SnapshotStore>.
-// AggregateProcess communicates with it via SnapshotPersistorRef, never holding the
-// store directly — satisfying the Phase 2 lockless messaging design.
+// SnapshotPersistor is a dedicated persistence process that owns Album.
+// AggregateProcess communicates with it via SnapshotPersistorProxy, never holding
+// the store directly — satisfying the Phase 2 lockless messaging design.
 //
-// Compile errors are expected until SnapshotPersistor and SnapshotPersistorRef are
-// implemented in nitinol-eventsource/src/process/persistence/.
-
-use std::sync::Arc;
+// A persistor is not started by hand: the system whose store holds a snapshot
+// slot distributes the one process over it, and `system.snapshot_persistor()` is
+// how every caller — an activation recovering from a snapshot, or a test — asks
+// for it.
 
 use bytes::Bytes;
-use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
-use nitinol_persistence::store::InMemorySnapshotStore;
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::SnapshotPersistorProxy;
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::{Album, InMemoryEventStore, InMemorySnapshotStore};
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
 use nitinol_runtime::ProcessSystem;
 
 // Test helpers
 
-/// Spawns a fresh ProcessSystem with an InMemorySnapshotStore-backed SnapshotPersistor.
-async fn setup() -> (ProcessSystem, SnapshotPersistorProxy) {
-    let system = ProcessSystem::new().await;
-    let store = Arc::new(InMemorySnapshotStore::default());
-    let snapshot_ref = SnapshotPersistor::spawn(&system, store).await;
+/// A system over an InMemorySnapshotStore, and the one persistor it distributes.
+///
+/// The system is handed back because it is what keeps that process reachable:
+/// its node holds the cell the persistor was started in.
+async fn setup() -> (
+    EventSourceSystem<CustomStore<Album>>,
+    SnapshotPersistorProxy,
+) {
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .snapshot(InMemorySnapshotStore::default())
+                .build(),
+        ))
+        .build();
+    let snapshot_ref = system.snapshot_persistor().await;
     (system, snapshot_ref)
 }
 
@@ -34,9 +48,9 @@ fn make_snapshot(aggregate_id: &AggregateId, sequence: u64, value: u64) -> Persi
     }
 }
 
-// SaveSnapshot + LoadLatestSnapshot: 正常系
+// SaveSnapshot + LoadLatestSnapshot: the ordinary path
 
-/// SaveSnapshot 後に LoadLatestSnapshot で同じスナップショットが取得できる。
+/// After SaveSnapshot, LoadLatestSnapshot returns that same snapshot.
 #[tokio::test]
 async fn snapshot_persistor_save_and_load_latest() {
     // Given
@@ -67,10 +81,10 @@ async fn snapshot_persistor_save_and_load_latest() {
     );
 }
 
-// LoadLatestSnapshot: スナップショットが存在しない場合は None
+// LoadLatestSnapshot: None where no snapshot exists
 
-/// スナップショットを保存していない aggregate_id に対して
-/// LoadLatestSnapshot は None を返す。
+/// For an aggregate_id no snapshot was saved for, LoadLatestSnapshot
+/// returns None.
 #[tokio::test]
 async fn snapshot_persistor_load_when_no_snapshot_returns_none() {
     // Given
@@ -89,10 +103,10 @@ async fn snapshot_persistor_load_when_no_snapshot_returns_none() {
     );
 }
 
-// LoadLatestSnapshot: 複数回保存後は最大シーケンスを返す
+// LoadLatestSnapshot: the highest sequence after several saves
 
-/// sequence=3 と sequence=5 を保存した後、
-/// LoadLatestSnapshot は sequence=5 を返す。
+/// After saving sequence=3 and sequence=5, LoadLatestSnapshot returns
+/// sequence=5.
 #[tokio::test]
 async fn snapshot_persistor_load_latest_returns_highest_sequence() {
     // Given: save two snapshots in ascending sequence order
@@ -126,9 +140,9 @@ async fn snapshot_persistor_load_latest_returns_highest_sequence() {
     );
 }
 
-// LoadLatestSnapshot: 異なる aggregate_id のスナップショットが混在しない
+// LoadLatestSnapshot: snapshots of different aggregate_ids do not mix
 
-/// 2 つの aggregate_id に保存したスナップショットは互いに独立している。
+/// Snapshots saved under two aggregate_ids are independent of each other.
 #[tokio::test]
 async fn snapshot_persistor_load_isolates_by_aggregate_id() {
     // Given: save snapshots for id_a (value=10, seq=2) and id_b (value=20, seq=4)
@@ -171,10 +185,10 @@ async fn snapshot_persistor_load_isolates_by_aggregate_id() {
     assert_eq!(snap_b.sequence, 4, "id_b snapshot must have sequence=4");
 }
 
-// SaveSnapshot: 上書き後に load_latest が最新を返す
+// SaveSnapshot: load_latest returns the newest after an overwrite
 
-/// 同じ aggregate_id に対して sequence を増やして上書き保存すると、
-/// 次の LoadLatestSnapshot は新しい値を返す。
+/// Saving over the same aggregate_id with a higher sequence makes the next
+/// LoadLatestSnapshot return the newer value.
 #[tokio::test]
 async fn snapshot_persistor_overwrite_returns_newer_snapshot() {
     // Given: save an initial snapshot, then overwrite with a newer one

@@ -19,13 +19,17 @@ async fn runtime_feature_exposes_process_system() {
 
 /// When the "persistence" feature is enabled, nitinol::persistence types must
 /// be accessible.
+///
+/// The stream key an aggregate is persisted under is the identifier this layer
+/// owns. A projection's identifier is not: it names a consumer
+/// `nitinol-eventsource` owns, and it is reached through that facade — see
+/// `eventsource_feature_exposes_the_projection_identifier`.
 #[cfg(feature = "persistence")]
 #[test]
 fn persistence_feature_exposes_id_types() {
-    use nitinol::persistence::{AggregateId, ProjectionId};
+    use nitinol::persistence::AggregateId;
 
     let _agg = AggregateId::new("test");
-    let _proj = ProjectionId::new("test");
 }
 
 // Feature: eventsource
@@ -36,7 +40,8 @@ fn persistence_feature_exposes_id_types() {
 #[test]
 fn eventsource_feature_exposes_aggregate_and_projection() {
     // These types come from nitinol::eventsource re-export
-    use nitinol::eventsource::{Aggregate, AggregateProps, Event, ProjectorProps};
+    use nitinol::contract::Codec;
+    use nitinol::eventsource::{Aggregate, AggregateProps, Event, Never, ProjectorProps};
     // EventType lives in nitinol-persistence; the eventsource feature transitively
     // enables the persistence feature, so nitinol::persistence is re-exported.
     use nitinol::persistence::{EventType, Family, TypeName};
@@ -44,14 +49,31 @@ fn eventsource_feature_exposes_aggregate_and_projection() {
     // Minimal dummy types satisfying the trait bounds required by AggregateProps<A: Aggregate>.
     #[derive(Clone)]
     struct DummyEvent;
+
+    struct DummyCodec;
+    impl Codec<DummyEvent> for DummyCodec {
+        type Error = std::convert::Infallible;
+
+        fn encode(_event: &DummyEvent) -> Result<bytes::Bytes, Self::Error> {
+            Ok(bytes::Bytes::new())
+        }
+
+        fn decode(_payload: &[u8]) -> Result<DummyEvent, Self::Error> {
+            Ok(DummyEvent)
+        }
+    }
+
     impl Event for DummyEvent {
         const EVENT_TYPE: EventType = EventType::new(Family::new("dummy"), TypeName::new("event"));
+
+        type Codec = DummyCodec;
     }
 
     #[derive(Default)]
     struct DummyAggregate;
     impl Aggregate for DummyAggregate {
         type Event = DummyEvent;
+        type Recover = Never;
         fn apply(&mut self, _event: DummyEvent) {}
     }
 
@@ -60,17 +82,43 @@ fn eventsource_feature_exposes_aggregate_and_projection() {
     let _ = std::marker::PhantomData::<ProjectorProps<(), ()>>;
 }
 
+/// When the "eventsource" feature is enabled, a projection's identifier must be
+/// reachable through the umbrella — from the facade root and from the
+/// `projection` module both.
+///
+/// The facade is an explicit re-export list rather than a glob, so the move
+/// from `nitinol-persistence` to `nitinol-eventsource` has to be followed here:
+/// an umbrella user whose `nitinol::persistence::ProjectionId` stopped
+/// resolving and who had nothing to reach instead could not name a projection
+/// at all.
+#[cfg(feature = "eventsource")]
+#[test]
+fn eventsource_feature_exposes_the_projection_identifier() {
+    use nitinol::eventsource::ProjectionId;
+
+    let through_the_root = ProjectionId::new("test");
+    let through_the_module: nitinol::eventsource::projection::ProjectionId =
+        through_the_root.clone();
+
+    assert_eq!(
+        through_the_module.as_str(),
+        through_the_root.as_str(),
+        "the facade root and the projection module must name one type"
+    );
+}
+
 // Feature: eventsource — SystemEvent system must NOT be exposed at umbrella root
 
 /// Regression guard: the umbrella facade (`pub mod eventsource`) must expose all
-/// user-facing root items and sub-modules, while deliberately NOT including
-/// `SystemEvent`, `appending_system_event`, or `SystemEventDecodeError`
-/// (excluded from the umbrella re-export).
+/// user-facing root items and sub-modules, while deliberately NOT including the
+/// framework-internal items — `SystemEvent`, `SystemEventDecodeError`,
+/// `DeclaresEventType`, `MatchesEventType` and `EventAppending` (excluded from
+/// the umbrella re-export).
 ///
 /// The test body is a compile-time check only: it passes if every import
 /// resolves successfully.  No runtime assertions are needed because the
-/// absence of the three framework-internal items is enforced structurally by
-/// the facade's explicit re-export list.
+/// absence of the framework-internal items is enforced structurally by the
+/// facade's explicit re-export list.
 #[cfg(feature = "eventsource")]
 #[test]
 fn eventsource_facade_exposes_user_api_without_system_event() {
@@ -87,8 +135,6 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
         AggregateTellTarget,
         // errors
         AskError,
-        CodecSet,
-        CodecUnset,
         // durable stream
         CursorSet,
         CursorUnset,
@@ -153,12 +199,40 @@ fn eventsource_error_facade_exposes_user_facing_types() {
     // in src/lib.rs would catch it at `cargo test --doc`.
 }
 
-// Default: no features enabled → nothing is re-exported
+// Feature: postgres
 
-/// With no features enabled, the umbrella crate must still compile (empty lib.rs).
-/// This is the zero-dependency default, matching Tokio's approach.
+/// When the "postgres" feature is enabled, the sqlx provider must be reachable
+/// through the umbrella crate, and its store must be usable as the framework's
+/// `Journal` handle.
+///
+/// Without the feature the provider is not part of the build at all, which is
+/// what `optional = true` on the dependency gives: there is nothing to import
+/// and this test is not compiled.
+#[cfg(feature = "postgres")]
 #[test]
-fn umbrella_compiles_with_no_features_enabled() {
-    // Nothing to import: this test just verifies the crate builds with no features.
-    // The test body is intentionally empty.
+fn postgres_feature_exposes_the_sqlx_event_store() {
+    use nitinol::persistence::__private::linked_event_registry;
+    use nitinol::persistence::store::Journal;
+    use nitinol::persistence::EventRegistryError;
+    use nitinol::sqlx::sqlx::PgPool;
+    use nitinol::sqlx::PostgresEventStore;
+
+    // Compile-time check: what the provider builds is what the framework plugs in.
+    fn plugged_in(store: PostgresEventStore) -> Journal {
+        Journal::from(store)
+    }
+    let _: fn(PostgresEventStore) -> Journal = plugged_in;
+
+    // A store is opened over a pool alone: the event types it serves are the
+    // ones its binary linked, so there is no registry for a caller to pass in
+    // — and no registry for a caller to forget to pass in, which is what left
+    // a saga's own records unrestorable.
+    let _: fn(PgPool) -> Result<PostgresEventStore, EventRegistryError> = PostgresEventStore::new;
+
+    let registry = linked_event_registry()
+        .expect("a build whose linked event types claim distinct canonical paths builds one");
+    assert!(
+        registry.resolve("dummy.event").is_none(),
+        "collection answers for the event types the build linked, and nothing declares this one"
+    );
 }

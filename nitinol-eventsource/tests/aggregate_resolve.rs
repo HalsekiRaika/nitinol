@@ -24,10 +24,11 @@ use nitinol_eventsource::error::PersistError;
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
-    Query, SnapshotPersistor, Snapshotable,
+    Latest, Never, Query, Snapshotable,
 };
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore, InMemorySnapshotStore};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -39,6 +40,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("resolve"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 // Fixtures: aggregates
@@ -50,6 +53,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -65,6 +69,7 @@ struct SnapshottingCounter {
 
 impl Aggregate for SnapshottingCounter {
     type Event = Incremented;
+    type Recover = Latest;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -74,11 +79,13 @@ impl Aggregate for SnapshottingCounter {
 impl Snapshotable for SnapshottingCounter {
     type Snapshot = u64;
 
+    type Codec = JsonCodec;
+
     fn capture(&self) -> u64 {
         self.value
     }
 
-    fn restore(snapshot: u64) -> Self {
+    fn recover(snapshot: u64) -> Self {
         Self { value: snapshot }
     }
 }
@@ -117,7 +124,6 @@ impl Decider<Increment> for SnapshottingCounter {
 
 // Fixtures: codec
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -135,7 +141,7 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 // Helpers
 
 /// Stream sequences stored under `id`, in ascending order.
-async fn stored_sequences(store: &Arc<dyn EventStore>, id: &AggregateId) -> Vec<u64> {
+async fn stored_sequences(store: &Journal, id: &AggregateId) -> Vec<u64> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(id))
         .await
@@ -188,10 +194,14 @@ const CONCURRENT_RESOLVERS: usize = 16;
 async fn concurrent_resolve_produces_a_single_writer() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("resolve-single-flight");
     let barrier = Arc::new(Barrier::new(CONCURRENT_RESOLVERS));
@@ -255,10 +265,14 @@ async fn concurrent_resolve_produces_a_single_writer() {
 async fn second_spawn_aggregate_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("resolve-second-spawn");
 
@@ -297,10 +311,14 @@ async fn second_spawn_aggregate_addresses_the_same_aggregate() {
 async fn aggregate_props_spawn_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("resolve-props-path");
 
@@ -308,10 +326,7 @@ async fn aggregate_props_spawn_addresses_the_same_aggregate() {
     spawned.ask(Increment).await.expect("first dispatch");
 
     // When
-    let from_props = system
-        .aggregate_props::<Counter>(id.clone())
-        .spawn(system.process_system())
-        .await;
+    let from_props = system.aggregate_props::<Counter>(id.clone()).spawn().await;
     from_props
         .ask(Increment)
         .await
@@ -329,42 +344,44 @@ async fn aggregate_props_spawn_addresses_the_same_aggregate() {
     );
 }
 
-/// The snapshot-persistor step of the props builder must not drop the resolve
-/// wiring: `with_snapshot_persistor` rebuilds the builder, and a field lost
-/// there would silently send this one entry point back to per-call activation.
+/// An aggregate that recovers from the newest snapshot must resolve through the
+/// same registry as one that replays its whole stream.
+///
+/// `Recover = Latest` is what makes the activation ask its system for a
+/// snapshot persistor, and those recovery ingredients travel with the
+/// activation the props build — so a resolve wiring lost alongside them would
+/// silently send this one entry point back to per-call activation.
 #[tokio::test]
-async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() {
+async fn aggregate_props_for_a_recovering_aggregate_addresses_the_same_aggregate() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .snapshot(InMemorySnapshotStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(persistence)
         .build();
-    let snapshot_ref = SnapshotPersistor::spawn(
-        system.process_system(),
-        Arc::new(InMemorySnapshotStore::default()),
-    )
-    .await;
     let id = AggregateId::new("resolve-props-snapshot");
 
     let first = system
         .aggregate_props::<SnapshottingCounter>(id.clone())
-        .with_snapshot_persistor(snapshot_ref.clone(), system.codec::<u64>())
-        .spawn(system.process_system())
+        .spawn()
         .await;
     first.ask(Increment).await.expect("first dispatch");
 
     // When
     let second = system
         .aggregate_props::<SnapshottingCounter>(id.clone())
-        .with_snapshot_persistor(snapshot_ref, system.codec::<u64>())
-        .spawn(system.process_system())
+        .spawn()
         .await;
     second
         .ask(Increment)
         .await
-        .expect("a snapshot-configured props must dispatch to the same aggregate");
+        .expect("a snapshot-recovering props must dispatch to the same aggregate");
     first
         .ask(Increment)
         .await
@@ -374,7 +391,7 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
     assert_eq!(
         stored_sequences(&store, &id).await,
         vec![1, 2, 3],
-        "configuring a snapshot persistor must not restore per-call activation"
+        "an aggregate that recovers from a snapshot must not restore per-call activation"
     );
 }
 
@@ -382,9 +399,10 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
 
 /// R-5: a reference stays valid across the death of the activation it reached.
 ///
-/// A rival writer is spawned through the raw `AggregateProps` path, which keeps
-/// activating per call, so it can take the stream away from the resolved
-/// reference's activation.  The resolved activation then loses an append on a
+/// A rival writer is spawned on a second system over the same journal, which
+/// resolves through an aggregate registry of its own, so it can take the stream
+/// away from the resolved reference's activation.  The resolved activation then
+/// loses an append on a
 /// non-genesis sequence, stops because of it, and the *very next* dispatch through the
 /// same reference — no retry loop — must reach a re-activated aggregate that
 /// replayed everything the rival wrote: the proxy evicts the dying activation
@@ -393,16 +411,22 @@ async fn aggregate_props_with_snapshot_persistor_addresses_the_same_aggregate() 
 async fn reference_survives_the_death_of_its_activation() {
     // Given
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(Arc::clone(&store))
+        .with_persistence(persistence)
         .build();
     let id = AggregateId::new("resolve-self-heal");
 
-    let rival = AggregateProps::<Counter>::new(id.clone(), Arc::clone(&store))
-        .with_codec(system.codec::<Incremented>())
-        .spawn(system.process_system())
+    let rival_system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store.clone()))
+        .build();
+    let rival = AggregateProps::<Counter>::new(id.clone())
+        .spawn(&rival_system)
         .await;
     rival
         .ask(Increment)

@@ -9,19 +9,20 @@
 // Every error asserted on here is produced by a real dispatch, so the mapping is
 // checked against the errors the framework actually builds.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::error::PersistError;
+use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
     codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
-    Query, Retryability,
+    Never, Query, Retryability,
 };
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -33,6 +34,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("retryability"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 // Fixtures: aggregate
@@ -44,6 +47,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -94,7 +98,6 @@ impl Query<GetCount> for Counter {
 
 // Fixtures: codec
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -111,30 +114,47 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 
 // Helpers
 
-/// Activate one writer for `id` on `store` through the raw props path, which
-/// activates per call.
+/// A system distributing `store`, with an aggregate registry of its own.
+///
+/// One registry resolves an identity to one activation, so a second writer of
+/// one stream is a second system over the same store.
+async fn system_over(store: &Journal) -> EventSourceSystem<Journal> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store.clone()))
+        .build()
+}
+
+/// Activate one writer for `id` on `system`.
 async fn spawn_writer(
-    ps: &ProcessSystem,
+    system: &EventSourceSystem<Journal>,
     id: &AggregateId,
-    store: &Arc<dyn EventStore>,
 ) -> AggregateProxy<Counter> {
-    AggregateProps::<Counter>::new(id.clone(), Arc::clone(store))
-        .with_codec(Arc::new(JsonCodec))
-        .spawn(ps)
+    AggregateProps::<Counter>::new(id.clone())
+        .spawn(system)
         .await
 }
 
 /// Put two writers on one stream and return the error the one that fell behind
-/// receives for a non-genesis append.
+/// receives for a non-genesis append, together with a reference still
+/// addressing the writer that lost.
+///
+/// The reference the conflict is reported to treats losing a stream as an
+/// invalidation and resolves a fresh activation on its next dispatch, so it
+/// cannot be used to reach the activation that stopped.  A second reference to
+/// the same identity on the same system is taken before the race and holds the
+/// activation it first reached, which is how a dispatch to a stopped activation
+/// is reached at all.
 async fn non_genesis_conflict(
-    ps: &ProcessSystem,
     id: &AggregateId,
-    store: &Arc<dyn EventStore>,
+    store: &Journal,
 ) -> (AggregateProxy<Counter>, AskError<std::convert::Infallible>) {
-    let winner = spawn_writer(ps, id, store).await;
+    let winning = system_over(store).await;
+    let losing = system_over(store).await;
+
+    let winner = spawn_writer(&winning, id).await;
     winner.ask(Increment).await.expect("genesis append");
 
-    let loser = spawn_writer(ps, id, store).await;
+    let loser = spawn_writer(&losing, id).await;
     // A spawn returns before `on_start` has replayed, and an activation answers
     // user messages only afterwards — so this query pins the loser at sequence 1
     // and makes the append it is about to lose a non-genesis one.
@@ -147,6 +167,17 @@ async fn non_genesis_conflict(
         "the loser must be parked after the genesis event before the winner moves on"
     );
 
+    let stopped = losing.aggregate_proxy::<Counter>(id.clone());
+    let addressed = stopped
+        .exec(GetCount)
+        .await
+        .expect("the second reference must reach the activation that is about to lose");
+    assert_eq!(
+        addressed, 1,
+        "the second reference must be addressing the writer that is about to lose, not a \
+         second activation of it"
+    );
+
     winner
         .ask(Increment)
         .await
@@ -156,7 +187,7 @@ async fn non_genesis_conflict(
         .ask(Increment)
         .await
         .expect_err("a writer that fell behind must be rejected by the store");
-    (loser, err)
+    (stopped, err)
 }
 
 // R-5-TRANSIENT
@@ -166,12 +197,11 @@ async fn non_genesis_conflict(
 #[tokio::test]
 async fn sequence_conflict_is_transient() {
     // Given
-    let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("retryability-conflict");
 
     // When
-    let (_loser, err) = non_genesis_conflict(&ps, &id, &store).await;
+    let (_loser, err) = non_genesis_conflict(&id, &store).await;
 
     // Then
     assert!(
@@ -193,12 +223,12 @@ async fn sequence_conflict_is_transient() {
 #[tokio::test]
 async fn dispatch_to_a_stopped_activation_is_transient() {
     // Given
-    let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
     let id = AggregateId::new("retryability-stopped");
-    let (loser, _conflict) = non_genesis_conflict(&ps, &id, &store).await;
+    let (loser, _conflict) = non_genesis_conflict(&id, &store).await;
 
-    // When: keep dispatching to the pinned reference until the stop lands
+    // When: keep dispatching to the reference that still addresses the writer
+    // that lost, until the stop lands
     let err = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match loser.ask(Increment).await {
@@ -228,15 +258,11 @@ async fn dispatch_to_a_stopped_activation_is_transient() {
 #[tokio::test]
 async fn decider_rejection_is_permanent() {
     // Given
-    let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let proxy = AggregateProps::<Counter>::new(
-        AggregateId::new("retryability-rejection"),
-        Arc::clone(&store),
-    )
-    .with_codec(Arc::new(JsonCodec))
-    .spawn(&ps)
-    .await;
+    let store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(&store).await;
+    let proxy = AggregateProps::<Counter>::new(AggregateId::new("retryability-rejection"))
+        .spawn(&system)
+        .await;
 
     // When
     let err = proxy
@@ -262,12 +288,13 @@ async fn decider_rejection_is_permanent() {
 #[tokio::test]
 async fn already_created_is_permanent() {
     // Given: both writers address the genesis sequence
-    let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let store = Journal::from(InMemoryEventStore::default());
+    let creating_system = system_over(&store).await;
+    let redelivering_system = system_over(&store).await;
     let id = AggregateId::new("retryability-already-created");
 
-    let creator = spawn_writer(&ps, &id, &store).await;
-    let redelivered = spawn_writer(&ps, &id, &store).await;
+    let creator = spawn_writer(&creating_system, &id).await;
+    let redelivered = spawn_writer(&redelivering_system, &id).await;
     let replayed = redelivered
         .exec(GetCount)
         .await

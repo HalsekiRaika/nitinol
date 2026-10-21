@@ -11,11 +11,14 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct OrderPlaced {
@@ -27,6 +30,7 @@ impl Event for OrderPlaced {
         Family::new("saga.ctx.upstream"),
         TypeName::new("OrderPlaced"),
     );
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,6 +43,17 @@ impl Event for ReservationRequested {
         Family::new("saga.ctx.upstream"),
         TypeName::new("ReservationRequested"),
     );
+    type Codec = JsonCodec;
+}
+
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+// The observed payload is decoded and delivered as the variant it belongs to;
+// what this saga decides does not read it, which `dead_code` cannot tell apart
+// from a field nothing fills.
+#[allow(dead_code)]
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
 }
 
 #[derive(Debug, Clone)]
@@ -61,20 +76,17 @@ const CAPTURING_SAGA_ID: &str = "saga-ctx-upstream-1";
 
 #[async_trait]
 impl Saga for CapturingSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(CAPTURING_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        _event: Self::SubscribedEvent,
+        _input: Self::Subscribe,
         ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
         self.captured
@@ -92,12 +104,7 @@ impl Saga for CapturingSaga {
     }
 }
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -154,39 +161,27 @@ async fn wait_for_count(
 
 #[tokio::test]
 async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-upstream-order");
 
-    append_order_placed(&upstream_store, &order_id, 1, "SKU-1").await;
+    append_order_placed(&journal, &order_id, 1, "SKU-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<CapturingSaga>::new(move |_components| CapturingSaga {
+        captured: Arc::clone(&captured_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     wait_for_count(&captured, &notify, 1).await;
 
@@ -202,41 +197,29 @@ async fn saga_context_exposes_upstream_aggregate_id_from_envelope() {
 
 #[tokio::test]
 async fn saga_context_exposes_upstream_sequence_from_envelope() {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-upstream-seq-order");
 
-    append_order_placed(&upstream_store, &order_id, 1, "S-1").await;
-    append_order_placed(&upstream_store, &order_id, 2, "S-2").await;
-    append_order_placed(&upstream_store, &order_id, 3, "S-3").await;
+    append_order_placed(&journal, &order_id, 1, "S-1").await;
+    append_order_placed(&journal, &order_id, 2, "S-2").await;
+    append_order_placed(&journal, &order_id, 3, "S-3").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<CapturingSaga>::new(move |_components| CapturingSaga {
+        captured: Arc::clone(&captured_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     wait_for_count(&captured, &notify, 3).await;
 
@@ -255,39 +238,27 @@ async fn saga_context_exposes_upstream_sequence_from_envelope() {
 async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
     let started = jiff::Timestamp::now();
 
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-now-order");
 
-    append_order_placed(&upstream_store, &order_id, 1, "NOW-1").await;
+    append_order_placed(&journal, &order_id, 1, "NOW-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
 
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<CapturingSaga>::new(move |_components| CapturingSaga {
+        captured: Arc::clone(&captured_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     wait_for_count(&captured, &notify, 1).await;
 
@@ -311,16 +282,14 @@ async fn saga_context_now_returns_runtime_timestamp_not_unix_epoch() {
 
 #[tokio::test]
 async fn saga_context_existing_accessors_remain_saga_scoped() {
-    let ps = ProcessSystem::new().await;
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("saga-ctx-saga-scope-order");
 
-    append_order_placed(&upstream_store, &order_id, 7, "SCOPE-1").await;
+    append_order_placed(&journal, &order_id, 7, "SCOPE-1").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(CAPTURING_SAGA_ID);
     let captured: Arc<Mutex<Vec<CapturedUpstream>>> = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -328,22 +297,13 @@ async fn saga_context_existing_accessors_remain_saga_scoped() {
     let captured_for_producer = Arc::clone(&captured);
     let notify_for_producer = Arc::clone(&notify);
 
-    let _saga_proxy =
-        SagaProps::<CapturingSaga>::new(saga_id.clone(), saga_store, move || CapturingSaga {
-            captured: Arc::clone(&captured_for_producer),
-            notify: Arc::clone(&notify_for_producer),
-        })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
-        .await;
+    let _host = SagaManagerProps::<CapturingSaga>::new(move |_components| CapturingSaga {
+        captured: Arc::clone(&captured_for_producer),
+        notify: Arc::clone(&notify_for_producer),
+    })
+    .observing::<OrderPlaced>(Subscription::stream(&order_id))
+    .spawn(&system)
+    .await;
 
     wait_for_count(&captured, &notify, 1).await;
 

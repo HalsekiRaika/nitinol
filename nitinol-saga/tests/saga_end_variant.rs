@@ -1,7 +1,10 @@
-//! The `End` variant is the single-responsibility termination
-//! marker.  Interpreting it must stop the saga process (`ctx.stop_self()`),
-//! which causes the subscriber to stop via the direct poller's subscriber
-//! watch, and in turn tears down the upstream subscription.
+//! The `End` variant is the single-responsibility termination marker.
+//! Interpreting it writes the durable `Ended` fact and stops the instance that
+//! decided it (`ctx.stop_self()`).  What makes the termination hold is the fact
+//! rather than the stop: the subscriptions belong to the host, so a later
+//! record for the same correlation id reaches a successor instance, which
+//! replays that fact, starts in the terminal lifecycle and drops the record —
+//! `Saga::handle` is never reached again.
 //!
 //! Also exercises the Sequence short-circuit invariant: effects placed after
 //! `End` inside a Sequence are not interpreted (the interpreter must break).
@@ -20,13 +23,16 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{system::EventSourceSystem, Event, SequenceCursor};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_eventsource::{system::EventSourceSystem, Event};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryStore, Journal};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaProps};
+use nitinol_saga::{
+    Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps, SagaSubscribe, Subscription,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct OrderPlaced {
@@ -35,6 +41,7 @@ struct OrderPlaced {
 
 impl Event for OrderPlaced {
     const EVENT_TYPE: EventType = EventType::new(Family::new("end"), TypeName::new("OrderPlaced"));
+    type Codec = JsonCodec;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -45,11 +52,18 @@ struct ReservationRequested {
 impl Event for ReservationRequested {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("end"), TypeName::new("ReservationRequested"));
+    type Codec = JsonCodec;
 }
 
 /// Correlation rule of [`PersistThenEndSaga`]: this file drives one order
 /// process, so every `OrderPlaced` names that single instance.
 const PERSIST_THEN_END_SAGA_ID: &str = "end-saga-1";
+
+/// The whole alphabet this saga reacts to: one observed source, no deadline.
+#[derive(SagaSubscribe)]
+enum Observed {
+    Order(OrderPlaced),
+}
 
 /// A saga that emits `Persist.combine(End)` so we can verify both:
 /// 1. The user event is persisted before End is interpreted
@@ -61,22 +75,20 @@ struct PersistThenEndSaga {
 
 #[async_trait]
 impl Saga for PersistThenEndSaga {
-    type SubscribedEvent = OrderPlaced;
+    type Subscribe = Observed;
     type Event = ReservationRequested;
-    type ScheduledMessage = ();
     type Error = std::convert::Infallible;
 
-    fn correlate(_event: &Self::SubscribedEvent) -> Option<SagaId> {
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
         Some(SagaId::new(PERSIST_THEN_END_SAGA_ID))
     }
 
-    fn apply(&mut self, _event: Self::Event) {}
-
     async fn handle(
         &mut self,
-        event: Self::SubscribedEvent,
+        input: Self::Subscribe,
         _ctx: &mut SagaContext,
     ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        let Observed::Order(event) = input;
         *self.handle_count.lock().expect(
             "handle_count mutex is never poisoned: no holder panics while the guard is alive",
         ) += 1;
@@ -97,12 +109,7 @@ impl Saga for PersistThenEndSaga {
     }
 }
 
-async fn append_order_placed(
-    store: &Arc<dyn EventStore>,
-    agg_id: &AggregateId,
-    sequence: u64,
-    sku: &str,
-) {
+async fn append_order_placed(store: &Journal, agg_id: &AggregateId, sequence: u64, sku: &str) {
     let payload = serde_json::to_vec(&OrderPlaced {
         sku: sku.to_owned(),
     })
@@ -122,7 +129,7 @@ async fn append_order_placed(
         .expect("append OrderPlaced must succeed");
 }
 
-async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<LoadedEvent> {
+async fn load_saga_events(store: &Journal, saga_id: &SagaId) -> Vec<LoadedEvent> {
     store
         .load(LoadQuery::by_stream(saga_id))
         .await
@@ -136,14 +143,15 @@ async fn load_saga_events(store: &Arc<dyn EventStore>, saga_id: &SagaId) -> Vec<
 async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
-    let upstream_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // One journal: the order stream the saga observes and the saga's own stream
+    // are tenants of the store the system distributes.
+    let journal = system.persistence().event_store();
     let order_id = AggregateId::new("end-order");
-    append_order_placed(&upstream_store, &order_id, 1, "FIRST").await;
+    append_order_placed(&journal, &order_id, 1, "FIRST").await;
 
-    let saga_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let saga_id = SagaId::new(PERSIST_THEN_END_SAGA_ID);
     let handle_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
     let handled_first = Arc::new(Notify::new());
@@ -151,23 +159,13 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     let handle_count_clone = Arc::clone(&handle_count);
     let handled_first_clone = Arc::clone(&handled_first);
 
-    let _saga_proxy =
-        SagaProps::<PersistThenEndSaga>::new(saga_id.clone(), Arc::clone(&saga_store), move || {
-            PersistThenEndSaga {
-                handle_count: Arc::clone(&handle_count_clone),
-                handled_first: Arc::clone(&handled_first_clone),
-            }
+    let _host =
+        SagaManagerProps::<PersistThenEndSaga>::new(move |_components| PersistThenEndSaga {
+            handle_count: Arc::clone(&handle_count_clone),
+            handled_first: Arc::clone(&handled_first_clone),
         })
-        .with_codec(system.codec::<ReservationRequested>())
-        .with_subscription(
-            Arc::clone(&upstream_store),
-            system.codec::<OrderPlaced>(),
-            SequenceCursor::Stream {
-                key: order_id.as_str().to_owned(),
-                after: 0,
-            },
-        )
-        .spawn(system.process_system())
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
+        .spawn(&system)
         .await;
 
     tokio::time::timeout(Duration::from_secs(3), handled_first.notified())
@@ -179,7 +177,7 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
     // is broken.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let events_after_first = load_saga_events(&saga_store, &saga_id).await;
+    let events_after_first = load_saga_events(&journal, &saga_id).await;
     let user_events_after_first: Vec<&LoadedEvent> = events_after_first
         .iter()
         .filter(|e| e.event_type == ReservationRequested::EVENT_TYPE)
@@ -192,10 +190,12 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
         user_events_after_first.len()
     );
 
-    // Now push a second upstream event.  If End correctly stopped the saga
-    // process and its DurableStream subscription, handle() will not run again
-    // and no further user events will be persisted.
-    append_order_placed(&upstream_store, &order_id, 2, "SECOND").await;
+    // Now push a second upstream event.  The host's subscription keeps
+    // delivering, so this record is routed at the instance the correlation
+    // names regardless — and if End was interpreted correctly, what receives it
+    // starts from the durable `Ended` fact: handle() will not run again and no
+    // further user events will be persisted.
+    append_order_placed(&journal, &order_id, 2, "SECOND").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let final_handle_count = *handle_count
@@ -203,11 +203,11 @@ async fn end_variant_stops_saga_process_and_prevents_further_handle_calls() {
         .expect("handle_count mutex is never poisoned: no holder panics while the guard is alive");
     assert_eq!(
         final_handle_count, 1,
-        "after End, the saga process must be stopped; \
+        "after End, the saga must be terminated for good; \
          Saga::handle must not be invoked for any subsequent upstream event"
     );
 
-    let final_events = load_saga_events(&saga_store, &saga_id).await;
+    let final_events = load_saga_events(&journal, &saga_id).await;
     let final_user_events: Vec<&LoadedEvent> = final_events
         .iter()
         .filter(|e| e.event_type == ReservationRequested::EVENT_TYPE)

@@ -1,0 +1,5 @@
+error: #[derive(SagaSubscribe)] supports enums only
+ --> tests/ui/fail/saga_subscribe_not_an_enum.rs:7:8
+  |
+7 | struct Bad;
+  |        ^^^

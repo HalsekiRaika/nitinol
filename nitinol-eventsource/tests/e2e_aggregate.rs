@@ -9,16 +9,15 @@
 // that this file tells a single cohesive user story rather than testing individual
 // features in isolation.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use futures_util::TryStreamExt;
 use nitinol_eventsource::{
-    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event, Query,
+    codec::Codec, system::EventSourceSystem, Aggregate, Decider, Decision, Event, Never, Query,
 };
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::InMemoryEventStore;
 use nitinol_persistence::{AggregateId, EventType, Family, LoadQuery, TypeName};
 use nitinol_runtime::ProcessSystem;
 
@@ -30,6 +29,8 @@ struct Incremented;
 impl Event for Incremented {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("e2e.agg"), TypeName::new("Incremented"));
+
+    type Codec = JsonCodec;
 }
 
 // Fixtures: aggregate
@@ -41,6 +42,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -72,7 +74,6 @@ impl Query<GetCount> for Counter {
 
 // Fixtures: JsonCodec (serde_json-backed)
 
-#[derive(Default)]
 struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -101,14 +102,17 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
 async fn e2e_ask_persists_the_fact_its_decision_stated() {
     // Given
     let ps = ProcessSystem::new().await;
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(persistence)
         .build();
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("e2e-agg-ask");
-    let proxy = system
-        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
-        .await;
+    let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
 
     // When
     proxy.ask(Increment).await.expect("ask must succeed");
@@ -127,8 +131,8 @@ async fn e2e_ask_persists_the_fact_its_decision_stated() {
         "ask(Increment) must persist exactly one event"
     );
     assert_eq!(
-        loaded[0].event_type.type_key(),
-        Incremented::EVENT_TYPE.type_key(),
+        loaded[0].event_type,
+        Incremented::EVENT_TYPE,
         "the persisted event must be the Incremented the decision stated"
     );
 
@@ -155,21 +159,22 @@ async fn e2e_persisted_state_is_visible_through_a_later_reference() {
     // Given
     let ps = ProcessSystem::new().await;
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .build(),
+        ))
         .build();
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("e2e-agg-restart");
 
     // Reference 1: write one event via ask()
     {
-        let proxy1 = system
-            .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
-            .await;
+        let proxy1 = system.spawn_aggregate::<Counter>(id.clone()).await;
         proxy1.ask(Increment).await.expect("ask must succeed");
     }
 
     // When: resolve the same AggregateId again
-    let proxy2 = system.spawn_aggregate::<Counter>(id, store).await;
+    let proxy2 = system.spawn_aggregate::<Counter>(id).await;
     let count = proxy2.exec(GetCount).await.expect("exec must succeed");
 
     // Then: the later reference sees the persisted increment
@@ -189,14 +194,17 @@ async fn e2e_persisted_state_is_visible_through_a_later_reference() {
 async fn e2e_multiple_asks_advance_sequence_monotonically() {
     // Given
     let ps = ProcessSystem::new().await;
+    let persistence = PersistenceProvider::new(
+        CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build(),
+    );
+    let store = persistence.event_store();
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
+        .with_persistence(persistence)
         .build();
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let id = AggregateId::new("e2e-agg-multi");
-    let proxy = system
-        .spawn_aggregate::<Counter>(id.clone(), Arc::clone(&store))
-        .await;
+    let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
 
     // When: three sequential increments
     proxy.ask(Increment).await.expect("ask 1");

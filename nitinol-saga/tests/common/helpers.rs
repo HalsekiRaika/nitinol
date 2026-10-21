@@ -3,22 +3,16 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, EventType, Family, LoadedEvent, TypeName};
-use nitinol_runtime::ProcessSystem;
-use nitinol_saga::{SagaEffect, ScheduleSpec, TellIntent};
+use nitinol_persistence::__private::reserved_family;
+use nitinol_persistence::{EventType, Family, LoadedEvent, TypeName};
+use nitinol_saga::{SagaEffect, SagaId, ScheduleSpec, TimerName};
 
 // JsonCodec — shared across all integration tests
 
-#[derive(Default)]
 pub struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
@@ -33,88 +27,23 @@ impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
     }
 }
 
-// Minimal aggregate used only to obtain an AggregateProxy for Tell tests.
-
-#[derive(Default)]
-pub struct TestTarget;
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct TestTargetEvent;
-
-impl Event for TestTargetEvent {
-    const EVENT_TYPE: EventType = EventType::new(Family::new("test"), TypeName::new("noop_target"));
-}
-
-impl Aggregate for TestTarget {
-    type Event = TestTargetEvent;
-
-    fn apply(&mut self, _event: TestTargetEvent) {}
-}
-
-/// `NoopCmd` must implement `Clone` because the new ADT's `SagaEffect::tell`
-/// keeps the command around for staged retries (each retry re-`tell`s the
-/// target with a cloned copy).  `Serialize + Deserialize` is required because
-/// `SagaEffect::tell` serializes the command as crash-restart payload.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct NoopCmd;
-
-impl Decider<NoopCmd> for TestTarget {
-    type Output = ();
-    type Rejection = std::convert::Infallible;
-
-    fn decide(&self, _cmd: NoopCmd) -> Decision<TestTargetEvent, (), Self::Rejection> {
-        Decision::persist(Vec::new()).output(())
-    }
-}
-
-/// Spin up a minimal system and return a `SagaEffect::tell(...)`.
-///
-/// Used by unit tests that need to exercise the tell-shaped effect (a
-/// `Persist { events: [], tells: [_], schedules: [] }` value) without
-/// triggering any real side effect.
-pub async fn make_tell_effect<E>() -> SagaEffect<E> {
-    let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(store)
-        .build();
-    let proxy = system
-        .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-target"))
-        .await;
-    SagaEffect::tell(proxy, NoopCmd)
-}
-
-/// Build a single [`TellIntent`] over a freshly spawned no-op aggregate
-/// target so tests can feed it into `SagaEffect::tell_intent(...)` without
-/// going through the `SagaEffect::tell` convenience helper.
-pub async fn make_tell_intent() -> TellIntent {
-    let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(store)
-        .build();
-    let proxy = system
-        .spawn_aggregate::<TestTarget>(AggregateId::new("test-tell-intent-target"))
-        .await;
-    TellIntent::new(proxy, NoopCmd)
-}
+// A saga's own time needs no helper: the host resolves the one resident
+// `SchedulerProcess` from the saga's alphabet, so a test that wants deadlines
+// declares a `#[subscribe(deadline)]` variant and asks the components for a
+// `Deadline<M>`. There is no proxy for a test to hold, which is the point —
+// holding one would make "arm a timer without writing the fact" expressible.
 
 // Shape — a PartialEq + Debug mirror of the `SagaEffect<E>` ADT used for
 // structural comparison without requiring `SagaEffect` itself to implement
 // PartialEq or Debug.
 //
-// `TellIntent` is opaque (its inner side effect cannot be matched against), so
-// `Persist` records only the *count* of tells.  `ScheduleSpec` is `PartialEq`,
-// so we capture the specs verbatim.
+// `ScheduleSpec` is `PartialEq`, so we capture the specs verbatim.
 
 #[derive(Debug, PartialEq)]
 pub enum Shape<E> {
     None,
     Persist {
         events: Vec<E>,
-        tells: usize,
         schedules: Vec<ScheduleSpec>,
     },
     End,
@@ -125,13 +54,8 @@ pub enum Shape<E> {
 pub fn shape_of<E: Clone>(effect: &SagaEffect<E>) -> Shape<E> {
     match effect {
         SagaEffect::None => Shape::None,
-        SagaEffect::Persist {
-            events,
-            tells,
-            schedules,
-        } => Shape::Persist {
+        SagaEffect::Persist { events, schedules } => Shape::Persist {
             events: events.clone(),
-            tells: tells.len(),
             schedules: schedules.clone(),
         },
         SagaEffect::End => Shape::End,
@@ -140,115 +64,261 @@ pub fn shape_of<E: Clone>(effect: &SagaEffect<E>) -> Shape<E> {
     }
 }
 
-pub const OUTBOX_MARKER: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("outbox"));
+/// The framework's own family. `Family::new` refuses the reserved namespace, so
+/// a test that has to name a framework record — to find it on a stream it has
+/// loaded — goes through the same constructor the framework itself does.
+const SAGA_FAMILY: Family = reserved_family("nitinol.saga");
 
-/// Type-level identity shared by every schedule marker written on a saga's own
-/// stream.  The per-transition variant (`scheduled` / `cancelled` / `fired`) is
-/// carried alongside this type key, not in it.
-pub const SCHEDULE_MARKER: EventType =
-    EventType::new(Family::new("nitinol.saga"), TypeName::new("schedule"));
+/// The one identity every schedule marker written on a saga's own stream is
+/// written down as.  The transition (`scheduled` / `cancelled` / `fired`) is
+/// carried by its payload's `oneof`, which [`schedule_kind_of`] reads.
+pub const SCHEDULE_MARKER: EventType = EventType::new(SAGA_FAMILY, TypeName::new("schedule"));
+
+// Schedule markers — mirror of `proto/schedule.proto`.
+//
+// `ScheduleEvent` is `pub(crate)` in `nitinol-saga`, so an integration test
+// reads the transition the way any other consumer of the column would: by
+// decoding the payload's `oneof`, which is where the transition lives.
 
 #[derive(Clone, PartialEq, prost::Message)]
-pub struct TellRequestedPayload {
-    #[prost(uint64, tag = "1")]
-    pub tell_id: u64,
-    #[prost(bytes = "vec", optional, tag = "2")]
-    pub crash_restart: Option<Vec<u8>>,
-    /// Target aggregate stream key (field 3, added with DLQ replay fix).
-    /// Empty string for streams written before this field was added.
-    #[prost(string, tag = "3")]
-    pub target: String,
+pub struct ScheduledMarkerPayload {
+    #[prost(string, tag = "1")]
+    pub saga_id: String,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    #[prost(uint64, tag = "3")]
+    pub after_nanos: u64,
+    #[prost(bytes = "vec", tag = "4")]
+    pub payload: Vec<u8>,
+    #[prost(int64, tag = "5")]
+    pub scheduled_at_unix_millis: i64,
+    #[prost(string, tag = "6")]
+    pub message_type: String,
+    #[prost(string, tag = "7")]
+    pub message_codec: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
-pub struct TellIdPayload {
-    #[prost(uint64, tag = "1")]
-    pub tell_id: u64,
+pub struct CancelledMarkerPayload {
+    #[prost(string, tag = "1")]
+    pub saga_id: String,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    #[prost(int64, tag = "3")]
+    pub cancelled_at_unix_millis: i64,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
-pub struct ScheduledPayload {
-    #[prost(int64, tag = "1")]
-    pub at_unix_seconds: i64,
+pub struct FiredMarkerPayload {
+    #[prost(string, tag = "1")]
+    pub saga_id: String,
+    #[prost(string, tag = "2")]
+    pub name: String,
+    #[prost(int64, tag = "3")]
+    pub fired_at_unix_millis: i64,
 }
-
-/// Mirror of the production `Ended {}` outbox marker (proto tag 5).  The
-/// message carries no fields — its presence in the saga stream is the durable
-/// signal that the saga terminated.
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct EndedPayload {}
 
 #[derive(Clone, PartialEq, prost::Oneof)]
-pub enum OutboxKind {
+pub enum ScheduleKind {
     #[prost(message, tag = "1")]
-    TellRequested(TellRequestedPayload),
+    Scheduled(ScheduledMarkerPayload),
     #[prost(message, tag = "2")]
-    TellAcked(TellIdPayload),
+    Cancelled(CancelledMarkerPayload),
     #[prost(message, tag = "3")]
-    TellFailed(TellIdPayload),
-    #[prost(message, tag = "4")]
-    Scheduled(ScheduledPayload),
-    #[prost(message, tag = "5")]
-    Ended(EndedPayload),
+    Fired(FiredMarkerPayload),
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
-pub struct OutboxMarkerPayload {
-    #[prost(oneof = "OutboxKind", tags = "1, 2, 3, 4, 5")]
-    pub kind: Option<OutboxKind>,
+pub struct ScheduleMarkerPayload {
+    #[prost(oneof = "ScheduleKind", tags = "1, 2, 3")]
+    pub kind: Option<ScheduleKind>,
 }
 
-pub fn encode_outbox_marker(kind: OutboxKind) -> Bytes {
-    let msg = OutboxMarkerPayload { kind: Some(kind) };
+/// Encode the `scheduled` arm so a test can seed a stream that already holds an
+/// unfired schedule — the state a crash leaves behind — without first running
+/// an incarnation that would also arm the timer in a live scheduler.
+///
+/// Field for field this is what `ScheduleEvent::Scheduled` writes: the nanos
+/// delay, the wall-clock anchor it is measured from, and the `message_type` /
+/// `message_codec` identity the payload is named under.
+pub fn encode_schedule_scheduled(
+    saga_id: &SagaId,
+    name: &TimerName,
+    after: std::time::Duration,
+    message_type: &str,
+    message_codec: &str,
+    payload: &[u8],
+    scheduled_at_unix_millis: i64,
+) -> Bytes {
+    let msg = ScheduleMarkerPayload {
+        kind: Some(ScheduleKind::Scheduled(ScheduledMarkerPayload {
+            saga_id: saga_id.as_str().to_owned(),
+            name: name.as_str().to_owned(),
+            after_nanos: u64::try_from(after.as_nanos()).unwrap_or(u64::MAX),
+            payload: payload.to_vec(),
+            scheduled_at_unix_millis,
+            message_type: message_type.to_owned(),
+            message_codec: message_codec.to_owned(),
+        })),
+    };
     Bytes::from(prost::Message::encode_to_vec(&msg))
 }
 
-pub fn encode_outbox_tell_requested(tell_id: u64, crash_restart: Option<&[u8]>) -> Bytes {
-    encode_outbox_marker(OutboxKind::TellRequested(TellRequestedPayload {
-        tell_id,
-        crash_restart: crash_restart.map(<[u8]>::to_vec),
-        target: String::new(),
-    }))
-}
-
-/// Encode a `TellRequested` outbox marker with an explicit `target` stream key
-/// (field 3).  Used by tests that exercise the DLQ replay path, which requires
-/// the target to be stored in the durable `TellRequested` record.
-pub fn encode_outbox_tell_requested_with_target(
-    tell_id: u64,
-    crash_restart: Option<&[u8]>,
-    target: &str,
-) -> Bytes {
-    encode_outbox_marker(OutboxKind::TellRequested(TellRequestedPayload {
-        tell_id,
-        crash_restart: crash_restart.map(<[u8]>::to_vec),
-        target: target.to_owned(),
-    }))
-}
-
-pub fn encode_outbox_tell_acked(tell_id: u64) -> Bytes {
-    encode_outbox_marker(OutboxKind::TellAcked(TellIdPayload { tell_id }))
-}
-
-pub fn encode_outbox_tell_failed(tell_id: u64) -> Bytes {
-    encode_outbox_marker(OutboxKind::TellFailed(TellIdPayload { tell_id }))
-}
-
-/// Encode the durable `Ended` terminal marker (proto tag 5) so tests can
-/// seed a "this saga already terminated" stream before spawning the process.
-pub fn encode_outbox_ended() -> Bytes {
-    encode_outbox_marker(OutboxKind::Ended(EndedPayload {}))
-}
-
-pub fn decode_outbox_kind(payload: &[u8]) -> OutboxKind {
-    <OutboxMarkerPayload as prost::Message>::decode(payload)
-        .expect("payload must be a valid prost OutboxMarker message")
+pub fn decode_schedule_kind(payload: &[u8]) -> ScheduleKind {
+    <ScheduleMarkerPayload as prost::Message>::decode(payload)
+        .expect("payload must be a valid prost ScheduleMarker message")
         .kind
-        .expect("outbox marker payload must carry a oneof kind")
+        .expect("schedule marker payload must carry a oneof kind")
 }
 
-pub fn outbox_kind_of(event: &LoadedEvent) -> Option<OutboxKind> {
-    (event.event_type.type_key() == OUTBOX_MARKER.type_key())
-        .then(|| decode_outbox_kind(&event.payload))
+pub fn schedule_kind_of(event: &LoadedEvent) -> Option<ScheduleKind> {
+    (event.event_type == SCHEDULE_MARKER).then(|| decode_schedule_kind(&event.payload))
+}
+
+/// The transition a schedule marker records, as the name the proto gives it.
+///
+/// Test assertions read as the wire does; the string is the `oneof` field name,
+/// not a path segment.
+pub fn schedule_transition(kind: &ScheduleKind) -> &'static str {
+    match kind {
+        ScheduleKind::Scheduled(_) => "scheduled",
+        ScheduleKind::Cancelled(_) => "cancelled",
+        ScheduleKind::Fired(_) => "fired",
+    }
+}
+
+// Lifecycle facts — mirror of `proto/lifecycle.proto`.
+//
+// `LifecycleEvent` is `pub(crate)` in `nitinol-saga`, so an integration test
+// reads the fact the way any other consumer of the column would: by decoding
+// the payload's `oneof`, which is where the fact lives.
+
+/// The one identity every lifecycle fact is written down as — a sibling of
+/// [`SCHEDULE_MARKER`] and [`CONSUMED_MARKER`], so a saga's termination has a
+/// declaration of its own rather than sharing an envelope with a transport
+/// mechanism.
+pub const LIFECYCLE_MARKER: EventType = EventType::new(SAGA_FAMILY, TypeName::new("lifecycle"));
+
+/// Mirror of the production `Ended {}` lifecycle fact (proto tag 1).  The
+/// message carries no fields — its presence in the saga stream is the durable
+/// signal that the saga terminated.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct LifecycleEndedPayload {}
+
+#[derive(Clone, PartialEq, prost::Oneof)]
+pub enum LifecycleKind {
+    #[prost(message, tag = "1")]
+    Ended(LifecycleEndedPayload),
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct LifecycleMarkerPayload {
+    #[prost(oneof = "LifecycleKind", tags = "1")]
+    pub kind: Option<LifecycleKind>,
+}
+
+/// Encode the durable `Ended` lifecycle fact so tests can seed a "this saga
+/// already terminated" stream before spawning the process.
+pub fn encode_lifecycle_ended() -> Bytes {
+    let msg = LifecycleMarkerPayload {
+        kind: Some(LifecycleKind::Ended(LifecycleEndedPayload {})),
+    };
+    Bytes::from(prost::Message::encode_to_vec(&msg))
+}
+
+pub fn decode_lifecycle_kind(payload: &[u8]) -> LifecycleKind {
+    <LifecycleMarkerPayload as prost::Message>::decode(payload)
+        .expect("payload must be a valid prost LifecycleMarker message")
+        .kind
+        .expect("lifecycle marker payload must carry a oneof kind")
+}
+
+pub fn lifecycle_kind_of(event: &LoadedEvent) -> Option<LifecycleKind> {
+    (event.event_type == LIFECYCLE_MARKER).then(|| decode_lifecycle_kind(&event.payload))
+}
+
+/// The fact a lifecycle row records, as the name the proto gives its `oneof`
+/// arm.
+pub fn lifecycle_fact(kind: &LifecycleKind) -> &'static str {
+    match kind {
+        LifecycleKind::Ended(_) => "ended",
+    }
+}
+
+// Consumed facts — mirror of `proto/consumed.proto`.
+//
+// `ConsumedPositionEvent` is `pub(crate)` in `nitinol-saga`, so an integration
+// test reads the fact the way any other consumer of the column would: by
+// decoding the payload's `oneof`, which is where the fact lives.
+
+/// The one identity every consumed fact is written down as — a sibling of
+/// [`SCHEDULE_MARKER`] and [`LIFECYCLE_MARKER`], so a saga's input positions
+/// have a declaration of their own.
+///
+/// Tests that count what a saga wrote select on this rather than adding one to
+/// a literal: the row is framework bookkeeping, and an assertion that says
+/// "exactly one user event" has to keep counting user events.
+pub const CONSUMED_MARKER: EventType = EventType::new(SAGA_FAMILY, TypeName::new("consumed"));
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ConsumedFactPayload {
+    /// Stream key of the upstream source the position belongs to.
+    #[prost(string, tag = "1")]
+    pub source: String,
+    /// Highest upstream sequence of that source the saga has consumed.
+    #[prost(uint64, tag = "2")]
+    pub sequence: u64,
+    /// Canonical path of the declared source's event type.  Two declared
+    /// sources can live on one stream key, so the stream key alone does not
+    /// name what a position settled.
+    #[prost(string, tag = "3")]
+    pub source_event_type: String,
+}
+
+#[derive(Clone, PartialEq, prost::Oneof)]
+pub enum ConsumedKind {
+    #[prost(message, tag = "1")]
+    Consumed(ConsumedFactPayload),
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ConsumedMarkerPayload {
+    #[prost(oneof = "ConsumedKind", tags = "1")]
+    pub kind: Option<ConsumedKind>,
+}
+
+pub fn encode_consumed_fact(source: &str, sequence: u64, source_event_type: &str) -> Bytes {
+    let msg = ConsumedMarkerPayload {
+        kind: Some(ConsumedKind::Consumed(ConsumedFactPayload {
+            source: source.to_owned(),
+            sequence,
+            source_event_type: source_event_type.to_owned(),
+        })),
+    };
+    Bytes::from(prost::Message::encode_to_vec(&msg))
+}
+
+pub fn decode_consumed_fact(payload: &[u8]) -> ConsumedFactPayload {
+    let ConsumedKind::Consumed(consumed) =
+        <ConsumedMarkerPayload as prost::Message>::decode(payload)
+            .expect("payload must be a valid prost ConsumedMarker message")
+            .kind
+            .expect("consumed payload must carry a oneof kind");
+    consumed
+}
+
+/// The fact a row holds, or `None` when the row is not one or cannot be read
+/// as one.
+///
+/// Answers rather than insisting: a test whose subject *is* an unreadable row
+/// has to be able to describe the stream it seeded without panicking on the
+/// very row under test.
+pub fn readable_consumed_fact_of(event: &LoadedEvent) -> Option<ConsumedFactPayload> {
+    if event.event_type != CONSUMED_MARKER {
+        return None;
+    }
+    <ConsumedMarkerPayload as prost::Message>::decode(&event.payload[..])
+        .ok()?
+        .kind
+        .map(|ConsumedKind::Consumed(consumed)| consumed)
 }

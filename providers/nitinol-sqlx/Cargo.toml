@@ -1,0 +1,76 @@
+[package]
+name = "nitinol-sqlx"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "sqlx-backed EventStore provider for nitinol"
+
+# The library is a benchmark target too, and libtest's harness is what runs it,
+# so a plain `cargo bench -p nitinol-sqlx -- --save-baseline <name>` hands
+# criterion's arguments to libtest, which rejects them outright. Nothing in the
+# library is a benchmark, so switching its target off leaves `--` to criterion.
+[lib]
+bench = false
+
+[features]
+# Enabled by default so that a plain `cargo clippy --workspace --all-targets`
+# and `cargo test --workspace --all-targets` compile the backend rather than an
+# empty crate. The umbrella crate keeps the provider out of a build that did not
+# ask for it by depending on it optionally.
+default = ["postgres"]
+postgres = ["dep:sqlx", "sqlx/postgres", "dep:time"]
+
+[dependencies]
+nitinol-persistence = { path = "../../nitinol-persistence" }
+async-trait = "0.1"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+jiff = "0.2"
+thiserror = "2"
+
+# No TLS feature is enabled: the roots and backends the sqlx TLS features reach
+# for carry licences outside the set this workspace allows.
+sqlx = { version = "0.9", optional = true, default-features = false, features = [
+  "runtime-tokio",
+  "migrate",
+  "macros",
+  "time",
+] }
+time = { version = "0.3", optional = true }
+
+[dev-dependencies]
+nitinol-store-conformance = { path = "../../nitinol-store-conformance" }
+# The ExactlyOnce acceptance criteria are about a projector running against this
+# provider's offset store, so judging them needs the interpreter that drives
+# `begin → project → offset save → commit` and the runtime it spawns in.
+# Both are dev-dependencies only: a provider that depended on the interpreter
+# for its own compilation would invert the layering this workspace keeps.
+nitinol-eventsource = { path = "../../nitinol-eventsource" }
+nitinol-runtime = { path = "../../nitinol-runtime" }
+# The contract tests declare their event types the way a user's crate does —
+# by placing entries in the collection slice. `#[derive(Event)]` writes that
+# for a user, but the derive lives behind the umbrella crate, which this
+# provider cannot depend on, so the tests place their entries by hand.
+linkme = "0.3"
+futures-core = "0.3"
+futures-util = "0.3"
+# `sync` and `time` are what the offset clauses need: a rendezvous that
+# puts two writers on one row at the same moment, and a deadline on every wait
+# so a rule that never released a lock fails the run instead of hanging it.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+# Pinned exactly rather than by caret: both crates break their API across patch
+# ranges of their own dependency on each other, and a resolver free to move
+# either one turns an unrelated `cargo update` into a compile failure here.
+testcontainers = "=0.27.3"
+testcontainers-modules = { version = "=0.15.0", default-features = false, features = [
+  "postgres",
+] }
+
+criterion = { workspace = true }
+
+[[bench]]
+name = "postgres"
+harness = false

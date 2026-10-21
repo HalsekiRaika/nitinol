@@ -1,6 +1,6 @@
 //! Generates prost message types for the saga marker events from the
-//! `proto/*.proto` schemas (outbox markers, schedule markers, dead-letter
-//! events, and dead-letter disposition markers).
+//! `proto/*.proto` schemas (schedule markers, consumed facts, and lifecycle
+//! facts).
 //!
 //! `protox` parses the schema in pure Rust (no `protoc` binary required) and
 //! produces a `FileDescriptorSet`, which `prost-build` turns into Rust code in
@@ -9,18 +9,16 @@
 
 use std::path::Path;
 
-const PROTOS: [&str; 4] = [
-    "proto/outbox.proto",
+const PROTOS: [&str; 3] = [
     "proto/schedule.proto",
-    "proto/dead_letter.proto",
-    "proto/dead_letter_disposition.proto",
+    "proto/consumed.proto",
+    "proto/lifecycle.proto",
 ];
 const PROTO_INCLUDE: &str = "proto";
-const GENERATED: [&str; 4] = [
-    "nitinol.saga.outbox.rs",
+const GENERATED: [&str; 3] = [
     "nitinol.saga.schedule.rs",
-    "nitinol.saga.dead_letter.rs",
-    "nitinol.saga.dead_letter_disposition.rs",
+    "nitinol.saga.consumed.rs",
+    "nitinol.saga.lifecycle.rs",
 ];
 
 fn main() {

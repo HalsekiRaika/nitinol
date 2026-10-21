@@ -3,11 +3,20 @@
 //! Issuing the payslip is the only thing that happens here, and it is
 //! idempotent: that is what lets the pattern deliver at-least-once and still
 //! need no compensation.
+//!
+//! Nothing in this module knows a saga exists.  A delivery host reaches the
+//! payslip through the same reference any other caller would resolve, so the
+//! receiving side of a fan-out is an ordinary [`Aggregate`] + [`Decider`] pair
+//! and implements no framework surface of its own.  What it does owe is the
+//! absorption of a repeat, because the delivery that brings the command is
+//! at-least-once.
 
 use serde::{Deserialize, Serialize};
 
-use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Query};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Never, Query};
 use nitinol_persistence::{EventType, Family, TypeName};
+
+use crate::codec::JsonCodec;
 
 /// The payslip's genesis event.
 ///
@@ -21,26 +30,37 @@ pub struct PayslipIssued;
 impl Event for PayslipIssued {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("saga.fanout"), TypeName::new("PayslipIssued"));
+
+    type Codec = JsonCodec;
 }
 
 /// Issue the payslip this stream stands for.
 ///
-/// `payslip` is the target's stream key.  It is not read by [`Decider::decide`]
-/// — the only thing the decision turns on is whether this payslip has been
-/// issued already — but it is what makes the command routable on its own: a
-/// reference to the target is built from it with
-/// [`EventSourceSystem::aggregate_proxy`](nitinol_eventsource::system::EventSourceSystem::aggregate_proxy),
-/// and after a full process crash the saga's crash-restart factory rebuilds that
-/// reference out of these very bytes (see
-/// [`crate::saga::FanOutSaga::crash_restart_intent`]).
+/// It carries nothing, for the same reason [`PayslipIssued`] does: *which*
+/// payslip is being issued is the stream key of the aggregate the command is
+/// addressed to, and the address is named beside the command rather than inside
+/// it — [`SagaDelivery::new`](nitinol_saga::SagaDelivery::new) takes an
+/// [`AggregateId`](nitinol_persistence::AggregateId) and the command as two
+/// arguments.
 ///
-/// `Clone + Serialize + Deserialize` are required by
-/// `SagaEffect::tell`, which serializes the command into the
-/// `TellRequested` outbox marker as its crash-restart payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct IssuePayslip {
-    pub payslip: String,
-}
+/// # Why there is no operation id on it
+///
+/// A receiver under at-least-once delivery has to recognise a repeat, and the
+/// general answer is an operation id the domain puts on the command — that is
+/// what `examples/saga/3.idempotent-receive` is about.  A creation-only fan-out
+/// is the degenerate case of it: this payslip is issued at most once in its
+/// whole life, so "have I done this already?" and "do I exist already?" are the
+/// same question, and the payslip answers it from its own genesis record.  An
+/// operation id here would be a second copy of the stream key.
+///
+/// # What the command is *not* required to be
+///
+/// Neither `Clone` nor serializable.  A delivery host writes down no copy of a
+/// command: what is durable is the saga's decision, and the commands are
+/// re-derived from it by [`Saga::dispatch`](nitinol_saga::Saga::dispatch) every
+/// time the host reads that decision.  So nothing about a command has to survive
+/// a restart — only the decision does.
+pub struct IssuePayslip;
 
 /// One employee's payslip for one payroll run.
 ///
@@ -70,6 +90,7 @@ impl Payslip {
 
 impl Aggregate for Payslip {
     type Event = PayslipIssued;
+    type Recover = Never;
 
     fn apply(&mut self, _event: PayslipIssued) {
         self.issued = true;
@@ -77,8 +98,11 @@ impl Aggregate for Payslip {
 }
 
 impl Decider<IssuePayslip> for Payslip {
-    /// The issue asks nothing back — the saga dispatches it with `tell` — and
-    /// whether it happened is read from the payslip's own stream with
+    /// The issue has nothing to answer back, but it is still delivered with
+    /// `ask`: the delivery host needs the receiver's answer to know the command
+    /// was carried out, since a refusal and a success would otherwise be the
+    /// same event and the host would treat the decision as finished either way.
+    /// What the issue *means* is read from the payslip's own stream, with
     /// [`IsIssued`].
     type Output = ();
     type Rejection = std::convert::Infallible;

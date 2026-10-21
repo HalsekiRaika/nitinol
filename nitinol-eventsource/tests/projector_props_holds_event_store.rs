@@ -1,16 +1,18 @@
-//! `ProjectorProps::new` accepts `Arc<dyn EventStore>` directly.
+//! `ProjectorProps::new` names no store, and the projector process holds the
+//! journal its system distributes directly.
 //!
-//! The projector process now owns its event-store reference inline; it
-//! catches up by calling `store.load` directly instead of asking an
-//! `EventPersistor` actor.
+//! The projector process owns its event-store reference inline; it catches up
+//! by calling `store.load` directly instead of asking an `EventPersistor`
+//! process.  The handle reaches it from the system the props are spawned on,
+//! whose journal slot *is* a `Journal` — the props carry neither it nor the
+//! offset store.
 //!
 //! Two complementary checks:
 //!
-//! 1. Compile-time type assertion — `ProjectorProps::new`'s 2nd argument is
-//!    `Arc<dyn EventStore>`.  A regression to `EventPersistorProxy` fails
-//!    to compile.
-//! 2. Runtime integration — events pre-loaded into the store are observed
-//!    by the projector during catchup.
+//! 1. Compile-time type assertion — `ProjectorProps::new` receives the
+//!    projection's identity and its producer, and nothing that names a store.
+//! 2. Runtime integration — events pre-loaded into the journal the system was
+//!    built on are observed by the projector during catchup.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -20,9 +22,13 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
-use nitinol_eventsource::{codec::Codec, Event, ProjectionContext, Projector, ProjectorProps};
-use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, ProjectionId, TypeName};
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::{
+    codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps,
+};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+use nitinol_persistence::store::{InMemoryEventStore, InMemoryOffsetStore};
+use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // Minimal Ping fixture
@@ -32,6 +38,8 @@ struct PingEvent;
 
 impl Event for PingEvent {
     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("PingEvent"));
+
+    type Codec = PingCodec;
 }
 
 struct PingCodec;
@@ -68,37 +76,36 @@ impl Projector<PingEvent> for CountingProjector {
 
 // Compile-time type assertion
 
-/// `ProjectorProps::new` MUST accept `Arc<dyn EventStore>` as its 2nd
-/// argument.  Not a `#[test]` — the compiler enforces the signature.
+/// `ProjectorProps::new` MUST receive the projection's identity and its
+/// producer, and nothing else — neither a journal nor the supplier that holds
+/// one.  Not a `#[test]` — the compiler enforces the signature.
 ///
-/// We exercise the call in a generic context because `ProjectorProps::new` is
-/// generic over the projector type — a function pointer assignment cannot
-/// capture this generic shape directly, so we call it and discard.
+/// A regression to a receiving shape that also takes a store, a provider or an
+/// offset store is a compile error here: the projector takes both of its stores
+/// from the system it is spawned on.
 #[allow(dead_code)]
-fn _assert_sig_projector_props_new_accepts_arc_dyn_event_store(
-    pid: ProjectionId,
-    store: Arc<dyn EventStore>,
-    cs: Arc<InMemoryCheckpointStore>,
-) {
-    let count = Arc::new(AtomicUsize::new(0));
-    let notify = Arc::new(Notify::new());
-    let _ = ProjectorProps::new(pid, store, cs, move || CountingProjector {
-        count: Arc::clone(&count),
-        notify: Arc::clone(&notify),
-    });
+fn _assert_sig_projector_props_new_receives_an_identity_and_a_producer() {
+    let _: fn(ProjectionId, fn() -> CountingProjector) -> ProjectorProps<CountingProjector> =
+        ProjectorProps::new;
 }
 
 // Runtime: catchup processes pre-loaded events via direct store
 
-/// A projector spawned with Arc<dyn EventStore> catches up by reading events
-/// pre-loaded into the same store — confirming the projector calls
+/// A projector spawned on a system catches up by reading events pre-loaded
+/// into the journal that system was built on — confirming the projector calls
 /// `store.load` directly (no proxy in between).
 #[tokio::test]
-async fn projector_catches_up_via_direct_arc_dyn_event_store() {
+async fn projector_catches_up_via_the_journal_it_was_wired_over() {
     // Given
-    let system = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
+    let system = EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(
+            CustomStore::builder()
+                .eventstore(InMemoryEventStore::default())
+                .projection_offsets(InMemoryOffsetStore::default())
+                .build(),
+        ))
+        .build();
+    let store = system.persistence().event_store();
     let agg_id = AggregateId::new("projector-direct-store");
 
     // Pre-populate the store with 3 events
@@ -122,17 +129,15 @@ async fn projector_catches_up_via_direct_arc_dyn_event_store() {
     let count_c = Arc::clone(&count);
     let notify_c = Arc::clone(&notify);
 
-    // When: spawn projector with Arc<dyn EventStore> (no EventPersistor)
-    let _proxy = ProjectorProps::new(
-        ProjectionId::new("direct-store-projector"),
-        Arc::clone(&store),
-        Arc::clone(&checkpoint_store),
-        move || CountingProjector {
+    // When: spawn the projector on the system over the same journal (no
+    // EventPersistor)
+    let _proxy = ProjectorProps::new(ProjectionId::new("direct-store-projector"), move || {
+        CountingProjector {
             count: Arc::clone(&count_c),
             notify: Arc::clone(&notify_c),
-        },
-    )
-    .with_event::<PingEvent>(Arc::new(PingCodec))
+        }
+    })
+    .with_event::<PingEvent>()
     .catchup_from_aggregate(agg_id)
     .spawn(&system)
     .await;

@@ -1,6 +1,6 @@
 //! Monoid laws for the `SagaEffect` ADT.
 //!
-//! The variants are `None / Persist { events, tells, schedules } / End /
+//! The variants are `None / Persist { events, schedules } / End /
 //! Sequence(Vec<...>) / CancelSchedule`.  `None` is the identity, `combine` is
 //! the associative binary operation that constructs a *flat* `Sequence` (no
 //! nesting) and folds the newly adjacent `Persist × Persist` junction into a
@@ -9,30 +9,22 @@
 //! These tests do not assert anything about the interpreter — only the
 //! algebra of effect composition.  The interpreter-level batch boundary is
 //! covered by `saga_combine_persist_single_append.rs`.
+//!
+//! The laws hold for the `schedules` category of a `Persist` too, but a
+//! `ScheduleSpec` cannot be named from out here — `Deadline::set` is its only
+//! constructor, and a `Deadline` only exists inside the producer the spawn
+//! builder calls — so those cases sit beside `combine` in
+//! `nitinol-saga/src/effect/helper.rs`.
 
 #[path = "common/helpers.rs"]
 mod common;
 use common::{shape_of, Shape};
 
-use std::time::Duration;
-
-use bytes::Bytes;
-use nitinol_saga::{SagaEffect, ScheduleSpec, TimerName};
-
-/// Build a distinguishable `ScheduleSpec` so that a reversed concatenation is
-/// observable through `Shape` (`ScheduleSpec` is `PartialEq`).
-fn spec(name: &str, secs: u64) -> ScheduleSpec {
-    ScheduleSpec {
-        name: TimerName::new(name),
-        after: Duration::from_secs(secs),
-        payload: Bytes::new(),
-    }
-}
+use nitinol_saga::{SagaEffect, TimerName};
 
 fn persist_shape(events: Vec<u32>) -> Shape<u32> {
     Shape::Persist {
         events,
-        tells: 0,
         schedules: vec![],
     }
 }
@@ -89,22 +81,6 @@ fn combine_none_right_is_identity_for_end() {
     assert!(
         matches!(result, SagaEffect::End),
         "End.combine(None) must return End unchanged"
-    );
-}
-
-#[tokio::test]
-async fn combine_none_right_identity_holds_for_tell_shaped_persist() {
-    let tell = common::make_tell_effect::<u32>().await;
-    let result = tell.combine(SagaEffect::None);
-
-    assert_eq!(
-        shape_of(&result),
-        Shape::Persist {
-            events: vec![],
-            tells: 1,
-            schedules: vec![],
-        },
-        "Persist-with-tells.combine(None) must return the Persist branch unchanged"
     );
 }
 
@@ -232,7 +208,7 @@ fn combine_is_associative_when_end_separates_two_persists() {
 
 #[test]
 fn combine_is_associative_when_cancel_schedule_separates_two_persists() {
-    let mk_cancel = || SagaEffect::<u32>::cancel_schedule(TimerName::new("t"));
+    let mk_cancel = || SagaEffect::<u32>::CancelSchedule(TimerName::new("t"));
 
     let left = SagaEffect::persist(1u32)
         .combine(mk_cancel())
@@ -257,52 +233,6 @@ fn combine_merges_two_adjacent_persist_leaves_into_one_persist() {
         persist_shape(vec![1u32, 2]),
         "combine must fold two adjacent Persist branches into a single Persist so \
          the interpreter writes one atomic batch"
-    );
-}
-
-#[tokio::test]
-async fn combine_merges_persist_with_tell_shaped_persist() {
-    let persist = SagaEffect::persist(7u32);
-    let tell = common::make_tell_effect::<u32>().await;
-    let result = persist.combine(tell);
-
-    assert_eq!(
-        shape_of(&result),
-        Shape::Persist {
-            events: vec![7u32],
-            tells: 1,
-            schedules: vec![],
-        },
-        "persist(e).combine(tell(..)) must yield ONE Persist carrying both the \
-         domain event and the tell intent — splitting them across two Persist \
-         branches reopens the at-most-once tell-loss window"
-    );
-}
-
-#[tokio::test]
-async fn combine_concatenates_events_tells_and_schedules_left_to_right() {
-    let left_spec = spec("left", 1);
-    let right_spec = spec("right", 2);
-    let left_intent = common::make_tell_intent().await;
-    let right_intent = common::make_tell_intent().await;
-
-    let left = SagaEffect::persist_all(vec![1u32, 2])
-        .combine(SagaEffect::tell_intent(left_intent))
-        .combine(SagaEffect::schedule_spec(left_spec.clone()));
-    let right = SagaEffect::persist(3u32)
-        .combine(SagaEffect::tell_intent(right_intent))
-        .combine(SagaEffect::schedule_spec(right_spec.clone()));
-
-    assert_eq!(
-        shape_of(&left.combine(right)),
-        Shape::Persist {
-            events: vec![1u32, 2, 3],
-            tells: 2,
-            schedules: vec![left_spec, right_spec],
-        },
-        "the merge must concatenate events, tells AND schedules — each in \
-         left-to-right order; dropping or reordering any of the three categories \
-         silently loses saga intent"
     );
 }
 
@@ -341,7 +271,7 @@ fn combine_does_not_merge_persists_separated_by_end() {
 #[test]
 fn combine_does_not_merge_persists_separated_by_cancel_schedule() {
     let result = SagaEffect::persist(1u32)
-        .combine(SagaEffect::cancel_schedule(TimerName::new("drop")))
+        .combine(SagaEffect::CancelSchedule(TimerName::new("drop")))
         .combine(SagaEffect::persist(2u32));
 
     assert_eq!(
@@ -369,9 +299,9 @@ fn combine_merges_persists_across_a_trailing_none_leaf() {
         Shape::Sequence(vec![persist_shape(vec![1u32, 2])]),
         "None is the identity: it must not sit on the junction and split the two \
          Persist branches into separate append batches — an identity element that \
-         decides whether a tell survives a crash is observable, which the identity \
-         law forbids.  Unlike End and CancelSchedule, None carries no \
-         interpretation of its own"
+         decides whether a schedule fact shares its decision's batch is \
+         observable, which the identity law forbids.  Unlike End and \
+         CancelSchedule, None carries no interpretation of its own"
     );
 }
 

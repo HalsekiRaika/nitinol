@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 
-#[derive(Default)]
 pub struct JsonCodec;
 
 impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {

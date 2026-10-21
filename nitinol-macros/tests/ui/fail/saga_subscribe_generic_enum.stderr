@@ -1,0 +1,5 @@
+error: #[derive(SagaSubscribe)] does not support generic enums
+  --> tests/ui/fail/saga_subscribe_generic_enum.rs:11:6
+   |
+11 | enum Observed<T> {
+   |      ^^^^^^^^

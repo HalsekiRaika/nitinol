@@ -1,7 +1,9 @@
 #![cfg(feature = "test-helpers")]
 
+use bytes::Bytes;
+use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::test_helpers::MockAggregateProxy;
-use nitinol_eventsource::{Aggregate, Decider, Decision, Event};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Never};
 use nitinol_persistence::{EventType, Family, TypeName};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -9,9 +11,29 @@ struct Reserved {
     sku: String,
 }
 
+/// The codec `Reserved` names. The mock proxy never persists, so the format
+/// only has to exist.
+struct ReservedCodec;
+
+impl Codec<Reserved> for ReservedCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(event: &Reserved) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::copy_from_slice(event.sku.as_bytes()))
+    }
+
+    fn decode(payload: &[u8]) -> Result<Reserved, Self::Error> {
+        Ok(Reserved {
+            sku: String::from_utf8_lossy(payload).into_owned(),
+        })
+    }
+}
+
 impl Event for Reserved {
     const EVENT_TYPE: EventType =
         EventType::new(Family::new("mock.proxy"), TypeName::new("Reserved"));
+
+    type Codec = ReservedCodec;
 }
 
 #[derive(Default)]
@@ -19,6 +41,7 @@ struct Inventory;
 
 impl Aggregate for Inventory {
     type Event = Reserved;
+    type Recover = Never;
 
     fn apply(&mut self, _event: Reserved) {}
 }
@@ -57,15 +80,6 @@ fn new_yields_empty_capture_buffer() {
     assert!(
         mock.drain_captured::<Reserve>().is_empty(),
         "a brand-new MockAggregateProxy must have no captured commands"
-    );
-}
-
-#[test]
-fn default_yields_empty_capture_buffer() {
-    let mock: MockAggregateProxy<Inventory> = MockAggregateProxy::default();
-    assert!(
-        mock.drain_captured::<Reserve>().is_empty(),
-        "Default::default() must agree with new() — both empty"
     );
 }
 

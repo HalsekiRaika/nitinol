@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Decider, Decision};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Never};
+
+use crate::codec::JsonCodec;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Event)]
-#[event(family = "saga.example")]
+#[event(family = "saga.example", codec = JsonCodec)]
 pub struct OrderPlaced {
     pub sku: String,
 }
@@ -14,6 +16,7 @@ pub struct Order;
 
 impl Aggregate for Order {
     type Event = OrderPlaced;
+    type Recover = Never;
 
     fn apply(&mut self, _event: OrderPlaced) {}
 }
@@ -23,8 +26,10 @@ pub struct PlaceOrder {
 }
 
 impl Decider<PlaceOrder> for Order {
-    /// Placing the order asks nothing back: what follows from it is the saga's
-    /// reservation, which is observed on the inventory's own stream.
+    /// Placing the order asks nothing back.  What follows from it — the
+    /// reservation — is decided by a saga that observes this stream and carried
+    /// out on the inventory, so none of it is part of this decision and none of
+    /// it is awaited here.
     type Output = ();
     type Rejection = std::convert::Infallible;
 
