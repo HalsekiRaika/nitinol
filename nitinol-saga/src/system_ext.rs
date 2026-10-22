@@ -48,7 +48,8 @@ pub trait SagaSystemExt {
     type Store: SagaOffsetSlot;
 
     /// Host the saga `S` on the stores the supplier distributes — the manager,
-    /// and the delivery host that carries out what it decides.
+    /// the delivery host that carries out what it decides, and, when `S`'s
+    /// alphabet declares a deadline, the deadline index.
     ///
     /// The system-first form of the one verb a saga is started with; the
     /// props-first form is
@@ -73,8 +74,19 @@ pub trait SagaSystemExt {
     /// [`with_delivery_id`](SagaManagerProps::with_delivery_id),
     /// [`with_partitions`](SagaManagerProps::with_partitions) and
     /// [`with_delivery_poll_interval`](SagaManagerProps::with_delivery_poll_interval).
-    /// The handle [`spawn`](SagaManagerProps::spawn) answers with reaches both
-    /// halves — see [`SagaHostProxy`](crate::SagaHostProxy).
+    /// The handle [`spawn`](SagaManagerProps::spawn) answers with reaches every
+    /// part — see [`SagaHostProxy`](crate::SagaHostProxy).
+    ///
+    /// The same holds for a saga's own time. A deadline lives on the saga's
+    /// own stream, as the schedule fact it wrote, and is armed again only when
+    /// its instance is next activated; after a restart nothing upstream need
+    /// ever name that instance again. So a saga type whose alphabet declares a
+    /// deadline is hosted with its deadline index too: it reads every
+    /// instance's schedule facts and asks the manager for an instance when one
+    /// of its deadlines falls due. The saga writes its own stream; the delivery
+    /// host and the index are readers of it, each from a position of its own —
+    /// the delivery host's recorded, the index's rebuilt from the start of the
+    /// journal whenever it starts.
     ///
     /// # Typestate
     ///

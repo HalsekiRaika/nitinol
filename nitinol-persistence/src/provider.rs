@@ -185,10 +185,13 @@ pub trait ProjectionOffsetSlot: Store {
 /// attachments have got.
 ///
 /// This is the slot for **every** attachment a saga runs with, not the delivery
-/// host's alone: the host records what it has delivered here, and so do the
-/// manager and the deadline index as they are written. What they have in common
-/// is that the framework owns them, so their offsets belong wherever an operator
-/// put the journal — which is the axis `PRV-4` states.
+/// host's alone: the host records what it has delivered here, and so does the
+/// manager as it is written. The deadline index reads the journal in global
+/// order too, but records no position here: it is a cache of the schedule
+/// facts, rebuilt from the start of the journal whenever it starts. What the
+/// attachments that record have in common is that the framework owns them, so
+/// their offsets belong wherever an operator put the journal — which is the
+/// axis `PRV-4` states.
 ///
 /// A distinct associated type name from
 /// [`ProjectionOffsetSlot::ProjectionOffsets`] so that a store

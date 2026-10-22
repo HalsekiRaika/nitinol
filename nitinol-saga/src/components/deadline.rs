@@ -35,6 +35,10 @@ use crate::scheduler::TimerName;
 /// current declaration says.
 pub trait DeadlineMessage: Sized + Send + Sync + 'static {
     /// The name this message type claims on the wire.
+    ///
+    /// One per saga type: every saga type's schedule facts share one event
+    /// type, and this name is what the deadline index tells a saga type's own
+    /// from — see [`DeclaresDeadline::MESSAGE_TYPE`](crate::DeclaresDeadline::MESSAGE_TYPE).
     const TYPE_NAME: &'static str;
     /// The name of the format [`Self::Codec`] writes this message as.
     const CODEC_NAME: &'static str;

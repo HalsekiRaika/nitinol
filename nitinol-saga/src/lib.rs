@@ -8,7 +8,14 @@
 //! everybody else is the separate pure mapping [`Saga::dispatch`] answers, and
 //! carrying it out belongs to a delivery host, which
 //! [`host`](SagaSystemExt::host) starts beside the manager whose decisions it
-//! carries, on the contract [`SagaDeliveryProps`] states.
+//! carries, on the contract [`SagaDeliveryProps`] states.  A saga type that
+//! declares a deadline is started with a third part, its deadline index, which
+//! brings an instance back when one of its deadlines falls due.
+//!
+//! The saga is the writer of its own stream, and the parts beside it are
+//! readers of that stream, each in global order from a position of its own:
+//! the delivery host carries the decisions it reads, and the deadline index
+//! asks for the instances whose deadlines it reads to have fallen due.
 //!
 //! # Mental model
 //!
@@ -18,18 +25,20 @@
 //! | Reactive context | [`SagaContext`] |
 //! | Effect ADT | [`SagaEffect`] |
 //! | Identifier | [`SagaId`] |
-//! | Spawn verb | [`SagaSystemExt::host`] (starts the manager and the delivery host that carries out what it decides) |
+//! | Spawn verb | [`SagaSystemExt::host`] (starts the manager, the delivery host that carries out what it decides, and — for a saga type with a deadline — the deadline index) |
 //! | Spawn builder | [`SagaManagerProps`] (what [`host`](SagaSystemExt::host) hands back, and what the props-first form starts from) |
 //! | Upstream subscription value | [`Subscription`] |
-//! | Handle | [`SagaHostProxy`], reaching [`SagaManagerProxy`] and [`SagaDeliveryProxy`] |
+//! | Handle | [`SagaHostProxy`], reaching [`SagaManagerProxy`], [`SagaDeliveryProxy`] and [`SagaDeadlineIndexProxy`] |
 //! | Delivery mapping | [`Saga::dispatch`] answering [`SagaDelivery`] |
 //! | Delivery-host settings | [`SagaDeliveryProps`] (where each setting the saga's builder names states its contract) |
 //! | Delivery-host handle | [`SagaDeliveryProxy`] |
 //! | Delivery-host identifier | [`SagaDeliveryId`] |
+//! | Deadline-index handle | [`SagaDeadlineIndexProxy`] |
 //!
 //! There is one spawn verb, one spawn builder and one handle because there is
 //! one kind of saga: [`host`](SagaSystemExt::host) always starts a manager and
-//! the host that delivers what it decides, and a saga whose
+//! the host that delivers what it decides — and, when the saga has time of its
+//! own, the index that brings its instances back for it — and a saga whose
 //! [`Saga::correlate`] always answers the same [`SagaId`] is that manager with
 //! a single instance rather than a second mechanism.
 //!
@@ -58,7 +67,9 @@
 //!   is dropped before [`Saga::handle`] runs again.  A source's cursor is the
 //!   manager's and starts where the [`Subscription`] named, because it is
 //!   spoken for by no single instance's position — so the sweep from there is
-//!   also what activates the instances that are not resident.  An effect
+//!   also what activates the instances that are not resident for a record.
+//!   An instance waiting on a deadline needs no record: the deadline index
+//!   brings it back when the deadline falls due.  An effect
 //!   that writes nothing else still commits a consumed-position-only append,
 //!   so a no-op decision is not redelivered either; what the guarantee does
 //!   *not* cover — an append that never landed, and the entry points with no
@@ -149,7 +160,18 @@
 //!   is where they durably live: the scheduler restores nothing of its own after
 //!   a restart, and an unfired deadline is re-armed when the instance that set it
 //!   is next activated (at-least-once delivery; handlers must be idempotent).
-//!   What the journal says is still pending is readable through
+//!   That activation does not wait on the upstream: the host also starts the
+//!   saga type's deadline index, one process per delivery partition, which
+//!   reads every instance's schedule and lifecycle facts in global order and,
+//!   when a deadline falls due, asks the manager for its instance.  The
+//!   instance replays, re-arms the deadline, and the scheduler fires it into
+//!   [`Saga::handle`] — the index decodes no deadline and delivers nothing, so
+//!   a firing has one road.  The index records no position: it is a cache of
+//!   the schedule facts, read again from the start of the journal whenever it
+//!   starts, so losing it costs time and never a deadline.  It tells a saga
+//!   type's schedule facts from another's by the deadline message type they
+//!   name ([`DeclaresDeadline::MESSAGE_TYPE`]), which is therefore one per saga
+//!   type.  What the journal says is still pending is readable through
 //!   [`Deadline::pending`].
 //! - Termination is durable and final.  Interpreting [`SagaEffect::End`] writes
 //!   an `Ended` fact onto the saga's own stream and stops the process; a later
@@ -314,6 +336,7 @@
 mod components;
 mod consumed;
 mod context;
+mod deadline_index;
 mod delivery;
 mod effect;
 mod error;
@@ -332,6 +355,7 @@ mod system_ext;
 
 pub use self::components::{Deadline, DeadlineMessage, PendingDeadline, SagaComponents};
 pub use self::context::SagaContext;
+pub use self::deadline_index::SagaDeadlineIndexProxy;
 pub use self::delivery::{
     partition_of, SagaDelivery, SagaDeliveryError, SagaDeliveryId, SagaDeliveryProps,
     SagaDeliveryProxy,

@@ -27,10 +27,14 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_PARTITIONS: NonZeroUsize = NonZeroUsize::MIN;
 
 /// How many times a panicking partition is rebuilt before it is left stopped.
-const RESTART_MAX_RETRIES: u32 = 5;
+///
+/// Shared with the deadline index's partitions, which are rebuilt on the same
+/// terms: both are pull consumers of the journal that lose nothing by being
+/// rebuilt.
+pub(crate) const RESTART_MAX_RETRIES: u32 = 5;
 
 /// The window the retries above are counted in.
-const RESTART_WITHIN: Duration = Duration::from_secs(60);
+pub(crate) const RESTART_WITHIN: Duration = Duration::from_secs(60);
 
 /// Wiring for a delivery host over the saga type `S`.
 ///
@@ -199,6 +203,18 @@ impl<S: Saga> SagaDeliveryProps<S> {
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
         self
+    }
+
+    /// The partition count this host is wired with, which the saga's deadline
+    /// index is spread over too.
+    pub(crate) fn partitions(&self) -> NonZeroUsize {
+        self.partitions
+    }
+
+    /// The cadence this host asks the journal at, which the saga's deadline
+    /// index asks it at too.
+    pub(crate) fn poll_interval(&self) -> Duration {
+        self.poll_interval
     }
 
     /// Start the host over `journal` and `offsets`, delivering through `host`,

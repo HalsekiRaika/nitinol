@@ -10,6 +10,7 @@ use nitinol_runtime::process::SupervisionStrategy;
 use nitinol_runtime::{IdleTimeout, Props};
 
 use crate::components::SagaComponents;
+use crate::deadline_index;
 use crate::delivery::{SagaDeliveryId, SagaDeliveryProps};
 use crate::process::instance::SagaProducer;
 use crate::process::manager::SagaManagerProcess;
@@ -40,7 +41,11 @@ pub struct SagaHosted<S: Saga, St> {
 /// instance is spawned and replayed on the spot, an id already resident is
 /// handed the record directly. Beside it, it starts the delivery host that
 /// carries out what the manager decides: a saga whose decisions nobody carries
-/// out is not a saga, so the two are one declaration.
+/// out is not a saga, so the two are one declaration. A saga type whose
+/// alphabet declares a deadline is also started with its deadline index, which
+/// reads the schedule facts every instance has written and asks the manager
+/// for an instance when one of its deadlines falls due — so a deadline reaches
+/// its instance whether or not anything upstream ever names it again.
 ///
 /// `B` is the binding typestate: one slot per declared source,
 /// [`observing`](Self::observing) moves one, and [`spawn`](Self::spawn) exists
@@ -145,6 +150,11 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     ///
     /// What a partition bounds, and what changing the count costs, is stated on
     /// [`SagaDeliveryProps::with_partitions`] and on [`SagaDeliveryProps`].
+    ///
+    /// The deadline index is spread over the same count and assigns a saga to
+    /// the same partition, by [`partition_of`](crate::partition_of). It records
+    /// no position, so changing the count costs it nothing: every partition
+    /// reads the schedule facts from the start whenever it starts.
     pub fn with_partitions(mut self, partitions: NonZeroUsize) -> Self {
         self.delivery = self.delivery.with_partitions(partitions);
         self
@@ -153,7 +163,10 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     /// Have this saga's delivery host ask the journal no more often than every
     /// `interval` — see [`SagaDeliveryProps::with_poll_interval`].
     ///
-    /// This is the *delivery* side's cadence, on the saga's own decisions. How
+    /// This is the *delivery* side's cadence, on the saga's own decisions, and
+    /// the deadline index's: both read what the saga's own streams hold, so
+    /// one setting says how stale either may be. A deadline is therefore
+    /// asked for at most this long after it falls due. How
     /// often an observed source is asked is that source's own
     /// [`Subscription::with_poll_interval`], named per source on
     /// [`observing`](Self::observing).
@@ -181,6 +194,12 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     /// the instances that are not resident.  Each instance still drops the
     /// records its own stream names as consumed, so the sweep costs no second
     /// decision.
+    ///
+    /// An instance with a pending deadline does not depend on the sweep: the
+    /// deadline index reads the schedule fact on the instance's own stream and
+    /// asks the manager for the instance when the deadline falls due, so a
+    /// subscription that starts past every record the instance was ever
+    /// claimed by still has its deadline delivered.
     ///
     /// Which of the delivered events an instance acts on is decided by
     /// [`Saga::correlate`], not here — correlation is domain knowledge carried
@@ -218,8 +237,9 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H>
 where
     B: AllSourcesSubscribed<S::Subscribe>,
 {
-    /// The one road both entry points take: start the manager and the delivery
-    /// host that carries out what it decides, on `system`.
+    /// The one road both entry points take: start the manager, the delivery
+    /// host that carries out what it decides, and — when the alphabet declares
+    /// a deadline — the deadline index, on `system`.
     ///
     /// Every store comes from `system` here and nowhere else — the journal its
     /// instances persist to and its sources are observed from, and the
@@ -227,8 +247,10 @@ where
     /// forms cannot drift into reaching different destinations.
     ///
     /// The manager starts first: a delivery host reads what is already
-    /// journalled, so the order costs nothing either way, and the handle answers
-    /// for both halves only once both are running.
+    /// journalled, so the order costs nothing either way, and the index asks
+    /// the manager it is handed for instances, so that manager exists before
+    /// it. The handle answers for every part only once all of them are
+    /// running.
     async fn start_on<St: SagaOffsetSlot>(
         self,
         system: &EventSourceSystem<St>,
@@ -270,10 +292,15 @@ where
         // and permanently stop the whole fan-out during a quiet upstream.
         .with_idle_timeout(IdleTimeout::Persistent);
 
-        let manager = SagaManagerProxy::new(ps.spawn(props).await);
-        let delivery = self.delivery.start_on(store, offsets, host).await;
+        let manager = ps.spawn(props).await;
+        let partitions = self.delivery.partitions();
+        let poll_interval = self.delivery.poll_interval();
+        let delivery = self.delivery.start_on(store.clone(), offsets, host).await;
+        let deadline_index =
+            deadline_index::start_for::<S>(partitions, poll_interval, store, manager.clone(), ps)
+                .await;
 
-        SagaHostProxy::new(manager, delivery)
+        SagaHostProxy::new(SagaManagerProxy::new(manager), delivery, deadline_index)
     }
 }
 
@@ -281,8 +308,9 @@ impl<S: Saga, B> SagaManagerProps<S, B, Unhosted>
 where
     B: AllSourcesSubscribed<S::Subscribe>,
 {
-    /// Spawn the manager, and the delivery host that carries out what it
-    /// decides, on `system`.
+    /// Spawn the manager, the delivery host that carries out what it decides
+    /// and — when the alphabet declares a deadline — the deadline index, on
+    /// `system`.
     ///
     /// Every declared source's poller and every saga instance are runtime
     /// **children** of the manager, so stopping the manager cascade-stops the
@@ -290,8 +318,9 @@ where
     ///
     /// A saga whose alphabet declares a deadline also has the system's one
     /// resident timer core resolved here, and every instance the manager spawns
-    /// is handed it — which is the whole of a saga's deadline wiring, however
-    /// many instances the correlation fans out to.
+    /// is handed it, and its deadline index started beside the delivery host —
+    /// which is the whole of a saga's deadline wiring, however many instances
+    /// the correlation fans out to.
     ///
     /// Every instance the manager spawns is handed `system` through
     /// [`SagaComponents::system`](crate::SagaComponents::system).
@@ -380,15 +409,17 @@ where
     B: AllSourcesSubscribed<S::Subscribe>,
     St: SagaOffsetSlot,
 {
-    /// Spawn the manager process, and the delivery host that carries out what
-    /// it decides, on the system these props came from.
+    /// Spawn the manager process, the delivery host that carries out what it
+    /// decides and — when the alphabet declares a deadline — the deadline
+    /// index, on the system these props came from.
     ///
     /// Nothing is named here, and every instance the manager spawns is handed
     /// that system through
     /// [`SagaComponents::system`](crate::SagaComponents::system).  The manager
     /// starts first: a delivery host reads what is already journalled, so the
-    /// order costs nothing either way, and the handle answers for both halves
-    /// only once both are running.
+    /// order costs nothing either way, and the index asks that manager for
+    /// instances. The handle answers for every part only once all of them are
+    /// running.
     ///
     /// Spawning before every declared source is bound is a **compile error** —
     /// including the degenerate case of binding nothing at all:

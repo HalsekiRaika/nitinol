@@ -1,6 +1,6 @@
 mod instance;
 mod interpreter;
-mod manager;
+pub(crate) mod manager;
 mod manager_props;
 mod proxy;
 mod replay;

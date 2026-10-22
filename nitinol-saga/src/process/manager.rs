@@ -160,6 +160,40 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaManagerProcess<S> {
     }
 }
 
+/// Ask for one of this manager's instances to be resident.
+///
+/// Sent by the deadline index when a deadline the journal holds for `saga_id`
+/// falls due. It carries no firing: an instance brought back replays its own
+/// stream, re-arms the deadline on the resident scheduler, and the scheduler's
+/// firing reaches it through [`DeliverScheduled`] — the one road a deadline
+/// takes to `handle`.
+pub(crate) struct ActivateInstance {
+    pub(crate) saga_id: SagaId,
+}
+
+impl<S: Saga> Receive<ActivateInstance> for SagaManagerProcess<S> {
+    type Response = ();
+    /// One instance that cannot be brought back must not put the manager that
+    /// fronts every other one through supervision.
+    type Error = Infallible;
+
+    /// Activation on miss, and nothing for a resident instance.
+    ///
+    /// A stale proxy is not evicted here, unlike [`DeliverScheduled`]: nothing
+    /// is handed to it, so nothing is lost by its being stale, and the index
+    /// asks again until the journal settles the deadline — by when the
+    /// instance's `Terminated` has cleared it from the registry and the request
+    /// spawns a successor.
+    async fn recv(
+        &mut self,
+        msg: ActivateInstance,
+        ctx: &mut ProcessContext<Self>,
+    ) -> Result<(), Infallible> {
+        self.instance(msg.saga_id, ctx).await;
+        Ok(())
+    }
+}
+
 /// A deadline's firing addressed to one of this manager's instances.
 ///
 /// What the resident scheduler holds for such a deadline is this manager and

@@ -54,4 +54,5 @@ pub use self::error::SagaDeliveryError;
 pub use self::id::SagaDeliveryId;
 pub use self::partition::partition_of;
 pub use self::props::SagaDeliveryProps;
+pub(crate) use self::props::{RESTART_MAX_RETRIES, RESTART_WITHIN};
 pub use self::proxy::SagaDeliveryProxy;

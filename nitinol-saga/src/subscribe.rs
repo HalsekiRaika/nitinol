@@ -153,10 +153,10 @@ pub trait SagaSubscribe: Send + Sync + Sized + 'static {
 /// is read back as `A`.
 ///
 /// Sealed to [`NoDeadline`] and [`HasDeadline<M>`]. [`NoDeadline`]'s impl
-/// applies for every `A` and fixes both consts; [`HasDeadline<M>`]'s impl
+/// applies for every `A` and fixes every const; [`HasDeadline<M>`]'s impl
 /// applies only where `A: DeadlineVariant<M>` and fixes
 /// [`READ`](Self::READ) to `Some` of the one function built from that `wrap`.
-/// Neither impl leaves either const for `A`'s own `SagaSubscribe` impl to set,
+/// Neither impl leaves any const for `A`'s own `SagaSubscribe` impl to set,
 /// so there is no shape where [`HAS_DEADLINE`](Self::HAS_DEADLINE) is `true` —
 /// `Deadline<M>` obtainable, resident timer core resolved — while `READ` is
 /// `None`: a firing this saga can receive always has an arm it is delivered
@@ -176,6 +176,22 @@ pub trait DeclaresDeadline<A: SagaSubscribe>: sealed::Sealed + Send + Sync + 'st
     /// named, not through a format the framework picked — see
     /// [`ReadDeadlineError::IdentityMismatch`].
     const READ: Option<ReadDeadline<A>>;
+
+    /// The [`DeadlineMessage::TYPE_NAME`] of the message the alphabet declares,
+    /// and so the name every schedule fact this saga type writes carries.
+    ///
+    /// `None` exactly when [`HAS_DEADLINE`](Self::HAS_DEADLINE) is `false`.
+    /// Derived from the same shape as the two consts above, for the same
+    /// reason: the deadline index tells this saga type's schedule facts from
+    /// every other saga type's by this name, and a name settable apart from
+    /// `Deadline` could leave the index watching facts nobody of this type
+    /// writes.
+    ///
+    /// Every saga type's schedule facts share one event type, so the name is
+    /// the only thing that tells them apart: two saga types declaring the same
+    /// message type have their deadlines read by both types' indexes, and the
+    /// message type is therefore one per saga type.
+    const MESSAGE_TYPE: Option<&'static str>;
 }
 
 /// [`SagaSubscribe::Deadline`] for an alphabet with no `#[subscribe(deadline)]`
@@ -200,6 +216,7 @@ mod sealed {
 impl<A: SagaSubscribe> DeclaresDeadline<A> for NoDeadline {
     const HAS_DEADLINE: bool = false;
     const READ: Option<ReadDeadline<A>> = None;
+    const MESSAGE_TYPE: Option<&'static str> = None;
 }
 
 impl<A, M> DeclaresDeadline<A> for HasDeadline<M>
@@ -211,6 +228,7 @@ where
     const READ: Option<ReadDeadline<A>> = Some(|message_type, message_codec, payload| {
         read_deadline_message::<M>(message_type, message_codec, payload).map(A::wrap_deadline)
     });
+    const MESSAGE_TYPE: Option<&'static str> = Some(M::TYPE_NAME);
 }
 
 /// How alphabet `A` constructs its `#[subscribe(deadline)]` variant from the

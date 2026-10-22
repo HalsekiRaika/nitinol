@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (nitinol-saga): the read-side deadline index. A saga type whose alphabet
+  declares a `#[subscribe(deadline)]` variant is now hosted with it: `host` /
+  `spawn` starts one top-level process per partition beside the manager and the
+  delivery host, sharing the delivery host's `with_partitions` count (a saga is
+  assigned by the same `partition_of`) and its `with_delivery_poll_interval`
+  cadence. A saga type that declares no deadline starts none.
+
+  Each partition reads every saga's `nitinol.saga.schedule` and
+  `nitinol.saga.lifecycle` facts in global order, each event type with a cursor
+  of its own, and holds the deadlines they leave pending: a `scheduled` fact
+  replaces the deadline of the same timer name, `cancelled` and `fired` remove
+  it, and `ended` removes every deadline of that saga. When one falls due it
+  asks the manager for that instance, and goes on asking on every tick until a
+  `fired`, `cancelled` or `ended` fact takes the deadline out. The instance is
+  brought back the way any activation brings it back — replay, re-arm on the
+  resident scheduler, and the firing reaching `handle` — so a pending deadline
+  now reaches `handle` after a restart, or on another system over the same
+  store, even when nothing upstream ever names that instance again. The index
+  decodes no deadline message and delivers nothing.
+
+  The index records no position: it is a cache of the schedule facts, rebuilt
+  from the start of the journal whenever a partition starts or is restarted by
+  supervision. Asking the store by those two event types alone keeps the
+  rebuild proportional to the schedule and lifecycle facts rather than to the
+  upstream's history.
+
+  New surface: `SagaHostProxy::deadline_index()` answers a
+  `SagaDeadlineIndexProxy` (its `pids()`, one per partition) or `None` for a
+  saga type with no deadline, and `DeclaresDeadline::MESSAGE_TYPE` names the
+  deadline message type a saga type's schedule facts carry. The index reports
+  `"saga deadline index rebuilt"` (`message_type`, `partition`, `count`) once
+  per partition start and `"saga deadline index requested activation"`
+  (`message_type`, `partition`, `saga_id`, `timer`, `due_at_unix_millis`) for
+  each request through `tracing`.
+
+  Every saga type's schedule facts share one event type, and the deadline
+  message type they name is what tells them apart, so a
+  `DeadlineMessage::TYPE_NAME` is one per saga type: two saga types declaring
+  the same one each have their index ask for the other's instances.
+
 - (workspace): criterion benchmarks for the single-node paths, and
   `BENCHMARKS.md` beside them. `nitinol-persistence/benches` measures
   `InMemoryEventStore::append` (one record, and a batch of a hundred) and
