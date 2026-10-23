@@ -79,10 +79,12 @@ pub(crate) enum InterpretOutcome {
     /// position from the append that closes the input out, and the outermost
     /// caller reads it only to report the failure before still answering `Ok`
     /// — raising it would stop the saga through handler-failure supervision,
-    /// which is exactly what must not happen here.  No cursor is held open for
-    /// this: the live upstream cursor advances regardless, and recovery comes
-    /// instead from what never became durable — nothing on the journal claims
-    /// the record, so a later host's sweep of that source re-opens it.
+    /// which is exactly what must not happen here.  The live read of the
+    /// source is not what stops here — the saga stays alive — but the partition
+    /// that read the record is: the outermost caller answers it as unsettled,
+    /// so the partition reads no further and hands the same record again on its
+    /// next turn, and since nothing on the journal claims it, a restart reads it
+    /// again from the recorded offset below it as well.
     ///
     /// A deadline firing recovers the same way, through the row that settles
     /// *it*: no `fired` marker is written for this outcome, so the schedule fact

@@ -16,8 +16,8 @@ use crate::saga::Saga;
 
 /// A typed handle to a running saga instance manager.
 ///
-/// The manager's upstream pollers — one per declared source — and every
-/// instance it spawned are runtime children of the manager process, so its
+/// The manager's source partitions — one per declared source and partition —
+/// and every instance it spawned are runtime children of the manager process, so its
 /// lifetime bounds the whole fan-out. Dropping every copy of this handle does
 /// not affect them — only stopping the manager (e.g. via [`Self::stop`] or
 /// supervision) does.
@@ -43,8 +43,10 @@ impl<S: Saga> SagaManagerProxy<S> {
         self.inner.pid()
     }
 
-    /// Stops the manager, cascade-stopping every upstream poller — one per
-    /// declared source — and every saga instance it currently holds.
+    /// Stops the manager, cascade-stopping every source partition — one per
+    /// declared source and partition — and every saga instance it currently
+    /// holds. Each partition's recorded offset stays where its last turn put
+    /// it, so the next manager over the same store resumes from there.
     ///
     /// The delivery host a hosted saga was started with is **not** stopped:
     /// it is a top-level process of the system rather than a child of the
@@ -113,7 +115,7 @@ impl<S: Saga> SagaHostProxy<S> {
         }
     }
 
-    /// The manager half: the instances, their upstream pollers, and the pid
+    /// The manager half: the instances, their source partitions, and the pid
     /// the whole fan-out is registered under.
     pub fn manager(&self) -> &SagaManagerProxy<S> {
         &self.manager

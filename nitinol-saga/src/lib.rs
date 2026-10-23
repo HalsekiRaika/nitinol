@@ -15,7 +15,10 @@
 //! The saga is the writer of its own stream, and the parts beside it are
 //! readers of that stream, each in global order from a position of its own:
 //! the delivery host carries the decisions it reads, and the deadline index
-//! asks for the instances whose deadlines it reads to have fallen due.
+//! asks for the instances whose deadlines it reads to have fallen due. The
+//! manager is a reader too, of the sources the saga observes: each source is
+//! read per partition from an offset the manager records, the way the delivery
+//! host records its own.
 //!
 //! # Mental model
 //!
@@ -48,11 +51,15 @@
 //! # Capabilities
 //!
 //! - Subscription-driven: each source the saga's alphabet declares is observed
-//!   on the journal the system the saga was spawned on distributes, via a
-//!   runtime child `DirectPollerProcess` of its own (catchup + live, at-least-once
-//!   delivery), with its own cursor. Every poller's lifetime is bound to the
+//!   on the journal the system the saga was spawned on distributes, by runtime
+//!   child processes of the manager — one per partition (catchup + live,
+//!   at-least-once delivery), each with an offset of its own, recorded in the
+//!   system's saga-offset slot. A partition resumes from the higher of the
+//!   source's floor ([`Subscription::with_after`]) and that offset, so a
+//!   restart reads on from where the last run settled rather than reading the
+//!   source again from its floor. Every partition's lifetime is bound to the
 //!   manager process that owns it; when the manager stops the runtime
-//!   cascade-stops every child poller automatically.
+//!   cascade-stops every one of them automatically.
 //!   [`Subscription::with_poll_interval`] is how often one source is asked,
 //!   which is a deployment's choice rather than the framework's.
 //! - Consumed inputs are de-duplicated by the framework.  Most positions are
@@ -64,10 +71,11 @@
 //!   settled by a position-only append: it was seen, it produced nothing, and
 //!   that one row is all it leaves.  Either way, replay rebuilds those
 //!   positions from the stream alone and a redelivered record at or below one
-//!   is dropped before [`Saga::handle`] runs again.  A source's cursor is the
-//!   manager's and starts where the [`Subscription`] named, because it is
-//!   spoken for by no single instance's position — so the sweep from there is
-//!   also what activates the instances that are not resident for a record.
+//!   is dropped before [`Saga::handle`] runs again.  That is the whole of a
+//!   position's job: where a source reads from is the manager's, decided by
+//!   the source's floor and the offset its partition recorded, and no
+//!   instance's position speaks for either — which is also why an offset lost
+//!   or carried backwards costs a re-read and never a second decision.
 //!   An instance waiting on a deadline needs no record: the deadline index
 //!   brings it back when the deadline falls due.  An effect
 //!   that writes nothing else still commits a consumed-position-only append,
@@ -77,9 +85,9 @@
 //!   per declared source of each upstream stream, so one source's progress
 //!   never covers a record of another.  A record that fails to decode is
 //!   settled by neither path: it has no typed input to attribute to an
-//!   instance, so nothing durable is written for it and a restart repeats the
-//!   same report instead of resuming past it — detailed under "Correlation and
-//!   routing" below.
+//!   instance, so nothing is written on any saga stream for it, and its
+//!   source's offset moves past it — detailed under "Correlation and routing"
+//!   below.
 //! - Symmetric spawn: a saga is started in one of two forms and no more —
 //!   props-first, [`SagaManagerProps::new`]`(producer)…spawn(&system)`, or
 //!   system-first, [`SagaSystemExt::host`]`(producer)…spawn()`. The second is
@@ -94,7 +102,8 @@
 //!   [`PersistenceProvider`](nitinol_persistence::provider::PersistenceProvider),
 //!   and the spawn resolves every store from it — the journal every instance's
 //!   own stream lands on, the journal each declared source is polled from, and
-//!   the saga-offset slot the delivery host records in.  `EventStore` is
+//!   the saga-offset slot the delivery host and the manager's source
+//!   partitions record in, each under keys of its own.  `EventStore` is
 //!   stream-keyed, so that one store holds the upstream stream and every
 //!   instance's own stream side by side, which is why a
 //!   [`Subscription`] names a stream key and a position and no store at all.
@@ -111,17 +120,20 @@
 //!   that needs a reference into the host resolves it there rather than from a
 //!   clone of the system captured outside the spawn.
 //! - Instance management: the manager [`host`](SagaSystemExt::host) starts
-//!   holds one upstream subscription per declared source, shared by every
-//!   instance of a saga type, so an upstream record is decoded once no matter
-//!   how far the correlation fans out.  It interprets [`Saga::correlate`] at
-//!   runtime: a correlation id with no resident instance is spawned and
-//!   replayed on arrival, an id already resident is handed the event directly,
-//!   and [`SagaManagerProps::with_instance_passivation`] stops instances that
-//!   fall idle — a later event revives them from their own stream.  Owning each
-//!   source's cursor makes it the manager's decision whether a record from
-//!   that source is settled: it withholds the cursor when the addressed
-//!   instance could not settle the record, and advances past a record no
-//!   instance claims so one unclaimed record cannot stall the rest.  A
+//!   reads each declared source with one reader per partition, shared by every
+//!   instance of a saga type that falls in it, so an upstream record is decoded
+//!   once per partition no matter how far the correlation fans out.  It
+//!   interprets [`Saga::correlate`] at runtime: a correlation id with no
+//!   resident instance is spawned and replayed on arrival, an id already
+//!   resident is handed the event directly, and
+//!   [`SagaManagerProps::with_instance_passivation`] stops instances that fall
+//!   idle — a later event revives them from their own stream.  Owning each
+//!   partition's offset makes it the manager's decision whether a record is
+//!   settled: it reads no further when the addressed instance could not answer
+//!   for the record, keeps the recorded offset below a record whose decision
+//!   never became durable, and moves past a record no instance claims — or one
+//!   another partition's instance does — so one unclaimed record cannot stall
+//!   the rest.  A
 //!   [`Saga::correlate`] that always answers the same id reduces the manager to
 //!   a single resident instance, which is how a saga with one process is run —
 //!   the degenerate case, not a mechanism of its own.
@@ -182,8 +194,8 @@
 //!   through `tracing` and dropped, with nothing written: a terminated saga
 //!   records no further facts, and not even a position, since a record that
 //!   reached no `handle` settles nothing a later incarnation could use.  It is
-//!   still answered, so one ended instance never holds a shared cursor behind
-//!   it.
+//!   still answered, so one ended instance never holds a source partition
+//!   behind it.
 //! - The two layers a failure belongs to: a *business* failure is a domain fact
 //!   and reaches the saga as an input — the answer the addressed aggregate
 //!   recorded, observed through the source declared for it, or the saga's own
@@ -211,14 +223,17 @@
 //!   when that answer equals the instance's own id; anything else is ignored
 //!   silently.  A record whose upstream bytes do not decode has no typed input to
 //!   correlate on, so there is no instance it could be attributed to: it is
-//!   reported through `tracing` and skipped, its source's cursor advances past it,
-//!   and nothing durable is written for it.  A decode failure is deterministic and
-//!   permanent — a stalling escape hatch would stall forever — so re-reading the
-//!   record after a restart repeats the report rather than a decision.
+//!   reported through `tracing` and skipped, its source's offset moves past it,
+//!   and nothing is written on any saga stream for it.  A decode failure is
+//!   deterministic and permanent — a stalling escape hatch would stall forever —
+//!   so a source that reads the record again repeats the report rather than a
+//!   decision.
 //! - A persist batch the store refuses is retried a bounded number of times and
 //!   then reported.  The input it was decided from stays unconsumed — no
-//!   position is written for a decision no store holds — so a later incarnation
-//!   reads the record again and decides it again.  The saga itself stays alive
+//!   position is written for a decision no store holds — and its source's
+//!   partition reads no further, handing the record again on its next poll
+//!   with the recorded offset below it, so a later manager reads the record
+//!   again and decides it again.  The saga itself stays alive
 //!   rather than stopping, which is what lets its next input retry the same
 //!   decision, [`SagaEffect::End`] included; when that redelivery comes, and
 //!   how it differs from a refused input's, is stated on [`Saga::handle`].

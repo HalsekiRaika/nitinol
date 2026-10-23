@@ -1,17 +1,27 @@
-//! The saga instance manager: one subscription per declared source in front of
-//! every instance of a saga type.
+//! The saga instance manager: the source partitions in front of every instance
+//! of a saga type.
 //!
 //! The manager is the machine that interprets [`Saga::correlate`] at runtime.
-//! It holds the only subscriptions, so an observed record is decoded once no
-//! matter how many instances the correlation fans out to, and it owns the one
-//! cursor of each source — which makes "do not advance on failure" a manager
-//! decision rather than an instance one.
+//! Its source partitions are the only readers of the declared sources, so an
+//! observed record is decoded once per partition no matter how many instances
+//! the correlation fans out to, and each partition owns its source's offset
+//! for the instances that fall in it — which makes "do not move past a record
+//! that is not settled" a partition decision rather than an instance one.
 //!
-//! The declared sources stay independent of one another: one cursor each, no
-//! order between them, and a stalled source holding up nothing but itself.
+//! Each partition of each declared source resumes from the higher of the
+//! source's floor and the offset it recorded, so a restart reads on from where
+//! the last one settled instead of reading the source again from its floor.
+//! The offset is a cache of what the journal already says: an instance drops
+//! every record its own stream names as consumed, so an offset lost or carried
+//! backwards costs a re-read and never a second decision.
+//!
+//! The declared sources stay independent of one another, and so do the
+//! partitions of one: an offset each, no order between them, and a stalled
+//! partition holding up nothing but itself.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use nitinol_eventsource::system::SystemHandle;
@@ -19,10 +29,15 @@ use nitinol_persistence::store::Journal;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Terminated};
 use nitinol_runtime::IdleTimeout;
 
+use crate::delivery::SagaDeliveryId;
 use crate::error::SagaUpstreamHandlerError;
 use crate::id::SagaId;
 use crate::process::instance::{SagaInstanceSpec, SagaProducer, ScheduleDelivery};
-use crate::process::saga_process::{FireScheduled, OwnedUpstream, SagaProcess, UpstreamMessage};
+use crate::process::manager_offsets::SagaManagerOffsets;
+use crate::process::saga_process::{
+    FireScheduled, SagaProcess, UpstreamMessage, UpstreamSettlement,
+};
+use crate::process::source_partition::{SagaSourcePartition, UpstreamSource};
 use crate::saga::Saga;
 use crate::scheduler::SchedulerProxy;
 
@@ -35,15 +50,24 @@ pub(crate) struct SagaManagerProcess<S: Saga> {
     /// resources without a reference to the system being captured outside the
     /// spawn.
     pub(crate) host: SystemHandle,
-    /// One subscription per declared source, shared by every instance the
-    /// manager fronts.
+    /// The declared sources, each read by one partition per partition of the
+    /// host, shared by every instance of that partition.
     ///
-    /// Each starts exactly where its [`Subscription`](crate::Subscription) said:
-    /// a shared cursor is spoken for by no single instance's consumed position,
-    /// and the sweep from the configured position is what activates the
-    /// instances that are not resident.  Each instance still drops the records
-    /// it has already consumed, so the sweep costs no second decision.
-    pub(crate) upstream: Vec<OwnedUpstream<S::Subscribe>>,
+    /// Each partition resumes from the higher of the floor its
+    /// [`Subscription`](crate::Subscription) named and the offset it recorded —
+    /// no instance's consumed position speaks for either. An instance with a
+    /// pending deadline and nothing new upstream is brought back by the
+    /// deadline index, not by reading the source again.
+    pub(crate) upstream: Vec<UpstreamSource<S::Subscribe>>,
+    /// The saga-offset slot every source partition records its progress in —
+    /// the system's, the one the delivery host records in.
+    pub(crate) offsets: SagaManagerOffsets,
+    /// How many partitions each source is read by: the count the delivery
+    /// host and the deadline index are spread over too.
+    pub(crate) partitions: NonZeroUsize,
+    /// The delivery host's identifier, which the source partitions' offsets are
+    /// filed under too.
+    pub(crate) host_id: SagaDeliveryId,
     /// Passivation window handed to every instance this manager spawns.
     pub(crate) instance_idle_timeout: IdleTimeout,
     /// The resident timer core handed to every instance this manager spawns,
@@ -108,14 +132,25 @@ impl<S: Saga> SagaManagerProcess<S> {
 
 impl<S: Saga> Process for SagaManagerProcess<S> {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
-        // One poller per declared source, each from its own configured
-        // position, so a source whose upstream has stalled holds up only
-        // itself.
-        for source in self.upstream.clone() {
-            source
-                .config
-                .spawn_child(ctx, self.store.clone(), source.cursor)
-                .await;
+        // Every partition there is. This range is the one place a host that
+        // took only some of the partitions would name its share.
+        let owned = 0..self.partitions.get();
+        // One reader per declared source and partition, each from its own
+        // offset, so a partition whose record is stalled holds up only itself.
+        for source in &self.upstream {
+            for partition in owned.clone() {
+                let props = SagaSourcePartition::new(
+                    source.clone(),
+                    partition,
+                    self.partitions,
+                    &self.host_id,
+                    self.store.clone(),
+                    self.offsets.clone(),
+                    ctx.self_proxy().clone(),
+                )
+                .into_props();
+                ctx.spawn_child(props).await;
+            }
         }
     }
 
@@ -130,30 +165,25 @@ impl<S: Saga> Process for SagaManagerProcess<S> {
 }
 
 impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaManagerProcess<S> {
-    type Response = ();
-    /// Returning `Err` stops that source's `DirectPoller` (via `ask()`) from
-    /// advancing its shared cursor, so a record the addressed instance could not
-    /// settle is redelivered rather than skipped.
+    /// The addressed instance's answer, handed back to the partition that read
+    /// the record so it decides how far its offset may move.
+    type Response = UpstreamSettlement;
+    /// Returning `Err` keeps the source partition (via `ask()`) from reading
+    /// past the record, so a record the addressed instance could not answer for
+    /// is redelivered rather than skipped.
     type Error = SagaUpstreamHandlerError;
 
     async fn recv(
         &mut self,
         msg: UpstreamMessage<S::Subscribe>,
         ctx: &mut ProcessContext<Self>,
-    ) -> Result<(), SagaUpstreamHandlerError> {
-        // A record belonging to no instance is nobody's work.  Advancing past it
-        // is what keeps one unclaimed record from stalling every instance behind
-        // it on that source's shared subscription.
-        let Some(saga_id) = S::correlate(&msg.input) else {
-            return Ok(());
-        };
-
-        let instance = self.instance(saga_id, ctx).await;
+    ) -> Result<UpstreamSettlement, SagaUpstreamHandlerError> {
+        let instance = self.instance(msg.saga_id.clone(), ctx).await;
         instance.ask(msg).await.map_err(|e| {
             tracing::warn!(
                 error = %e,
                 "saga manager: instance did not settle the observed record; \
-                 holding that source's shared cursor so it is redelivered"
+                 holding that source partition so it is redelivered"
             );
             SagaUpstreamHandlerError
         })

@@ -363,10 +363,10 @@ async fn saga_replays_its_own_stream_via_direct_store_on_respawn() {
         .len();
     assert_eq!(
         seen, 2,
-        "one handle call per upstream order: the catchup the respawn performs \
-         re-reads the order the first incarnation already decided from, and the \
-         position replay restored is what keeps it from reaching handle a \
-         second time"
+        "one handle call per upstream order: the respawn resumes from the \
+         recorded offset, and should it read the order the first incarnation \
+         already decided from again, the position replay restored is what keeps \
+         it from reaching handle a second time"
     );
 
     let persisted = decisions(&saga_events);

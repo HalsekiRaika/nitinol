@@ -86,7 +86,11 @@ pub trait SagaSystemExt {
     /// of its deadlines falls due. The saga writes its own stream; the delivery
     /// host and the index are readers of it, each from a position of its own —
     /// the delivery host's recorded, the index's rebuilt from the start of the
-    /// journal whenever it starts.
+    /// journal whenever it starts. The manager is a reader as well, of the
+    /// sources the saga observes, and it records its position too: a restart
+    /// resumes each source from the offset each partition recorded, which is
+    /// why an instance with a pending deadline and nothing new upstream is the
+    /// index's to bring back.
     ///
     /// # Typestate
     ///

@@ -1,9 +1,8 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use nitinol_eventsource::{DurableSubscription, SequenceCursor};
 use nitinol_persistence::store::Journal;
-use nitinol_persistence::{AggregateId, LoadedEvent};
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::components::{deadline, PendingDeadlines};
@@ -19,109 +18,52 @@ use crate::retry_policy::RetryPolicy;
 use crate::saga::Saga;
 use crate::scheduler::{self, ScheduleEvent, SchedulerProxy, Timers};
 use crate::scheduler::{ScheduleToken, TimerName};
-use crate::subscribe::{DeclaresDeadline, SagaSubscribe, SourceBinding, SubscribedSource};
+use crate::subscribe::{DeclaresDeadline, SagaSubscribe};
 
 /// One observed record, decoded as the variant of the saga's alphabet it
-/// belongs to, delivered by the `DirectPollerProcess` of the source that read
-/// it.
+/// belongs to, handed on by the source partition that read it.
 ///
 /// A record whose bytes could not be decoded never becomes one of these: the
-/// transform reports it and answers `None`, which advances the poller's cursor
-/// past it.  A decode failure is deterministic and permanent, and carries no
-/// typed input to correlate, so there is no instance it could be attributed to
-/// and nothing a retry would change.
+/// partition reports it and counts it settled, which moves its offset past it.
+/// A decode failure is deterministic and permanent, and carries no typed input
+/// to correlate, so there is no instance it could be attributed to and nothing
+/// a retry would change.
 pub(crate) struct UpstreamMessage<A> {
     pub(crate) aggregate_id: AggregateId,
     pub(crate) sequence: u64,
     /// Which declared source read this record.
     ///
-    /// Decided by the transform — the source that matched the row's event type —
-    /// so no later stage has to classify it again.  It travels with the record
-    /// because the consumed position names it: two declared sources can share
-    /// one stream, and the stream key alone would let one source's progress
-    /// cover the other's records.
+    /// Decided by the partition — the source that matched the row's event type
+    /// — so no later stage has to classify it again.  It travels with the
+    /// record because the consumed position names it: two declared sources can
+    /// share one stream, and the stream key alone would let one source's
+    /// progress cover the other's records.
     pub(crate) source: PositionSource,
+    /// The instance [`Saga::correlate`] addressed this record to.
+    ///
+    /// Answered once, by the partition, which needs it to tell its own records
+    /// from another partition's; carried so the manager picks the instance
+    /// from that one answer rather than asking again.
+    pub(crate) saga_id: SagaId,
     pub(crate) input: A,
 }
 
-/// The subscription one declared source is observed through.
+/// What an instance answers for an observed record it was handed: whether the
+/// record is settled — whether the source's offset may move past it.
 ///
-/// One of these per declared external source: its own transform, its own
-/// cursor.  A saga's sources are independent, so a source whose upstream has
-/// stalled cannot hold up another's progress.
-pub(crate) struct OwnedUpstream<A> {
-    pub(crate) config: DurableSubscription<UpstreamMessage<A>>,
-    pub(crate) cursor: SequenceCursor,
-}
-
-impl<A> Clone for OwnedUpstream<A> {
-    fn clone(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            cursor: self.cursor.clone(),
-        }
-    }
-}
-
-/// Build the subscription that turns each raw record of one declared source into
-/// the [`UpstreamMessage`] a saga understands.
-///
-/// Owned here rather than at the spawn boundary so every declared source
-/// classifies a record — wrong type, decodable, corrupt — identically.
-pub(crate) fn source_subscription<A>(source: SubscribedSource<A>) -> OwnedUpstream<A>
-where
-    A: Send + Sync + 'static,
-{
-    let event_type = source.event_type();
-    let position_source = PositionSource::of(event_type);
-    let (decode, binding) = source.into_parts();
-    let SourceBinding {
-        cursor,
-        poll_interval,
-    } = binding;
-    let config = DurableSubscription::new(move |loaded: LoadedEvent| {
-        // This source claims the rows of its own event type and no others,
-        // which is what lets several sources read one stream key without
-        // reading each other's records.
-        if loaded.event_type != event_type {
-            return None;
-        }
-        let aggregate_id = AggregateId::new(loaded.stream_key);
-        let sequence = loaded.sequence;
-        match decode(&loaded.payload) {
-            Ok(input) => Some(UpstreamMessage {
-                aggregate_id,
-                sequence,
-                source: position_source.clone(),
-                input,
-            }),
-            Err(e) => {
-                // Reported and skipped, which is the whole of the handling:
-                // answering `None` advances this source's cursor past the
-                // record. A codec that refused these bytes once refuses them
-                // every time, and with no typed input there is no instance
-                // to attribute the failure to — so there is nothing a
-                // retry or a held cursor could recover.
-                // Nothing durable is written, so a restart re-reads the
-                // record and repeats this report.
-                tracing::error!(
-                    error = %e,
-                    event_type = %event_type,
-                    upstream_key = aggregate_id.as_str(),
-                    upstream_sequence = sequence,
-                    "saga could not decode an observed record; skipping it",
-                );
-                None
-            }
-        }
-    });
-    // A binding that named no interval is left at the one `nitinol-eventsource`
-    // already polls at, rather than handed a value restated here.
-    let config = match poll_interval {
-        Some(interval) => config.with_poll_interval(interval),
-        None => config,
-    };
-    OwnedUpstream { config, cursor }
+/// Settled means the journal holds a durable answer for the record, or the
+/// record is one this instance owes nothing: it was consumed already, or the
+/// instance has ended.  A record whose position could
+/// not be written at all is neither — that is the handler's error, and the
+/// record is handed again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpstreamSettlement {
+    Settled,
+    /// The record reached `handle`, and what it decided never became durable:
+    /// nothing on the journal claims it, so only a later read can bring it to
+    /// `handle` again.  The instance stays alive, and the partition reads no
+    /// further and hands the same record again on its next turn.
+    Unsettled,
 }
 
 /// Whether this saga instance can still reach [`Saga::handle`].
@@ -361,11 +303,11 @@ impl<S: Saga> Process for SagaProcess<S> {
         // run again, and anything still routed here is dropped.
         if outcome.ended {
             self.lifecycle = Lifecycle::Ended;
-            // Terminal, and still resident on purpose: the manager's shared
-            // subscription keeps delivering here, and it reads this instance's
-            // answer to decide whether that source's cursor may advance.
+            // Terminal, and still resident on purpose: the manager's source
+            // partitions keep delivering here, and each reads this instance's
+            // answer to decide whether it may read past the record.
             // Stopping would make every such arrival unanswerable and hold the
-            // shared cursor behind an instance that will never act again, so
+            // partition behind an instance that will never act again, so
             // the instance accepts and drops each one until the manager
             // passivates it.
             tracing::info!(
@@ -408,33 +350,24 @@ impl<S: Saga> Process for SagaProcess<S> {
 }
 
 impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
-    type Response = ();
-    /// Returning `Err(SagaUpstreamHandlerError)` signals the `DirectPoller`
-    /// (via `ask()`) to NOT advance the upstream cursor, keeping the saga
-    /// state consistent with what was actually processed.
+    type Response = UpstreamSettlement;
+    /// Returning `Err(SagaUpstreamHandlerError)` has the source partition (via
+    /// `ask()`) read no further than the record before this one, and hand the
+    /// same record again on its next turn.
     type Error = SagaUpstreamHandlerError;
 
     async fn recv(
         &mut self,
         msg: UpstreamMessage<S::Subscribe>,
         ctx: &mut ProcessContext<Self>,
-    ) -> Result<(), SagaUpstreamHandlerError> {
+    ) -> Result<UpstreamSettlement, SagaUpstreamHandlerError> {
         let UpstreamMessage {
             aggregate_id,
             sequence,
             source: declared_source,
             input,
+            ..
         } = msg;
-
-        // Correlation is decided before the lifecycle is consulted: an event
-        // belonging to another instance is none of this saga's business, ended
-        // or not.
-        let Some(target_id) = S::correlate(&input) else {
-            return Ok(());
-        };
-        if target_id != self.saga_id {
-            return Ok(());
-        }
 
         // A record already consumed — whether by a `Saga::handle` decision or
         // by the position-only append that settled one `handle` refused — must
@@ -452,7 +385,7 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
                 upstream_sequence = sequence,
                 "saga dropped a redelivered observed record it has already consumed"
             );
-            return Ok(());
+            return Ok(UpstreamSettlement::Settled);
         }
 
         // The position each settle path below writes: the stream, the declared
@@ -471,8 +404,8 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
         // the arrival is reported and dropped.  Nothing durable is written for
         // it: a terminated saga records no further facts, and a position would
         // claim an input a `handle` never saw.  The record is still answered
-        // with `Ok` so the cursor moves past it; holding it would starve every
-        // instance behind this one on a shared subscription.
+        // as settled so the partition's offset moves past it; holding it would
+        // starve every instance behind this one in the same partition.
         if matches!(self.lifecycle, Lifecycle::Ended) {
             tracing::warn!(
                 saga_id = self.saga_id.as_str(),
@@ -480,7 +413,7 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
                 upstream_sequence = sequence,
                 "saga has terminated; dropping an observed record routed to it"
             );
-            return Ok(());
+            return Ok(UpstreamSettlement::Settled);
         }
 
         let current_sequence = self.sequence;
@@ -514,12 +447,12 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
                 )
                 .await
                 {
-                    // Return Err so the DirectPoller (via ask()) does NOT
-                    // advance the upstream cursor: with no position the input is
+                    // Return Err so the source partition (via ask()) does NOT
+                    // read past this record: with no position the input is
                     // unconsumed, and a redelivery must reach `handle` again.
                     return Err(SagaUpstreamHandlerError);
                 }
-                return Ok(());
+                return Ok(UpstreamSettlement::Settled);
             }
         };
 
@@ -532,27 +465,28 @@ impl<S: Saga> Receive<UpstreamMessage<S::Subscribe>> for SagaProcess<S> {
         // durable without its input's consumed position becoming durable too.
         let mut ictx = self.interpreter_ctx(ctx, Some(input_position));
         // An append the effect required never landed, so no position was
-        // written and this input is not consumed.  Reported and answered with
-        // `Ok`: raising it would put this process through handler-failure
-        // supervision, and a saga that stops here is exactly what must not
-        // happen — staying alive is what lets the *next* input retry the
-        // decision, including an `End` whose `Ended` fact did not land. Nothing
-        // durable claims the record either, so a later host's sweep of this
-        // source re-opens it: the journal names no position for it, which this
-        // failure left exactly where it was.
-        if matches!(
-            interpreter::run_saga_effect(effect, &mut ictx).await,
-            InterpretOutcome::AppendFailed
-        ) {
-            tracing::error!(
-                saga_id = self.saga_id.as_str(),
-                upstream_key = aggregate_id.as_str(),
-                upstream_sequence = sequence,
-                "saga could not persist what it decided from an observed record; \
-                 the record stays unconsumed, so a restart decides it again"
-            );
+        // written and this input is not consumed.  Reported and answered as
+        // unsettled rather than as an error: raising it would put this process
+        // through handler-failure supervision, and a saga that stops here is
+        // exactly what must not happen — staying alive is what lets the *next*
+        // input retry the decision, including an `End` whose `Ended` fact did
+        // not land. Nothing durable claims the record either, so the source
+        // partition reads no further and hands it again on its next turn, and
+        // a restart reads it again from the offset below it: the journal names
+        // no position for it, which this failure left exactly where it was.
+        match interpreter::run_saga_effect(effect, &mut ictx).await {
+            InterpretOutcome::AppendFailed => {
+                tracing::error!(
+                    saga_id = self.saga_id.as_str(),
+                    upstream_key = aggregate_id.as_str(),
+                    upstream_sequence = sequence,
+                    "saga could not persist what it decided from an observed record; \
+                     the record stays unconsumed, so a restart decides it again"
+                );
+                Ok(UpstreamSettlement::Unsettled)
+            }
+            InterpretOutcome::Continue | InterpretOutcome::Stop => Ok(UpstreamSettlement::Settled),
         }
-        Ok(())
     }
 }
 
@@ -684,8 +618,8 @@ impl<S: Saga> Receive<FireScheduled> for SagaProcess<S> {
         };
 
         match outcome {
-            // A firing does not arrive through a `DirectPoller`, so there is no
-            // upstream cursor to withhold and no redelivery to wait for.  The
+            // A firing does not arrive through a source partition, so there is
+            // no upstream offset to withhold and no redelivery to wait for.  The
             // settlement is withheld instead: with no `fired` marker the
             // schedule fact stays unfired on the stream, so a later activation
             // re-arms the deadline — at once, its due time being past — and

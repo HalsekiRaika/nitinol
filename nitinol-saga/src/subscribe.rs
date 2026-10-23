@@ -274,8 +274,8 @@ pub struct SubscriptionSet(#[doc(hidden)] pub SourceBinding);
 /// field: a user can move one the builder handed out, and cannot invent one.
 ///
 /// The journal is absent on purpose: it is the one the system the saga is
-/// spawned on distributes, and the manager hands it to each source's poller at
-/// the spawn.
+/// spawned on distributes, and the manager hands it to each source's
+/// partitions at the spawn.
 pub struct SourceBinding {
     pub(crate) cursor: SequenceCursor,
     /// The cadence the binding named, where it named one.
@@ -315,14 +315,16 @@ pub trait AllSourcesSubscribed<A> {
 
 /// How the bytes of one declared source are read as the alphabet it belongs to.
 ///
-/// Shared rather than owned because a poller's transform is rebuilt on every
-/// supervised restart of the poller, and the alphabet is not `Clone`.
+/// Shared rather than owned because every partition of a source reads with it,
+/// and is rebuilt with it on every supervised restart, and the alphabet is not
+/// `Clone`.
 pub(crate) type DecodeSource<A> = Arc<dyn Fn(&[u8]) -> Result<A, CodecError> + Send + Sync>;
 
 /// One declared source, resolved: which event type it reads, how that type is
 /// read as the alphabet, and where it is read from.
 ///
-/// This is what the spawn boundary turns into one poller per source.
+/// This is what the spawn boundary turns into one reader per source and
+/// partition.
 #[doc(hidden)]
 pub struct SubscribedSource<A> {
     event_type: EventType,

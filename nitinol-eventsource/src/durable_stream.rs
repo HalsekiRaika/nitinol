@@ -16,7 +16,11 @@ mod stream;
 ///
 /// Chosen as a balance between catch-up latency and event-store load.
 /// Override via `with_poll_interval` on either builder.
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+///
+/// Public so a pull consumer outside this crate that leaves its cadence unset
+/// — a saga's observed source, say — polls at this one rather than at a value
+/// restated beside it.
+pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub use self::cursor::SequenceCursor;
 pub use self::proxy::{DurableStreamProxy, DurableSubscription};

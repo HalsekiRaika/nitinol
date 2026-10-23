@@ -294,12 +294,12 @@ pub trait Saga: Send + Sync + 'static {
     /// would make it, and it does not reach this method again on redelivery.
     ///
     /// A record whose upstream bytes fail to decode is the one case that is
-    /// neither decided nor settled: it is reported and skipped, its source's
-    /// cursor advances past it, and nothing durable is written for it. A decode
-    /// failure is deterministic and permanent — there is no typed input to
-    /// correlate, so there is no instance it could be attributed to — so
-    /// re-reading the record after a restart repeats the report rather than a
-    /// decision.
+    /// neither decided nor settled by a position: it is reported and skipped,
+    /// its source's offset moves past it, and nothing is written on the saga's
+    /// own stream for it. A decode failure is deterministic and permanent —
+    /// there is no typed input to correlate, so there is no instance it could
+    /// be attributed to — so a source that reads the record again repeats the
+    /// report rather than a decision.
     ///
     /// Where that guarantee stops:
     ///
@@ -313,12 +313,13 @@ pub trait Saga: Send + Sync + 'static {
     ///   decision no store holds.
     ///
     ///   *When* that redelivery comes differs between the two.  A refused
-    ///   input whose position-only append failed holds its source's cursor, so
+    ///   input whose position-only append failed holds its source's read, so
     ///   the record comes round again on the next poll.  A *decision* whose
-    ///   batch never landed does not hold the cursor: the saga stays alive
-    ///   instead — which is what lets its next input retry the decision, `End`
-    ///   included — and the record comes round when a later incarnation reads
-    ///   the source again, since nothing durable claims it.
+    ///   batch never landed holds it the same way, with one difference: the
+    ///   saga stays alive instead of being stopped — which is what lets the
+    ///   redelivered record retry the decision, `End` included — and since
+    ///   nothing durable claims the record, a later manager reads it again too,
+    ///   from the source's recorded offset, which stays below it.
     /// - An effect that writes nothing else still commits a consumed-position-only
     ///   append when the input it was decided from has a position not yet
     ///   durable — which is always the case for an observed event, since one
