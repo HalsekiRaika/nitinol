@@ -19,7 +19,7 @@ use crate::subscribe::SourceBinding;
 /// [`observing`](crate::SagaManagerProps::observing) per declared source, so a
 /// saga observing several sources names a start position for each.
 /// Two sources may name the same stream key: each reads only the rows of its own
-/// event type, and each keeps its own cursor and its own consumed position.
+/// event type, and each keeps its own offsets and its own consumed position.
 ///
 /// A source reads either one stream ([`stream`](Self::stream)) or the whole
 /// journal in the order it accepted the records ([`global`](Self::global)).
@@ -45,12 +45,14 @@ impl Subscription {
     /// `key` is the stream key the upstream events are appended under — an
     /// [`AggregateId`](nitinol_persistence::AggregateId) for an aggregate's
     /// stream, a [`SagaId`](crate::SagaId) for another saga's own stream.
-    /// Starting at the beginning means the manager sweeps everything already
-    /// written before it was spawned, which is what activates the instances
-    /// that are not resident; each instance drops the records its own stream
-    /// names as consumed, so the sweep reaches [`Saga::handle`](crate::Saga::handle)
-    /// only with records that one has not decided from.
-    /// [`with_after`](Self::with_after) names a position to start past instead.
+    /// The beginning is the floor: a source that has never recorded an offset
+    /// reads everything already written before it was spawned, and from then
+    /// on resumes past the offset it recorded, counted in the stream's own
+    /// sequence — a restart does not read the stream again from here. Each
+    /// instance drops the records its own stream names as consumed, so a
+    /// record read twice reaches [`Saga::handle`](crate::Saga::handle) only if
+    /// that instance has not decided from it.
+    /// [`with_after`](Self::with_after) names a higher floor instead.
     ///
     /// The stream is read from the journal the system this saga is spawned on
     /// distributes. There is no form of this that names a store:
@@ -87,11 +89,12 @@ impl Subscription {
     /// A store-wide position is not a stream position, so it is *not* carried
     /// forward from the consumed positions the saga's own stream records: those
     /// name a stream and its sequence, and reading one as a global sequence would
-    /// skip records that were never consumed.  A source bound this way therefore
-    /// starts where [`with_after`](Self::with_after) says and re-reads what it
-    /// has already consumed after a restart — which the per-source consumed
-    /// positions still drop before they reach
-    /// [`Saga::handle`](crate::Saga::handle).
+    /// skip records that were never consumed.  A source bound this way starts
+    /// above [`with_after`](Self::with_after) and resumes past the offset it
+    /// recorded, which it counts in the store's global sequence — the
+    /// dimension it reads in. Whatever it does read again — after an offset
+    /// was lost, say — the per-source consumed positions still drop before it
+    /// reaches [`Saga::handle`](crate::Saga::handle).
     ///
     /// The journal is the system's, the same one [`stream`](Self::stream) reads.
     pub fn global() -> Self {
@@ -107,6 +110,9 @@ impl Subscription {
     ///
     /// A floor, not a starting point: a source bound this way never sees the
     /// records at or below it, however little of the stream has been consumed.
+    /// Where it resumes is the higher of this floor and the offset it
+    /// recorded, so raising the floor above a recorded offset skips ahead,
+    /// and lowering it below one changes nothing until the offset is lost.
     pub fn with_after(mut self, after: u64) -> Self {
         self.after = after;
         self

@@ -45,12 +45,18 @@
 //! unconsumed, and that is the whole of what it leaves: the failure is reported
 //! and the delivery answered, so the incarnation stays alive — staying alive is
 //! what lets the *next* input retry the decision, including an `End` whose
-//! `Ended` fact did not land.  Nothing durable claims the record either, so
-//! what re-opens it is a fresh host over the same journal: its shared cursor
-//! sweeps that source from the position it was configured with, and the
-//! instance it spawns drops only the records the journal names as consumed —
-//! which such a failure left exactly where they were.  Every failure test below
-//! spawns that successor by hand.
+//! `Ended` fact did not land.  Nothing durable claims the record either, and
+//! the source partition that read it records no offset past it, so what
+//! re-opens it is a fresh host over the same journal: it resumes that source
+//! from the recorded offset, which stays below the first record left
+//! unsettled, and the instance it spawns drops only the records the journal
+//! names as consumed — which such a failure left exactly where they were.
+//! Every failure test below spawns that successor by hand.
+//!
+//! The consumed position is there to drop duplicates and for nothing else:
+//! where a source resumes is decided by its floor and its recorded offset, and
+//! a test below that needs a record read again gets it by leaving the offset
+//! behind the record, not by a successor re-reading from the floor.
 //!
 //! Two things make those tests settled rather than sampled.  The store
 //! decorator refuses exactly as many appends as the one under test attempts —
@@ -75,10 +81,15 @@
 
 #[path = "common/helpers.rs"]
 mod common;
+#[path = "common/delivery.rs"]
+mod delivery;
+#[path = "common/manager_offsets.rs"]
+mod manager_offsets;
 use common::{
     decode_consumed_fact, encode_consumed_fact, lifecycle_kind_of, readable_consumed_fact_of,
     ConsumedFactPayload, JsonCodec, LifecycleKind, CONSUMED_MARKER, SCHEDULE_MARKER,
 };
+use manager_offsets::manager_scope;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -95,7 +106,8 @@ use nitinol_eventsource::Event;
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
 use nitinol_persistence::store::{
-    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, Journal,
+    EventStore, EventStream, InMemoryEventStore, InMemoryOffsetStore, Journal, OffsetScope,
+    OffsetStore,
 };
 use nitinol_persistence::{
     AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, TypeName,
@@ -662,11 +674,20 @@ type TestSystem = EventSourceSystem<TestStore>;
 /// delivery host records in.  So the upstream records a test seeds and the
 /// rows its saga writes are tenants of one journal, kept apart by stream key.
 async fn system_over<E: EventStore + 'static>(journal: E) -> TestSystem {
+    system_over_offsets(journal, &InMemoryOffsetStore::default()).await
+}
+
+/// A system of its own over `journal`, recording saga progress in `offsets` —
+/// a handle the test keeps, so it can read what the system recorded.
+async fn system_over_offsets<E: EventStore + 'static>(
+    journal: E,
+    offsets: &InMemoryOffsetStore,
+) -> TestSystem {
     EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
                 .eventstore(journal)
-                .saga_offsets(InMemoryOffsetStore::default())
+                .saga_offsets(offsets.clone())
                 .build(),
         ))
         .build()
@@ -1206,11 +1227,11 @@ async fn a_consumed_input_never_reaches_handle_after_a_restart() {
 
 /// The skip is the framework's, not the cursor's.
 ///
-/// Given a `Global` subscription, whose resume position a per-source stream
-/// sequence cannot be derived for, so redelivery of a consumed record really
-/// does happen,
+/// Given a `Global` subscription, which resumes from its recorded global
+/// offset, and a first host that may stop before that offset lands — in which
+/// case the consumed record is read again,
 /// When the saga restarts,
-/// Then the redelivered record is dropped before `handle`.
+/// Then a record read again is dropped before `handle`.
 #[tokio::test]
 async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it() {
     let system = in_memory_system().await;
@@ -1235,8 +1256,8 @@ async fn a_redelivered_consumed_input_is_dropped_even_when_the_cursor_replays_it
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
         vec![1, 2],
-        "a Global cursor starts over from its configured position, so seq 1 is \
-         re-read from the store; what stops it is the position, not the cursor; \
+        "a Global subscription resumes from its recorded offset; should seq 1 be \
+         read again, what stops it is the position, not the cursor; \
          stream held {:?}",
         describe(&events)
     );
@@ -1445,14 +1466,14 @@ async fn a_position_of_one_source_does_not_cover_another() {
     );
 }
 
-// CP-RESUME-BOUND — where a restarted source's cursor starts from
+// CP-RESUME-BOUND — where a restarted source starts from
 //
-// A host's shared cursor is spoken for by no single instance's consumed
-// position, so what it is configured with is where it starts — the sweep from
-// there is what activates the instances that are not resident, and each
-// instance drops what its own stream already names as consumed.  The two tests
-// below pin the two halves of that: the configured position is honoured
-// exactly, and it is never undercut by what the journal happens to hold.
+// A source resumes from the higher of its configured floor and the offset its
+// partition recorded, and no instance's consumed position speaks for either:
+// the position only drops what its own stream already names as consumed.  The
+// two tests below pin the two halves of that: the floor is never undercut by
+// what the journal happens to hold, and a restarted source resumes above its
+// recorded offset in the dimension it was configured in.
 
 /// Given a subscription configured to start past a record the saga has *not*
 /// consumed,
@@ -1495,19 +1516,23 @@ async fn the_configured_floor_survives_a_lower_consumed_position() {
     );
 }
 
-/// Given a `Global` subscription, whose position is a global ordering that a
-/// per-source stream sequence cannot be translated into,
-/// When a fresh host is spawned over a journal that already holds a position,
-/// Then the cursor is left exactly where it was configured — de-duplication is
-/// the position's job, and a cursor that tried to read a global position out of
-/// a per-source one would skip records nobody consumed.
+/// Given a `Global` subscription whose partition recorded an offset — a global
+/// sequence, the dimension the subscription was configured in,
+/// When a fresh host is spawned over the same store,
+/// Then its first poll resumes just above that offset, and every poll still
+/// asks by global sequence: an offset kept in another dimension, or a consumed
+/// position read as a global one, would skip records nobody consumed.
 #[tokio::test]
-async fn a_global_subscription_keeps_its_configured_cursor() {
+async fn a_global_subscription_resumes_from_its_recorded_offset() {
     let queries: Queries = Arc::new(Mutex::new(Vec::new()));
-    let system = system_over(QueryRecordingStore {
-        inner: InMemoryEventStore::default(),
-        queries: Arc::clone(&queries),
-    })
+    let offsets = InMemoryOffsetStore::default();
+    let system = system_over_offsets(
+        QueryRecordingStore {
+            inner: InMemoryEventStore::default(),
+            queries: Arc::clone(&queries),
+        },
+        &offsets,
+    )
     .await;
     let journal = system.persistence().event_store();
     let source = AggregateId::new("global-resume-order");
@@ -1518,8 +1543,14 @@ async fn a_global_subscription_keeps_its_configured_cursor() {
 
     let first = spawn_deciding(&system, from_every_source(), &handled).await;
     wait_for_saga_rows(&journal, &saga_id, CONSUMED_MARKER, 1).await;
-    first.manager().stop().await.expect("stop must succeed");
+    wait_for_manager_offset(&offsets).await;
+    stop_and_wait(&system, &first).await;
     drop(first);
+    // Read once the first host is gone: its partition may have recorded more
+    // turns after the barrier, and the successor resumes from the last.
+    let recorded = manager_offset(&offsets)
+        .await
+        .expect("the offset waited for above is still recorded");
 
     take_queries(&queries);
 
@@ -1534,9 +1565,9 @@ async fn a_global_subscription_keeps_its_configured_cursor() {
 
     assert_eq!(
         asked_from.first().copied(),
-        Some(Some(1)),
-        "the first poll of the restarted Global subscription must start where it \
-         was configured to; asked from {asked_from:?}"
+        Some(Some(recorded + 1)),
+        "the first poll of the restarted Global subscription resumes just above \
+         the global sequence its partition recorded; asked from {asked_from:?}"
     );
     assert!(
         asked_from.iter().all(Option::is_some),
@@ -1546,9 +1577,43 @@ async fn a_global_subscription_keeps_its_configured_cursor() {
     assert_eq!(
         barrier.iter().map(|s| s.sequence).collect::<Vec<_>>(),
         vec![1, 2],
-        "re-reading the consumed record is expected here; dropping it before \
-         handle is what keeps the decision from being made twice"
+        "seq 1 reaches handle once, by the first host, and seq 2 once, by the \
+         second"
     );
+}
+
+/// The offset the one partition of [`DecidingSaga`]'s manager records its
+/// `OrderPlaced` source under: the host is unnamed, so its identifier is the
+/// path of the saga's own event type.
+fn manager_offset_scope() -> OffsetScope {
+    manager_scope(
+        &ReservationRequested::EVENT_TYPE.to_path().to_string(),
+        OrderPlaced::EVENT_TYPE,
+        0,
+    )
+}
+
+async fn manager_offset(offsets: &InMemoryOffsetStore) -> Option<u64> {
+    offsets
+        .load(&manager_offset_scope())
+        .await
+        .expect("an in-memory offset load succeeds")
+}
+
+/// Wait until the manager has recorded any offset at all.
+async fn wait_for_manager_offset(offsets: &InMemoryOffsetStore) {
+    let deadline = std::time::Instant::now() + BARRIER_TIMEOUT;
+    loop {
+        if manager_offset(offsets).await.is_some() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the manager to record an offset under {}",
+            manager_offset_scope().as_str()
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 // CP-MULTI-APPEND — one handle call, several appends, one position

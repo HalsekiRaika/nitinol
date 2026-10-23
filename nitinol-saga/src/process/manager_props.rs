@@ -14,8 +14,9 @@ use crate::deadline_index;
 use crate::delivery::{SagaDeliveryId, SagaDeliveryProps};
 use crate::process::instance::SagaProducer;
 use crate::process::manager::SagaManagerProcess;
+use crate::process::manager_offsets::SagaManagerOffsets;
 use crate::process::proxy::{SagaHostProxy, SagaManagerProxy};
-use crate::process::saga_process;
+use crate::process::source_partition::UpstreamSource;
 use crate::saga::Saga;
 use crate::scheduler;
 use crate::subscribe::{AllSourcesSubscribed, BindSource, SourceBindings};
@@ -35,8 +36,9 @@ pub struct SagaHosted<S: Saga, St> {
 
 /// The builder every saga is started from.
 ///
-/// It spawns a manager that holds one upstream subscription per declared
-/// source — shared by every instance of the saga type — and derives the
+/// It spawns a manager that reads each declared source — one reader per
+/// partition, shared by every instance of the saga type that falls in it, each
+/// resuming from an offset it records — and derives the
 /// instance for each record from [`Saga::correlate`]: an id with no resident
 /// instance is spawned and replayed on the spot, an id already resident is
 /// handed the record directly. Beside it, it starts the delivery host that
@@ -55,7 +57,8 @@ pub struct SagaHosted<S: Saga, St> {
 /// [`SagaSystemExt::host`](crate::SagaSystemExt::host) hands back a
 /// [`SagaHosted`] one that carries it already. Neither names a store: the
 /// journal its instances persist to, the journals its sources are observed
-/// from, and the slot its delivery host records in are all the system's.
+/// from, and the slot its delivery host and its source partitions record in
+/// are all the system's.
 ///
 /// # A single resident saga
 ///
@@ -76,6 +79,12 @@ pub struct SagaManagerProps<S: Saga, B = SourceBindings<S>, H = Unhosted> {
     /// The delivery host's settings, carried in every `H` because both entry
     /// points start a host and both name those settings on this builder.
     delivery: SagaDeliveryProps<S>,
+    /// The host identifier the wiring named, if it named one.
+    ///
+    /// Kept here rather than only handed to `delivery`, because the manager's
+    /// source offsets are filed under the same identifier and the spawn
+    /// resolves it once for both.
+    delivery_id: Option<SagaDeliveryId>,
     host: H,
 }
 
@@ -108,6 +117,7 @@ impl<S: Saga> SagaManagerProps<S, SourceBindings<S>, Unhosted> {
             bindings: SourceBindings::<S>::default(),
             instance_idle_timeout: IdleTimeout::Inherit,
             delivery: SagaDeliveryProps::new(),
+            delivery_id: None,
             host: Unhosted,
         }
     }
@@ -126,6 +136,7 @@ impl<S: Saga, B> SagaManagerProps<S, B, Unhosted> {
             bindings: self.bindings,
             instance_idle_timeout: self.instance_idle_timeout,
             delivery: self.delivery,
+            delivery_id: self.delivery_id,
             host: SagaHosted {
                 system: Hosted::new(host),
                 _saga: PhantomData,
@@ -140,8 +151,12 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     ///
     /// What the identifier is for, and what it defaults to, is stated on
     /// [`SagaDeliveryProps::with_delivery_id`].
+    ///
+    /// The manager's progress through each declared source is filed under the
+    /// same identifier, so two hosts over one saga type keep their reading of
+    /// the sources apart as well as their delivery.
     pub fn with_delivery_id(mut self, id: SagaDeliveryId) -> Self {
-        self.delivery = self.delivery.with_delivery_id(id);
+        self.delivery_id = Some(id);
         self
     }
 
@@ -155,6 +170,20 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     /// the same partition, by [`partition_of`](crate::partition_of). It records
     /// no position, so changing the count costs it nothing: every partition
     /// reads the schedule facts from the start whenever it starts.
+    ///
+    /// The manager reads every declared source with the same count of
+    /// partitions, each assigned the instances [`partition_of`](crate::partition_of)
+    /// puts in it, and each with an offset of its own. Changing the count is
+    /// done on the delivery host's terms, for the same reason: an offset covers
+    /// the instances that used to fall in its partition, so a new count leaves
+    /// some partitions reading again what is already consumed — which the
+    /// instances drop — and can leave a record unsettled under the old count
+    /// behind an offset already past it under the new one. So every partition
+    /// is drained first: stop the saga, let nothing be left unsettled, then
+    /// start it with the new count. Changing the count under a running saga,
+    /// or restarting with a new count while a partition is held at an
+    /// unsettled record, can carry an offset past a record that then never
+    /// reaches [`Saga::handle`] again.
     pub fn with_partitions(mut self, partitions: NonZeroUsize) -> Self {
         self.delivery = self.delivery.with_partitions(partitions);
         self
@@ -185,21 +214,31 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     /// source the alphabet never declared are both compile errors, and
     /// [`spawn`](Self::spawn) does not exist while any slot is still unbound.
     ///
-    /// These are the only subscriptions in the fan-out: the manager runs one
-    /// `DirectPollerProcess` per declared source and decodes each record once,
-    /// then routes it by [`Saga::correlate`].  An instance the manager spawns
-    /// opens none of its own — which is also why a source's cursor starts
-    /// exactly where `subscription` says: it is spoken for by no single
-    /// instance's consumed position, and the sweep from there is what activates
-    /// the instances that are not resident.  Each instance still drops the
-    /// records its own stream names as consumed, so the sweep costs no second
-    /// decision.
+    /// These are the only readers in the fan-out: the manager reads each
+    /// declared source with one partition per partition of the host
+    /// ([`with_partitions`](Self::with_partitions), one by default), each of
+    /// which decodes what it reads once and hands on the records whose
+    /// instance, by [`Saga::correlate`], falls in it.  An instance the manager
+    /// spawns opens no subscription of its own.
     ///
-    /// An instance with a pending deadline does not depend on the sweep: the
-    /// deadline index reads the schedule fact on the instance's own stream and
-    /// asks the manager for the instance when the deadline falls due, so a
-    /// subscription that starts past every record the instance was ever
-    /// claimed by still has its deadline delivered.
+    /// Where a partition reads from is the higher of `subscription`'s floor and
+    /// the offset the partition recorded in the system's saga-offset slot — the
+    /// slot the delivery host records in, under a key of its own. The offset
+    /// moves only as far as every record below it is settled, once per poll,
+    /// so a restart reads on from there rather than sweeping the source again
+    /// from its floor; a record whose decision never became durable stops the
+    /// partition at it, reading nothing past it and handing it again on the
+    /// next poll, and a restart brings it to [`Saga::handle`] again from the
+    /// offset below it.  The
+    /// floor is never undercut, whatever offset is recorded.  No instance's
+    /// consumed position speaks for either: the position is what drops a
+    /// record an instance has already consumed, which is what keeps an offset
+    /// that was lost or moved backwards from costing a second decision.
+    ///
+    /// An instance with a pending deadline and nothing new upstream is not
+    /// brought back by reading the source: the deadline index reads the
+    /// schedule fact on the instance's own stream and asks the manager for the
+    /// instance when the deadline falls due.
     ///
     /// Which of the delivered events an instance acts on is decided by
     /// [`Saga::correlate`], not here — correlation is domain knowledge carried
@@ -217,6 +256,7 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
             bindings: <B as BindSource<E>>::bind(self.bindings, subscription.into_binding()),
             instance_idle_timeout: self.instance_idle_timeout,
             delivery: self.delivery,
+            delivery_id: self.delivery_id,
             host: self.host,
         }
     }
@@ -243,8 +283,9 @@ where
     ///
     /// Every store comes from `system` here and nowhere else — the journal its
     /// instances persist to and its sources are observed from, and the
-    /// saga-offset slot the host records its progress in — so the two spawn
-    /// forms cannot drift into reaching different destinations.
+    /// saga-offset slot the host and the source partitions record their
+    /// progress in — so the two spawn forms cannot drift into reaching
+    /// different destinations.
     ///
     /// The manager starts first: a delivery host reads what is already
     /// journalled, so the order costs nothing either way, and the index asks
@@ -265,37 +306,57 @@ where
             .bindings
             .into_sources()
             .into_iter()
-            .map(saga_process::source_subscription)
+            .map(UpstreamSource::resolve)
             .collect();
         let instance_idle_timeout = self.instance_idle_timeout;
         let scheduler = scheduler::resolve_for::<S>(ps).await;
+        // Resolved once, here, and handed to both halves: the delivery host
+        // files its progress under this identifier and the manager files its
+        // sources' progress under it too, so the two cannot disagree on what
+        // the host is called. The default is derived the way the delivery
+        // host derives its own — from the declared event type, which the type
+        // fixes in every build — because the key it names is persisted.
+        let host_id = self.delivery_id.unwrap_or_else(|| {
+            SagaDeliveryId::new(<S::Event as Event>::EVENT_TYPE.to_path().to_string())
+        });
+        let partitions = self.delivery.partitions();
 
         let manager_host = host.clone();
         let manager_store = store.clone();
+        let manager_offsets = SagaManagerOffsets::new(offsets.clone());
+        let manager_host_id = host_id.clone();
         let props = Props::new(move || SagaManagerProcess::<S> {
             store: manager_store.clone(),
             producer: Arc::clone(&producer),
             host: manager_host.clone(),
             upstream: upstream.clone(),
+            offsets: manager_offsets.clone(),
+            partitions,
+            host_id: manager_host_id.clone(),
             instance_idle_timeout,
             scheduler: scheduler.clone(),
             instances: HashMap::new(),
         })
-        // An instance that could not settle a record is reported by holding the
-        // shared cursor, not by taking the manager down: stopping it would strip
-        // every other instance of its delivery because one of them failed.
+        // An instance that could not settle a record is reported by holding
+        // its source partition, not by taking the manager down: stopping it
+        // would strip every other instance of its delivery because one of them
+        // failed.
         .with_supervision_strategy(SupervisionStrategy::Resume)
         // Idleness is a per-instance signal — `with_instance_passivation` is
         // what acts on it.  The manager itself is the sole owner of the
-        // subscriptions and the registry with nothing left to revive it, so
-        // letting a system-wide default idle timeout reach it would silently
-        // and permanently stop the whole fan-out during a quiet upstream.
+        // source partitions and the registry with nothing left to revive it,
+        // so letting a system-wide default idle timeout reach it would
+        // silently and permanently stop the whole fan-out during a quiet
+        // upstream.
         .with_idle_timeout(IdleTimeout::Persistent);
 
         let manager = ps.spawn(props).await;
-        let partitions = self.delivery.partitions();
         let poll_interval = self.delivery.poll_interval();
-        let delivery = self.delivery.start_on(store.clone(), offsets, host).await;
+        let delivery = self
+            .delivery
+            .with_delivery_id(host_id)
+            .start_on(store.clone(), offsets, host)
+            .await;
         let deadline_index =
             deadline_index::start_for::<S>(partitions, poll_interval, store, manager.clone(), ps)
                 .await;
@@ -312,8 +373,8 @@ where
     /// and — when the alphabet declares a deadline — the deadline index, on
     /// `system`.
     ///
-    /// Every declared source's poller and every saga instance are runtime
-    /// **children** of the manager, so stopping the manager cascade-stops the
+    /// Every partition of every declared source and every saga instance are
+    /// runtime **children** of the manager, so stopping the manager cascade-stops the
     /// whole fan-out.
     ///
     /// A saga whose alphabet declares a deadline also has the system's one

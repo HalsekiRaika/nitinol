@@ -19,10 +19,14 @@
 //! position is the only row it leaves.
 //!
 //! A record whose upstream bytes fail to decode writes no position at all: it
-//! is reported and skipped, and the subscription's cursor advances past it
-//! without anything durable being recorded.  A decode failure is deterministic
-//! and permanent, so re-reading the record after a restart repeats the report
-//! rather than the decision.
+//! is reported and skipped, and the source's offset moves past it without
+//! anything being written on the saga's own stream.  A decode failure is
+//! deterministic and permanent, so a source that reads the record again
+//! repeats the report rather than the decision.
+//!
+//! The position is there to drop what was already consumed and for nothing
+//! else: where a source reads from is its floor and the offset it recorded,
+//! not any instance's position.
 //!
 //! Either way, de-duplication of the input is moved off the user's `handle`
 //! and onto the framework, and nothing here decides *when* to write a

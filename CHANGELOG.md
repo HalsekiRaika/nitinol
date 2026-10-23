@@ -734,6 +734,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING** (`nitinol-saga`): a restarted saga manager no longer reads its
+  upstream sources again from the position each `Subscription` names. Every
+  declared source is read by one child process of the manager per partition,
+  and each records how far it has settled in the system's saga-offset slot —
+  the slot the delivery host records in — so a restart resumes each source
+  from that offset. The cost of a restart no longer grows with the length of
+  the upstream history.
+
+  - Where a partition resumes is the higher of the `Subscription`'s floor
+    (`with_after`, still a floor: nothing at or below it is ever delivered)
+    and its recorded offset. The offset counts in the dimension the
+    subscription reads in — a stream's own sequence for
+    `Subscription::stream`, the store's global sequence for
+    `Subscription::global`.
+  - New keys are written to `saga_offsets`:
+    `nitinol.saga-manager.{n}:{host}:{source}.{partition}`, where `host` is
+    the delivery host's identifier (`with_delivery_id`, or the path of the
+    saga's own event type by default), `n` is its byte length and `source` is
+    the path of the declared source's event type. The part differs from the
+    delivery host's `saga-delivery`, so the two share one table.
+  - The partition count is `with_partitions` (one by default), shared with
+    the delivery host and the deadline index, and a record goes to the
+    partition `partition_of` puts its instance's id in. Changing the count is
+    done the delivery host's way: drain every partition, stop, start with the
+    new count.
+  - The offset moves only as far as every record below it is settled, at most
+    once per poll. A record whose decision the store refused (the saga stays
+    alive) stops the partition at it: nothing past it is read, the same record
+    is handed again on the next poll, and a restart brings it to `handle`
+    again from the offset below it — the recovery a re-read from the
+    subscription's position used to provide. An offset that fails to save is
+    reported and offered again on the next poll.
+  - The consumed position on a saga's own stream only drops duplicates: an
+    offset lost, lowered or reassigned costs a re-read and never a second
+    decision. An instance with a pending deadline and nothing new upstream is
+    brought back by the deadline index, not by a re-read.
+  - Reported through `tracing` as `saga manager partition resumed` (source,
+    partition, resume position, floor, recorded offset),
+    `saga manager partition is held at an unsettled record`, and
+    `saga manager could not record its progress; retrying on the next tick`.
+
+  `nitinol-eventsource` now exports `DEFAULT_POLL_INTERVAL`, the cadence a
+  saga source that names no `with_poll_interval` is polled at.
+
 - **BREAKING** (`nitinol-contract`, `nitinol-eventsource`, `nitinol-saga`,
   `nitinol`): every spawn is on an `EventSourceSystem`, and takes every store it
   needs from it. No public API names a store, a supplier or a persistor by hand.

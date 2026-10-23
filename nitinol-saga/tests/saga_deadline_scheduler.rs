@@ -64,8 +64,8 @@ use nitinol_persistence::{
 };
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
-    Deadline, DeadlineMessage, Saga, SagaContext, SagaEffect, SagaId, SagaManagerProps,
-    Subscription, TimerName,
+    Deadline, DeadlineMessage, Saga, SagaContext, SagaDeliveryId, SagaEffect, SagaId,
+    SagaManagerProps, Subscription, TimerName,
 };
 
 // Local JSON codec for the domain events — self-contained so this file does not
@@ -1021,7 +1021,10 @@ async fn a_deadline_reset_from_its_own_firing_survives_replay() {
     // there is already named by a position on the saga's own stream, so it
     // wakes the instance this host fronts and is then dropped before
     // `Saga::handle` — which leaves replay as the only account of the re-set
-    // deadline, and is what `fires_2` below reads back.
+    // deadline, and is what `fires_2` below reads back.  The second host is
+    // named apart from the first so it records no offset the first already
+    // carried past that record: it reads the source from its floor, which is
+    // what wakes its instance before the re-set deadline falls due.
     let fires_2 = Arc::new(Mutex::new(Vec::<String>::new()));
     let fires_2_producer = Arc::clone(&fires_2);
     let _host_2 =
@@ -1030,6 +1033,7 @@ async fn a_deadline_reset_from_its_own_firing_survives_replay() {
             fires: Arc::clone(&fires_2_producer),
         })
         .observing::<Trigger>(Subscription::stream("deadline-upstream-arch004"))
+        .with_delivery_id(SagaDeliveryId::new("deadline-reset-replay-second-host"))
         .spawn(&system)
         .await;
 

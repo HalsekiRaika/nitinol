@@ -61,9 +61,7 @@ pub enum SagaEffect<E> {
         events: Vec<E>,
         schedules: Vec<ScheduleSpec>,
     },
-    /// Stop the saga process.  The runtime cascade-stops every upstream
-    /// `DirectPollerProcess` child — one per declared source — preventing
-    /// further `handle` calls.
+    /// Stop the saga process, preventing further `handle` calls.
     End,
     /// An ordered collection of effects executed sequentially.
     Sequence(Vec<SagaEffect<E>>),

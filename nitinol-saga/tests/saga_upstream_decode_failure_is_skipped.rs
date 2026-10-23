@@ -39,8 +39,10 @@
 //! `saga_handle_error_settles_with_position_only.rs`), because a decision was
 //! made about it.  Here nothing was decided — there was no typed event to
 //! decide from — so there is no decision for a position to be as durable as.
-//! The visible consequence is that a restart re-reads the corrupt record and
-//! reports it again, which is cheaper than a write per corrupt byte.
+//! The visible consequence is that the source's offset is the only thing that
+//! moves past the corrupt record, and a source that reads it again — one whose
+//! offset was lost, say — reports it again, which is cheaper than a write per
+//! corrupt byte.
 //!
 //! The report itself reaches an operator as a `tracing::error!`.  That is not a
 //! durable record, so it is not something this file can read off a stream and
