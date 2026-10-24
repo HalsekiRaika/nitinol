@@ -74,3 +74,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "postgres"
 harness = false
+
+[[bench]]
+name = "postgres_system"
+harness = false

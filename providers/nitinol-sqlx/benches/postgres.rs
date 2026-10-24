@@ -6,20 +6,10 @@
 //! container on the same machine are two different measurements, so whatever is
 //! recorded carries what it was run on.
 //!
-//! # It runs against `DATABASE_URL` or it does not run
-//!
-//! There is no fallback that starts a database. A throwaway container brought
-//! up per run measures that container's cold caches and its host's spare
-//! capacity, which is not a baseline anything can be compared against later.
-//! So with no `DATABASE_URL` this says so on stderr and exits successfully,
-//! having registered no benchmark at all.
-//!
-//! # The schema it writes in
-//!
-//! A schema of this run's own, named after the process, migrated on the way in
-//! and dropped on the way out. A panic leaves it behind — the drop is on the
-//! way out of a successful run and nowhere else — so a crashed run is cleaned
-//! up by hand.
+//! Where the database comes from and the schema this run writes in are the
+//! same for every bench target of this crate, and are stated once in
+//! `common/postgres.rs`: no `DATABASE_URL` means nothing is measured, and the
+//! run's own schema is dropped on the way out of a successful run only.
 //!
 //! # What the rows do to the numbers
 //!
@@ -31,7 +21,9 @@
 //! Run with
 //! `DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres cargo bench -p nitinol-sqlx`.
 
-use std::process;
+#[path = "common/postgres.rs"]
+mod postgres;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -44,8 +36,7 @@ use nitinol_persistence::{
     AppendingEvent, EventRegistryEntry, EventType, Family, TypeName, EVENT_REGISTRY,
 };
 use nitinol_sqlx::{PostgresEventStore, PostgresOffsetStore};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{AssertSqlSafe, Executor as _, PgPool};
+use postgres::BenchDatabase;
 use tokio::runtime::Runtime;
 
 const RECORDED: EventType = EventType::new(Family::new("bench.sqlx"), TypeName::new("Recorded"));
@@ -64,10 +55,6 @@ const OCCURRED_AT_MICROSECOND: i64 = 1_700_000_000_123_456;
 
 const APPENDED: [u64; 2] = [1, 100];
 
-/// Each benchmark has one call in flight at a time, so a handful is enough for
-/// the pool never to be what a measurement is waiting on.
-const POOL_CONNECTIONS: u32 = 4;
-
 const WARM_UP: Duration = Duration::from_secs(1);
 
 /// Short for the reason the crate-level note gives: every iteration writes a
@@ -82,21 +69,9 @@ static SAVED: AtomicU64 = AtomicU64::new(0);
 
 /// The Postgres this run writes in, and the two stores over it.
 struct Benched {
-    schema: String,
-    /// The connection the schema is created and dropped through, which is not
-    /// the one the benchmarks run on: that one's `search_path` is already
-    /// pointed at the schema.
-    admin: PgPool,
-    pool: PgPool,
+    db: BenchDatabase,
     events: PostgresEventStore,
     offsets: PostgresOffsetStore,
-}
-
-fn runtime() -> Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("a benchmark run needs a tokio runtime to drive the database on")
 }
 
 fn fixed_instant() -> Timestamp {
@@ -122,73 +97,25 @@ fn batch(count: u64) -> Vec<AppendingEvent> {
         .collect()
 }
 
-async fn pool_on(url: &str, schema: &str) -> PgPool {
-    let schema = schema.to_owned();
-    PgPoolOptions::new()
-        .max_connections(POOL_CONNECTIONS)
-        .after_connect(move |connection, _| {
-            let search_path = format!("SET search_path TO {schema}");
-            Box::pin(async move {
-                connection.execute(AssertSqlSafe(search_path)).await?;
-                Ok(())
-            })
-        })
-        .connect(url)
-        .await
-        .expect("the database DATABASE_URL names must accept a pool of connections")
-}
-
-/// A schema of this run's own, migrated, with a store of each kind over it.
+/// This run's schema, with a store of each kind over it.
 async fn bring_up(url: &str) -> Benched {
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(url)
-        .await
-        .expect("the database DATABASE_URL names must accept a connection");
-
-    // A schema name cannot be a bind parameter. This one is built here out of a
-    // process id, so the statement carries nothing a caller could have shaped.
-    let schema = format!("nitinol_sqlx_bench_{}", process::id());
-    admin
-        .execute(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
-        .await
-        .expect("the database DATABASE_URL names must allow a schema of its own");
-
-    let pool = pool_on(url, &schema).await;
-    PostgresEventStore::migrate(&pool)
-        .await
-        .expect("the provider's migrations must apply to the database this run reached");
-
-    let events = PostgresEventStore::new(pool.clone())
+    let db = BenchDatabase::bring_up(url).await;
+    let events = PostgresEventStore::new(db.pool.clone())
         .expect("the event types this benchmark binary linked claim distinct canonical paths");
-    let offsets = PostgresOffsetStore::new(pool.clone());
+    let offsets = PostgresOffsetStore::new(db.pool.clone());
 
     Benched {
-        schema,
-        admin,
-        pool,
+        db,
         events,
         offsets,
     }
 }
 
-/// Give the connections back and take the schema away again.
 async fn tear_down(benched: Benched) {
-    // The two stores hold handles onto `pool` and are let go of here, before
+    // The two stores hold handles onto the pool and are let go of here, before
     // the connections they reach through are given back.
-    let Benched {
-        schema,
-        admin,
-        pool,
-        ..
-    } = benched;
-    pool.close().await;
-
-    admin
-        .execute(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
-        .await
-        .expect("the schema this run created must be removable again");
-    admin.close().await;
+    let Benched { db, .. } = benched;
+    db.tear_down().await;
 }
 
 /// What one `append` costs, as a single record and as a batch of a hundred.
@@ -237,7 +164,7 @@ fn event_store(c: &mut Criterion, rt: &Runtime, benched: &Benched) {
 /// which is inside the window and costs an atomic add.
 fn offset_store(c: &mut Criterion, rt: &Runtime, benched: &Benched) {
     let store = &benched.offsets;
-    let pool = &benched.pool;
+    let pool = &benched.db.pool;
     let scope = OffsetScope::new("bench.sqlx.offset");
     let scope = &scope;
 
@@ -275,15 +202,11 @@ fn offset_store(c: &mut Criterion, rt: &Runtime, benched: &Benched) {
 /// command line, so `--save-baseline`, `--baseline` and `--profile-time` reach
 /// the benchmarks below, and write the summary at the end.
 fn main() {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!(
-            "nitinol-sqlx benches: nothing to run against, so nothing was measured \
-             (no DATABASE_URL)"
-        );
+    let Some(url) = postgres::database_url() else {
         return;
     };
 
-    let rt = runtime();
+    let rt = postgres::runtime();
     let benched = rt.block_on(bring_up(&url));
 
     let mut criterion = Criterion::default().configure_from_args();

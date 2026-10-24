@@ -83,6 +83,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the machine they were taken on, and how to reach a flame graph or
   tokio-console from here.
 
+- (`nitinol-sqlx`): a second bench target, `postgres_system`, in
+  `providers/nitinol-sqlx/benches`. It measures bringing an aggregate back out
+  of Postgres by replay and from a snapshot over streams of 1, 100, 1000 and
+  10000, and an `ExactlyOnce` projector catching up with a stream of 100 and of
+  1000 in events per second; `BENCHMARKS.md` records what it was run on and the
+  numbers it gave.
+
 - (`nitinol-sqlx`): `PostgresSnapshotStore`, a `SnapshotStore` over a Postgres
   table, and the migration `0004_create_snapshot.sql` that creates it. The
   table is part of the crate's schema, so `PostgresEventStore::migrate` applies
