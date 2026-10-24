@@ -402,15 +402,17 @@ fn activation(c: &mut Criterion) {
 ///
 /// Not timed: seeding, the system, and stopping the projector afterwards.
 ///
-/// # The default poll interval is inside the window
+/// # What is inside the window
 ///
-/// A projector starts a poller, and that poller waits out its interval before
-/// its first read rather than reading straight away. The interval a projector
-/// polls at is the framework's default of 250 ms and there is no entry point
-/// that changes it, so **each iteration carries about 250 ms that is the
-/// cadence and not the catch-up**. What the numbers here compare across stream
-/// lengths is therefore the work above that floor, and the floor is why the
-/// three lengths read so close to one another.
+/// A projector starts a poller, and that poller reads as soon as it starts
+/// rather than waiting out its interval first. The projector here names no
+/// interval, so it polls at the framework's default, but that cadence is only
+/// in the window when one read does not reach the end of the stream: a turn
+/// after the first comes an interval after the one before. A read that takes
+/// the whole stream — which is what a projector applying every record without
+/// failing does — leaves **the catch-up itself, and nothing of the cadence**,
+/// so what the numbers compare across stream lengths is the work of reading
+/// and applying that many records.
 fn projector_catchup(c: &mut Criterion) {
     let rt = runtime();
     let ps = rt.block_on(ProcessSystem::new());

@@ -9,9 +9,11 @@
 //!          due, not at the next poll
 //! ```
 //!
-//! The first turn comes one poll interval after the host starts and reads the
-//! deadline; the next poll is a whole interval later. A stopped manager keeps
-//! the request visible without an instance to fire it.
+//! The deadline is seeded after the host has started, so the index's first
+//! turn, which comes as soon as it starts, is not what reads it: the turn one
+//! poll interval after the start is, and the poll after that is a whole
+//! interval later. A stopped manager keeps the request visible without an
+//! instance to fire it.
 
 #[path = "common/helpers.rs"]
 mod common;
@@ -29,7 +31,8 @@ use nitinol_saga::{SagaId, Subscription};
 
 const SAGA: &str = "deadline-index-wakes-at-deadline-1";
 const POLL: Duration = Duration::from_secs(2);
-/// After the first turn (at one poll interval) and before the second.
+/// After the turn that reads the deadline (one poll interval after the start)
+/// and before the poll that follows it.
 const DUE_IN: Duration = Duration::from_millis(2_600);
 const LATE_BY: i64 = 800;
 

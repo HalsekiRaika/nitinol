@@ -1,7 +1,6 @@
 //! One partition of a delivery host: the loop that reads, delivers, and
 //! records.
 
-use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -366,11 +365,15 @@ where
 
 /// Drives a partition on a fixed cadence.
 ///
-/// Sleep first, then poll: a partition spawned over a journal it has already
-/// finished with does not read it before the wiring that started it has
-/// returned.
+/// Poll first, then sleep: a partition reads as soon as it starts, and waits
+/// the interval between one read and the next. A hold's pause is the
+/// partition's own and is measured from the turn that held, so the first turn
+/// holding waits the same as any other. The driver lives as long as its
+/// process: a supervised restart rebuilds the partition but not this, so a
+/// rebuilt partition waits the interval before its first read.
 pub struct PartitionDriver<S: Saga, Cs: OffsetStore> {
     interval: Duration,
+    has_ticked: bool,
     _process: PhantomData<fn() -> (S, Cs)>,
 }
 
@@ -378,6 +381,7 @@ impl<S: Saga, Cs: OffsetStore> PartitionDriver<S, Cs> {
     pub(crate) fn new(interval: Duration) -> Self {
         Self {
             interval,
+            has_ticked: false,
             _process: PhantomData,
         }
     }
@@ -390,12 +394,16 @@ where
 {
     type Event = ();
 
-    fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        let interval = self.interval;
-        async move {
-            tokio::time::sleep(interval).await;
-            Some(())
+    async fn next(&mut self) -> Option<Self::Event> {
+        // The flag is read and set inside the future rather than when it is
+        // made: the lifecycle loop drops a `next` future it never polled when
+        // a system signal is waiting, and a flag set at creation would lose
+        // the first turn to that.
+        if self.has_ticked {
+            tokio::time::sleep(self.interval).await;
         }
+        self.has_ticked = true;
+        Some(())
     }
 
     async fn apply(

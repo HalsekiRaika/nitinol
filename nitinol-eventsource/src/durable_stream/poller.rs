@@ -89,8 +89,16 @@ pub(crate) trait Poll: Process {
         Self: Sized;
 }
 
+/// Ticks a poller once as soon as it starts, then once every `interval`.
+///
+/// The interval is the wait between consecutive reads, so a poller started
+/// over a backlog reads it at once rather than an interval later. The driver
+/// lives as long as its process: a supervised restart rebuilds the poller's
+/// state but not this, so a restarted poller waits the interval before its
+/// first read.
 pub(crate) struct IntervalDriver<P> {
     interval: Duration,
+    has_ticked: bool,
     _phantom: PhantomData<fn() -> P>,
 }
 
@@ -98,6 +106,7 @@ impl<P> IntervalDriver<P> {
     pub(crate) fn new(interval: Duration) -> Self {
         Self {
             interval,
+            has_ticked: false,
             _phantom: PhantomData,
         }
     }
@@ -109,12 +118,16 @@ where
 {
     type Event = ();
 
-    fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        let interval = self.interval;
-        async move {
-            tokio::time::sleep(interval).await;
-            Some(())
+    async fn next(&mut self) -> Option<Self::Event> {
+        // The flag is read and set inside the future rather than when it is
+        // made: the lifecycle loop drops a `next` future it never polled when
+        // a system signal is waiting, and a flag set at creation would lose
+        // the first tick to that.
+        if self.has_ticked {
+            tokio::time::sleep(self.interval).await;
         }
+        self.has_ticked = true;
+        Some(())
     }
 
     async fn apply(

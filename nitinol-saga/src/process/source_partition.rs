@@ -2,7 +2,6 @@
 //! the source, hands the manager the records of its partition, and records how
 //! far everything it read is settled.
 
-use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -484,9 +483,14 @@ impl<S: Saga> Process for SagaSourcePartition<S> {}
 
 /// Drives a source partition on its source's cadence.
 ///
-/// Sleep first, then poll, the cadence the delivery host's partitions keep.
+/// Poll first, then sleep, the cadence the delivery host's partitions keep: a
+/// source partition reads as soon as it starts, and waits the interval between
+/// one read and the next. The driver lives as long as its process: a
+/// supervised restart rebuilds the partition but not this, so a rebuilt
+/// partition waits the interval before its first read.
 pub(crate) struct SourcePartitionDriver<S: Saga> {
     interval: Duration,
+    has_ticked: bool,
     _process: PhantomData<fn() -> S>,
 }
 
@@ -494,6 +498,7 @@ impl<S: Saga> SourcePartitionDriver<S> {
     fn new(interval: Duration) -> Self {
         Self {
             interval,
+            has_ticked: false,
             _process: PhantomData,
         }
     }
@@ -502,12 +507,16 @@ impl<S: Saga> SourcePartitionDriver<S> {
 impl<S: Saga> Driver<SagaSourcePartition<S>> for SourcePartitionDriver<S> {
     type Event = ();
 
-    fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        let interval = self.interval;
-        async move {
-            tokio::time::sleep(interval).await;
-            Some(())
+    async fn next(&mut self) -> Option<Self::Event> {
+        // The flag is read and set inside the future rather than when it is
+        // made: the lifecycle loop drops a `next` future it never polled when
+        // a system signal is waiting, and a flag set at creation would lose
+        // the first turn to that.
+        if self.has_ticked {
+            tokio::time::sleep(self.interval).await;
         }
+        self.has_ticked = true;
+        Some(())
     }
 
     async fn apply(

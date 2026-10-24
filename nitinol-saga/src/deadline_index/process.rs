@@ -2,7 +2,6 @@
 //! schedule and lifecycle facts, and asks for the instances whose deadlines
 //! have fallen due.
 
-use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -265,14 +264,19 @@ fn wait_for(now: jiff::Timestamp, due_at: jiff::Timestamp, poll: Duration) -> Du
 /// Drives an index partition: a turn every poll interval, and one at the
 /// earliest deadline still to come when that falls sooner.
 ///
-/// Sleep first, then read, as a delivery partition does. The poll interval
-/// stays the longest a turn waits, so the journal is read for new facts and a
-/// deadline already asked for is asked for again at that cadence.
+/// Read first, then sleep, as a delivery partition does: the first turn comes
+/// as soon as the partition starts, so a deadline already due is asked for
+/// without waiting an interval. The poll interval stays the longest a later
+/// turn waits, so the journal is read for new facts and a deadline already
+/// asked for is asked for again at that cadence. The driver lives as long as
+/// its process: a supervised restart rebuilds the partition but not this, so
+/// a rebuilt partition waits before its first read.
 pub(crate) struct IndexDriver<S: Saga> {
     poll: Duration,
-    /// How long the next `next` sleeps; the poll interval until a turn has
-    /// read the deadlines.
+    /// How long `next` sleeps once the first turn has been handed out; the
+    /// poll interval until a turn has read the deadlines.
     wait: Duration,
+    has_ticked: bool,
     _saga: PhantomData<fn() -> S>,
 }
 
@@ -281,6 +285,7 @@ impl<S: Saga> IndexDriver<S> {
         Self {
             poll,
             wait: poll,
+            has_ticked: false,
             _saga: PhantomData,
         }
     }
@@ -289,12 +294,16 @@ impl<S: Saga> IndexDriver<S> {
 impl<S: Saga> Driver<SagaDeadlineIndexPartition<S>> for IndexDriver<S> {
     type Event = ();
 
-    fn next(&mut self) -> impl Future<Output = Option<Self::Event>> + Send {
-        let wait = self.wait;
-        async move {
-            tokio::time::sleep(wait).await;
-            Some(())
+    async fn next(&mut self) -> Option<Self::Event> {
+        // The flag is read and set inside the future rather than when it is
+        // made: the lifecycle loop drops a `next` future it never polled when
+        // a system signal is waiting, and a flag set at creation would lose
+        // the first turn to that.
+        if self.has_ticked {
+            tokio::time::sleep(self.wait).await;
         }
+        self.has_ticked = true;
+        Some(())
     }
 
     async fn apply(

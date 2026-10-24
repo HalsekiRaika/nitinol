@@ -117,6 +117,11 @@ where
 
 impl<T, S, H> DurableStream<T, S, H> {
     /// Override the polling cadence.
+    ///
+    /// The first read does not wait for the interval. The stream's poller reads
+    /// nothing until the stream has been subscribed to, though, so a poller
+    /// started before `subscribe` makes its first real read on its first turn
+    /// after the subscription, up to an interval later.
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
         self

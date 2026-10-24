@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (nitinol-eventsource): `ProjectorProps::with_poll_interval(Duration)`. A
+  projector's cadence can now be named, from any state of the builder before
+  `spawn` and on both the props `ProjectorProps::new` builds and the ones
+  `EventSourceSystem::projector_props` hands out. The interval is the wait
+  between one read of the journal and the next; props that name none read at
+  `DEFAULT_POLL_INTERVAL` (250 ms), as before. It is the projector's
+  counterpart of the saga side's `Subscription::with_poll_interval` and
+  `SagaDeliveryProps::with_poll_interval`.
+
 - (nitinol-saga): the read-side deadline index. A saga type whose alphabet
   declares a `#[subscribe(deadline)]` variant is now hosted with it: `host` /
   `spawn` starts one top-level process per partition beside the manager and the
@@ -733,6 +742,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indistinguishable here.
 
 ### Changed
+
+- (nitinol-eventsource, nitinol-saga): every poll-driven consumer — a
+  `DurableStream`, a `DurableSubscription` and so a projector, and a saga's
+  observed sources, delivery host and deadline index — now makes its first
+  read as soon as it is spawned rather than an interval later. The interval
+  between consecutive reads and the delivery host's backoff after a hold are
+  unchanged, and so are where a consumer resumes from and what it delivers.
+  What an existing deployment sees is the first read arriving up to one
+  interval earlier; nothing breaks. A projector started over a stream already
+  written no longer waits out 250 ms before catching up. A `DurableStream`'s
+  shared poller still reads nothing until the stream is subscribed to, so its
+  first real read comes on the first turn after `subscribe`. A poller or
+  partition restarted by supervision keeps the driver that times it, and waits
+  one interval before reading again.
 
 - **BREAKING** (`nitinol-saga`): a restarted saga manager no longer reads its
   upstream sources again from the position each `Subscription` names. Every

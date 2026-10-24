@@ -200,6 +200,11 @@ impl<S: Saga> SagaDeliveryProps<S> {
     ///
     /// A pull consumer trades latency for load on the store, and which way a
     /// deployment wants that is not something the framework can know.
+    ///
+    /// The first read does not wait for the interval: each partition, and the
+    /// saga's deadline index, reads as soon as it is spawned — the same as a
+    /// projector's poller, whose cadence is named on
+    /// [`ProjectorProps::with_poll_interval`](nitinol_eventsource::ProjectorProps::with_poll_interval).
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
         self

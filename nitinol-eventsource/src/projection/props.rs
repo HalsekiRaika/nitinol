@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::projection::ProjectionId;
 use nitinol_contract::Event;
@@ -9,7 +10,7 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{Props, SupervisionStrategy};
 
-use crate::durable_stream::{DurableSubscription, SequenceCursor};
+use crate::durable_stream::{DurableSubscription, SequenceCursor, DEFAULT_POLL_INTERVAL};
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};
 use crate::projection::process::{CatchupOrigin, ProjectorProcess};
 use crate::projection::projector::Projector;
@@ -37,6 +38,7 @@ pub struct ProjectorProps<P, Tx = (), E = EventUnset, O = OriginUnset, H = Unhos
     tx_provider: Option<Arc<dyn ErasedTxProvider<Tx> + Send + Sync>>,
     producer: Box<dyn Fn() -> P + Send + Sync>,
     handlers: Vec<Arc<dyn EventTypeHandler<P, Tx>>>,
+    poll_interval: Duration,
     host: H,
     _phantom: PhantomData<E>,
 }
@@ -77,9 +79,31 @@ where
             tx_provider: None,
             producer: Box::new(producer),
             handlers: Vec::new(),
+            poll_interval: DEFAULT_POLL_INTERVAL,
             host: Unhosted,
             _phantom: PhantomData,
         }
+    }
+}
+
+impl<P, Tx, E, O, H> ProjectorProps<P, Tx, E, O, H> {
+    /// Ask the journal no more often than every `interval`.
+    ///
+    /// The interval is the wait between one read of the journal and the next.
+    /// The first read does not wait for it: a projector spawned over events
+    /// already in its stream reads them as soon as it starts, and an event
+    /// appended afterwards is read on a later turn, an interval after the one
+    /// before. Props that name no interval read at [`DEFAULT_POLL_INTERVAL`].
+    ///
+    /// A pull consumer trades latency for load on the store, and which way a
+    /// deployment wants that is not something the framework can know — the
+    /// same reason the saga side names its cadence, on
+    /// `nitinol_saga::Subscription::with_poll_interval` for an observed source
+    /// and `nitinol_saga::SagaDeliveryProps::with_poll_interval` for a delivery
+    /// host.
+    pub fn with_poll_interval(mut self, interval: Duration) -> Self {
+        self.poll_interval = interval;
+        self
     }
 }
 
@@ -110,6 +134,7 @@ where
             tx_provider: Some(Arc::new(provider) as Arc<dyn ErasedTxProvider<TP::Tx> + Send + Sync>),
             producer: self.producer,
             handlers: Vec::new(),
+            poll_interval: self.poll_interval,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -144,6 +169,7 @@ where
             tx_provider: self.tx_provider,
             producer: self.producer,
             handlers: self.handlers,
+            poll_interval: self.poll_interval,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -183,6 +209,7 @@ where
             tx_provider: self.tx_provider,
             producer: self.producer,
             handlers: self.handlers,
+            poll_interval: self.poll_interval,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -196,6 +223,7 @@ where
             tx_provider: self.tx_provider,
             producer: self.producer,
             handlers: self.handlers,
+            poll_interval: self.poll_interval,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -230,6 +258,7 @@ where
         let handlers = self.handlers;
         let producer = self.producer;
         let tx_provider = self.tx_provider;
+        let poll_interval = self.poll_interval;
 
         // Built once here: the key this projector's position is filed under is
         // the same for the load below and for every save it makes afterwards.
@@ -249,7 +278,8 @@ where
             CatchupOrigin::Global => SequenceCursor::Global { after: offset },
         };
 
-        let upstream_config = DurableSubscription::<nitinol_persistence::LoadedEvent>::new(Some);
+        let upstream_config = DurableSubscription::<nitinol_persistence::LoadedEvent>::new(Some)
+            .with_poll_interval(poll_interval);
 
         let runtime_props = Props::new(move || ProjectorProcess {
             projector: producer(),
@@ -486,6 +516,7 @@ impl<P, Tx, E, O> ProjectorProps<P, Tx, E, O, Unhosted> {
             tx_provider: self.tx_provider,
             producer: self.producer,
             handlers: self.handlers,
+            poll_interval: self.poll_interval,
             host: Hosted::new(host),
             _phantom: PhantomData,
         }

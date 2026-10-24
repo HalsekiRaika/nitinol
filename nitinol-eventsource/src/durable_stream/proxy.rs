@@ -67,6 +67,9 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
     }
 
     /// Override the polling cadence.
+    ///
+    /// The first read does not wait for the interval: the poller reads as soon
+    /// as it is spawned, and waits the interval between one read and the next.
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
         self

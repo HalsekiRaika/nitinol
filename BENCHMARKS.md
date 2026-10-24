@@ -37,7 +37,7 @@ is worth reading before comparing two runs:
 
 | Benchmark | Carried in the number |
 |---|---|
-| `projector_catchup/*` | **About 250 ms of poll interval.** A projector's poller waits out its interval before its first read, that interval is the framework's default of 250 ms, and there is no entry point that changes it. So the three stream lengths read close to one another: what differs between them is the work above that floor. |
+| `projector_catchup/*` | **The catch-up itself, and no poll interval when one read takes the whole stream.** A projector's poller reads as soon as it starts, so the framework's default interval of 250 ms — which the benchmark keeps, naming none — is in the window only for a turn after the first, one an interval after the read before it that did not reach the end of the stream. A number from before that first read stopped waiting carries about 250 ms of interval and is not comparable to one from after. |
 | `saga_round_trip/poll_1ms` | Both poll intervals — the manager's subscription and the delivery host's — named at one millisecond each, which is what the benchmark's name records. A number taken at another cadence is a different measurement. Every iteration also writes to the one in-memory journal, which this store walks in full on every load, so a run drifts upward as it goes. |
 | `activation/*` | Nothing in the window, but an idle activation per iteration stays on the process system: a live aggregate cannot be stopped from outside it. The group's `sample_size` and `measurement_time` are what bound how many. |
 | `postgres_*` | Rows that nothing removes, so a later iteration writes into a fuller table than an earlier one. |
@@ -168,9 +168,11 @@ the same machine.
 Three things about this set, so that the next person reading it does not mistake
 them for properties of the code:
 
-* The catch-up numbers are the 250 ms poll interval and very little else, as
-  the table above says. They are in here because that is the number a
-  deployment waits, not because the catch-up is slow.
+* The catch-up numbers are the 250 ms poll interval and very little else: at
+  this commit a projector's poller waited out its interval before its first
+  read. They are in here because that is the number a deployment waited, not
+  because the catch-up is slow. The first read no longer waits, so a later set
+  carries what the table above says instead and is not comparable with these.
 * The Postgres numbers are a commit each, against a container writing through an
   overlay filesystem with `fsync` on. They say what this machine's durability
   costs; another database will read differently, and a managed one across a
@@ -178,6 +180,28 @@ them for properties of the code:
 * `postgres_event_store/append/100` is barely above `append/1`, which is what
   one round trip carrying a hundred rows versus one row looks like when the
   commit dominates.
+
+### 2026-10-24, `4443f69` + #167
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8) |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Toolchain | rustc 1.98.1, cargo 1.98.1 |
+
+| Crate | Benchmark | Median |
+|---|---|---|
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/1` | 36.009 µs |
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/100` | 475.07 µs |
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/1000` | 4.5047 ms |
+
+Measured on dev `4443f69` with the #167 changes applied, before they were
+merged.
+
+Only the catch-up benchmarks were run again; the rest of the 2026-10-19 set
+still stands for this machine. The first read no longer waits out the poll
+interval, so these numbers are the catch-up itself, as the table at the top
+says, and they grow with the stream's length where the earlier ones did not.
 
 ## Profiling one of them
 

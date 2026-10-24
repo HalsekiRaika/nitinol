@@ -133,6 +133,11 @@ impl Subscription {
     /// quiet stream polled rarely beside a busy one polled often. A source
     /// that names no interval keeps the one `nitinol-eventsource` already
     /// polls at.
+    ///
+    /// The first read does not wait for the interval: a source's partitions
+    /// read as soon as they are spawned, as a projector's poller does — whose
+    /// cadence is named on
+    /// [`ProjectorProps::with_poll_interval`](nitinol_eventsource::ProjectorProps::with_poll_interval).
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = Some(interval);
         self

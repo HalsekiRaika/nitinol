@@ -48,11 +48,12 @@ use nitinol_runtime::ProcessSystem;
 
 // Timing
 //
-// A projector polls its event store every `DEFAULT_POLL_INTERVAL` (250 ms,
-// `durable_stream.rs:19`) and that interval cannot be overridden through
-// `ProjectorProps`.  The longest chain asserted here needs four ticks, so the
-// bound below leaves room for a loaded machine without ever being the thing a
-// passing test waits on: every wait returns as soon as its condition holds.
+// The projectors here name no interval, so each reads its event store once as
+// soon as it starts and then every `DEFAULT_POLL_INTERVAL` (250 ms); naming
+// one is what `ProjectorProps::with_poll_interval` is for.  The longest chain
+// asserted here needs four ticks, so the bound below leaves room for a loaded
+// machine without ever being the thing a passing test waits on: every wait
+// returns as soon as its condition holds.
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_STEP: Duration = Duration::from_millis(5);
