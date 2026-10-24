@@ -40,7 +40,7 @@ pub(crate) struct SagaDeadlineIndexPartition<S: Saga> {
     /// The last schedule fact read.
     ///
     /// Apart from `lifecycle_cursor` because the two fact types are read by two
-    /// queries, each in its own order: one position across both would pass
+    /// queries, each in its own order: one cursor across both would pass
     /// over whatever one type committed below where the other had reached.
     schedule_cursor: u64,
     /// The last lifecycle fact read.

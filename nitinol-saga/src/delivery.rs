@@ -10,13 +10,14 @@
 //!
 //! A host subscribes across every instance of one saga type — one stream per
 //! instance — by naming the declared event type to the store together with the
-//! position it has finished with. The store does the selecting, so no row of
+//! cursor it has finished with. The store does the selecting, so no row of
 //! another type is fetched to be thrown away, and the subscription is not tied
 //! to any one stream.
 //!
 //! A record is finished with when **every** delivery it implied landed.
-//! Anything less and the position stays below it: a cursor that moved past a
-//! delivery still owed would leave that delivery with nothing pointing at it.
+//! Anything less and the cursor stays below it, and so does the offset recorded
+//! from it: a cursor that moved past a delivery still owed would leave that
+//! delivery with nothing pointing at it.
 //!
 //! # Why a command is asked rather than told
 //!

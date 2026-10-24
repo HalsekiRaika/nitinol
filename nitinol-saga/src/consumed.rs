@@ -25,8 +25,10 @@
 //! repeats the report rather than the decision.
 //!
 //! The position is there to drop what was already consumed and for nothing
-//! else: where a source reads from is its floor and the offset it recorded,
-//! not any instance's position.
+//! else. It is a fact on the saga's own stream, not a reader's offset, and
+//! never reaches the offset store: where a source reads from is its floor and
+//! the offset its partition recorded, not any instance's consumed position —
+//! see the crate's [mental model](crate#mental-model).
 //!
 //! Either way, de-duplication of the input is moved off the user's `handle`
 //! and onto the framework, and nothing here decides *when* to write a

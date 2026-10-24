@@ -41,7 +41,7 @@ struct Position {
     ///
     /// Never past a record whose work is still owed.
     cursor: u64,
-    /// The last position the store has taken.
+    /// The last offset the store has taken.
     ///
     /// At or behind `cursor` in ordinary running: the host may be further along
     /// than the store knows, which costs a redelivery after a crash and never a
@@ -73,7 +73,7 @@ pub struct SagaDeliveryPartition<S: Saga, Cs: OffsetStore> {
     /// Absent until the recorded progress has been read.
     ///
     /// A partition rebuilt by supervision starts here again, so a restart
-    /// resumes from what the store holds then rather than from a position
+    /// resumes from what the store holds then rather than from a cursor
     /// captured when the host was wired.
     position: Option<Position>,
     /// How many turns in a row have ended held, which is what the pause grows
@@ -223,8 +223,8 @@ where
         }
     }
 
-    /// Offer the store the position this partition has reached, if it is ahead
-    /// of what the store holds.
+    /// Offer the store this partition's cursor as its offset, if it is ahead of
+    /// the offset the store holds.
     ///
     /// Only ever a strict move forward, so a backend that takes none but
     /// forward moves and one that overwrites whatever it is handed answer a

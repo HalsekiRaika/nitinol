@@ -36,6 +36,10 @@ pub struct SagaHosted<S: Saga, St> {
 
 /// The builder every saga is started from.
 ///
+/// The manager it spawns is a reader of the sources the saga observes, keeping
+/// one offset per source and partition — see the crate's
+/// [mental model](crate#mental-model).
+///
 /// It spawns a manager that reads each declared source — one reader per
 /// partition, shared by every instance of the saga type that falls in it, each
 /// resuming from an offset it records — and derives the
@@ -168,7 +172,7 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     ///
     /// The deadline index is spread over the same count and assigns a saga to
     /// the same partition, by [`partition_of`](crate::partition_of). It records
-    /// no position, so changing the count costs it nothing: every partition
+    /// no offset, so changing the count costs it nothing: every partition
     /// reads the schedule facts from the start whenever it starts.
     ///
     /// The manager reads every declared source with the same count of
@@ -231,7 +235,7 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     /// next poll, and a restart brings it to [`Saga::handle`] again from the
     /// offset below it.  The
     /// floor is never undercut, whatever offset is recorded.  No instance's
-    /// consumed position speaks for either: the position is what drops a
+    /// consumed position speaks for either: the consumed position is what drops a
     /// record an instance has already consumed, which is what keeps an offset
     /// that was lost or moved backwards from costing a second decision.
     ///

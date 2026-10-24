@@ -6,7 +6,7 @@
 //! |---|---|
 //! | [`store::EventStore`] | Append and load domain events |
 //! | [`store::SnapshotStore`] | Save and load aggregate snapshots |
-//! | [`store::OffsetStore`] | Track the progress of an event consumer |
+//! | [`store::OffsetStore`] | Track a consumer's place in a set of streams (a snapshot is one stream's fold) |
 //! | [`store::OffsetScope`] | The key a consumer's progress is filed under |
 //! | [`store::DeliveryMode`] | Delivery guarantee: `AtMostOnce` / `AtLeastOnce` / `ExactlyOnce` |
 //! | [`provider::Store`] | Hold the stores above, as one cloneable handle per deployment |

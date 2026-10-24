@@ -2,8 +2,8 @@
 
 /// Why an operator's move of a partition's recorded progress did not happen.
 ///
-/// Every variant leaves the partition exactly as it was: the stored position,
-/// the position the running partition is reading from, and what it is held at
+/// Every variant leaves the partition exactly as it was: the stored offset,
+/// the cursor the running partition is reading from, and what it is held at
 /// are all unchanged.
 #[derive(Debug, thiserror::Error)]
 pub enum SagaDeliveryError {
@@ -30,7 +30,7 @@ pub enum SagaDeliveryError {
         to: u64,
         reached: u64,
     },
-    /// The store would not take the new position.
+    /// The store would not take the new offset.
     #[error("recording {to} as partition {partition}'s progress failed: {detail}")]
     NotRecorded {
         partition: usize,

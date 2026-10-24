@@ -69,7 +69,8 @@ impl<S: Saga> SagaManagerProxy<S> {
 /// one of its deadlines falls due.
 ///
 /// The saga writes its own stream; the delivery host and the index each read
-/// it in global order from a position of their own. All of them are reached
+/// it in global order, the delivery host from an offset it records and the
+/// index from cursors it rebuilds whenever it starts. All of them are reached
 /// through this rather than returned as a tuple, because one declaration
 /// started them and there is no wiring in which a deployment holds one without
 /// the others.
@@ -84,8 +85,8 @@ impl<S: Saga> SagaManagerProxy<S> {
 ///
 /// Shared by cloning rather than by being wrapped: a clone reaches the same
 /// manager process and the same running partitions, so `manager().stop()`
-/// through any clone stops the one manager, and a position moved through one
-/// clone's `delivery()` is the position the others read.
+/// through any clone stops the one manager, and an offset moved through one
+/// clone's `delivery()` is the offset the others read.
 pub struct SagaHostProxy<S: Saga> {
     manager: SagaManagerProxy<S>,
     delivery: SagaDeliveryProxy<S>,

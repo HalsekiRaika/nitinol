@@ -38,11 +38,14 @@ pub(crate) const RESTART_WITHIN: Duration = Duration::from_secs(60);
 
 /// Wiring for a delivery host over the saga type `S`.
 ///
+/// The delivery host is a reader of the saga type's streams, and what it keeps
+/// is an offset — see the crate's [mental model](crate#mental-model).
+///
 /// A delivery host subscribes to the decisions every instance of `S` has
 /// persisted, turns each into the commands [`Saga::dispatch`] says it implies,
 /// and delivers them to the aggregates they are addressed to. Polling, the
-/// cursor, the recorded progress, holding on a failure and backing off are all
-/// the host's; what the saga author writes is the mapping.
+/// cursor, the offset, holding on a failure and backing off are all the
+/// host's; what the saga author writes is the mapping.
 ///
 /// This type is where the delivery guarantee is written down. Everything else
 /// in the crate that needs it links here rather than restating it.
@@ -114,18 +117,18 @@ pub(crate) const RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// # Changing the partition count
 ///
 /// The partition a stream key falls in is derived from the count, so changing
-/// the count reassigns keys. A partition's recorded position covers the set of
-/// streams that used to map to it, and after the change it covers a different
-/// set: records already delivered under the old assignment are read again under
-/// the new one, and records not yet delivered may move to a partition whose
-/// recorded position is already past them.
+/// the count reassigns keys. A partition's offset covers the set of streams that
+/// used to map to it, and after the change it covers a different set: records
+/// already delivered under the old assignment are read again under the new
+/// one, and records not yet delivered may move to a partition whose offset is
+/// already past them.
 ///
 /// What that costs is redelivery, which the receivers' idempotency absorbs —
 /// the same thing a crash costs. What it is **not** safe against is delivery
 /// being skipped, so a count is changed with every partition drained: stop the
 /// host, let nothing be left unfinished, then start it with the new count.
 /// Changing it under a running host, or restarting with a new count while a
-/// partition is held, can carry a position past records nothing then delivers.
+/// partition is held, can carry an offset past records nothing then delivers.
 ///
 /// # Where it starts
 ///

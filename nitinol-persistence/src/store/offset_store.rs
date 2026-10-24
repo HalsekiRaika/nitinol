@@ -72,6 +72,9 @@ pub enum DeliveryMode {
 
 /// The persisted progress cache every event consumer shares.
 ///
+/// A snapshot caches the fold of one stream; an offset caches a reader's place
+/// in a set of streams.
+///
 /// What an offset holds is where a consumer had got to, and nothing more.
 /// The business record is the events themselves — the aggregates' and the
 /// sagas' — so an offset can be rebuilt by reading from the beginning, and

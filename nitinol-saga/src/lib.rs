@@ -12,15 +12,51 @@
 //! declares a deadline is started with a third part, its deadline index, which
 //! brings an instance back when one of its deadlines falls due.
 //!
-//! The saga is the writer of its own stream, and the parts beside it are
-//! readers of that stream, each in global order from a position of its own:
-//! the delivery host carries the decisions it reads, and the deadline index
-//! asks for the instances whose deadlines it reads to have fallen due. The
-//! manager is a reader too, of the sources the saga observes: each source is
-//! read per partition from an offset the manager records, the way the delivery
-//! host records its own.
-//!
 //! # Mental model
+//!
+//! A saga instance is the sole writer of its one stream, and the parts around
+//! it are readers, each holding a place over a set of streams.
+//!
+//! Three words name those places, and each means one thing throughout this
+//! crate:
+//!
+//! - **offset** — a reader's place that is persisted: kept in the
+//!   [`OffsetStore`](nitinol_persistence::store::OffsetStore) under an
+//!   [`OffsetScope`](nitinol_persistence::store::OffsetScope) key, so it
+//!   outlives a restart.
+//! - **cursor** — a reader's place that lives in its process alone: a poller
+//!   holds it, and a restart loses it.
+//! - **consumed position** — a fact a saga instance writes on its own stream
+//!   (`nitinol.saga.consumed`), naming an upstream record it has consumed. It
+//!   is not a reader's place.
+//!
+//! | Part | Toward the streams | What it holds |
+//! |---|---|---|
+//! | Saga instance | The sole writer of its own stream | Its state, its consumed positions and its pending deadlines — each a fold of its own stream's facts, so it holds no cache. There is no snapshot yet, and a snapshot would be the only cache it could hold |
+//! | Manager (one source partition) | A reader of the source streams the saga observes, one per declared source and partition | An offset per partition, in the `OffsetStore` under `nitinol.saga-manager.…`, and an in-process cursor. A partition resumes from the higher of the [`with_after`](Subscription::with_after) floor and its offset |
+//! | Delivery host | A reader of the saga type's streams, selecting their rows by event type | An offset per partition, in the `OffsetStore` under `nitinol.saga-delivery.…`, and an in-process cursor |
+//! | Deadline index | A reader of the saga type's schedule and lifecycle facts | In-process cursors alone. It records no offset, and reads the journal again from its start whenever it starts |
+//!
+//! An instance's consumed position looks like a reader's place, and is not
+//! one: it never appears in the `OffsetStore`. It is a fact on the instance's
+//! own stream, written by the same append that lands the decision it closes
+//! out — or, where no decision lands with it (an input [`Saga::handle`]
+//! refused, an effect that writes nothing else), by an append of its own —
+//! and its only job is to drop a redelivered record the instance has already
+//! consumed. Where a source is read from is the manager's alone, decided by the
+//! source's floor and the offset its partition recorded, and no instance's
+//! consumed position speaks for either — which is why an offset lost or carried
+//! backwards costs a re-read and never a second decision.
+//!
+//! The three readers are the same kind of part as a
+//! [projector](nitinol_eventsource::Projector): each reads a set of streams and
+//! keeps how far it has read as a place of its own. The two that record an
+//! offset record it in the same `OffsetStore` a projector records in, under
+//! keys of their own: a projector's key is its projection id, and the saga's
+//! readers' keys sit inside the framework's `nitinol` namespace, where no
+//! projection id can reach.
+//!
+//! Each concept the saga author meets is one type:
 //!
 //! | Concept | Type |
 //! |---|---|
@@ -62,27 +98,25 @@
 //!   cascade-stops every one of them automatically.
 //!   [`Subscription::with_poll_interval`] is how often one source is asked,
 //!   which is a deployment's choice rather than the framework's.
-//! - Consumed inputs are de-duplicated by the framework.  Most positions are
-//!   written onto the saga's own stream by the append that closes out the
-//!   `handle` decision the input produced — the last one, when one `handle`
-//!   call reaches the store as more than one atomic append — so the position
-//!   is never durable before every append it depends on is.  An input
-//!   [`Saga::handle`] answered `Err` produces no decision at all and is
-//!   settled by a position-only append: it was seen, it produced nothing, and
-//!   that one row is all it leaves.  Either way, replay rebuilds those
-//!   positions from the stream alone and a redelivered record at or below one
-//!   is dropped before [`Saga::handle`] runs again.  That is the whole of a
-//!   position's job: where a source reads from is the manager's, decided by
-//!   the source's floor and the offset its partition recorded, and no
-//!   instance's position speaks for either — which is also why an offset lost
-//!   or carried backwards costs a re-read and never a second decision.
+//! - Consumed inputs are de-duplicated by the framework, by the consumed
+//!   position — a fact on the saga's own stream rather than an offset, as
+//!   [the mental model](#mental-model) sets out.  Most consumed positions are
+//!   written by the append that closes out the `handle` decision the input
+//!   produced — the last one, when one `handle` call reaches the store as more
+//!   than one atomic append — so a consumed position is never durable before
+//!   every append it depends on is.  An input [`Saga::handle`] answered `Err`
+//!   produces no decision at all and is settled by a consumed-position-only
+//!   append: it was seen, it produced nothing, and that one row is all it
+//!   leaves.  Either way, replay rebuilds the consumed positions from the
+//!   stream alone and a redelivered record at or below one is dropped before
+//!   [`Saga::handle`] runs again.
 //!   An instance waiting on a deadline needs no record: the deadline index
 //!   brings it back when the deadline falls due.  An effect
 //!   that writes nothing else still commits a consumed-position-only append,
 //!   so a no-op decision is not redelivered either; what the guarantee does
 //!   *not* cover — an append that never landed, and the entry points with no
-//!   input to consume — is stated on [`Saga::handle`].  Positions are held
-//!   per declared source of each upstream stream, so one source's progress
+//!   input to consume — is stated on [`Saga::handle`].  Consumed positions are
+//!   held per declared source of each upstream stream, so one source's progress
 //!   never covers a record of another.  A record that fails to decode is
 //!   settled by neither path: it has no typed input to attribute to an
 //!   instance, so nothing is written on any saga stream for it, and its
@@ -142,7 +176,7 @@
 //!   addressed to, and [`host`](SagaSystemExt::host) starts the host that
 //!   carries them, on the contract [`SagaDeliveryProps`] states.
 //!   The host subscribes across every instance of the saga type — it names the
-//!   declared event type to the store together with the position it has
+//!   declared event type to the store together with the cursor it has
 //!   finished with, so no row of another type is fetched to be discarded — and
 //!   delivers with `ask`, because the receiver's answer is the only thing that
 //!   says a command was carried out. A record counts as finished only once
@@ -178,8 +212,8 @@
 //!   when a deadline falls due, asks the manager for its instance.  The
 //!   instance replays, re-arms the deadline, and the scheduler fires it into
 //!   [`Saga::handle`] — the index decodes no deadline and delivers nothing, so
-//!   a firing has one road.  The index records no position: it is a cache of
-//!   the schedule facts, read again from the start of the journal whenever it
+//!   a firing has one road.  The index records no offset, only in-process
+//!   cursors: it is a cache of the schedule facts, read again from the start of the journal whenever it
 //!   starts, so losing it costs time and never a deadline.  It tells a saga
 //!   type's schedule facts from another's by the deadline message type they
 //!   name ([`DeclaresDeadline::MESSAGE_TYPE`]), which is therefore one per saga
@@ -192,7 +226,7 @@
 //!   to a terminated instance — an observed record a manager's shared
 //!   subscription delivers, a deadline reached after the end — is reported
 //!   through `tracing` and dropped, with nothing written: a terminated saga
-//!   records no further facts, and not even a position, since a record that
+//!   records no further facts, and not even a consumed position, since a record that
 //!   reached no `handle` settles nothing a later incarnation could use.  It is
 //!   still answered, so one ended instance never holds a source partition
 //!   behind it.
@@ -204,7 +238,7 @@
 //!   saga is not notified and there is no hook to register for one.  Nothing in
 //!   between is persisted: there is no queue of type-less bytes a saga's own
 //!   failures accumulate in, and an input [`Saga::handle`] refused leaves its
-//!   position and a `tracing` report rather than a durable record of the
+//!   consumed position and a `tracing` report rather than a durable record of the
 //!   refusal.
 //! - Reserved namespace: `nitinol` belongs to the framework, in the stream-key
 //!   space and the event-type space alike.  [`SagaId`] refuses a name inside it
@@ -230,7 +264,7 @@
 //!   decision.
 //! - A persist batch the store refuses is retried a bounded number of times and
 //!   then reported.  The input it was decided from stays unconsumed — no
-//!   position is written for a decision no store holds — and its source's
+//!   consumed position is written for a decision no store holds — and its source's
 //!   partition reads no further, handing the record again on its next poll
 //!   with the recorded offset below it, so a later manager reads the record
 //!   again and decides it again.  The saga itself stays alive
@@ -284,7 +318,7 @@
 //!    at-least-once too, so the same fact can be *delivered* more than once;
 //!    whether it is decided again depends on whether the batch recording the
 //!    decision landed.  Until it does, the fact is unconsumed and a redelivery
-//!    runs the fan-out again.  Once it has, the fact's position is on the
+//!    runs the fan-out again.  Once it has, the fact's consumed position is on the
 //!    saga's own stream and the redelivery is dropped before [`Saga::handle`].
 //! 3. **Idempotent creation.**  The child answers a repeated creation command
 //!    with "already created" rather than with a second write, which is what

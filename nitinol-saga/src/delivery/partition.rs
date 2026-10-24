@@ -19,7 +19,7 @@ const PRIME: u64 = 0x0000_0100_0000_01b3;
 ///
 /// The answer is part of a persisted key — a partition's offset — so an
 /// assignment that moved between two runs of one deployment would have a
-/// partition resume from a position belonging to a different set of streams.
+/// partition resume from an offset belonging to a different set of streams.
 /// `std`'s default hasher promises nothing across builds or across processes:
 /// its algorithm is explicitly allowed to change, and `RandomState` reseeds per
 /// process. FNV-1a is specified by its two constants above, so the assignment

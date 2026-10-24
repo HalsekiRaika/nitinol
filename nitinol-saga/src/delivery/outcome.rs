@@ -64,7 +64,7 @@ pub(crate) enum HoldCause {
     ///
     /// The deliveries up to it were carried out all the same: what failed is
     /// the cache of where they got to, not the work. Nothing is skipped on
-    /// account of it, and the position is offered again.
+    /// account of it, and the same offset is offered again.
     ProgressUnrecorded { position: u64 },
 }
 

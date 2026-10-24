@@ -12,6 +12,9 @@ use crate::subscribe::SagaSubscribe;
 
 /// Event-sourced process manager.
 ///
+/// A saga is the sole writer of its own stream; the parts the framework starts
+/// around it are readers — see the crate's [mental model](crate#mental-model).
+///
 /// A saga reacts to the inputs it declares — events emitted by the aggregates it
 /// observes, and deadlines of its own — and produces a declarative
 /// [`SagaEffect`] describing what should happen next: persist new saga events,
@@ -83,7 +86,7 @@ pub trait Saga: Send + Sync + 'static {
     /// Domain-level error type produced by [`Saga::handle`].
     ///
     /// A refused input is reported through `tracing` and settled by its
-    /// position alone — see [`Saga::handle`] for what that means for
+    /// consumed position alone — see [`Saga::handle`] for what that means for
     /// redelivery.  This type exists to keep the signature symmetrical with
     /// `Decider::Rejection` and to give the implementation a place to surface
     /// diagnostics.

@@ -11,8 +11,8 @@
 //!
 //! The two differ only in *when* the name is known, and therefore in what a
 //! rejection can be.  The law itself — the root, and the boundary that decides
-//! membership — lives next to [`Family`] in
-//! [`crate::event_type`](crate::event_type), because `Family::new` is the
+//! membership — lives next to [`Family`](crate::Family) in
+//! `crate::event_type`, because `Family::new` is the
 //! compile-time enforcement point that needs it in the same evaluation.  This
 //! module re-exports [`RESERVED_NAMESPACE`] and [`is_within_reserved_namespace`]
 //! so callers can keep reaching them through `nitinol_persistence::reserved`,

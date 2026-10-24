@@ -55,8 +55,8 @@ where
 /// system they were spawned on, and this is how an operator reaches them.
 ///
 /// Shared by cloning rather than by being wrapped: a clone names the one
-/// host's running partitions, so a position moved through one handle is the
-/// position every other handle reads.
+/// host's running partitions, so an offset moved through one handle is the
+/// offset every other handle reads.
 pub struct SagaDeliveryProxy<S: Saga> {
     delivery_id: SagaDeliveryId,
     partitions: Vec<Box<dyn PartitionHandle>>,
@@ -110,7 +110,7 @@ impl<S: Saga> SagaDeliveryProxy<S> {
     ///
     /// # What it means
     ///
-    /// The recorded position is a cache of progress and can be rebuilt by
+    /// The offset is a cache of progress and can be rebuilt by
     /// reading from the beginning — but this is not a rebuild. It says the
     /// commands the stretch being passed over implied **will not be
     /// delivered**: whatever the saga decided there does not reach its target,
@@ -119,7 +119,7 @@ impl<S: Saga> SagaDeliveryProxy<S> {
     /// Nothing in the framework can make it.
     ///
     /// The host is not restarted and nothing else pauses: the partition named
-    /// is reading from the new position by the time this returns, and the other
+    /// has its cursor at the new offset by the time this returns, and the other
     /// partitions never stopped.
     ///
     /// # What it refuses

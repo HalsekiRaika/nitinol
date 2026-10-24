@@ -13,7 +13,7 @@ const SAGA_DELIVERY_PART: &str = "saga-delivery";
 ///
 /// A deployment names its own: two hosts over one saga type — a second
 /// deployment, a migration running beside the first — keep separate progress,
-/// and which of them a stored position belongs to is a decision the wiring
+/// and which of them a stored offset belongs to is a decision the wiring
 /// makes rather than one derived from the type. Deriving it from the saga's
 /// declared event type is the default when the wiring names none.
 ///
@@ -56,8 +56,8 @@ impl SagaDeliveryId {
     /// The key partition `partition` of this host records its progress under.
     ///
     /// Progress is per partition rather than per host: a host recording one
-    /// position for all its partitions would have them overwrite each other,
-    /// and a held partition would drag the rest back to its own position on
+    /// offset for all its partitions would have them overwrite each other,
+    /// and a held partition would drag the rest back to its own offset on
     /// restart. The key is therefore this identifier together with the
     /// partition number, and that the two render one key injectively — inside
     /// the framework's own namespace, where no user-named scope can reach — is

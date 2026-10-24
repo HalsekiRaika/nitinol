@@ -121,10 +121,11 @@ impl<A> UpstreamSource<A> {
         }
     }
 
-    /// The read of every record of this source above `position`.
+    /// The read of every record of this source above `position`, the
+    /// partition's cursor.
     ///
     /// A stream source names its key and nothing else, and a global source
-    /// names nothing but the position: this source claims its own rows by
+    /// names nothing but the cursor: this source claims its own rows by
     /// event type as it reads them, so the store is asked for no type.
     fn query_above(&self, position: u64) -> LoadQuery {
         match &self.floor {
@@ -193,15 +194,15 @@ struct Position {
     /// unsettled, kept so that being stopped there is reported once rather
     /// than on every tick the same record is handed again.
     stalled_at: Option<u64>,
-    /// The last position the store has taken.
+    /// The last offset the store has taken.
     durable: u64,
 }
 
 /// What a partition makes of one record it read.
 enum Verdict {
-    /// Owed nothing more: decided, settled by its position, addressed to no
-    /// instance or to another partition's, unreadable, or dropped by an ended
-    /// instance.
+    /// Owed nothing more: decided, settled by its consumed position, addressed
+    /// to no instance or to another partition's, unreadable, or dropped by an
+    /// ended instance.
     Settled,
     /// Handed to its instance, whose decision never became durable. The
     /// partition reads no further, so the same record is handed again on the
@@ -411,8 +412,8 @@ impl<S: Saga> SagaSourcePartition<S> {
         }
     }
 
-    /// Offer the store the position every record up to which is settled, if it
-    /// is ahead of what the store holds.
+    /// Offer the store this partition's cursor — every record up to it is
+    /// settled — as its offset, if it is ahead of the offset the store holds.
     ///
     /// Only ever a strict move forward, so a backend that takes none but
     /// forward moves and one that overwrites whatever it is handed answer this
