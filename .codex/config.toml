@@ -1,3 +1,6 @@
 [mcp_servers.takt]
 command = "takt-mcp"
 cwd = "/home/rechella/projects/nitinol"
+
+[mcp_servers.takt.tools.takt_list_tasks]
+approval_mode = "approve"
