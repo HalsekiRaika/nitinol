@@ -1,0 +1,3 @@
+[mcp_servers.takt]
+command = "takt-mcp"
+cwd = "/home/rechella/projects/nitinol"
