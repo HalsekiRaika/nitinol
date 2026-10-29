@@ -36,7 +36,8 @@ use bytes::Bytes;
 
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_eventsource::{
-    codec::Codec, Event, ProjectionContext, ProjectionId, Projector, ProjectorProps, TxProvider,
+    codec::Codec, Event, PolledBatch, ProjectionContext, ProjectionId, Projector, ProjectorProps,
+    SettledThrough, TxProvider,
 };
 use nitinol_persistence::error::OffsetError;
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
@@ -801,10 +802,13 @@ async fn exactly_once_tx_begin_failure_blocks_the_next_event() {
 /// The offset save fails twice and then succeeds. A successful `project`
 /// is not enough to let the cursor move when the save inside the same
 /// transaction failed and the transaction was rolled back.
+///
+/// Both events are read together and settled as one batch, so the save that
+/// fails is the batch's one save, and the whole batch is what is re-applied.
 #[tokio::test(flavor = "multi_thread")]
 async fn exactly_once_tx_offset_save_failure_blocks_the_next_event() {
     let event_store = InMemoryEventStore::default();
-    let (offset_store, _saves) = MockOffsetStore::new(2);
+    let (offset_store, saves) = MockOffsetStore::new(2);
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(
             CustomStore::builder()
@@ -839,8 +843,14 @@ async fn exactly_once_tx_offset_save_failure_blocks_the_next_event() {
 
     assert_eq!(
         observed,
-        vec![1, 1, 1, 2],
-        "seq=1 must be re-applied until its offset save succeeds, before seq=2"
+        vec![1, 2, 1, 2, 1, 2],
+        "the batch must be re-applied from seq=1 until its offset save succeeds; \
+         seq=2 must never be settled on its own ahead of seq=1"
+    );
+    assert_eq!(
+        saves.load(Ordering::SeqCst),
+        3,
+        "the batch saves its offset once per attempt: two refused, one accepted"
     );
     assert_eq!(
         counters.rolled_back(),
@@ -859,6 +869,10 @@ async fn exactly_once_tx_offset_save_failure_blocks_the_next_event() {
 /// framework's side — the transaction was already consumed by `commit`, so
 /// there is nothing left to roll back — and the safe reading is "not
 /// committed": the cursor holds and seq=1 is redelivered.
+///
+/// Both events are read together and committed as one batch, so seq=2 is
+/// projected inside every uncommitted transaction too. What holds is that
+/// neither is ever settled: each redelivery starts again from seq=1.
 #[tokio::test(flavor = "multi_thread")]
 async fn exactly_once_tx_commit_failure_blocks_the_next_event() {
     let event_store = InMemoryEventStore::default();
@@ -892,12 +906,15 @@ async fn exactly_once_tx_commit_failure_blocks_the_next_event() {
     .spawn(&system)
     .await;
 
-    let retried = wait_for(|| recorder.len() >= 3).await;
+    let retried = wait_for(|| recorder.sequences().iter().filter(|&&s| s == 1).count() >= 3).await;
     let observed = recorder.sequences();
 
     assert!(
-        !observed.contains(&2),
-        "seq=2 must not be projected while seq=1's commit keeps failing; observed {observed:?}"
+        observed
+            .chunks(2)
+            .all(|attempt| attempt == &[1, 2][..attempt.len()]),
+        "every redelivery must start again from seq=1 while the batch's commit keeps \
+         failing; observed {observed:?}"
     );
     assert_eq!(
         counters.rolled_back(),
@@ -956,8 +973,14 @@ async fn at_most_once_failing_event_does_not_block_the_next_event() {
     .await;
 
     let reached = wait_for_offset(&offset_store, &projection_id, Some(2)).await;
+    // The batch's offset is saved before either event is projected.
+    let both_attempted = wait_for(|| recorder.len() >= 2).await;
     let observed = recorder.sequences();
 
+    assert!(
+        both_attempted,
+        "both events must be handed to project(); observed {observed:?}"
+    );
     assert_eq!(
         observed,
         vec![1, 2],
@@ -1174,13 +1197,23 @@ async fn already_processed_event_is_accepted_without_projecting() {
         occurred_at: jiff::Timestamp::now(),
     };
 
-    let accepted = proxy.ask(already_processed).await;
+    let accepted = proxy
+        .ask(PolledBatch {
+            records: vec![(3, already_processed)],
+            last_observed: 3,
+        })
+        .await;
 
-    assert!(
-        accepted.is_ok(),
-        "an event at or below the offset must be accepted so the cursor can move past it, \
-         got {accepted:?}"
-    );
+    match accepted {
+        Ok(SettledThrough(through)) => assert_eq!(
+            through, 3,
+            "an event at or below the offset must be settled so the cursor can move past it"
+        ),
+        Err(e) => panic!(
+            "an event at or below the offset must be accepted so the cursor can move past it, \
+             got {e:?}"
+        ),
+    }
     assert_eq!(
         recorder.sequences(),
         Vec::<u64>::new(),

@@ -15,31 +15,33 @@
 //! that what a snapshot saves is read where the rows have to be fetched and
 //! decoded rather than handed over from memory.
 //!
-//! # What an `ExactlyOnce` projection pays per event
+//! # What an `ExactlyOnce` projection pays for a catch-up
 //!
 //! `postgres_projection/exactly_once/N` starts a projector carrying a
 //! `TxProvider` over the run's pool and waits until it has applied all N
-//! records of a stream written before it existed. For every record the
-//! framework begins a transaction, hands it to `project`, saves the offset in
-//! it and commits, so the number is that boundary N times over — the commit
-//! above all, which is what a granularity other than one transaction per event
-//! would change.
+//! records of a stream written before it existed. The projector settles what
+//! one read of the journal returned as one batch: the framework begins one
+//! transaction, hands it to `project` for every record of the batch, saves the
+//! offset in it once and commits once. The projector names no batch limit, and
+//! both lengths measured are within the default one, so each catch-up is one
+//! read and one batch: the number is one transaction's boundary plus N runs of
+//! `project` inside it.
 //!
 //! The read model is a counter in memory rather than a table. A table would put
-//! one more statement inside each of those transactions and not one more
-//! commit, and what is being measured is the boundary the framework draws, not
-//! the statement a particular read model issues inside it.
+//! N more statements inside that transaction and not one more commit, and what
+//! is being measured is the boundary the framework draws, not the statements a
+//! particular read model issues inside it.
 //!
 //! The projector names no poll interval, so it polls at the framework's
 //! default. That cadence is not in the window: a poller reads as soon as it
-//! starts, and that read asks for the whole stream with no limit, so a
-//! projector that applies every record without failing never waits for a
-//! second turn.
+//! starts, and that read asks for up to the default batch limit, which holds
+//! the whole stream, so a projector that applies every record without failing
+//! never waits for a second turn.
 //!
 //! The window ends when `project` has run for the last record, which is before
-//! that record's offset save and commit: the window holds N − 1 commits, not N.
-//! That is about 1 % under the boundary's cost at N = 100 and about 0.1 % at
-//! N = 1000.
+//! the batch's offset save and commit: the window holds the batch's `begin`,
+//! the read and the N runs of `project`, and no commit at all. The one commit
+//! the catch-up pays comes after it, while the iteration stops its projector.
 //!
 //! # What stays behind between iterations
 //!
@@ -57,12 +59,11 @@
 //!
 //! # How long a run takes
 //!
-//! Three to five minutes on the machine `BENCHMARKS.md` records, almost all of
-//! it `exactly_once/1000`: a commit is about 14 ms there, so one iteration of it
-//! is about 14 s, and criterion's flat sampling runs one warm-up iteration and
-//! ten samples of at least one iteration each whatever the measurement time.
-//! The upper end is a run whose commits slow down for a stretch, which that
-//! machine has shown. The activations together take seconds.
+//! The projection group takes about 35 s on the machine `BENCHMARKS.md`
+//! records, which is the measurement time its lengths are given below plus
+//! warm-up: a catch-up is one commit rather than one per record, so an
+//! iteration takes milliseconds and criterion fills that time with many of
+//! them. The activations together take seconds.
 //!
 //! Run with
 //! `DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres cargo bench -p nitinol-sqlx --bench postgres_system`.
@@ -101,9 +102,10 @@ use tokio::sync::Notify;
 const ACTIVATED: [u64; 4] = [1, 100, 1_000, 10_000];
 
 /// Each stream length with the measurement time its projection benchmark is
-/// given: room for about two catch-ups at a commit of about 14 ms per record.
-/// Criterion's flat sampling takes ten samples of at least one iteration
-/// regardless, so this sizes the samples and does not shorten the run.
+/// given. The times were sized for about two catch-ups at a commit of about
+/// 14 ms per record; a catch-up now commits once, so they hold many iterations
+/// each. Criterion's flat sampling takes ten samples of at least one iteration
+/// regardless.
 const PROJECTED: [(u64, Duration); 2] = [
     (100, Duration::from_secs(3)),
     (1_000, Duration::from_secs(30)),

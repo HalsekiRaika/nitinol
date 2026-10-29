@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +11,9 @@ use nitinol_persistence::AggregateId;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{Props, SupervisionStrategy};
 
-use crate::durable_stream::{DurableSubscription, SequenceCursor, DEFAULT_POLL_INTERVAL};
+use crate::durable_stream::{
+    DurableSubscription, SequenceCursor, DEFAULT_BATCH_LIMIT, DEFAULT_POLL_INTERVAL,
+};
 use crate::projection::handler::{ConcreteHandler, EventTypeHandler};
 use crate::projection::process::{CatchupOrigin, ProjectorProcess};
 use crate::projection::projector::Projector;
@@ -31,6 +34,11 @@ pub struct OriginSet(pub(crate) CatchupOrigin);
 /// from [`EventSourceSystem::projector_props`] carrying it already. The two
 /// forms meet on one private path, so a projector follows the same journal and
 /// records its position in the same slot either way.
+///
+/// The projector these props start settles what each read of the journal
+/// returned as one batch — one offset save, and under `ExactlyOnce` with a
+/// [`TxProvider`] one transaction — of at most
+/// [`with_batch_limit`][Self::with_batch_limit] records.
 pub struct ProjectorProps<P, Tx = (), E = EventUnset, O = OriginUnset, H = Unhosted> {
     projection_id: ProjectionId,
     delivery_mode: DeliveryMode,
@@ -39,6 +47,7 @@ pub struct ProjectorProps<P, Tx = (), E = EventUnset, O = OriginUnset, H = Unhos
     producer: Box<dyn Fn() -> P + Send + Sync>,
     handlers: Vec<Arc<dyn EventTypeHandler<P, Tx>>>,
     poll_interval: Duration,
+    batch_limit: NonZeroUsize,
     host: H,
     _phantom: PhantomData<E>,
 }
@@ -80,6 +89,7 @@ where
             producer: Box::new(producer),
             handlers: Vec::new(),
             poll_interval: DEFAULT_POLL_INTERVAL,
+            batch_limit: DEFAULT_BATCH_LIMIT,
             host: Unhosted,
             _phantom: PhantomData,
         }
@@ -87,13 +97,19 @@ where
 }
 
 impl<P, Tx, E, O, H> ProjectorProps<P, Tx, E, O, H> {
-    /// Ask the journal no more often than every `interval`.
+    /// Ask the journal no more often than every `interval`, except while a
+    /// backlog is being read back to back.
     ///
     /// The interval is the wait between one read of the journal and the next.
     /// The first read does not wait for it: a projector spawned over events
     /// already in its stream reads them as soon as it starts, and an event
     /// appended afterwards is read on a later turn, an interval after the one
     /// before. Props that name no interval read at [`DEFAULT_POLL_INTERVAL`].
+    ///
+    /// One case reads sooner than the interval: a read that came back with
+    /// [`with_batch_limit`][ProjectorProps::with_batch_limit] records and
+    /// settled whole is followed by the next at once, so a backlog is read back
+    /// to back. Every other read waits the interval.
     ///
     /// A pull consumer trades latency for load on the store, and which way a
     /// deployment wants that is not something the framework can know — the
@@ -103,6 +119,28 @@ impl<P, Tx, E, O, H> ProjectorProps<P, Tx, E, O, H> {
     /// host.
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
+        self
+    }
+
+    /// Read at most `limit` records from the journal at a time.
+    ///
+    /// What one read returns is the batch this projector settles as one unit:
+    /// its offset is saved once per batch rather than once per event, and under
+    /// `ExactlyOnce` with a [`TxProvider`] the batch is one transaction, so the
+    /// limit is also the most records one transaction carries. A larger limit
+    /// means fewer saves and commits over a backlog, and a longer transaction —
+    /// and a whole batch to redo when one of its records fails. Props that name
+    /// no limit read [`DEFAULT_BATCH_LIMIT`] at a time.
+    ///
+    /// A read that came back with `limit` records and settled whole is followed
+    /// by the next one at once rather than an interval later, so a backlog is
+    /// read back to back; anything less waits the interval as usual.
+    ///
+    /// The limit is asked of the journal, not enforced on its answer: a store
+    /// that returns more than it was asked for has all of what it returned
+    /// applied as one batch.
+    pub fn with_batch_limit(mut self, limit: NonZeroUsize) -> Self {
+        self.batch_limit = limit;
         self
     }
 }
@@ -135,6 +173,7 @@ where
             producer: self.producer,
             handlers: Vec::new(),
             poll_interval: self.poll_interval,
+            batch_limit: self.batch_limit,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -170,6 +209,7 @@ where
             producer: self.producer,
             handlers: self.handlers,
             poll_interval: self.poll_interval,
+            batch_limit: self.batch_limit,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -210,6 +250,7 @@ where
             producer: self.producer,
             handlers: self.handlers,
             poll_interval: self.poll_interval,
+            batch_limit: self.batch_limit,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -224,6 +265,7 @@ where
             producer: self.producer,
             handlers: self.handlers,
             poll_interval: self.poll_interval,
+            batch_limit: self.batch_limit,
             host: self.host,
             _phantom: PhantomData,
         }
@@ -259,6 +301,7 @@ where
         let producer = self.producer;
         let tx_provider = self.tx_provider;
         let poll_interval = self.poll_interval;
+        let batch_limit = self.batch_limit;
 
         // Built once here: the key this projector's position is filed under is
         // the same for the load below and for every save it makes afterwards.
@@ -294,6 +337,7 @@ where
             offset_sequence: offset,
             upstream_config: upstream_config.clone(),
             upstream_cursor: cursor.clone(),
+            batch_limit,
         })
         // An event the projector could not apply is reported by returning
         // `Err`, which is also what supervision sees.  Under the runtime's
@@ -517,6 +561,7 @@ impl<P, Tx, E, O> ProjectorProps<P, Tx, E, O, Unhosted> {
             producer: self.producer,
             handlers: self.handlers,
             poll_interval: self.poll_interval,
+            batch_limit: self.batch_limit,
             host: Hosted::new(host),
             _phantom: PhantomData,
         }

@@ -13,24 +13,32 @@ use crate::store::offset_scope::OffsetScope;
 /// idempotent overwrites work with `AtLeastOnce`, non-idempotent counters
 /// require `ExactlyOnce`, best-effort handling tolerates loss with
 /// `AtMostOnce`.
+///
+/// A projector applies what each read of its journal returned as one batch,
+/// handing its records to the handler in order, and saves the offset once per
+/// batch rather than once per event. Each variant below says where in the batch
+/// that one save falls. Records the projector skips — already applied, or of a
+/// type it does not follow — count as delivered, and a batch of nothing but
+/// such records saves nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryMode {
-    /// Offset is saved **before** the handler runs. On crash mid-handler
-    /// the event is not retried — at most one delivery, possibly zero.
+    /// Offset is saved, at the batch's end, **before** any handler of the
+    /// batch runs. On crash mid-batch the remaining events are not retried —
+    /// at most one delivery, possibly zero.
     ///
     /// A handler that returns an error is *not* retried either: the offset
-    /// was already persisted, and the subscription moves on to the next event.
-    /// That is the loss this mode is chosen for.
+    /// was already persisted, and the projector goes on to the next event of
+    /// the batch. That is the loss this mode is chosen for.
     AtMostOnce,
-    /// Offset is saved **after** the handler returns successfully. A
-    /// crash between the two causes the event to be redelivered on restart,
-    /// so handlers must be idempotent.
+    /// Offset is saved **after** the handlers return successfully, once per
+    /// batch, at the last event that settled. A crash between the two causes
+    /// the batch to be redelivered on restart, so handlers must be idempotent.
     ///
-    /// A handler that returns an error, or an offset save that fails, leaves
-    /// the event unprocessed: the subscription does not move past it, and it is
-    /// redelivered on the next poll rather than overtaken by the events behind
-    /// it. An event that keeps failing therefore keeps everything behind it
-    /// waiting.
+    /// A handler that returns an error stops the batch there: the offset is
+    /// saved at the event before it, and the failing event and everything
+    /// behind it are redelivered on the next poll rather than overtaken. An
+    /// offset save that fails leaves the whole batch unprocessed. An event that
+    /// keeps failing therefore keeps everything behind it waiting.
     AtLeastOnce,
     /// Behavior depends on whether a `TxProvider` is configured on the
     /// projector.
@@ -40,21 +48,24 @@ pub enum DeliveryMode {
     /// for persisting both the read-model update and the offset atomically.
     /// Having no offset of its own to compare, the framework takes the
     /// `Result` of `project()` as the whole account of what happened: `Ok`
-    /// means processed and the subscription moves on, `Err` means the event was
-    /// not processed and the subscription holds it for redelivery. A `project()`
+    /// means processed and the projector goes on, `Err` means the event was
+    /// not processed, so the batch stops there and the subscription holds that
+    /// event for redelivery, with the events before it settled. A `project()`
     /// that committed its work and then failed for an unrelated reason will be
     /// called again with the same event, so it must be prepared to recognise
     /// what it already wrote.
     ///
     /// **With a `TxProvider` configured**: the framework coordinates the
-    /// offset save inside the transaction: for each event it calls
-    /// `begin`, runs the handler (`project`), saves the offset inside
-    /// that transaction, then calls `commit`. If `begin`, `project`, the
-    /// offset save or `commit` fails, the event is not marked processed:
-    /// any started transaction is rolled back and the subscription holds the
-    /// event for redelivery. A failed `commit` is read as uncommitted — see the
-    /// `TxProvider` trait in `nitinol-eventsource` for why that reading is the
-    /// safe one and what it costs.
+    /// offset save inside the transaction, one transaction per batch: it
+    /// calls `begin` once, runs the handler (`project`) for every event of the
+    /// batch inside that transaction, saves the offset at the batch's end
+    /// inside it, then calls `commit` once. If `begin`, any `project`, the
+    /// offset save or `commit` fails, no event of the batch is marked
+    /// processed: the started transaction is rolled back and the subscription
+    /// holds the batch for redelivery from its first event. A failed `commit`
+    /// is read as uncommitted — see the `TxProvider` trait in
+    /// `nitinol-eventsource` for why that reading is the safe one and what it
+    /// costs.
     ///
     /// **What this guarantees, and what it does not.** The guarantee above
     /// holds for a single consumer per [`OffsetScope`] — one process, or one

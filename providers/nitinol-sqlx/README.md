@@ -220,8 +220,10 @@ async fn project(
 
 `with_tx_provider` requires the offset store's `Tx` to be the provider's, so
 a pairing that would not share a transaction does not compile. The framework
-then drives `begin → project → offset save → commit` for each event, and
-rolls back — leaving the event to be redelivered — if any of the four fails.
+then drives `begin → project → offset save → commit` once per batch — what one
+read of the journal returned, with `project` run for every event of it inside
+the one transaction — and rolls back, leaving the whole batch to be
+redelivered, if any of the four fails.
 
 ### An offset moves forward or not at all
 

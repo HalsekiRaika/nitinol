@@ -126,5 +126,11 @@ pub use self::projection::{
 
 pub use self::durable_stream::{
     CursorSet, CursorUnset, DurableStream, DurableStreamProxy, DurableSubscription, SequenceCursor,
-    DEFAULT_POLL_INTERVAL,
+    DEFAULT_BATCH_LIMIT, DEFAULT_POLL_INTERVAL,
 };
+
+// The message a projector's poller hands it and the answer it reads back. They
+// appear in `ProjectorProcess`'s `Receive` impl, so they are public for that
+// bound to be nameable, and hidden because nothing outside this crate sends one.
+#[doc(hidden)]
+pub use self::durable_stream::{PolledBatch, SettledThrough};

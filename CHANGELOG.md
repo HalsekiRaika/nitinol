@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (nitinol-eventsource): `ProjectorProps::with_batch_limit(NonZeroUsize)` and
+  `DEFAULT_BATCH_LIMIT` (1000). A projector reads at most that many records
+  from its journal at a time, and what one read returns is the batch it
+  settles as one unit — one offset save, and under `ExactlyOnce` with a
+  `TxProvider` one transaction — so the limit is also the most one transaction
+  carries. Like `with_poll_interval` it can be named from any state of the
+  builder before `spawn`, on both the props `ProjectorProps::new` builds and
+  the ones `EventSourceSystem::projector_props` hands out. A read that came
+  back full and settled whole is followed by the next one at once rather than
+  an interval later, so a backlog is read back to back. The limit is asked of
+  the journal: a store that returns more has all of it applied as one batch.
+
 - (nitinol-eventsource): `ProjectorProps::with_poll_interval(Duration)`. A
   projector's cadence can now be named, from any state of the builder before
   `spawn` and on both the props `ProjectorProps::new` builds and the ones
@@ -749,6 +761,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indistinguishable here.
 
 ### Changed
+
+- (nitinol-eventsource): a projector saves its offset — and under
+  `ExactlyOnce` with a `TxProvider` begins and commits its transaction — once
+  per batch rather than once per event. A batch is what one read of the
+  journal returned, at most `with_batch_limit` records; while a projector is
+  caught up it is often one record. On Postgres a 1000-record `ExactlyOnce`
+  catch-up pays one commit where it paid a thousand (see `BENCHMARKS.md`). Each
+  delivery mode reads the same as before with "the batch" for "the event":
+  - `ExactlyOnce` with a `TxProvider`: one `begin`, every handler of the batch
+    inside that one transaction, the offset saved at the batch's end inside it,
+    one `commit`. A failure at `begin`, in any handler, at the save or at the
+    commit rolls the transaction back (a failed commit is still read as
+    uncommitted) and redelivers the whole batch from its first record; the
+    records after the failing one are not projected.
+  - `ExactlyOnce` without a `TxProvider`: still no framework save. The records
+    before a failing handler are settled, and redelivery starts at the failing
+    one.
+  - `AtLeastOnce`: the handlers run in order and the offset is saved once, at
+    the last record that settled. A failing handler stops the batch there and
+    is redelivered with everything behind it; a failed save redelivers the
+    whole batch.
+  - `AtMostOnce`: the batch's end is saved once before any handler runs, and a
+    failing handler is still left behind while the rest of the batch is
+    applied.
+  - Records skipped as already applied or of an unfollowed type count as
+    settled, and a batch of nothing else saves nothing and opens no
+    transaction. `ProjectionContext::current_sequence` is still the record's
+    own sequence.
+
+  What changes for a read model is the size of the unit that is redone: a
+  restart, a rollback or an unknown commit outcome redelivers the batch rather
+  than one event, so an `AtLeastOnce` handler is handed more records again
+  after a crash, and an `ExactlyOnce` transaction holds up to a batch of
+  writes. `ProjectorProcess` now receives the batch its poller reads instead of
+  one `LoadedEvent` at a time (`Receive<PolledBatch<LoadedEvent>>`, answering
+  how far it settled). It is not a message a user sends, so this is not a
+  breaking change. `DurableSubscription::spawn_child` and
+  `DurableStreamProxy::subscribe_from` still deliver one record per `ask`.
 
 - (nitinol-eventsource, nitinol-saga): every poll-driven consumer — a
   `DurableStream`, a `DurableSubscription` and so a projector, and a saga's

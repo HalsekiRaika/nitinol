@@ -16,11 +16,18 @@ use crate::projection::context::ProjectionContext;
 ///
 /// # Catch-up and live delivery
 ///
-/// A projector process spawns a runtime child `DirectPollerProcess` that
-/// performs catch-up from the last saved offset and then continues with live
-/// polling.  The child's lifetime is bound to the projector process; when the
-/// projector stops the runtime cascade-stops the poller.  Events are handed to
-/// `project` in sequence order.
+/// A projector process spawns a runtime child poller that performs catch-up
+/// from the last saved offset and then continues with live polling.  The
+/// child's lifetime is bound to the projector process; when the projector stops
+/// the runtime cascade-stops the poller.  Events are handed to `project` in
+/// sequence order.
+///
+/// What each read of the journal returned — at most
+/// [`crate::ProjectorProps::with_batch_limit`] records — is settled as one
+/// batch: the offset is saved once per batch, and the delivery mode decides
+/// where in it (see [`nitinol_persistence::store::DeliveryMode`]).
+/// [`ProjectionContext::current_sequence`] is still the sequence of the event
+/// being projected, not of the batch.
 ///
 /// # Idempotency
 ///
@@ -30,9 +37,10 @@ use crate::projection::context::ProjectionContext;
 ///
 /// For non-idempotent read-model updates (e.g., incrementing a counter), use
 /// `ExactlyOnce` delivery with a [`crate::TxProvider`] configured on the
-/// projector. The framework then manages `begin → project → offset save →
-/// commit`, rolling back the transaction if either step fails, so the event
-/// is redelivered rather than partially applied.
+/// projector. The framework then manages `begin → project (every event of the
+/// batch) → offset save → commit`, rolling back the transaction if any step
+/// fails, so the batch is redelivered from its first event rather than
+/// partially applied.
 ///
 /// # A failed event holds the ones behind it
 ///

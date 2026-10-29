@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,9 +11,11 @@ use nitinol_runtime::process::{
 };
 use nitinol_runtime::{ProcessSystem, Props, Stream};
 
+use crate::durable_stream::batch::{PolledBatch, SettledThrough};
 use crate::durable_stream::cursor::SequenceCursor;
 use crate::durable_stream::poller::{
-    DirectPollerProcess, DurablePollerProcess, IntervalDriver, SharedPollState, TransformFn,
+    BatchPollerProcess, DirectPollerProcess, DurablePollerProcess, IntervalDriver, Poll,
+    SharedPollState, TransformFn,
 };
 
 const POLLER_RESTART_MAX_RETRIES: u32 = 5;
@@ -27,6 +30,12 @@ const POLLER_RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// process field keeps the shared poller alive for the process's lifetime —
 /// `DurableSubscription` avoids that by carrying only the ingredients for a
 /// direct poller, with no reference to the shared poller.
+///
+/// Every spawn method here delivers one record per `ask`, and the subscriber's
+/// `Ok` is what moves the cursor past that record. A projector does not take
+/// this road: it is fed by a crate-internal poller that hands it what each read
+/// returned as one batch, under the same supervision and interval, so that it
+/// can save its offset — and commit its transaction — once per batch.
 ///
 /// # No journal of its own
 ///
@@ -75,11 +84,34 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
         self
     }
 
-    /// Build a fully-wired `Props` for a [`DirectPollerProcess`] — supervision
-    /// strategy, custom interval driver, and process construction in one
-    /// place. Both [`Self::spawn_child`] and
-    /// [`DurableStreamProxy::subscribe_from`] delegate here so that changes
-    /// to any of these values are made exactly once.
+    /// Wire the supervision strategy and the interval driver every direct
+    /// poller runs under around `make`, so a per-record poller and a batch
+    /// poller are supervised and timed alike, and a change to either is made
+    /// exactly once.
+    fn poller_props<Pl>(
+        &self,
+        make: impl Fn() -> Pl + Send + Sync + 'static,
+        name: Option<ProcessName>,
+    ) -> Props![Pl; IntervalDriver]
+    where
+        Pl: Poll,
+    {
+        let driver = IntervalDriver::<Pl>::new(self.poll_interval);
+        let restart_strategy =
+            SupervisionStrategy::restart(POLLER_RESTART_MAX_RETRIES, POLLER_RESTART_WITHIN)
+                .expect("POLLER_RESTART_WITHIN is a positive duration constant");
+        let mut props = Props::new(make)
+            .with_supervision_strategy(restart_strategy)
+            .with_driver(driver);
+        if let Some(n) = name {
+            props = props.with_name(n);
+        }
+        props
+    }
+
+    /// Build a fully-wired `Props` for a [`DirectPollerProcess`]. Both
+    /// [`Self::spawn_child`] and [`DurableStreamProxy::subscribe_from`]
+    /// delegate here so that the process construction is stated once.
     fn make_direct_poller_props<S>(
         &self,
         journal: Journal,
@@ -90,25 +122,16 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
     where
         S: Process + Receive<T, Response = ()>,
     {
-        let store = journal;
         let transform = Arc::clone(&self.transform);
-        let initial_cursor = cursor;
-        let driver = IntervalDriver::<DirectPollerProcess<T, S>>::new(self.poll_interval);
-        let restart_strategy =
-            SupervisionStrategy::restart(POLLER_RESTART_MAX_RETRIES, POLLER_RESTART_WITHIN)
-                .expect("POLLER_RESTART_WITHIN is a positive duration constant");
-        let mut props = Props::new(move || DirectPollerProcess {
-            store: store.clone(),
-            subscriber: subscriber.clone(),
-            transform: Arc::clone(&transform),
-            cursor: initial_cursor.clone(),
-        })
-        .with_supervision_strategy(restart_strategy)
-        .with_driver(driver);
-        if let Some(n) = name {
-            props = props.with_name(n);
-        }
-        props
+        self.poller_props(
+            move || DirectPollerProcess {
+                store: journal.clone(),
+                subscriber: subscriber.clone(),
+                transform: Arc::clone(&transform),
+                cursor: cursor.clone(),
+            },
+            name,
+        )
     }
 
     /// Spawn a `DirectPollerProcess` over `journal` as a runtime **child** of
@@ -127,6 +150,39 @@ impl<T: 'static + Send + Sync> DurableSubscription<T> {
     {
         let subscriber = ctx.self_proxy().clone();
         let props = self.make_direct_poller_props(journal, subscriber, cursor, None);
+        ctx.spawn_child(props).await;
+    }
+
+    /// Spawn a poller over `journal` as a runtime **child** of `ctx`'s process
+    /// that hands it each read as one [`PolledBatch`] of at most `batch_limit`
+    /// records, instead of a record at a time.
+    ///
+    /// The lifetime, supervision and interval are those of
+    /// [`Self::spawn_child`]; what differs is the unit of delivery, and that a
+    /// read which came back full and settled whole is followed by the next one
+    /// at once. This is the road a projector takes, so it can settle a read as
+    /// one unit.
+    pub(crate) async fn spawn_batch_child<S>(
+        &self,
+        ctx: &mut ProcessContext<S>,
+        journal: Journal,
+        cursor: SequenceCursor,
+        batch_limit: NonZeroUsize,
+    ) where
+        S: Process + Receive<PolledBatch<T>, Response = SettledThrough>,
+    {
+        let subscriber = ctx.self_proxy().clone();
+        let transform = Arc::clone(&self.transform);
+        let props = self.poller_props(
+            move || BatchPollerProcess {
+                store: journal.clone(),
+                subscriber: subscriber.clone(),
+                transform: Arc::clone(&transform),
+                cursor: cursor.clone(),
+                batch_limit,
+            },
+            None,
+        );
         ctx.spawn_child(props).await;
     }
 
