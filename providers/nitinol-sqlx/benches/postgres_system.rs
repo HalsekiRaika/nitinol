@@ -18,14 +18,14 @@
 //! # What an `ExactlyOnce` projection pays for a catch-up
 //!
 //! `postgres_projection/exactly_once/N` starts a projector carrying a
-//! `TxProvider` over the run's pool and waits until it has applied all N
+//! `TxProvider` over the run's pool and waits until it has settled all N
 //! records of a stream written before it existed. The projector settles what
 //! one read of the journal returned as one batch: the framework begins one
 //! transaction, hands it to `project` for every record of the batch, saves the
 //! offset in it once and commits once. The projector names no batch limit, and
 //! both lengths measured are within the default one, so each catch-up is one
-//! read and one batch: the number is one transaction's boundary plus N runs of
-//! `project` inside it.
+//! read and one batch: the number is one transaction — its `begin`, N runs of
+//! `project` inside it, one offset save and one commit.
 //!
 //! The read model is a counter in memory rather than a table. A table would put
 //! N more statements inside that transaction and not one more commit, and what
@@ -38,10 +38,13 @@
 //! the whole stream, so a projector that applies every record without failing
 //! never waits for a second turn.
 //!
-//! The window ends when `project` has run for the last record, which is before
-//! the batch's offset save and commit: the window holds the batch's `begin`,
-//! the read and the N runs of `project`, and no commit at all. The one commit
-//! the catch-up pays comes after it, while the iteration stops its projector.
+//! The window closes when the batch's offset save and commit have returned:
+//! the iteration waits until `project` has run for the last record, then until
+//! the `TxProvider` has seen a commit return `Ok` after that `project`. So the
+//! window holds the read, the batch's `begin`, the N runs of `project`, the one
+//! offset save and the one commit. That the commit left the offset at the
+//! stream's length is checked against the offset store after the window has
+//! closed.
 //!
 //! # What stays behind between iterations
 //!
@@ -59,10 +62,10 @@
 //!
 //! # How long a run takes
 //!
-//! The projection group takes about 35 s on the machine `BENCHMARKS.md`
+//! The projection group takes about 13 s on the machine `BENCHMARKS.md`
 //! records, which is the measurement time its lengths are given below plus
 //! warm-up: a catch-up is one commit rather than one per record, so an
-//! iteration takes milliseconds and criterion fills that time with many of
+//! iteration takes about 18 ms and criterion fills that time with many of
 //! them. The activations together take seconds.
 //!
 //! Run with
@@ -86,7 +89,10 @@ use nitinol_eventsource::{
     Aggregate, Event, Latest, Never, ProjectionContext, ProjectionId, Projector, Query,
     Snapshotable, TxProvider,
 };
-use nitinol_persistence::provider::{PersistenceProvider, SnapshotSlot, Store};
+use nitinol_persistence::provider::{
+    PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
+};
+use nitinol_persistence::store::{OffsetScope, OffsetStore};
 use nitinol_persistence::{
     AggregateId, AppendingEvent, EventRegistryEntry, EventType, Family, PersistedSnapshot,
     TypeName, EVENT_REGISTRY,
@@ -98,17 +104,18 @@ use postgres::BenchDatabase;
 use sqlx::{PgPool, PgTransaction};
 use tokio::runtime::Runtime;
 use tokio::sync::Notify;
+use tokio::time::error::Elapsed;
 
 const ACTIVATED: [u64; 4] = [1, 100, 1_000, 10_000];
 
 /// Each stream length with the measurement time its projection benchmark is
-/// given. The times were sized for about two catch-ups at a commit of about
-/// 14 ms per record; a catch-up now commits once, so they hold many iterations
-/// each. Criterion's flat sampling takes ten samples of at least one iteration
-/// regardless.
+/// given. A catch-up is one transaction, its one commit included, which puts an
+/// iteration at about 18 ms at either length on the machine `BENCHMARKS.md`
+/// records, so these hold tens and hundreds of iterations. Criterion's flat
+/// sampling takes ten samples of at least one iteration regardless.
 const PROJECTED: [(u64, Duration); 2] = [
-    (100, Duration::from_secs(3)),
-    (1_000, Duration::from_secs(30)),
+    (100, Duration::from_secs(2)),
+    (1_000, Duration::from_secs(10)),
 ];
 
 /// Short, for the reason the crate-level note gives: the activation benchmarks
@@ -118,8 +125,10 @@ const WARM_UP: Duration = Duration::from_millis(300);
 
 const ACTIVATION_MEASUREMENT: Duration = Duration::from_secs(1);
 
-/// Far past the ≈ 14 s a catch-up of the longest stream takes, so that only a
-/// catch-up that is not going to finish trips it rather than a slow one.
+/// How long an iteration waits for its projector to apply the last record, and
+/// then again for the commit that settles it. Far past what a catch-up of the
+/// longest stream takes, its commit included, so that only a catch-up that is
+/// not going to finish trips it rather than a slow one.
 const CATCHUP_DEADLINE: Duration = Duration::from_secs(120);
 
 /// How long a stopped projector has to leave the registry, and how often that
@@ -263,9 +272,16 @@ impl Query<GetCount> for SnapshotCounter {
 ///
 /// It is handed the framework's transaction and writes nothing in it, for the
 /// reason the crate-level note gives.
+///
+/// Before it counts a record it notes in `commits_seen` how many commits
+/// `committed` had by then. A batch commits after every `project` of it, so
+/// once the last record is counted, a commit past that number is the one that
+/// settled the batch holding it — however many batches came before.
 struct CountingProjector {
     applied: Arc<AtomicU64>,
     reached: Arc<Notify>,
+    committed: Arc<AtomicU64>,
+    commits_seen: Arc<AtomicU64>,
 }
 
 #[async_trait]
@@ -277,6 +293,8 @@ impl Projector<Incremented, PgTransaction<'static>> for CountingProjector {
         _event: Incremented,
         _ctx: &mut ProjectionContext<'_, PgTransaction<'static>>,
     ) -> Result<(), Self::Error> {
+        self.commits_seen
+            .store(self.committed.load(Ordering::SeqCst), Ordering::SeqCst);
         self.applied.fetch_add(1, Ordering::SeqCst);
         self.reached.notify_one();
         Ok(())
@@ -291,8 +309,14 @@ impl Projector<Incremented, PgTransaction<'static>> for CountingProjector {
 /// have to depend on the interpreter crate that declares `TxProvider` — the
 /// wrong way round for a provider. So the benchmark carries the one a user
 /// would write, which is what makes the number the one a deployment pays.
+///
+/// Beyond what a user would write, it counts in `committed` the commits that
+/// returned `Ok` and says so on `settled`: a commit returning is where the
+/// benchmark's window closes, and only the `TxProvider` sees it return.
 struct PoolTransactions {
     pool: PgPool,
+    committed: Arc<AtomicU64>,
+    settled: Arc<Notify>,
 }
 
 #[async_trait]
@@ -305,7 +329,10 @@ impl TxProvider for PoolTransactions {
     }
 
     async fn commit(&self, tx: Self::Tx) -> Result<(), Self::Error> {
-        tx.commit().await
+        tx.commit().await?;
+        self.committed.fetch_add(1, Ordering::SeqCst);
+        self.settled.notify_one();
+        Ok(())
     }
 
     async fn rollback(&self, tx: Self::Tx) {
@@ -390,29 +417,48 @@ fn fresh_projection() -> ProjectionId {
     ))
 }
 
-async fn applied_to(applied: &AtomicU64, reached: &Notify, expected: u64) {
+/// Wait until `counter` is at least `floor`, looking again each time `changed`
+/// is notified, for no longer than `CATCHUP_DEADLINE`.
+async fn counted_to(counter: &AtomicU64, changed: &Notify, floor: u64) -> Result<(), Elapsed> {
     let watch = async {
         loop {
-            let notified = reached.notified();
-            if applied.load(Ordering::SeqCst) >= expected {
+            let notified = changed.notified();
+            if counter.load(Ordering::SeqCst) >= floor {
                 return;
             }
             notified.await;
         }
     };
-    tokio::time::timeout(CATCHUP_DEADLINE, watch)
+    tokio::time::timeout(CATCHUP_DEADLINE, watch).await
+}
+
+async fn applied_to(applied: &AtomicU64, reached: &Notify, expected: u64) {
+    counted_to(applied, reached, expected)
         .await
         .unwrap_or_else(|_| {
             panic!("a projector following a stream of {expected} records must apply all of them")
         });
 }
 
+/// Wait for a commit past the `seen` that `project` noted for the last record,
+/// which is the commit of the batch holding that record.
+async fn committed_past(committed: &AtomicU64, settled: &Notify, seen: u64) {
+    counted_to(committed, settled, seen + 1)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "a projector that applied the last record must commit the batch holding it \
+                 (commits before that record: {seen})"
+            )
+        });
+}
+
 /// Stop `proxy` and wait for the runtime to let go of it.
 ///
-/// The window closed when `project` ran for the last record, while that
-/// record's offset save and commit were still on their way. Waiting for the
-/// process to leave the registry, rather than for the stop to have been sent,
-/// is what keeps that tail out of the next iteration's window.
+/// The window has closed by the time this runs: the batch's offset save and
+/// commit returned inside it. Waiting for the process to leave the registry,
+/// rather than for the stop to have been sent, is what keeps this projector's
+/// poller off the pool during the next iteration's window.
 async fn stopped<P: Process>(system: &ProcessSystem, proxy: &ProcessProxy<P>) {
     proxy
         .stop()
@@ -530,10 +576,13 @@ fn activation(c: &mut Criterion, rt: &Runtime, pool: &PgPool) {
 /// What it costs a projection running `ExactlyOnce` to catch up with a stream
 /// that was written before it existed.
 ///
-/// Timed: starting the projector and waiting until its read model has counted
-/// every record in the stream.
+/// Timed: starting the projector, waiting until its read model has counted
+/// every record in the stream, and waiting for the commit of the batch holding
+/// the last of them to return — the read, `begin`, N runs of `project`, one
+/// offset save and one commit.
 ///
-/// Not timed: seeding, the system, and stopping the projector afterwards.
+/// Not timed: seeding, the system, the check that the commit left the offset at
+/// the stream's length, and stopping the projector afterwards.
 ///
 /// The system is one per stream length: a projector is resolved by its
 /// projection identifier, which is new every iteration, so a system asked
@@ -541,6 +590,7 @@ fn activation(c: &mut Criterion, rt: &Runtime, pool: &PgPool) {
 fn exactly_once(c: &mut Criterion, rt: &Runtime, pool: &PgPool) {
     let ps = rt.block_on(ProcessSystem::new());
     let seeder = store_over(pool);
+    let offsets = seeder.projection_offsets();
 
     let mut group = c.benchmark_group("postgres_projection");
     group.sample_size(10);
@@ -561,30 +611,55 @@ fn exactly_once(c: &mut Criterion, rt: &Runtime, pool: &PgPool) {
             |b, &count| {
                 b.to_async(rt).iter_custom(|iters| {
                     let pool = pool.clone();
+                    let offsets = offsets.clone();
                     let id = followed.clone();
                     async move {
                         let mut measured = Duration::ZERO;
                         for _ in 0..iters {
                             let applied = Arc::new(AtomicU64::new(0));
                             let reached = Arc::new(Notify::new());
+                            let committed = Arc::new(AtomicU64::new(0));
+                            let settled = Arc::new(Notify::new());
+                            let commits_seen = Arc::new(AtomicU64::new(0));
                             let projector_applied = Arc::clone(&applied);
                             let projector_reached = Arc::clone(&reached);
+                            let projector_committed = Arc::clone(&committed);
+                            let projector_commits_seen = Arc::clone(&commits_seen);
                             let projection = fresh_projection();
+                            let scope = OffsetScope::from(&projection);
 
                             let started = Instant::now();
                             let projector = system
                                 .projector_props(projection, move || CountingProjector {
                                     applied: Arc::clone(&projector_applied),
                                     reached: Arc::clone(&projector_reached),
+                                    committed: Arc::clone(&projector_committed),
+                                    commits_seen: Arc::clone(&projector_commits_seen),
                                 })
-                                .with_tx_provider(PoolTransactions { pool: pool.clone() })
+                                .with_tx_provider(PoolTransactions {
+                                    pool: pool.clone(),
+                                    committed: Arc::clone(&committed),
+                                    settled: Arc::clone(&settled),
+                                })
                                 .with_event::<Incremented>()
                                 .catchup_from_aggregate(id.clone())
                                 .spawn()
                                 .await;
                             applied_to(&applied, &reached, count).await;
+                            let seen = commits_seen.load(Ordering::SeqCst);
+                            committed_past(&committed, &settled, seen).await;
                             measured += started.elapsed();
 
+                            let offset = offsets
+                                .load(&scope)
+                                .await
+                                .expect("a load against a database this run reached must answer");
+                            assert_eq!(
+                                offset,
+                                Some(count),
+                                "the commit that settled the catch-up must leave the offset at \
+                                 the stream's length"
+                            );
                             stopped(system.process_system(), &projector).await;
                         }
                         measured

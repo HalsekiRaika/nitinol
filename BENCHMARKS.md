@@ -31,7 +31,7 @@ a run reports is what it prints.
 | `nitinol-sqlx` | `postgres` | `postgres_offset_store/save_in_tx` | `pool.begin()`, the save inside that transaction, and the commit | — |
 | `nitinol-sqlx` | `postgres_system` | `postgres_activation/replay/N` | `activation/replay/N` over `PostgresStore`: resolving an identity on a system that has no activation for it, and the `exec` that reads how far the replay of N rows got | 1, 100, 1000, 10000 |
 | `nitinol-sqlx` | `postgres_system` | `postgres_activation/snapshot/N` | the same, for an aggregate recovering from a snapshot row taken at the stream's own length — so nothing is replayed after it | 1, 100, 1000, 10000 |
-| `nitinol-sqlx` | `postgres_system` | `postgres_projection/exactly_once/N` | starting a projector carrying a `TxProvider` over the run's pool, and waiting until its in-memory read model has counted the whole stream — one read and one batch: `begin`, then `project` once per record inside that transaction | 100, 1000 |
+| `nitinol-sqlx` | `postgres_system` | `postgres_projection/exactly_once/N` | starting a projector carrying a `TxProvider` over the run's pool, waiting until its in-memory read model has counted the whole stream, and waiting for the commit of that batch to return — one read and one batch: `begin`, `project` once per record inside that transaction, one offset save and one commit | 100, 1000 |
 
 What falls outside each timed window — seeding, wiring, building the records an
 append is handed — is stated on the benchmark itself, in the rustdoc of the file
@@ -45,7 +45,7 @@ is worth reading before comparing two runs:
 | `activation/*` | Nothing in the window, but an idle activation per iteration stays on the process system: a live aggregate cannot be stopped from outside it. The group's `sample_size` and `measurement_time` are what bound how many. |
 | `postgres_event_store/*`, `postgres_offset_store/*` | Rows that nothing removes, so a later iteration writes into a fuller table than an earlier one. |
 | `postgres_activation/*` | An idle activation per iteration stays on the process system, as with `activation/*`. The rows read are the ones seeded before the group and no more: an activation only reads. |
-| `postgres_projection/exactly_once/*` | One batch: both lengths are within the default batch limit of 1000, so the catch-up is one read and one transaction — its `begin` and N runs of `project` inside it. The window closes when `project` has run for the last record, before the batch's one offset save and commit, so it holds **no commit at all**; that commit is paid while the iteration stops its projector. A number from before the projector settled a batch as one unit holds N − 1 commits and is not comparable to one from after. Each iteration's projection has an identifier of its own and leaves one offset row behind. The poll interval is not in it, for the reason given for `projector_catchup/*`. |
+| `postgres_projection/exactly_once/*` | One batch: both lengths are within the default batch limit of 1000, so the catch-up is one read and one transaction — its `begin`, N runs of `project` inside it, one offset save and one commit. The window runs until the batch's save and commit have returned, so it holds that **one commit**; that the offset row was left at N is checked after the window closes. A number from before the projector settled a batch as one unit (N − 1 commits in the window) and one from just after it, when the window closed at the last `project` (no commit in the window), are not comparable to one from now. Each iteration's projection has an identifier of its own and leaves one offset row behind. The poll interval is not in it, for the reason given for `projector_catchup/*`. |
 
 ## Running them
 
@@ -66,9 +66,9 @@ before and after a change rather than once a release.
 
 `nitinol-sqlx` carries two bench targets, and `--bench postgres` or `--bench
 postgres_system` runs one of them alone: `postgres` is the store's two write
-paths and takes seconds, while most of `postgres_system` is the measurement
-time its projection group is given — about 35 s on that machine once the
-projector stopped committing per record.
+paths and takes seconds, while `postgres_system` is mostly measurement time —
+a second for each activation benchmark, and about 13 s on that machine for
+its projection group, warm-up included.
 
 `cargo test --workspace --all-targets` runs every benchmark **once** without
 measuring it, which is what catches a benchmark that no longer compiles or no
@@ -307,14 +307,14 @@ criterion's ten samples.
   what one read returned as one batch, and both lengths are within the default
   limit of 1000, so a catch-up is one transaction. The window closes when the
   last `project` has run, which is before that transaction's one save and
-  commit (see the table at the top), so what is left in it is the read, the
-  `begin` and N runs of `project` in memory. The commit — about 14 ms here, the
-  `save_in_tx` of the 2026-10-24 set — is still paid once per catch-up, outside
-  the window. Before, the window held N − 1 of them, which is the difference
-  between the two columns: a 1000-record catch-up that paid about 14 s of
-  commits pays one. Adding one such commit back to the median gives about
-  18 ms for 1000 records against 18.6 s — an estimate, since the commit was not
-  timed in this run.
+  commit (as the table at the top then said), so what is left in it is the
+  read, the `begin` and N runs of `project` in memory. The commit — about
+  14 ms here, the `save_in_tx` of the 2026-10-24 set — is still paid once per
+  catch-up, outside the window. Before, the window held N − 1 of them, which
+  is the difference between the two columns: a 1000-record catch-up that paid
+  about 14 s of commits pays one. Adding one such commit back to the median
+  gives about 18 ms for 1000 records against 18.6 s — an estimate, since the
+  commit was not timed in this run.
 * **No two groups this time.** `exactly_once/1000` had split into samples at
   13.3–13.7 s and at 23.5–29.1 s; its ten samples here fall within 4.15–4.39 ms
   of one another. The slow stretches were in the commits, which this window no
@@ -327,6 +327,45 @@ criterion's ten samples.
   against 36.0 µs, where the work is one record and one save either way.
   Whether that is the batch's own bookkeeping or a difference between the two
   days' runs was not established.
+
+### 2026-10-29, `7877839` + #174
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8) |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Toolchain | rustc 1.98.1, cargo 1.98.1 |
+| Database | PostgreSQL 17.11 (`postgres:17-alpine`), in the `nitinol-bench-pg` container on the same machine, default settings |
+
+| Crate | Benchmark | Median | Samples | Before |
+|---|---|---|---|---|
+| `nitinol-sqlx` | `postgres_projection/exactly_once/100` | 17.422 ms | 17.10–20.27 ms | 1.4797 ms |
+| `nitinol-sqlx` | `postgres_projection/exactly_once/1000` | 19.161 ms | 17.84–77.94 ms | 4.2102 ms |
+
+Measured on dev `7877839` with the #174 changes applied, before they were
+merged, with
+`DATABASE_URL=postgres://postgres:postgres@localhost:55432/postgres cargo bench -p nitinol-sqlx --bench postgres_system -- postgres_projection`.
+Only these were run again; the rest of the earlier sets still stands for this
+machine. "Samples" is the per-iteration time of the fastest and the slowest of
+criterion's ten samples. "Before" is the median the `7908045` + #168 set
+records and was not measured again in this run.
+
+* **Before and after do not measure the same thing.** The window now closes
+  when the batch's offset save and commit have returned, so it holds the read,
+  the `begin`, N runs of `project`, one save and one commit. The "Before"
+  column is the #168 window, which closed at the last `project` and held no
+  commit, so the two columns are not comparable; neither is the N − 1 commits
+  of the sets before #168.
+* **The estimate held.** The #168 set estimated about 18 ms for 1000 records
+  once the one commit was added back; this run's median is 19.161 ms, and two
+  later runs of the same command gave 18.200 ms and 17.892 ms.
+* **Two groups again, in this run.** The 2026-10-24 set saw samples split
+  into a 13 ms and a 25–29 ms group an event. Here `exactly_once/1000`'s ten
+  samples fell into six at 17.84–19.33 ms and four at 40.48–77.94 ms, which is
+  where the spread above comes from. The two later runs showed no such split:
+  17.72–23.35 ms and 17.74–20.02 ms. `exactly_once/100` had no second group in
+  any of the three; its one sample apart from the rest was a single 26.16 ms
+  in the third.
 
 ## Profiling one of them
 
