@@ -70,6 +70,10 @@ impl Codec<Evt> for UnitCodec {
 // When `should_fail` is true, project() returns an error.
 // When false, project() succeeds.
 // The call count and notify are shared so tests can observe execution.
+//
+// `should_fail` is read before the count is incremented and the notify fires.
+// A test woken by the notify may flip `should_fail` for a later event; reading
+// it first keeps that flip from changing the outcome of the call that woke it.
 
 #[derive(Debug, thiserror::Error)]
 #[error("intentional project failure")]
@@ -90,13 +94,14 @@ impl Projector<Evt> for ConditionallyFailingProjector {
         _event: Evt,
         _ctx: &mut ProjectionContext<'_, ()>,
     ) -> Result<(), Self::Error> {
-        self.count.fetch_add(1, Ordering::SeqCst);
-        self.notify.notify_one();
-        if self.should_fail.load(Ordering::SeqCst) {
+        let outcome = if self.should_fail.load(Ordering::SeqCst) {
             Err(ProjectFailed)
         } else {
             Ok(())
-        }
+        };
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_one();
+        outcome
     }
 }
 
