@@ -488,6 +488,61 @@ build figure is the remainder and is approximate.
   gate: `cargo test --all-targets` does not run them, and neither does
   nextest, so the gate's coverage is what it was.
 
+### 2026-10-31, `9c309ec`, before and after #177
+
+AMD Ryzen 7 2700X (8 threads), 31 GB, Linux 6.18.50, rustc 1.98.1,
+cargo-nextest 0.9.146, mold 3.0.0, sccache 0.19.0 as `RUSTC_WRAPPER`.
+
+| | Before | After |
+|---|---|---|
+| `cargo nextest run --workspace --no-run` | 495 s | 169 s |
+| binaries nextest lists | 304, of them 264 integration-test binaries | 84, of them 44 integration-test binaries |
+| tests nextest lists | 1316, none ignored | 1316, none ignored |
+| `target/` afterwards | 19 GB | 8.7 GB |
+
+"Before" is dev `9c309ec` checked out in a temporary worktree; "after" is the
+same commit with each crate's `tests/*.rs` moved under `tests/integration/` and
+declared as modules of one `tests/integration.rs`. Each build started from an
+empty `CARGO_TARGET_DIR` of its own, and the times are the ones cargo reports
+when it finishes. The tests' names are unchanged apart from the binary they sit
+in: `cargo test -p nitinol-saga --test integration e2e_saga::` runs what
+`--test e2e_saga` ran.
+
+| Crate | Integration-test binaries before | After |
+|---|---|---|
+| `nitinol-saga` | 120 | 9 |
+| `nitinol-eventsource` | 53 | 6 |
+| `nitinol-runtime` | 32 | 1 |
+| `nitinol-persistence` | 20 | 2 |
+| `nitinol-sqlx` | 14 | 1 |
+
+* **The build was spent compiling and linking one binary per file.** With 264
+  integration-test binaries, every file paid for its own compile of the test
+  crate and its own link against the whole dependency graph; folded, each crate
+  pays for that once. The build takes about a third of the time, and the target
+  directory is under half the size.
+* **sccache was on in both builds and served the same.** In each build, 313
+  Rust compilations missed the cache and 30 C and assembler compilations hit
+  it, so the dependencies were compiled in both rather than taken from the
+  cache. The two builds ran under the same condition; neither figure is what a
+  machine without sccache pays, since those 30 compilations would also run.
+* **Some tests keep a binary of their own.** A test that installs a process-wide
+  tracing subscriber reads every record it captures as its own, and a process
+  holds one subscriber, so it cannot share a process with other tests under
+  `cargo test`: in `nitinol-saga` the two tracing tests and the six
+  deadline-index tests that read the index's records, and in
+  `nitinol-eventsource` `tell_refusal_is_observable`,
+  `occ_conflict_is_observable`, `interpreter_conformance` and
+  `interpreter_equivalence`. `nitinol-eventsource`'s `ui` drives the compiler
+  over fixtures of its own, and `nitinol-persistence`'s
+  `event_registry_link_collision` links entries that collide on purpose, which
+  a binary whose registry has to build cannot hold.
+* **Both runners pass.** `cargo nextest run --workspace --lib --bins --tests
+  --examples` and `cargo test --workspace --tests`, each against one Postgres
+  named by `DATABASE_URL`, ran the 1316 tests with none failing. Under
+  `cargo test` the tests of one crate now run in one process, in parallel,
+  which is what the tests of one file already did.
+
 ## Profiling one of them
 
 Benchmarks say what something costs. A profiler says where.

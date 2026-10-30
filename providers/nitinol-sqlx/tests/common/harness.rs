@@ -16,11 +16,6 @@
 //! Only the third leaves a test passing on no evidence, and it is the only one
 //! that may. Once a database has been reached, failing to connect to it, to
 //! migrate it, or to keep a clause is a test failure — never a quiet return.
-//!
-//! Each test binary compiles this module in full but uses only the subset it
-//! needs, so per-binary dead code is expected.
-
-#![allow(dead_code)]
 
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};

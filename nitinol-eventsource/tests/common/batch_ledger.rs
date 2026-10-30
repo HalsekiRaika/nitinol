@@ -10,11 +10,6 @@
 //! `ProjectionContext::tx` and the offset saved inside it reach the read model
 //! and the offset slot only on `commit`, and `rollback` discards both. That is
 //! what lets a clause say "no record of the batch reached the read model".
-//!
-//! Each test binary compiles this module in full but uses only the subset it
-//! needs, so per-binary dead code is expected.
-
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::marker::PhantomData;

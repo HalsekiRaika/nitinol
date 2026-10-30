@@ -1,7 +1,4 @@
-//! Shared test helpers. Each test binary compiles this module in full but
-//! uses only the subset it needs, so per-binary dead code is expected.
-
-#![allow(dead_code)]
+//! Shared test helpers.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};

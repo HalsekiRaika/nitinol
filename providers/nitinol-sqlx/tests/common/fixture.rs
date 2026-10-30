@@ -4,11 +4,6 @@
 //! The instant every event carries is fixed rather than taken from the clock,
 //! so a round trip is compared against the value the caller supplied and two
 //! runs of the same test compare the same thing.
-//!
-//! Each test binary compiles this module in full but uses only the subset it
-//! needs, so per-binary dead code is expected.
-
-#![allow(dead_code)]
 
 use bytes::Bytes;
 use futures_util::TryStreamExt;

@@ -3,11 +3,6 @@
 //! A pull consumer's cadence is only visible from the store's side: what a
 //! poller does between two reads leaves nothing behind, so the moment of each
 //! `load` is what a clause about "how long it waited" can read.
-//!
-//! Each test binary compiles this module in full but uses only the subset it
-//! needs, so per-binary dead code is expected.
-
-#![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

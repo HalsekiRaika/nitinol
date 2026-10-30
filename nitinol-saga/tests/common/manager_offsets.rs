@@ -1,6 +1,4 @@
-//! Shared fixtures for the manager's per-source, per-partition offsets. Each
-//! test binary compiles this module in full but uses only the subset it needs,
-//! so per-binary dead code is expected.
+//! Shared fixtures for the manager's per-source, per-partition offsets.
 //!
 //! A binary that includes this module also includes `common/delivery.rs` as
 //! `delivery`: the recording offset store and the row-appending helper live
@@ -11,8 +9,6 @@
 //! addressed to. It decides nothing — every input it accepts is settled by its
 //! position alone — so no decision row reaches the delivery host, and the only
 //! positions the offset slot ends up holding are the manager's.
-
-#![allow(dead_code)]
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
