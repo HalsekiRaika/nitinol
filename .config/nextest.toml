@@ -1,0 +1,11 @@
+# cargo-nextest configuration. The quality gate runs the workspace's tests
+# through nextest so that test binaries run alongside one another instead of
+# one after the other, and so that each test's own time is visible.
+
+[profile.default]
+# A gate is read once at the end: every failure in one run, not the first.
+fail-fast = false
+
+# A test that runs this long is reported while it is still running, which is
+# how a hung test shows up in the gate's output instead of as a silent stall.
+slow-timeout = { period = "60s" }

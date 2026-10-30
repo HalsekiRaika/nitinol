@@ -87,3 +87,9 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt-mul
 nitinol-persistence = { path = "nitinol-persistence" }
 # `Codec` is stated in `Bytes`, so a test fixture that names a codec spells it.
 bytes = "1"
+
+# Line tables are enough for a backtrace with file and line; full debug info
+# makes every test binary and every link larger for nothing the tests use.
+# `profile.test` inherits from `profile.dev`.
+[profile.dev]
+debug = "line-tables-only"
