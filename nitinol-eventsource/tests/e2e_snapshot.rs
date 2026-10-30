@@ -22,7 +22,7 @@ use nitinol_eventsource::{
 };
 use nitinol_persistence::provider::{CustomStore, PersistenceProvider, SnapshotSlot, Store};
 use nitinol_persistence::store::{InMemoryEventStore, InMemorySnapshotStore, Journal};
-use nitinol_persistence::{AggregateId, EventType, Family, PersistedSnapshot, TypeName};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
 use nitinol_runtime::ProcessSystem;
 
 // Fixtures: event
@@ -192,7 +192,8 @@ async fn spawn_plain_counter<St: Store>(
 
 // Test 1: snapshot at latest sequence — no delta events → state recovered correctly
 
-/// Given 3 events persisted and a snapshot saved at sequence=3 (value=3),
+/// Given 3 events persisted and the activation's snapshot saved at sequence=3
+/// (value=3),
 /// When a new activation starts (snapshot load, no delta events),
 /// Then the counter is recovered to 3.
 #[tokio::test]
@@ -205,27 +206,16 @@ async fn e2e_snapshot_at_latest_sequence_restores_state() {
     let writing = system_over(store.clone()).await;
     let id = AggregateId::new("e2e-snap-latest");
 
-    // Write 3 events via activation 1
+    // Write 3 events via activation 1, then have it save a snapshot at seq=3
+    // (covers all events, no delta)
     {
         let proxy1 = spawn_counter(&writing, id.clone()).await;
         proxy1.ask(Increment).await.expect("ask 1");
         proxy1.ask(Increment).await.expect("ask 2");
         proxy1.ask(Increment).await.expect("ask 3");
+        let saved = proxy1.snapshot().await.expect("snapshot must succeed");
+        assert_eq!(saved, 3, "the snapshot must be taken at sequence 3");
     }
-
-    // Save a snapshot at seq=3 (covers all events, no delta), through the
-    // persistor that system distributes
-    writing
-        .snapshot_persistor()
-        .await
-        .save(PersistedSnapshot {
-            aggregate_id: id.clone(),
-            sequence: 3,
-            payload: Bytes::from(3u64.to_be_bytes().to_vec()),
-            created_at: jiff::Timestamp::now(),
-        })
-        .await
-        .expect("save snapshot must succeed");
 
     // When: a second system over the same store starts activation 2 — loads the
     // snapshot at seq=3 and finds no delta events
@@ -242,7 +232,8 @@ async fn e2e_snapshot_at_latest_sequence_restores_state() {
 
 // Test 2: snapshot + delta events → combined state
 
-/// Given 8 events persisted (seq=1..8) and a snapshot at seq=5 (value=5),
+/// Given 8 events persisted (seq=1..8) and the activation's snapshot saved
+/// after the fifth (seq=5, value=5),
 /// When a new activation starts,
 /// Then on_start loads the snapshot (value=5) and replays the 3 delta events (seq=6,7,8)
 /// producing counter=8.
@@ -256,27 +247,19 @@ async fn e2e_snapshot_plus_delta_events_combine_correctly() {
     let writing = system_over(store.clone()).await;
     let id = AggregateId::new("e2e-snap-delta");
 
-    // Write 8 events
+    // Write 5 events, have activation 1 save a snapshot at seq=5 (value=5),
+    // then write 3 more
     {
         let proxy1 = spawn_counter(&writing, id.clone()).await;
-        for _ in 0..8 {
+        for _ in 0..5 {
+            proxy1.ask(Increment).await.expect("ask must succeed");
+        }
+        let saved = proxy1.snapshot().await.expect("snapshot must succeed");
+        assert_eq!(saved, 5, "the snapshot must be taken at sequence 5");
+        for _ in 0..3 {
             proxy1.ask(Increment).await.expect("ask must succeed");
         }
     }
-
-    // Save a snapshot at seq=5 (value=5), through the persistor that system
-    // distributes
-    writing
-        .snapshot_persistor()
-        .await
-        .save(PersistedSnapshot {
-            aggregate_id: id.clone(),
-            sequence: 5,
-            payload: Bytes::from(5u64.to_be_bytes().to_vec()),
-            created_at: jiff::Timestamp::now(),
-        })
-        .await
-        .expect("save snapshot must succeed");
 
     // When: a second system over the same store starts activation 2 — loads the
     // snapshot (seq=5) then replays seq=6,7,8

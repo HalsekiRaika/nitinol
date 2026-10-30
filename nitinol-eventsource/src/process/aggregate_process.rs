@@ -1,15 +1,18 @@
 use std::borrow::Borrow;
 
+use bytes::Bytes;
 use futures_util::StreamExt;
-use nitinol_contract::{Aggregate, Decider, Decision, Event, Query};
+use nitinol_contract::{Aggregate, Decider, Decision, Event, Query, Snapshotable};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::store::Journal;
-use nitinol_persistence::{AggregateId, LoadQuery};
+use nitinol_persistence::{AggregateId, LoadQuery, PersistedSnapshot};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
 use crate::appending::EventAppending;
 use crate::codec;
-use crate::error::{AskHandlerError, ExecHandlerError, PersistError};
+use crate::error::{
+    AskHandlerError, CodecError, ExecHandlerError, PersistError, SnapshotHandlerError,
+};
 use crate::process::recover::SnapshotRecovery;
 
 // Internal message wrappers
@@ -35,6 +38,12 @@ pub(crate) struct TellCmd<C>(pub(crate) C);
 
 /// Routes a domain query through the `contract::Query<M>` path.
 pub(crate) struct ExecMsg<M>(pub(crate) M);
+
+/// Asks the activation to save its own state as a snapshot.
+///
+/// Sent only by `AggregateProxy::snapshot`, which exists only for an aggregate
+/// whose `Recover` marker is `Latest`.
+pub(crate) struct SnapshotCmd;
 
 // AggregateProcess
 
@@ -131,7 +140,8 @@ pub struct AggregateProcess<A: Aggregate> {
     pub(crate) aggregate_id: AggregateId,
     pub(crate) store: Journal,
     pub(crate) sequence: u64,
-    /// Where the newest snapshot is read from, and how it is read back as `A`.
+    /// Where the newest snapshot is read from and saved to, and how it is read
+    /// back as `A`.
     ///
     /// `Some` exactly when the aggregate's own
     /// [`Recover`](Aggregate::Recover) marker is
@@ -327,6 +337,61 @@ where
         // Asking the state a question is a synchronous call: no identity, no
         // sequence, no await point is available to the answer (L-1).
         self.state.query(msg.0).map_err(ExecHandlerError::Domain)
+    }
+}
+
+// Receive<SnapshotCmd>: saving the activation's own state
+//
+// The capture and the sequence are read in one handler, between two messages
+// of a mailbox that runs one at a time, so the payload is the state at exactly
+// the sequence it is saved under.
+
+impl<A> Receive<SnapshotCmd> for AggregateProcess<A>
+where
+    A: Aggregate + Snapshotable,
+{
+    type Response = u64;
+    type Error = SnapshotHandlerError;
+
+    async fn recv(
+        &mut self,
+        _msg: SnapshotCmd,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<Self::Response, Self::Error> {
+        let payload = self
+            .encode_snapshot()
+            .map_err(SnapshotHandlerError::Encode)?;
+        let recovery = self.recovery.clone().expect(RECOVERY_UNDER_LATEST);
+        recovery
+            .persistor()
+            .await
+            .save(PersistedSnapshot {
+                aggregate_id: self.aggregate_id.clone(),
+                sequence: self.sequence,
+                payload,
+                created_at: jiff::Timestamp::now(),
+            })
+            .await
+            .map_err(SnapshotHandlerError::Persist)?;
+        Ok(self.sequence)
+    }
+}
+
+/// Why an activation asked for a snapshot always carries a recovery: the
+/// request is sent only by `AggregateProxy::snapshot`, which exists only for a
+/// `Latest` aggregate, and a `Latest` aggregate's activation is always built
+/// with one.
+const RECOVERY_UNDER_LATEST: &str =
+    "a snapshot is requested only of a `Latest` aggregate, whose activation always carries a recovery";
+
+impl<A: Aggregate + Snapshotable> AggregateProcess<A> {
+    /// The current state, captured and written by the codec the aggregate
+    /// names.
+    ///
+    /// Synchronous so the captured value — which need not be `Send` — is gone
+    /// before the handler awaits the save.
+    fn encode_snapshot(&self) -> Result<Bytes, CodecError> {
+        codec::encode::<<A as Snapshotable>::Codec, A::Snapshot>(&self.state.capture())
     }
 }
 

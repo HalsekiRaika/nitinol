@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (nitinol-eventsource): `AggregateProxy::snapshot()`, the save side of
+  `Recover = Latest`. It exists only on an aggregate whose `Recover` is
+  `Latest` and which is `Snapshotable`; on a `Recover = Never` aggregate the
+  call does not compile. The caller passes nothing: the activation captures
+  its state with `Snapshotable::capture`, writes it with
+  `Snapshotable::Codec`, and saves it at the sequence it is at through the one
+  persistor the system distributes — the one a later activation recovers
+  from. The request goes through the activation's mailbox, so commands sent
+  before it are applied first and the payload and the sequence describe the
+  same moment. It answers the sequence it saved at; an activation that has
+  appended nothing is saved at sequence 0. `SnapshotSaveError` reports why the
+  call did not answer a sequence: `Encode` (the codec could not write the
+  state; nothing was handed to the persistor), `Persist` (the persistor
+  returned an error while saving) or `Send` (no answer came back from an
+  activation; the reference resolves a live one on the next call).
+
 - (nitinol-eventsource): `ProjectorProps::with_batch_limit(NonZeroUsize)` and
   `DEFAULT_BATCH_LIMIT` (1000). A projector reads at most that many records
   from its journal at a time, and what one read returns is the batch it
@@ -761,6 +777,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indistinguishable here.
 
 ### Changed
+
+- (examples): `examples/eventsource/4.snapshot` saves its snapshot with
+  `proxy.snapshot()` instead of building a `PersistedSnapshot` — payload,
+  sequence and timestamp — by hand.
 
 - (nitinol-sqlx): a load builds its statement out of the conditions its query
   holds, one statement per shape of query, so the plan Postgres keeps for it

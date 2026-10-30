@@ -38,6 +38,9 @@ serde_json = "1"
 # that only holds under an opt-in configuration is not a law this crate keeps.
 nitinol-conformance = { path = "../nitinol-conformance" }
 criterion = { workspace = true }
+# `tests/ui.rs`: what must not compile is fixed here rather than in a
+# `compile_fail` doctest, because doctests do not run in the gate.
+trybuild = "1"
 
 [[bench]]
 name = "event_source_system"

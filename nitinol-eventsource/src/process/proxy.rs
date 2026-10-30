@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex};
 
-use nitinol_contract::{Aggregate, Decider, Query};
+use nitinol_contract::{Aggregate, Decider, Latest, Query, Snapshotable};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::AggregateId;
 
-use crate::error::{AskError, ExecError, PersistError, TellError};
-use crate::process::aggregate_process::{AskCmd, ExecMsg, TellCmd};
+use crate::error::{AskError, ExecError, PersistError, SnapshotSaveError, TellError};
+use crate::process::aggregate_process::{AskCmd, ExecMsg, SnapshotCmd, TellCmd};
 use crate::process::resolve::{AggregateResolver, Incarnation};
 
 /// A reference to an aggregate, addressed by identity rather than by activation.
@@ -241,6 +241,42 @@ impl<A: Aggregate> AggregateProxy<A> {
     /// retrying is worthwhile.
     fn invalidate(&self, dead: &Incarnation<A>) {
         self.resolution.invalidate(dead);
+    }
+}
+
+impl<A> AggregateProxy<A>
+where
+    A: Aggregate<Recover = Latest> + Snapshotable,
+{
+    /// Capture the activation's state as a snapshot and save it at the
+    /// sequence the activation is at, answering that sequence.
+    ///
+    /// The caller supplies nothing. The activation captures its state with
+    /// [`Snapshotable::capture`], writes it with the codec the aggregate names
+    /// as [`Snapshotable::Codec`], and saves it through the one persistor its
+    /// system distributes — the one
+    /// [`EventSourceSystem::snapshot_persistor`](crate::system::EventSourceSystem::snapshot_persistor)
+    /// returns, and the one a later activation recovers from.
+    ///
+    /// The request goes through the activation's mailbox like any command, so
+    /// every command sent before it — told or asked — has been applied when the
+    /// state is captured, and the payload and the sequence describe the same
+    /// moment. An activation that has appended nothing is saved at sequence 0
+    /// like any other.
+    ///
+    /// Only an aggregate whose `Recover` marker is
+    /// [`Latest`](nitinol_contract::Latest) has this method: one that never
+    /// recovers from a snapshot has nothing that would read the save back.
+    pub async fn snapshot(&self) -> Result<u64, SnapshotSaveError> {
+        let incarnation = self.incarnation().await;
+        let outcome = incarnation
+            .ask(SnapshotCmd)
+            .await
+            .map_err(SnapshotSaveError::from);
+        if matches!(outcome, Err(SnapshotSaveError::Send(_))) {
+            self.invalidate(&incarnation);
+        }
+        outcome
     }
 }
 

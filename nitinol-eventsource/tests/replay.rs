@@ -328,26 +328,19 @@ async fn replay_applies_delta_events_after_snapshot() {
     let system = node_over(&store).await;
     let id = AggregateId::new("replay-snap-delta");
 
-    // Write 5 events through a snapshotable process
+    // Write 3 events through a snapshotable process, have it save a snapshot
+    // of the state after them (value=3, sequence=3), then write 2 more
     {
         let proxy = spawn_snapshotable(&system, id.clone()).await;
-        for _ in 0..5 {
+        for _ in 0..3 {
+            proxy.ask(Increment).await.expect("ask must succeed");
+        }
+        let saved = proxy.snapshot().await.expect("save snapshot");
+        assert_eq!(saved, 3, "the snapshot must be taken at sequence 3");
+        for _ in 0..2 {
             proxy.ask(Increment).await.expect("ask must succeed");
         }
     }
-
-    // Manually save a snapshot representing state after 3 events (value=3, sequence=3)
-    system
-        .snapshot_persistor()
-        .await
-        .save(PersistedSnapshot {
-            aggregate_id: id.clone(),
-            sequence: 3,
-            payload: Bytes::from(3u64.to_be_bytes().to_vec()),
-            created_at: jiff::Timestamp::now(),
-        })
-        .await
-        .expect("save snapshot");
 
     // When: a second node spawns the aggregate — replay loads snapshot (seq=3),
     // then 2 delta events (seq=4,5)
@@ -378,20 +371,9 @@ async fn replay_snapshot_at_latest_sequence_no_delta_events() {
         proxy.ask(Increment).await.expect("ask 1");
         proxy.ask(Increment).await.expect("ask 2");
         proxy.ask(Increment).await.expect("ask 3");
+        let saved = proxy.snapshot().await.expect("save snapshot");
+        assert_eq!(saved, 3, "the snapshot must be taken at sequence 3");
     }
-
-    // Save snapshot at sequence=3
-    system
-        .snapshot_persistor()
-        .await
-        .save(PersistedSnapshot {
-            aggregate_id: id.clone(),
-            sequence: 3,
-            payload: Bytes::from(3u64.to_be_bytes().to_vec()),
-            created_at: jiff::Timestamp::now(),
-        })
-        .await
-        .expect("save snapshot");
 
     // When: a second node spawns the aggregate — the snapshot covers all events,
     // so no delta events follow

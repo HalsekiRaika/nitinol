@@ -76,15 +76,16 @@ pub mod eventsource {
     /// User-facing error types from the eventsource layer.
     ///
     /// Framework-internal errors (`SystemEventDecodeError`, `AskHandlerError`,
-    /// `ExecHandlerError`, `ProjectionNotSettled`) are intentionally excluded —
-    /// they form part of the internal request/response plumbing and are not
-    /// part of the public API.
+    /// `ExecHandlerError`, `SnapshotHandlerError`, `ProjectionNotSettled`) are
+    /// intentionally excluded — they form part of the internal request/response
+    /// plumbing and are not part of the public API.
     pub mod error {
         pub use nitinol_eventsource::error::AskError;
         pub use nitinol_eventsource::error::CodecError;
         pub use nitinol_eventsource::error::ExecError;
         pub use nitinol_eventsource::error::PersistError;
         pub use nitinol_eventsource::error::Retryability;
+        pub use nitinol_eventsource::error::SnapshotSaveError;
         pub use nitinol_eventsource::error::TellError;
     }
 
@@ -103,7 +104,9 @@ pub mod eventsource {
 
     pub use nitinol_eventsource::Query;
     pub use nitinol_eventsource::{AggregateProps, AggregateProxy, AggregateTellTarget};
-    pub use nitinol_eventsource::{AskError, ExecError, Retryability, TellError};
+    pub use nitinol_eventsource::{
+        AskError, ExecError, Retryability, SnapshotSaveError, TellError,
+    };
     pub use nitinol_eventsource::{
         CursorSet, CursorUnset, DurableStream, DurableStreamProxy, DurableSubscription,
         SequenceCursor,

@@ -106,7 +106,7 @@ pub use self::appending::EventAppending;
 #[doc(hidden)]
 pub use nitinol_contract::{DeclaresEventType, MatchesEventType};
 
-pub use self::error::{AskError, ExecError, Retryability, TellError};
+pub use self::error::{AskError, ExecError, Retryability, SnapshotSaveError, TellError};
 pub use self::process::{AggregateProps, AggregateProxy, AggregateTellTarget, RecoverOn};
 pub use self::process::{SnapshotPersistor, SnapshotPersistorProxy};
 

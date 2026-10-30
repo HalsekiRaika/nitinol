@@ -1,4 +1,4 @@
-use nitinol_persistence::error::AppendError;
+use nitinol_persistence::error::{AppendError, SnapshotError};
 
 /// Error produced when decoding a [`crate::SystemEvent`] payload fails.
 ///
@@ -130,6 +130,37 @@ pub enum ExecError<E: std::error::Error + Send + Sync + 'static> {
     Send(nitinol_runtime::error::SendError),
 }
 
+/// Error returned by `AggregateProxy::snapshot`.
+///
+/// Only [`Encode`](Self::Encode) says that nothing was handed to the persistor:
+/// the activation encodes the snapshot before it saves it. The other variants
+/// report what the caller was told, not what the store holds.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotSaveError {
+    /// The codec the aggregate names could not write its captured state.
+    /// Nothing was handed to the persistor.
+    #[error("encoding the snapshot failed: {0}")]
+    Encode(CodecError),
+    /// The system's snapshot persistor reported an error while saving the
+    /// snapshot. What the store holds after that is the store's to say.
+    #[error("saving the snapshot failed: {0}")]
+    Persist(SnapshotError),
+    /// No answer to the snapshot request came back from an activation.
+    #[error("process send error: {0}")]
+    Send(nitinol_runtime::error::SendError),
+}
+
+/// Internal error produced by `AggregateProcess::recv` for snapshot requests.
+///
+/// Carried to the caller as [`SnapshotSaveError`] by the `From` below.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotHandlerError {
+    #[error("encode: {0}")]
+    Encode(CodecError),
+    #[error("persist: {0}")]
+    Persist(SnapshotError),
+}
+
 /// Internal error produced by `AggregateProcess::recv` for command messages.
 ///
 /// Carried to the caller as [`AskError`], variant for variant, by the `From`
@@ -198,6 +229,26 @@ where
             | nitinol_runtime::error::AskError::ReplyDropped
             | nitinol_runtime::error::AskError::Timeout { .. } => {
                 ExecError::Send(nitinol_runtime::error::SendError)
+            }
+        }
+    }
+}
+
+/// What an activation's answer to a snapshot request becomes at the reference
+/// boundary.
+///
+/// The same reading of an undelivered dispatch as the conversions above.
+impl From<nitinol_runtime::error::AskError<SnapshotHandlerError>> for SnapshotSaveError {
+    fn from(e: nitinol_runtime::error::AskError<SnapshotHandlerError>) -> Self {
+        match e {
+            nitinol_runtime::error::AskError::Handler(h) => match h {
+                SnapshotHandlerError::Encode(e) => SnapshotSaveError::Encode(e),
+                SnapshotHandlerError::Persist(e) => SnapshotSaveError::Persist(e),
+            },
+            nitinol_runtime::error::AskError::DeadLetter { .. }
+            | nitinol_runtime::error::AskError::ReplyDropped
+            | nitinol_runtime::error::AskError::Timeout { .. } => {
+                SnapshotSaveError::Send(nitinol_runtime::error::SendError)
             }
         }
     }

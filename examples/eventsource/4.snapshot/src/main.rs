@@ -8,7 +8,8 @@
 //!
 //! Flow:
 //!   1. Persist 5 events through the first system's activation
-//!   2. Save a snapshot at sequence = 5 (value = 5) through that system's persistor
+//!   2. Ask the activation to save a snapshot — it captures its own state
+//!      (value = 5) at its own sequence (5), written by the codec `Counter` names
 //!   3. Add 2 more events (seq = 6, 7) — the same activation, so nothing is replayed
 //!   4. Resolve the aggregate on a second system over the same store — a fresh
 //!      activation, which recovers from the snapshot (value = 5) and replays
@@ -18,13 +19,12 @@
 //! Run with:
 //!   cargo run -p eventsource-snapshot
 
-use bytes::Bytes;
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
 use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::InMemoryStore;
-use nitinol_persistence::{AggregateId, PersistedSnapshot};
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
 use eventsource_snapshot::counter::{Counter, GetCount, Increment};
@@ -60,21 +60,14 @@ async fn main() {
     }
     info!("wrote 5 events");
 
-    // Step 2: save a snapshot at seq=5 (value=5). The persistor is the one
-    // process the system distributes, so the activation that recovers later
-    // reads exactly what is written here.
-    writer
-        .snapshot_persistor()
-        .await
-        .save(PersistedSnapshot {
-            aggregate_id: id.clone(),
-            sequence: 5,
-            payload: Bytes::from(5u64.to_be_bytes().to_vec()),
-            created_at: jiff::Timestamp::now(),
-        })
-        .await
-        .expect("save snapshot must succeed");
-    info!("snapshot saved at seq=5");
+    // Step 2: the activation saves its own snapshot. It captures its state and
+    // writes it with the codec `Counter` names, at the sequence it is at — after
+    // the 5 increments above, because they went through the same mailbox first.
+    // The snapshot goes to the one persistor the system distributes, so the
+    // activation that recovers later reads exactly what is written here.
+    let saved = proxy.snapshot().await.expect("snapshot must succeed");
+    assert_eq!(saved, 5, "the snapshot is taken after the 5 increments");
+    info!(sequence = saved, "snapshot saved");
 
     // Step 3: 2 more events (seq=6,7). One system resolves one activation per
     // identity, so this reaches the activation from step 1 and the snapshot

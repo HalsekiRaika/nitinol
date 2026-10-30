@@ -160,6 +160,7 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
         // snapshot
         SnapshotPersistor,
         SnapshotPersistorProxy,
+        SnapshotSaveError,
         Snapshotable,
         TellError,
         TxProvider,
@@ -186,11 +187,15 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
 #[test]
 fn eventsource_error_facade_exposes_user_facing_types() {
     #[allow(unused_imports)]
-    use nitinol::eventsource::error::{AskError, CodecError, ExecError, PersistError, TellError};
+    use nitinol::eventsource::error::{
+        AskError, CodecError, ExecError, PersistError, SnapshotSaveError, TellError,
+    };
 
-    // CodecError and PersistError are concrete enums; verify they are in scope.
+    // CodecError, PersistError and SnapshotSaveError are concrete enums; verify
+    // they are in scope.
     let _ = std::marker::PhantomData::<CodecError>;
     let _ = std::marker::PhantomData::<PersistError>;
+    let _ = std::marker::PhantomData::<SnapshotSaveError>;
     // AskError<R>, ExecError<E> have type parameters — use Infallible as a stand-in.
     let _ = std::marker::PhantomData::<AskError<std::convert::Infallible>>;
     let _ = std::marker::PhantomData::<ExecError<std::convert::Infallible>>;

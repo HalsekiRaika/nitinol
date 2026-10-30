@@ -891,7 +891,6 @@ name = "eventsource-snapshot"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "jiff",
  "nitinol",
  "nitinol-eventsource",
  "nitinol-persistence",
@@ -1898,6 +1897,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "trybuild",
 ]
 
 [[package]]

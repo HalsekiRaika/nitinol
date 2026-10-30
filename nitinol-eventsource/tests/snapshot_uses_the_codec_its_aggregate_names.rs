@@ -2,10 +2,10 @@
 //! the snapshot persistor is wired without being handed one.
 //!
 //! This is the acceptance scenario "snapshots too run on the type-level
-//! binding". The
-//! framework itself only ever *recovers* from a snapshot — capturing and
-//! saving one is the caller's decision and the caller's call — so the two
-//! directions are observed at the two places they actually happen:
+//! binding". Both directions are observed here with a payload the caller
+//! writes itself, so the snapshot can claim a value the activation never held;
+//! the activation's own save through `AggregateProxy::snapshot` is covered by
+//! `tests/aggregate_proxy_snapshot.rs`.
 //!
 //! - the save side, where the caller reaches the format through
 //!   `<Counter as Snapshotable>::Codec` rather than through an injected handle;

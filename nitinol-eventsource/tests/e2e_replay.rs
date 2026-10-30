@@ -29,8 +29,7 @@ use nitinol_persistence::store::{
     EventStore, EventStream, InMemoryEventStore, InMemorySnapshotStore, Journal,
 };
 use nitinol_persistence::{
-    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, PersistedSnapshot,
-    TypeName,
+    AggregateId, AppendOutcome, AppendingEvent, EventType, Family, LoadQuery, TypeName,
 };
 use nitinol_runtime::ProcessSystem;
 
@@ -313,27 +312,19 @@ async fn e2e_replay_with_snapshot_restores_state() {
     let writing = system_over(store.clone()).await;
     let id = AggregateId::new("e2e-replay-snap");
 
-    // Write 5 events through activation 1
+    // Write 3 events through activation 1, have it save a snapshot at
+    // sequence=3 (value=3), then write 2 more
     {
         let proxy1 = spawn_snapshotable_counter(&writing, id.clone()).await;
-        for _ in 0..5 {
+        for _ in 0..3 {
+            proxy1.ask(Increment).await.expect("ask must succeed");
+        }
+        let saved = proxy1.snapshot().await.expect("snapshot must succeed");
+        assert_eq!(saved, 3, "the snapshot must be taken at sequence 3");
+        for _ in 0..2 {
             proxy1.ask(Increment).await.expect("ask must succeed");
         }
     }
-
-    // Save a snapshot at sequence=3 (value=3), through the persistor that
-    // system distributes
-    writing
-        .snapshot_persistor()
-        .await
-        .save(PersistedSnapshot {
-            aggregate_id: id.clone(),
-            sequence: 3,
-            payload: Bytes::from(3u64.to_be_bytes().to_vec()),
-            created_at: jiff::Timestamp::now(),
-        })
-        .await
-        .expect("save snapshot must succeed");
 
     // When: a second system over the same store starts activation 2 — replay:
     // snapshot (seq=3) + delta events (seq=4, seq=5)
