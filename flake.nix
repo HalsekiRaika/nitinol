@@ -44,7 +44,8 @@
 
             pkgs.rustup
             pkgs.sccache
-
+            pkgs.cargo-nextest
+            pkgs.mold-wrapped
 
             pkgs.pkg-config
             pkgs.openssl
