@@ -73,7 +73,11 @@ its projection group, warm-up included.
 `cargo test --workspace --all-targets` runs every benchmark **once** without
 measuring it, which is what catches a benchmark that no longer compiles or no
 longer completes. That is a plain part of the test run and needs nothing added
-to the command.
+to the command. The quality gate (`.takt/quality-gates/rust-quality.sh`) runs
+its tests through `cargo nextest`, which does not run bench targets, so it
+runs `cargo test --workspace --benches` after them for the same once-over —
+with `DATABASE_URL` unset on purpose, so the provider's benchmarks skip rather
+than measure inside the gate.
 
 ### The provider's benchmarks need a database
 
@@ -366,6 +370,59 @@ records and was not measured again in this run.
   17.72–23.35 ms and 17.74–20.02 ms. `exactly_once/100` had no second group in
   any of the three; its one sample apart from the rest was a single 26.16 ms
   in the third.
+
+## What the quality gate itself costs
+
+The gate (`.takt/quality-gates/rust-quality.sh`) is paid on every TAKT step
+and by anyone running it by hand, so its own time is measured here the same
+way the benchmarks are: on the machine in the tables above, against a target
+directory that starts empty, with sccache holding nothing for the toolchain in
+use. That is what a TAKT worktree pays, since each run is a fresh clone.
+
+### 2026-10-30, `423e17d`, before and after #166
+
+| Phase | Before | After |
+|---|---|---|
+| `cargo fmt` | 2 s | 1 s |
+| `cargo clippy --workspace --all-targets` | 76 s | 46 s |
+| `cargo dylint --all` | 87 s | 95 s |
+| building the test targets | 1195 s | about 760 s |
+| running the tests | 596 s, 302 binaries one after another | 45 s, 1306 tests across 302 binaries under nextest |
+| the gate as a whole | about 33 min | 16 min |
+| `target/` afterwards | 50 GB | 25 GB |
+
+"Before" is dev `423e17d` as it was; "after" is the same tree with the #166
+changes: mold as the linker (`.cargo/config.toml`), `debug =
+"line-tables-only"` for the dev and test profiles, the umbrella crate's
+`build.rs` removed, and the gate running its tests through `cargo nextest`.
+The build and run times under "after" are read off one gate run whose test
+phase took 814 s in all, with the nextest run measured again warm at 45 s; the
+build figure is the remainder and is approximate.
+
+* **The umbrella crate's `build.rs` rebuilt most of the workspace on every
+  cargo invocation.** It declared `rerun-if-changed=migrations` for a directory
+  that does not exist, and cargo treats a missing path as changed every time.
+  Every `cargo test` after the first rebuilt the umbrella and everything that
+  depends on it — the examples, `nitinol-saga`'s 120 test binaries, the
+  macros' tests — which took 748 s on this machine before a no-op second build
+  of 29 s. A gate pays this once per cargo command, so it hid inside the gate's
+  numbers; a developer running `cargo test` twice paid it in full.
+* **Running the test binaries one after another was the larger half of the
+  test phase.** `cargo test` runs one binary at a time and the tests inside it
+  in parallel; with 302 binaries most of which hold one or two tests, the run
+  is the sum of 302 short sequential runs. nextest schedules the tests of all
+  binaries together.
+* **The sqlx contract tests share a container.** Without `DATABASE_URL`, the
+  harness now starts one Postgres per test binary rather than one per test,
+  held for as long as any of the binary's tests is running: `cargo test -p
+  nitinol-sqlx --tests` started 14 containers for 14 binaries. The gate
+  instead starts one container for the whole run and hands it to the tests
+  through `DATABASE_URL`, the route they already took when one was named.
+* **What was not changed.** The 302 test binaries are still built one by one,
+  which is where the build time goes; folding each crate's `tests/*.rs` into
+  one binary per crate is a separate change. Doctests have never been in the
+  gate: `cargo test --all-targets` does not run them, and neither does
+  nextest, so the gate's coverage is what it was.
 
 ## Profiling one of them
 

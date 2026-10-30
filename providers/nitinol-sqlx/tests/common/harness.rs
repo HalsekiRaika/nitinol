@@ -5,10 +5,11 @@
 //! in each test:
 //!
 //! 1. `DATABASE_URL` names one, and that one is used.
-//! 2. There is no `DATABASE_URL`, but a container runtime is reachable: the
-//!    test that asks starts a Postgres of its own, and dropping the value it
-//!    was handed removes that container again — on the way out of the test and
-//!    on the way out of a panic alike.
+//! 2. There is no `DATABASE_URL`, but a container runtime is reachable: a
+//!    Postgres is started for this test binary and shared by every test of it
+//!    that is running at the same time. The last of them to let go of it
+//!    removes the container — on the way out of a test and on the way out of
+//!    a panic alike — and a test that asks after that starts another.
 //! 3. Neither: nothing is reachable, and the test returns without judging the
 //!    provider.
 //!
@@ -25,6 +26,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use futures_core::future::BoxFuture;
@@ -86,12 +88,23 @@ const POOL_CONNECTIONS: u32 = 8;
 
 /// The Postgres a test run reaches, and the stores it brings up over it.
 pub struct PostgresBackend {
-    /// Owned for as long as the test that asked for it: dropping it removes the
-    /// container this run started.
-    _container: Option<ContainerAsync<Postgres>>,
+    /// Held for as long as the test that asked for it. The container is the
+    /// one this binary's running tests share, and the last holder to drop it
+    /// removes it.
+    _container: Option<Arc<ContainerAsync<Postgres>>>,
     url: String,
     admin: PgPool,
 }
+
+/// The container this test binary's tests share, held weakly: a test that
+/// asks while another still holds it is handed the same one, and once no test
+/// holds it the container is gone and the next test starts another.
+///
+/// The lock is held across starting a container, so two tests asking at once
+/// start one between them rather than one each. It is an async lock because
+/// each test runs on a runtime of its own and a start is awaited under it.
+static SHARED_CONTAINER: OnceLock<tokio::sync::Mutex<Weak<ContainerAsync<Postgres>>>> =
+    OnceLock::new();
 
 /// How many schemas this test binary has handed out.
 ///
@@ -111,7 +124,7 @@ pub async fn postgres_backend() -> Option<PostgresBackend> {
         Ok(url) => (None, url),
         Err(_) => match container_runtime_reach() {
             Ok(()) => {
-                let container = start_postgres().await;
+                let container = shared_postgres().await;
                 let url = connection_url(&container).await;
                 (Some(container), url)
             }
@@ -288,6 +301,19 @@ impl Executor for TokioExecutor {
     fn yield_now(&self) -> BoxFuture<'static, ()> {
         Box::pin(tokio::task::yield_now())
     }
+}
+
+/// The container the running tests of this binary share, started if none of
+/// them holds one.
+async fn shared_postgres() -> Arc<ContainerAsync<Postgres>> {
+    let slot = SHARED_CONTAINER.get_or_init(|| tokio::sync::Mutex::new(Weak::new()));
+    let mut held = slot.lock().await;
+    if let Some(container) = held.upgrade() {
+        return container;
+    }
+    let container = Arc::new(start_postgres().await);
+    *held = Arc::downgrade(&container);
+    container
 }
 
 async fn start_postgres() -> ContainerAsync<Postgres> {
