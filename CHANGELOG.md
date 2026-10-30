@@ -762,6 +762,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- (nitinol-sqlx): a load builds its statement out of the conditions its query
+  holds, one statement per shape of query, so the plan Postgres keeps for it
+  no longer depends on the size of the journal; recovering from a snapshot
+  over a 22 202-row journal no longer walks every row (see `BENCHMARKS.md`).
+  What a load serves is unchanged.
+
 - (nitinol-eventsource): a projector saves its offset — and under
   `ExactlyOnce` with a `TxProvider` begins and commits its transaction — once
   per batch rather than once per event. A batch is what one read of the

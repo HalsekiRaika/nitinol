@@ -15,7 +15,7 @@ use jiff::Timestamp;
 use nitinol_persistence::error::LoadError;
 use nitinol_persistence::store::EventStream;
 use nitinol_persistence::{EventRegistry, LoadQuery, LoadedEvent};
-use sqlx::PgPool;
+use sqlx::{Execute as _, PgPool, Postgres, QueryBuilder};
 
 use super::failure::Failure;
 use super::numbering;
@@ -38,56 +38,17 @@ pub(super) fn load<'a>(
     event_types: &'a EventRegistry,
     query: LoadQuery,
 ) -> Result<EventStream<'a>, LoadError> {
-    let conditions = Conditions::of(query)?;
+    let mut statement = Conditions::of(query)?.into_statement();
 
-    // Every condition is a parameter that may be absent, so one statement
-    // answers every shape of query and the database plans it once.
-    //
-    // An event type prefix matches on segment boundaries: a stored path is
-    // under the prefix when it is the prefix itself, or when the prefix is
-    // followed by a separator. Comparing the column rather than matching a
-    // pattern against it is what keeps `_` and `%` — both legal in a family —
-    // from behaving as wildcards.
-    //
-    // The descendants are asked for as the half-open range `[$4 || '.',
-    // $4 || '/')` rather than by taking the leading characters of the column.
-    // The two select the same rows: `.` and `/` are adjacent bytes, so a path
-    // lies in that range exactly when `$4` is followed by a separator. What
-    // differs is that a range over the column reaches an index while a function
-    // of the column cannot, and an index is the difference between reading the
-    // rows of one declaration and reading every row above the position to
-    // throw most of them away.
-    //
-    // `COLLATE "C"` is what makes that equality hold, and it is not optional:
-    // the adjacency of `.` and `/` is a fact about bytes, and under a locale
-    // collation the same range leaves out paths that are under the prefix. It
-    // names the same collation the index on this column is built with, so the
-    // two have to be changed together or the index stops being reachable.
-    //
-    // A stored path is a family and a type name with nothing after it, so the
-    // range reaches a declaration only from a family above it. The equality is
-    // what a query for one declaration lands on: it has no descendant of its
-    // own for the range to gather.
-    let rows = sqlx::query_as::<_, StoredEvent>(
-        r#"
-        SELECT persistence_id, sequence_number, global_sequence, event_type, payload, occurred_at
-          FROM nitinol_journal
-         WHERE ($1::text   IS NULL OR persistence_id  =  $1)
-           AND ($2::bigint IS NULL OR global_sequence >= $2)
-           AND ($3::bigint IS NULL OR sequence_number >= $3)
-           AND ($4::text   IS NULL OR event_type COLLATE "C" = $4
-                                   OR (event_type COLLATE "C" >= $4 || '.'
-                                   AND event_type COLLATE "C" <  $4 || '/'))
-         ORDER BY global_sequence
-         LIMIT $5::bigint
-        "#,
-    )
-    .bind(conditions.stream_key)
-    .bind(conditions.from_global_sequence)
-    .bind(conditions.from_stream_sequence)
-    .bind(conditions.event_type_prefix)
-    .bind(conditions.limit)
-    .fetch(pool);
+    // A query built from the builder borrows it, and the stream handed back
+    // outlives this function, so the text and the values bound into it are
+    // taken out and given to a query that owns them.
+    let arguments = statement
+        .build()
+        .take_arguments()
+        .map_err(|cause| Failure::from(sqlx::Error::Encode(cause)))?
+        .expect("a builder built once hands over the values bound into it");
+    let rows = sqlx::query_as_with::<_, StoredEvent, _>(statement.sql(), arguments).fetch(pool);
 
     Ok(Box::pin(rows.map(move |row| {
         row.map_err(Failure::from)
@@ -120,6 +81,94 @@ impl Conditions {
             event_type_prefix: query.event_type_prefix.map(|prefix| prefix.to_string()),
             limit: query.limit.map(i64::try_from).transpose()?,
         })
+    }
+
+    /// The statement asking for these conditions and for nothing the query
+    /// left out.
+    ///
+    /// Each shape of query is a statement of its own, prepared and kept by the
+    /// connection under its own text, so whatever plan the database settles
+    /// on for it is a plan for the conditions it holds. A condition written
+    /// as one that may be absent cannot be costed: once the database stops
+    /// planning such a statement per call, the plan it keeps walks the global
+    /// order and filters, which for a stream recovering from a snapshot is
+    /// every row of the journal read to return none.
+    fn into_statement(self) -> QueryBuilder<Postgres> {
+        let mut statement = QueryBuilder::new(
+            "SELECT persistence_id, sequence_number, global_sequence, event_type, payload, \
+             occurred_at FROM nitinol_journal",
+        );
+        let mut joint = " WHERE ";
+
+        if let Some(key) = self.stream_key {
+            statement
+                .push(joint)
+                .push("persistence_id = ")
+                .push_bind(key);
+            joint = " AND ";
+        }
+        if let Some(from) = self.from_global_sequence {
+            statement
+                .push(joint)
+                .push("global_sequence >= ")
+                .push_bind(from);
+            joint = " AND ";
+        }
+        if let Some(from) = self.from_stream_sequence {
+            statement
+                .push(joint)
+                .push("sequence_number >= ")
+                .push_bind(from);
+            joint = " AND ";
+        }
+        // An event type prefix matches on segment boundaries: a stored path is
+        // under the prefix when it is the prefix itself, or when the prefix is
+        // followed by a separator. Comparing the column rather than matching a
+        // pattern against it is what keeps `_` and `%` — both legal in a family
+        // — from behaving as wildcards.
+        //
+        // The descendants are asked for as the half-open range `[prefix || '.',
+        // prefix || '/')` rather than by taking the leading characters of the
+        // column. The two select the same rows: `.` and `/` are adjacent bytes,
+        // so a path lies in that range exactly when the prefix is followed by a
+        // separator. What differs is that a range over the column reaches an
+        // index while a function of the column cannot, and an index is the
+        // difference between reading the rows of one declaration and reading
+        // every row above the position to throw most of them away.
+        //
+        // `COLLATE "C"` is what makes that equality hold, and it is not
+        // optional: the adjacency of `.` and `/` is a fact about bytes, and
+        // under a locale collation the same range leaves out paths that are
+        // under the prefix. It names the same collation the index on this
+        // column is built with, so the two have to be changed together or the
+        // index stops being reachable.
+        //
+        // A stored path is a family and a type name with nothing after it, so
+        // the range reaches a declaration only from a family above it. The
+        // equality is what a query for one declaration lands on: it has no
+        // descendant of its own for the range to gather.
+        if let Some(prefix) = self.event_type_prefix {
+            statement
+                .push(joint)
+                .push(r#"(event_type COLLATE "C" = "#)
+                .push_bind(prefix.clone())
+                .push(r#" OR (event_type COLLATE "C" >= "#)
+                .push_bind(prefix.clone())
+                .push(r#" || '.' AND event_type COLLATE "C" < "#)
+                .push_bind(prefix)
+                .push(" || '/'))");
+        }
+
+        statement.push(" ORDER BY global_sequence");
+
+        // A limit whose value the plan does not know is costed as one that
+        // stops early, and walking the global order looks cheap behind it, so
+        // a query without a limit is not given one to be planned around.
+        if let Some(limit) = self.limit {
+            statement.push(" LIMIT ").push_bind(limit);
+        }
+
+        statement
     }
 }
 

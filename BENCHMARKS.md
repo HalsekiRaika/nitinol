@@ -371,6 +371,70 @@ records and was not measured again in this run.
   any of the three; its one sample apart from the rest was a single 26.16 ms
   in the third.
 
+### 2026-10-30, `d34c638` + #172
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8) |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Toolchain | rustc 1.98.1, cargo 1.98.1 |
+| Database | PostgreSQL 17.11 (`postgres:17-alpine`), in the `nitinol-bench-pg` container on the same machine, default settings |
+
+| Crate | Benchmark | Median | Samples | Before |
+|---|---|---|---|---|
+| `nitinol-sqlx` | `postgres_activation/replay/1` | 327.02 µs | 309.0–342.2 µs | 396.92 µs |
+| `nitinol-sqlx` | `postgres_activation/replay/100` | 519.42 µs | 491.0–558.6 µs | 580.40 µs |
+| `nitinol-sqlx` | `postgres_activation/replay/1000` | 1.6698 ms | 1.574–1.835 ms | 1.7505 ms |
+| `nitinol-sqlx` | `postgres_activation/replay/10000` | 14.622 ms | 12.97–15.70 ms | 12.202 ms |
+| `nitinol-sqlx` | `postgres_activation/snapshot/1` | 681.23 µs | 627.7–741.6 µs | 738.23 µs |
+| `nitinol-sqlx` | `postgres_activation/snapshot/100` | 671.34 µs | 644.7–698.5 µs | 728.97 µs |
+| `nitinol-sqlx` | `postgres_activation/snapshot/1000` | 649.05 µs | 620.0–665.6 µs | 702.36 µs |
+| `nitinol-sqlx` | `postgres_activation/snapshot/10000` | 687.17 µs | 631.9–702.5 µs | 1.3059 ms |
+
+Measured with
+`DATABASE_URL=postgres://postgres:postgres@localhost:55432/postgres cargo bench -p nitinol-sqlx --bench postgres_system -- postgres_activation`,
+"Before" on dev `d34c638` as it stands and the median on `d34c638` with the
+#172 changes applied, before they were merged, in the same sitting. Only these
+were run; the rest of the earlier sets still stands for this machine.
+"Samples" is the per-iteration time of the fastest and the slowest of
+criterion's ten samples. By the `10000` step the journal holds 22 202 rows.
+
+* **The slow recoveries were the generic plan.** Before the change
+  `snapshot/10000` split into five samples at 0.68–0.77 ms and five at
+  1.84–1.92 ms, and a second run of the same command split the same way
+  (1.3259 ms; five at 0.68–0.83 ms, five at 1.83–2.15 ms). The same run with
+  `SET plan_cache_mode = force_custom_plan` added to the benchmark pool's
+  connections — for that run only, not kept — gave 786.28 µs, all ten samples
+  within 739.5–825.1 µs. `EXPLAIN` over a 22 202-row journal laid out the way
+  the benchmark seeds it shows what the generic plan did: the old statement's
+  generic plan walks `nitinol_journal_global_sequence_key` with every
+  condition as a filter, and for the snapshotted stream above its snapshot it
+  removed all 22 202 rows to return none, in 4.8–5.1 ms; the plan built for
+  the actual arguments reads `nitinol_journal_pkey` and takes 0.04 ms. A
+  statement prepared in that session and run five times with a replay's
+  arguments switched to the generic plan on the sixth run, the snapshot
+  recovery.
+* **After it, snapshot recovery is flat.** `snapshot/10000` is 38 µs above
+  `snapshot/1000`, and its samples no longer split; a second run gave
+  683.13 µs against 666.52 µs. The statement a recovery now runs names the
+  stream and the sequence and nothing else, and its generic plan reads the
+  primary key: 0.05 ms for the same recovery. A limit is written into a
+  statement only when the query has one, because a `LIMIT` parameter alone is
+  enough for the generic plan to walk the global order again — `EXPLAIN
+  (GENERIC_PLAN)` of the stream-and-sequence statement with `LIMIT $3` added
+  goes back to `nitinol_journal_global_sequence_key`.
+* **`replay/10000` moves by as much between two runs as between before and
+  after.** Its median is 14.622 ms here against 12.202 ms, but the second run
+  of each gave 13.190 ms after and 13.395 ms before, and the samples of all
+  four runs overlap within 12.0–15.7 ms. Measured in the database alone, the
+  replay's statement is not slower: 3.4–3.9 ms for the new statement's
+  generic plan, against 5.9–6.7 ms for the old statement's generic plan and
+  4.4–4.8 ms for its custom one. At 1, 100 and 1000 both runs of the replay
+  are below their "Before".
+* **Below 1000 a snapshot is still slower than a replay.** It is two queries —
+  the snapshot row, then the journal above it — against one, which this change
+  does not touch.
+
 ## What the quality gate itself costs
 
 The gate (`.takt/quality-gates/rust-quality.sh`) is paid on every TAKT step
