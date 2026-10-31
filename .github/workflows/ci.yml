@@ -105,6 +105,7 @@ jobs:
       - name: cargo nextest
         env:
           NEXTEST_SUCCESS_OUTPUT: final
+          CARGO_TERM_COLOR: never
         run: >-
           cargo nextest run --workspace --lib --bins --tests --examples --all-features --locked
           2>&1 | tee nextest.log
