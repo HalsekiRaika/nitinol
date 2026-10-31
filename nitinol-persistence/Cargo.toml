@@ -33,3 +33,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "in_memory_event_store"
 harness = false
+
+[lints]
+workspace = true

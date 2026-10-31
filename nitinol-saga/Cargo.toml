@@ -59,3 +59,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "saga_round_trip"
 harness = false
+
+[lints]
+workspace = true

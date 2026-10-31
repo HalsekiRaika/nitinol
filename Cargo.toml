@@ -21,7 +21,10 @@ libraries = [
 
 [workspace.lints.rust.unexpected_cfgs]
 level = "warn"
-check-cfg = ["cfg(dylint_lib, values(any()))"]
+check-cfg = ["cfg(dylint_lib, values(any()))", "cfg(tokio_unstable)"]
+
+[workspace.lints.clippy]
+manual_async_fn = "deny"
 
 [workspace.package]
 edition = "2021"

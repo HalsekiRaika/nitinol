@@ -15,3 +15,6 @@ nitinol-persistence = { path = "../nitinol-persistence" }
 # The codec signature is stated in `Bytes`, the same currency the persistence
 # layer's payloads are in.  A byte buffer is not an async runtime.
 bytes = "1"
+
+[lints]
+workspace = true

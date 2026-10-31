@@ -31,3 +31,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 futures-util = "0.3"
+
+[lints]
+workspace = true

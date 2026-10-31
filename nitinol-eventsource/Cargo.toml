@@ -45,3 +45,6 @@ trybuild = "1"
 [[bench]]
 name = "event_source_system"
 harness = false
+
+[lints]
+workspace = true

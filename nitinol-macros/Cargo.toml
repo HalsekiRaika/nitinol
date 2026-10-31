@@ -29,3 +29,6 @@ nitinol = { path = "..", features = ["eventsource", "saga"] }
 # ships no codec implementation of its own (it stays serde-free), so the
 # fixtures write their own.
 bytes = "1"
+
+[lints]
+workspace = true
