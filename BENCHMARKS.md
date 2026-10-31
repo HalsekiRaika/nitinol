@@ -45,7 +45,7 @@ is worth reading before comparing two runs:
 | `activation/*` | Nothing in the window, but an idle activation per iteration stays on the process system: a live aggregate cannot be stopped from outside it. The group's `sample_size` and `measurement_time` are what bound how many. |
 | `postgres_event_store/*`, `postgres_offset_store/*` | Rows that nothing removes, so a later iteration writes into a fuller table than an earlier one. |
 | `postgres_activation/*` | An idle activation per iteration stays on the process system, as with `activation/*`. The rows read are the ones seeded before the group and no more: an activation only reads. |
-| `postgres_projection/exactly_once/*` | One batch: both lengths are within the default batch limit of 1000, so the catch-up is one read and one transaction — its `begin`, N runs of `project` inside it, one offset save and one commit. The window runs until the batch's save and commit have returned, so it holds that **one commit**; that the offset row was left at N is checked after the window closes. A number from before the projector settled a batch as one unit (N − 1 commits in the window) and one from just after it, when the window closed at the last `project` (no commit in the window), are not comparable to one from now. Each iteration's projection has an identifier of its own and leaves one offset row behind. The poll interval is not in it, for the reason given for `projector_catchup/*`. |
+| `postgres_projection/exactly_once/*` | One batch: both lengths are within the default batch limit of 1000, so the catch-up is one read and one transaction — its `begin`, N runs of `project` inside it, one offset save and one commit. The window runs until the batch's save and commit have returned, so it holds that **one commit**; that the offset row was left at N is checked after the window closes. A number from before the projector settled a batch as one unit (N − 1 commits in the window) and one from just after it, when the window closed at the last `project` (no commit in the window), are not comparable to one from now. Each iteration's projection has an identifier of its own and leaves one offset row behind. The poll interval is not in it, for the reason given for `projector_catchup/*`. The one commit is one `fdatasync`, and on the bench host's virtual disk that is about 14 ms, served on a tick: a sample above about 25 ms per iteration holds a commit that waited several ticks or a stall of the disk, not more work. Compare the fast group of samples, not the median (the 2026-10-31 set). |
 
 ## Running them
 
@@ -434,6 +434,81 @@ criterion's ten samples. By the `10000` step the journal holds 22 202 rows.
 * **Below 1000 a snapshot is still slower than a replay.** It is two queries —
   the snapshot row, then the journal above it — against one, which this change
   does not touch.
+
+### 2026-10-31, `39b6801` + #173
+
+Why `postgres_projection/exactly_once/*` splits into two groups. Nothing in the
+code changed for this set; the bench ran twice with the server logging every
+statement's duration (`log_min_duration_statement = 0`,
+`track_wal_io_timing = on`, both reset afterwards), and the host's disk was
+measured on its own.
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8), a QEMU guest |
+| Disk | one QEMU virtual disk (`sda`, write-back cache); the container's volume and the workspace share it |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Database | PostgreSQL 17.11 (`postgres:17-alpine`), in the `nitinol-bench-pg` container on the same machine, default settings (`synchronous_commit = on`, `wal_sync_method = fdatasync`) |
+
+| Run | Benchmark | Samples (ms per iteration, sorted) |
+|---|---|---|
+| 1 | `exactly_once/100` | 17.02 17.25 17.30 17.42 17.46 17.49 17.79 17.84 17.94 **320.98** |
+| 1 | `exactly_once/1000` | 17.65 17.78 17.81 17.97 18.04 18.59 19.59 20.59 **93.03 122.33** |
+| 2 | `exactly_once/100` | 17.15 17.24 17.35 17.51 17.51 17.54 17.56 17.62 17.72 17.84 |
+| 2 | `exactly_once/1000` | 17.78 17.78 17.81 17.85 17.90 18.04 18.31 18.51 18.57 23.73 |
+
+What the server's log says about the commits inside those windows:
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| `COMMIT`s logged | 258 | 283 |
+| at 10–15 ms | 195 | 231 |
+| at 15–20 ms | 40 | 35 |
+| at 25–80 ms | 11 | 14 |
+| at 100–330 ms | 3 | 2 |
+| at 1.3–1.6 s | 3 | 0 |
+| `ROLLBACK`s | 0 | 0 |
+| WAL syncs, mean (`pg_stat_wal`) | 273, 33.5 ms | 320, 16.7 ms |
+
+* **A commit is one `fdatasync` of the WAL, and on this disk that is about
+  14 ms.** `pg_test_fsync` inside the container: `fdatasync` 71 ops/s
+  (14.0 ms an op), `open_datasync` the same, two 8 kB writes under
+  `open_datasync` 29.7 ms. Measured from the host with `dd oflag=dsync`, 300
+  writes landed in peaks near 9, 23, 37 and 53 ms, about 14 ms apart: the
+  virtual disk completes flushes on something like a 14 ms tick, and a sync
+  waits one tick or several. Everything else in the transaction is under a
+  millisecond: the `BEGIN` 0.03 ms, the journal read 0.45 ms on average, the
+  offset upsert 0.07 ms. One iteration at 17.5 ms is that one sync plus the
+  round trips around it, which is why neither length can go below about 17 ms
+  here and why `/100` and `/1000` are 0.3 ms apart.
+* **The second group is the same commit waiting longer for the disk.** Each
+  iteration is still one `BEGIN`, one read, one upsert and one `COMMIT` — the
+  log shows no second transaction and no rollback, so neither an extra round
+  trip nor a refused offset and redelivery is behind it. What varies is the
+  `COMMIT`: a few in every run take two to five ticks (25–80 ms), and run 1
+  had three that took 1.3–1.6 s, about 5.5 s apart. One such stall inside a
+  sample of 18 iterations adds 70–90 ms to that sample's mean, and a 1.6 s
+  stall inside a sample of 5 adds 320 ms, which are the slow samples above.
+  Run 2, under the same logging a minute later, had no stall and no slow
+  sample. The 2026-10-24 set's 13 ms and 25–29 ms per event — one commit per
+  event then — reads as one tick against two for each commit over a stretch;
+  that shape of the bench no longer exists, so this is the reading, not a
+  re-measurement.
+* **Not checkpoints.** `log_checkpoints` is on and no checkpoint started or
+  finished inside either window; the checkpointer's timed count moved by one
+  over the whole hour. What spaced the three stalls 5.5 s apart was not
+  identified; the guest's dirty-page writeback runs every 5 s
+  (`vm.dirty_writeback_centisecs = 500`), and the statement logging itself was
+  writing to the journal during run 1, so that run is not clean evidence for
+  the stall's cause, only for its size and its effect on the samples.
+* **How to read these two rows.** Compare the fast group, not the median: the
+  lower eight or nine samples of a run sit within a millisecond of each other
+  and are the cost of the work; a sample above about 25 ms per iteration holds
+  a disk stall and says nothing about the code. For a before/after, put the two
+  sorted sample lists side by side and compare their lower ends; a median can
+  land on either side of a stall. On this host no number that holds a commit
+  can be below about 14 ms, and a difference smaller than one tick between two
+  one-commit benchmarks is not a difference the disk can show.
 
 ## What the quality gate itself costs
 
