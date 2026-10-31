@@ -894,7 +894,7 @@ impl RecordingOffsetStore {
 /// the failing ones.
 fn take_one(budget: &AtomicUsize) -> bool {
     budget
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
             left.checked_sub(1)
         })
         .is_ok()

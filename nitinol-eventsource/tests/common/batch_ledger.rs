@@ -222,7 +222,7 @@ impl Failure {
         self.sequence == Some(sequence)
             && self
                 .remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n {
                     0 => None,
                     PERMANENT => Some(PERMANENT),
                     n => Some(n - 1),

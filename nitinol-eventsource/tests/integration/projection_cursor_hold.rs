@@ -185,7 +185,7 @@ fn budget(failures: usize) -> Arc<AtomicUsize> {
 /// Consume one failure from `remaining`; `false` once the budget is spent.
 fn take_failure(remaining: &AtomicUsize) -> bool {
     remaining
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n {
             0 => None,
             PERMANENT => Some(PERMANENT),
             n => Some(n - 1),
