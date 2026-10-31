@@ -1,5 +1,5 @@
-# Link with mold on Linux: the workspace builds several hundred test binaries,
-# and the linker is a large share of what a test build costs. The development
+# Link with mold on Linux: the workspace builds dozens of test binaries, and
+# the linker is a large share of what a test build costs. The development
 # shell (`flake.nix`) provides mold; a Linux machine without it needs mold on
 # its PATH or this section removed.
 [target.x86_64-unknown-linux-gnu]
