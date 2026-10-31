@@ -116,6 +116,8 @@ jobs:
           fi
       - name: nitinol-sqlx tests ran
         run: grep -cE '^[[:space:]]*PASS .* nitinol-sqlx::' nextest.log
+      - name: cargo test --doc
+        run: cargo test --workspace --doc --all-features --locked
       - name: cargo test --benches
         run: env -u DATABASE_URL cargo test --workspace --benches --quiet --all-features --locked
 
