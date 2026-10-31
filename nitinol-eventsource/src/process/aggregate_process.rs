@@ -384,7 +384,10 @@ where
 const RECOVERY_UNDER_LATEST: &str =
     "a snapshot is requested only of a `Latest` aggregate, whose activation always carries a recovery";
 
-impl<A: Aggregate + Snapshotable> AggregateProcess<A> {
+impl<A> AggregateProcess<A>
+where
+    A: Aggregate + Snapshotable,
+{
     /// The current state, captured and written by the codec the aggregate
     /// names.
     ///
@@ -410,7 +413,10 @@ enum NotAppended {
     Persist(#[from] PersistError),
 }
 
-impl<R: std::error::Error + Send + Sync + 'static> From<NotAppended> for AskHandlerError<R> {
+impl<R> From<NotAppended> for AskHandlerError<R>
+where
+    R: std::error::Error + Send + Sync + 'static,
+{
     fn from(e: NotAppended) -> Self {
         match e {
             NotAppended::AlreadyCreated => AskHandlerError::AlreadyCreated,

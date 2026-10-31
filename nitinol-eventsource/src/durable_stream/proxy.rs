@@ -58,7 +58,10 @@ impl<T> Clone for DurableSubscription<T> {
     }
 }
 
-impl<T: 'static + Send + Sync> DurableSubscription<T> {
+impl<T> DurableSubscription<T>
+where
+    T: 'static + Send + Sync,
+{
     /// Create a config with the default polling cadence (250 ms).
     ///
     /// Use [`Self::with_poll_interval`] to override the interval.

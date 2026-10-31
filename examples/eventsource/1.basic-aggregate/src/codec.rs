@@ -12,7 +12,10 @@ use nitinol_eventsource::codec::Codec;
 /// JSON codec: encodes events as JSON bytes and decodes them back.
 pub struct JsonCodec;
 
-impl<E: Serialize + for<'de> Deserialize<'de>> Codec<E> for JsonCodec {
+impl<E> Codec<E> for JsonCodec
+where
+    E: Serialize + for<'de> Deserialize<'de>,
+{
     type Error = serde_json::Error;
 
     fn encode(event: &E) -> Result<Bytes, Self::Error> {

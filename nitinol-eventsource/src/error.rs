@@ -80,7 +80,10 @@ pub enum AskError<R: std::error::Error + Send + Sync + 'static> {
     Send(nitinol_runtime::error::SendError),
 }
 
-impl<R: std::error::Error + Send + Sync + 'static> AskError<R> {
+impl<R> AskError<R>
+where
+    R: std::error::Error + Send + Sync + 'static,
+{
     /// Whether re-issuing the command is worth attempting.
     pub fn retryability(&self) -> Retryability {
         match self {

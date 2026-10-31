@@ -81,7 +81,11 @@ impl<A: Aggregate, St: Store> RecoverOn<A, St> for Never {
     }
 }
 
-impl<A: Aggregate + Snapshotable, St: SnapshotSlot> RecoverOn<A, St> for Latest {
+impl<A, St> RecoverOn<A, St> for Latest
+where
+    A: Aggregate + Snapshotable,
+    St: SnapshotSlot,
+{
     fn recovery(system: &EventSourceSystem<St>) -> Option<SnapshotRecovery<A>> {
         Some(SnapshotRecovery {
             source: system.snapshot_source(),

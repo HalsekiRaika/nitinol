@@ -66,7 +66,9 @@ jobs:
       - uses: taiki-e/cache-cargo-install-action@v2
         with:
           tool: dylint-link
-      - run: cargo dylint --all --workspace
+      - env:
+          DYLINT_RUSTFLAGS: -D warnings
+        run: cargo dylint --all --workspace
 
   # gate: structural
   structural:

@@ -54,6 +54,9 @@ authors = ["ReiRokusanami <reirokusanami.rdh@gmail.com>"]
 repository = "https://github.com/HalsekiRaika/nitinol"
 description = "A utilities for event sourcing"
 
+[lints]
+workspace = true
+
 [features]
 # No features are enabled by default — explicit opt-in, Tokio style.
 default = []

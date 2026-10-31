@@ -15,7 +15,11 @@ use crate::projection::projector::Projector;
 /// decodes raw bytes from the event store and delegates to the corresponding
 /// `Projector<E, Tx>::project` implementation.
 #[async_trait]
-pub(crate) trait EventTypeHandler<P: Send + Sync, Tx: Send>: Send + Sync {
+pub(crate) trait EventTypeHandler<P, Tx>: Send + Sync
+where
+    P: Send + Sync,
+    Tx: Send,
+{
     fn event_type(&self) -> EventType;
 
     async fn handle(
