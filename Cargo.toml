@@ -16,7 +16,7 @@ resolver = "2"
 
 [workspace.metadata.dylint]
 libraries = [
-    { git = "https://github.com/HalsekiRaika/dylints", rev = "cba0f0d", pattern = "lints/*" },
+    { git = "https://github.com/HalsekiRaika/dylints", rev = "9ea8108", pattern = "lints/*" },
 ]
 
 [workspace.lints.rust.unexpected_cfgs]
