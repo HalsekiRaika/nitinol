@@ -1,5 +1,7 @@
 # Nitinol
 
+[![CI](https://github.com/HalsekiRaika/nitinol/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/HalsekiRaika/nitinol/actions/workflows/ci.yml)
+
 An Event Sourcing toolkit for Rust.
 
 The benchmarks, how to run them, and the measurements taken so far are in

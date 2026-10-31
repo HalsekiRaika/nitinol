@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, master]
+  pull_request:
+    branches: [dev, master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # gate: fmt
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # gate: clippy
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "--all-features"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-${{ matrix.features }}
+      - run: >-
+          cargo clippy --workspace --all-targets --locked ${{ matrix.features }}
+          -- -D warnings -D clippy::unwrap_used -D clippy::undocumented_unsafe_blocks
+          -D clippy::manual_async_fn -D clippy::wrong_self_convention
+
+  # gate: dylint
+  dylint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dylint
+          cache-directories: ~/.cache/dylint
+      - uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-dylint
+      - uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: dylint-link
+      - run: cargo dylint --all --workspace -- --ignore-rust-version
+
+  # gate: structural
+  structural:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/ci/structural-checks.sh
+
+  # gate: test
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h localhost -p 5432 -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+      - uses: taiki-e/install-action@nextest
+      - name: cargo nextest
+        env:
+          NEXTEST_SUCCESS_OUTPUT: final
+        run: >-
+          cargo nextest run --workspace --lib --bins --tests --examples --all-features --locked
+          2>&1 | tee nextest.log
+      - name: nitinol-sqlx tests reached the database
+        run: |
+          if grep -n 'nothing to run against' nextest.log; then
+            exit 1
+          fi
+      - name: nitinol-sqlx tests ran
+        run: grep -cE '^[[:space:]]*PASS .* nitinol-sqlx::' nextest.log
+      - name: cargo test --benches
+        run: env -u DATABASE_URL cargo test --workspace --benches --quiet --all-features --locked
+
+  # gate: doc
+  doc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: doc
+      - env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --all-features --locked
