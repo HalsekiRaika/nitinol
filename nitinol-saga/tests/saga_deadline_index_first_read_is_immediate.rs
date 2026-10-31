@@ -76,6 +76,7 @@ async fn the_index_asks_for_a_deadline_already_due_without_waiting_for_its_inter
         POLL,
     )
     .await;
+    let spawned_in = started.elapsed();
     capture
         .wait_for(
             REQUESTED_ACTIVATION,
@@ -90,10 +91,30 @@ async fn the_index_asks_for_a_deadline_already_due_without_waiting_for_its_inter
     let asked_in = started.elapsed();
 
     // Then
+    //
+    // A failure here has come up once under the load of a whole-workspace test
+    // run and not again in 60 runs under eight busy loops, so the message
+    // carries what the next one needs: how long the spawn itself took, and
+    // the records of the two paths that cost exactly one interval — a first
+    // read that failed, or a first turn that panicked and was rebuilt.
     assert!(
         asked_in < WELL_INSIDE,
         "an index polling every {POLL:?} asked for a deadline already due \
-         {asked_in:?} after the host started; its first read waited for the \
-         interval"
+         {asked_in:?} after the host started (the spawn alone took \
+         {spawned_in:?}); its first read waited for the interval. rebuilt: \
+         {rebuilt:?}; read failures: {read_failures:?}; panics: {panics:?}",
+        rebuilt = capture.rebuilt(),
+        read_failures = capture.records(COULD_NOT_READ),
+        panics = capture.records(PARTITION_PANICKED),
     );
 }
+
+/// The record a partition writes when its read of the journal failed and it
+/// will try again on the next tick.
+const COULD_NOT_READ: &str =
+    "saga deadline index could not read the journal; retrying on the next tick";
+
+/// The record a partition writes when a turn panicked and supervision will
+/// rebuild it.
+const PARTITION_PANICKED: &str =
+    "a saga deadline index partition panicked; supervision will restart it";
