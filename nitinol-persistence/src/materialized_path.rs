@@ -64,9 +64,6 @@ impl From<&EventType> for MaterializedPath {
             segments.extend(family.split('.').map(str::to_owned));
         }
         segments.push(event_type.type_name().as_str().to_owned());
-        if let Some(variant) = event_type.variant() {
-            segments.push(variant.as_str().to_owned());
-        }
         Self { segments }
     }
 }

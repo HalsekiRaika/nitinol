@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nitinol_persistence::error::{AppendError, LoadError};
-use nitinol_persistence::store::{EventStore, EventStream};
+use nitinol_persistence::store::{EventStore, EventStream, Journal};
 use nitinol_persistence::{AppendOutcome, AppendingEvent, LoadQuery};
 
 /// A store that delegates every call to `backing` and counts how many times it
@@ -14,14 +14,19 @@ use nitinol_persistence::{AppendOutcome, AppendingEvent, LoadQuery};
 /// behind; only the call count tells them apart, which is what L-2's atomicity
 /// clause needs to tell a single atomic append from several that merely
 /// succeeded in order.
+///
+/// The count is behind an [`Arc`] so that every handle of this store is the one
+/// store: a `Clone` building a counter of its own would count per consumer, and
+/// the clause reads the count through a handle the journal distributed.
+#[derive(Clone)]
 pub(crate) struct CountingStore {
-    backing: Arc<dyn EventStore>,
+    backing: Journal,
     appends: Arc<AtomicUsize>,
 }
 
 impl CountingStore {
     /// Wrap `backing`, returning the store and a handle to read its count.
-    pub(crate) fn over(backing: Arc<dyn EventStore>) -> (Self, AppendCount) {
+    pub(crate) fn over(backing: Journal) -> (Self, AppendCount) {
         let appends = Arc::new(AtomicUsize::new(0));
         (
             Self {

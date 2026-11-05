@@ -28,14 +28,25 @@ use crate::decision::Decision;
 /// # Example
 ///
 /// ```rust
-/// use nitinol_contract::{Aggregate, Decider, Decision, Event};
+/// use bytes::Bytes;
+/// use nitinol_contract::{Aggregate, Codec, Decider, Decision, Event, Never};
 /// use nitinol_persistence::{EventType, Family, TypeName};
 ///
 /// #[derive(Clone)]
 /// enum CounterEvent { Incremented }
+///
+/// struct CounterEventCodec;
+/// impl Codec<CounterEvent> for CounterEventCodec {
+///     type Error = std::convert::Infallible;
+///     fn encode(_: &CounterEvent) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+///     fn decode(_: &[u8]) -> Result<CounterEvent, Self::Error> { Ok(CounterEvent::Incremented) }
+/// }
+///
 /// impl Event for CounterEvent {
 ///     const EVENT_TYPE: EventType =
 ///         EventType::new(Family::new("counter"), TypeName::new("incremented"));
+///
+///     type Codec = CounterEventCodec;
 /// }
 ///
 /// #[derive(Default)]
@@ -43,6 +54,7 @@ use crate::decision::Decision;
 ///
 /// impl Aggregate for Counter {
 ///     type Event = CounterEvent;
+///     type Recover = Never;
 ///
 ///     fn apply(&mut self, event: CounterEvent) {
 ///         match event {

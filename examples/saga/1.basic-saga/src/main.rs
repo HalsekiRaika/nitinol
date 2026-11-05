@@ -1,18 +1,38 @@
-use std::sync::Arc;
+//! The wiring of the basic saga example, end to end.
+//!
+//! Three spawns make the process work, and each is one of the three parts the
+//! crate docs describe:
+//!
+//! * the two aggregates — the order whose fact starts the process, and the
+//!   inventory the reservation is addressed to;
+//! * the saga, with one `observing` call per source its alphabet declares;
+//! * the **delivery host**, which is what turns the saga's persisted decisions
+//!   into commands at the inventory.  Without it the saga still decides and
+//!   still journals, and nothing is ever delivered.
+//!
+//! Run with:
+//!   cargo run -p saga-basic-saga
+
 use std::time::Duration;
 
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaDefaultStoreExt;
+use nitinol_saga::{SagaSystemExt, Subscription};
 
-use saga_basic_saga::codec::JsonCodec;
 use saga_basic_saga::inventory::{GetReservedCount, Inventory};
-use saga_basic_saga::order::{Order, PlaceOrder};
+use saga_basic_saga::order::{Order, OrderPlaced, PlaceOrder};
 use saga_basic_saga::saga::ReservationSaga;
+
+/// How often the delivery host asks the store what is new.
+///
+/// A pull consumer trades latency for load on the store; an example wants the
+/// latency, so it polls far more eagerly than a deployment would.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -29,30 +49,65 @@ async fn main() {
 
     let ps = ProcessSystem::new().await;
 
-    // One store for the whole example.  `EventStore` is stream-keyed, so the
+    // One supplier for the whole example.  `EventStore` is stream-keyed, so the
     // order's stream, the inventory's stream and the saga's own journal are
-    // tenants of this one instance, each under its own key — which is what lets
-    // the system hand it to every spawn below.
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // tenants of the one journal it supplies, each under its own key — which is
+    // what lets every spawn below resolve the same store.
+    //
+    // `InMemoryStore` also supplies a saga-offset slot, which is the
+    // second thing a delivery host needs: a store with no such slot makes
+    // `host` below a compile error rather than a host that cannot record where
+    // it got to.
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(store)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let order_id = AggregateId::new("example-order");
     let order_proxy = system.spawn_aggregate::<Order>(order_id.clone()).await;
 
+    let inventory_id = AggregateId::new("example-inventory");
     let inventory_proxy = system
-        .spawn_aggregate::<Inventory>(AggregateId::new("example-inventory"))
+        .spawn_aggregate::<Inventory>(inventory_id.clone())
         .await;
 
-    let inventory_for_producer = inventory_proxy.clone();
-
+    // `host` is the one verb a saga is started with, and it always starts a
+    // manager.  `ReservationSaga::correlate` answers the same id for every
+    // order, so what runs is that manager with a single instance — the
+    // degenerate case rather than a different kind of spawn, which is why no
+    // `SagaId` is named here.
+    //
+    // It starts the delivery host too, on the same declaration: the manager
+    // only journals what it decided, and a decision nobody carries out reaches
+    // no inventory, so there is no wiring in which one runs without the other.
+    // That host subscribes to the decisions every instance has persisted — its
+    // input is the store, so it needs nothing of the saga process and keeps no
+    // saga resident — asks `ReservationSaga::dispatch` what each one implies,
+    // and `ask`s the addressed aggregate.  Its settings are named here as well:
+    // `with_delivery_poll_interval` is how often it asks the journal, which is
+    // this deployment's choice.  `InMemoryStore` supplies the saga-offset slot
+    // that host records its progress in — a store with no such slot has no
+    // `host` on it at all.
+    //
+    // The factory is handed the capabilities the framework resolved for this
+    // saga; this one needs none of them, so it ignores them.  It is called
+    // again for every instance and whenever the runtime rebuilds one, so what
+    // it captures must be re-acquirable — an `AggregateId` trivially is, being
+    // the address of the inventory rather than a live reference to it.
+    //
+    // One `observing` call per source the alphabet declares — here the order's
+    // stream, read as `OrderPlaced` — and `spawn` exists only once every
+    // declared source has one.
+    //
+    // The handle it answers with reaches both halves, `manager()` and
+    // `delivery()`, and is only how an operator reaches what is running:
+    // dropping it would stop neither.
+    let saga_inventory = inventory_id.clone();
     let _saga_proxy = system
-        .spawn_saga(ReservationSaga::instance_id(), move || ReservationSaga {
-            inventory: inventory_for_producer.clone(),
+        .host::<ReservationSaga>(move |_components| ReservationSaga {
+            inventory: saga_inventory.clone(),
         })
-        .subscribed_to(system.subscription(&order_id))
+        .observing::<OrderPlaced>(Subscription::stream(&order_id))
+        .with_delivery_poll_interval(POLL_INTERVAL)
         .spawn()
         .await;
 
@@ -63,8 +118,11 @@ async fn main() {
         .await
         .expect("ask(PlaceOrder) must succeed");
 
-    // Poll until Inventory has processed the Reserve command dispatched by the saga.
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    // Everything after the order's own fact is asynchronous: the saga has to see
+    // it on its subscription, decide, and journal, and only then does the host
+    // read that decision and deliver it.  So the inventory is polled rather than
+    // awaited.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let count = loop {
         let c = inventory_proxy
             .exec(GetReservedCount)
@@ -74,11 +132,15 @@ async fn main() {
             break c;
         }
         if std::time::Instant::now() >= deadline {
-            panic!("saga must drive a Reserve into Inventory within 3 seconds");
+            panic!("the delivery host must land a Reserve on Inventory within 5 seconds");
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(POLL_INTERVAL).await;
     };
-    assert_eq!(count, 1, "Inventory must have received exactly one Reserve");
+    assert_eq!(
+        count, 1,
+        "one order means one reservation: the inventory recognises a redelivered \
+         reservation by its operation id and writes nothing for it"
+    );
 
     info!(reserved_count = count, "saga example finished successfully");
 }

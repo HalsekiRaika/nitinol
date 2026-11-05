@@ -11,7 +11,7 @@ pub use self::any::*;
 
 use crate::error::{AskError, SendError};
 use crate::ident::Pid;
-use crate::process::dead_letter::{suppress_log, DeadLetterProxy};
+use crate::process::dead_letter::{self, DeadLetterProxy};
 use crate::process::registry::ProcessRegistry;
 use crate::process::signal::SystemSignal;
 use crate::process::task::{AskTask, TellTask, UserTask};
@@ -60,7 +60,7 @@ impl<P: Process> ProcessProxy<P> {
         P: Receive<M>,
         M: 'static + Send + Sync,
     {
-        let suppress = suppress_log::<M>();
+        let suppress = dead_letter::suppress_log::<M>();
         let task: UserTask<P> = Box::new(TellTask::new(msg));
         match self.user_tx.send(task).await {
             Ok(()) => Ok(()),
@@ -81,7 +81,7 @@ impl<P: Process> ProcessProxy<P> {
         <P as Receive<M>>::Response: 'static + Send,
         <P as Receive<M>>::Error: 'static + Send,
     {
-        let suppress = suppress_log::<M>();
+        let suppress = dead_letter::suppress_log::<M>();
         let (tx, rx) =
             oneshot::channel::<Result<<P as Receive<M>>::Response, <P as Receive<M>>::Error>>();
         let task: UserTask<P> = Box::new(AskTask::new(msg, tx));
@@ -111,7 +111,7 @@ impl<P: Process> ProcessProxy<P> {
         <P as Receive<M>>::Response: 'static + Send,
         <P as Receive<M>>::Error: 'static + Send,
     {
-        let suppress = suppress_log::<M>();
+        let suppress = dead_letter::suppress_log::<M>();
         let (in_tx, in_rx) =
             oneshot::channel::<Result<<P as Receive<M>>::Response, <P as Receive<M>>::Error>>();
         let (out_tx, out_rx) = oneshot::channel::<

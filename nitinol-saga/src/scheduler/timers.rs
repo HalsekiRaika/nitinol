@@ -22,10 +22,7 @@ impl Timers {
     }
 
     fn token(&self, name: TimerName) -> ScheduleToken {
-        ScheduleToken {
-            saga_id: self.owner.clone(),
-            name,
-        }
+        ScheduleToken::new(self.owner.clone(), name)
     }
 
     /// Register a single-shot timer under `name`, replacing any earlier timer

@@ -13,7 +13,7 @@ mod question;
 mod refusal;
 
 pub use self::command::{Open, Settle};
-pub use self::event::{LedgerEvent, MalformedLedgerEvent};
+pub use self::event::{LedgerCodec, LedgerEvent, MalformedLedgerEvent};
 pub use self::ledger::Ledger;
 pub use self::question::{Balance, Holder};
 pub use self::refusal::{LedgerNotOpen, LedgerRejection};

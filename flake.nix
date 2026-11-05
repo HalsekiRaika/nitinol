@@ -43,6 +43,9 @@
             pkgs.ripgrep
 
             pkgs.rustup
+            pkgs.sccache
+            pkgs.cargo-nextest
+            pkgs.mold-wrapped
 
             pkgs.pkg-config
             pkgs.openssl
@@ -51,6 +54,10 @@
 
             pkgs.python3
           ];
+
+          # sccache
+          RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
+          SCCACHE_CACHE_SIZE = "50G";
 
           PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
@@ -62,7 +69,10 @@
           shellHook = ''
             export CARGO_HOME="''${CARGO_HOME:-$HOME/.cargo}"
             export RUSTUP_HOME="''${RUSTUP_HOME:-$HOME/.rustup}"
+            export SCCACHE_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/takt-sccache"
             export PATH="$CARGO_HOME/bin:$PATH"
+
+            mkdir -p "$SCCACHE_DIR"
 
             if ! rustup toolchain list | grep -q '^stable'; then
               echo "Installing Rust stable toolchain..."

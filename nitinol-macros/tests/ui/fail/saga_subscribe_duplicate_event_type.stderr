@@ -1,0 +1,5 @@
+error: #[derive(SagaSubscribe)] declares the same event type more than once
+  --> tests/ui/fail/saga_subscribe_duplicate_event_type.rs:20:5
+   |
+20 |     Secondary(Placed),
+   |     ^^^^^^^^^

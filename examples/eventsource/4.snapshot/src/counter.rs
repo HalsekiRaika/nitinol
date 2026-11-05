@@ -4,10 +4,12 @@
 //! raw `u64` counter — trivially captured and restored.
 
 use nitinol::eventsource::Event;
-use nitinol_eventsource::{Aggregate, Decider, Decision, Query, Snapshotable};
+use nitinol_eventsource::{Aggregate, Decider, Decision, Latest, Query, Snapshotable};
+
+use crate::codec::{EventCodec, SnapshotCodec};
 
 #[derive(Clone, Debug, PartialEq, Event)]
-#[event(family = "snapshot.counter")]
+#[event(family = "snapshot.counter", codec = EventCodec)]
 pub struct Incremented;
 
 #[derive(Default)]
@@ -17,6 +19,7 @@ pub struct Counter {
 
 impl Aggregate for Counter {
     type Event = Incremented;
+    type Recover = Latest;
 
     fn apply(&mut self, _event: Incremented) {
         self.value += 1;
@@ -26,11 +29,15 @@ impl Aggregate for Counter {
 impl Snapshotable for Counter {
     type Snapshot = u64;
 
+    /// The snapshot's own format, independent of the one that writes the
+    /// stream: a restore reaches for this, a replay for `Incremented`'s.
+    type Codec = SnapshotCodec;
+
     fn capture(&self) -> u64 {
         self.value
     }
 
-    fn restore(snapshot: u64) -> Self {
+    fn recover(snapshot: u64) -> Self {
         Self { value: snapshot }
     }
 }

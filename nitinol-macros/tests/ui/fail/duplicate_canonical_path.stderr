@@ -1,0 +1,7 @@
+error: symbol `_nitinol_event_collision.intra.Duplicate` is already defined
+  --> tests/ui/fail/duplicate_canonical_path.rs:44:21
+   |
+44 |     #[derive(Clone, Event)]
+   |                     ^^^^^
+   |
+   = note: this error originates in the derive macro `Event` (in Nightly builds, run with -Z macro-backtrace for more info)

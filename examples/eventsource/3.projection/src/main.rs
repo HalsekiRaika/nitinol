@@ -19,12 +19,13 @@ use std::time::Duration;
 
 use tracing::info;
 
-use nitinol_eventsource::{system::EventSourceSystem, ProjectorProps};
-use nitinol_persistence::store::{EventStore, InMemoryCheckpointStore, InMemoryEventStore};
-use nitinol_persistence::{AggregateId, ProjectionId};
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::ProjectionId;
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::InMemoryStore;
+use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
-use eventsource_projection::codec::JsonCodec;
 use eventsource_projection::counter::{Counter, Increment, Incremented};
 use eventsource_projection::read_model::{CountProjector, CountReadModel};
 
@@ -43,13 +44,9 @@ async fn main() {
 
     let ps = ProcessSystem::new().await;
 
-    // Shared stores
-    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let checkpoint_store = Arc::new(InMemoryCheckpointStore::default());
-
+    // The one supplier the journal and the projection offsets come from.
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(Arc::clone(&event_store))
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let agg_id = AggregateId::new("proj-counter");
@@ -66,21 +63,23 @@ async fn main() {
     let value = Arc::clone(&model.value);
     let updated = Arc::clone(&model.updated);
 
-    let _proj = ProjectorProps::new(
-        ProjectionId::new("proj-read-model"),
-        Arc::clone(&event_store),
-        Arc::clone(&checkpoint_store),
-        move || CountProjector {
-            model: CountReadModel {
-                value: Arc::clone(&model.value),
-                updated: Arc::clone(&model.updated),
-            },
-        },
-    )
-    .with_event::<Incremented>(system.codec::<Incremented>())
-    .catchup_from_aggregate(agg_id)
-    .spawn(system.process_system())
-    .await;
+    // Both slots the projector needs — the journal it follows and where it
+    // records how far it got — are resolved from the system's provider.
+    let _proj = system
+        .projector_props(ProjectionId::new("proj-read-model"), move || {
+            CountProjector {
+                model: CountReadModel {
+                    value: Arc::clone(&model.value),
+                    updated: Arc::clone(&model.updated),
+                },
+            }
+        })
+        // Which event types this projection follows is stated here; how they are
+        // read is not — `Incremented` names the codec that wrote it.
+        .with_event::<Incremented>()
+        .catchup_from_aggregate(agg_id)
+        .spawn()
+        .await;
 
     // Wait for both catch-up events to be projected
     tokio::time::timeout(Duration::from_millis(500), async {

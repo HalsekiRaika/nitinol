@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use futures_core::future::BoxFuture;
 use nitinol_contract::{Decider, Query};
-use nitinol_persistence::store::EventStore;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::AggregateId;
 
 use crate::fixture::{Ledger, LedgerNotOpen, LedgerRejection};
@@ -17,11 +15,7 @@ use crate::outcome::{Fault, Interpreted, Unanswered};
 pub trait Interpretation: Send + Sync {
     type Interpreter: Interpreter;
 
-    fn interpret(
-        &self,
-        ledger: AggregateId,
-        store: Arc<dyn EventStore>,
-    ) -> BoxFuture<'_, Self::Interpreter>;
+    fn interpret(&self, ledger: AggregateId, store: Journal) -> BoxFuture<'_, Self::Interpreter>;
 }
 
 /// One ledger, reached through the machinery under test.

@@ -32,7 +32,6 @@ use common::{
 };
 
 use std::fmt::Debug;
-use std::sync::Arc;
 
 use futures_util::TryStreamExt;
 
@@ -41,7 +40,7 @@ use nitinol_conformance::{
     LedgerNotOpen, LedgerRejection, Open, Settle, Unanswered,
 };
 use nitinol_eventsource::{Decider, Query};
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
 use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 
@@ -149,10 +148,7 @@ fn assert_same_answer<R>(
 
 /// The facts a stream holds, decoded as the domain would read them back, paired
 /// with the sequence each was given.
-async fn recorded_facts(
-    store: &Arc<dyn EventStore>,
-    ledger: &AggregateId,
-) -> Vec<(u64, LedgerEvent)> {
+async fn recorded_facts(store: &Journal, ledger: &AggregateId) -> Vec<(u64, LedgerEvent)> {
     let loaded: Vec<_> = store
         .load(LoadQuery::by_stream(ledger))
         .await
@@ -189,16 +185,16 @@ async fn one_decider_observed_through_two_interpreters_answers_the_same() {
     verify(&direct).await;
 
     // And: one stream each, so neither interpreter reads the other's facts
-    let activation_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
-    let direct_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let activation_store = Journal::from(InMemoryEventStore::default());
+    let direct_store = Journal::from(InMemoryEventStore::default());
     let activation_ledger = AggregateId::new("equivalence.ledger.activation");
     let direct_ledger = AggregateId::new("equivalence.ledger.direct");
 
     let by_activation = activation
-        .interpret(activation_ledger.clone(), Arc::clone(&activation_store))
+        .interpret(activation_ledger.clone(), activation_store.clone())
         .await;
     let by_direct = direct
-        .interpret(direct_ledger.clone(), Arc::clone(&direct_store))
+        .interpret(direct_ledger.clone(), direct_store.clone())
         .await;
 
     // When: the same commands and questions reach both, in the same order

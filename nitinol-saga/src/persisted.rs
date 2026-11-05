@@ -1,86 +1,89 @@
-use bytes::Bytes;
-use nitinol_eventsource::codec::ErasedCodec;
+use nitinol_eventsource::codec;
 use nitinol_eventsource::error::CodecError;
 use nitinol_eventsource::{Event, SystemEvent, SystemEventDecodeError};
-use nitinol_persistence::EventType;
+use nitinol_persistence::{is_within_reserved_namespace, EventType};
 
-use crate::dead_letter::{
-    is_dead_letter_disposition_event_type, is_dead_letter_event_type, DeadLetterDispositionEvent,
-    DeadLetterEvent,
-};
-use crate::outbox::{is_outbox_event_type, OutboxEvent};
-use crate::scheduler::{is_schedule_event_type, ScheduleEvent};
+use crate::consumed::ConsumedPositionEvent;
+use crate::lifecycle::LifecycleEvent;
+use crate::scheduler::ScheduleEvent;
 
+/// What one row of a saga's own stream is, read back as the content its
+/// declaration names.
+///
+/// Four kinds and no more: a domain event — the catch-all — plus the three
+/// facts the framework declares for itself.
 pub(crate) enum SagaPersisted<E> {
     Domain(E),
-    Outbox(OutboxEvent),
     Schedule(ScheduleEvent),
-    DeadLetter(DeadLetterEvent),
-    DeadLetterDisposition(DeadLetterDispositionEvent),
+    /// The position of an upstream record this saga has consumed, committed by
+    /// the append that closes out the input's interpretation — see
+    /// [`crate::consumed`] for what that means when one `handle` call reaches
+    /// the store as more than one atomic append.
+    Consumed(ConsumedPositionEvent),
+    /// A fact about the saga instance's own life — so far only that it ended.
+    Lifecycle(LifecycleEvent),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SagaPersistedDecodeError {
-    #[error("outbox marker decode failed: {0}")]
-    Outbox(#[from] SystemEventDecodeError),
-    #[error("schedule marker decode failed: {0}")]
+    #[error("schedule fact decode failed: {0}")]
     Schedule(SystemEventDecodeError),
-    #[error("dead letter decode failed: {0}")]
-    DeadLetter(SystemEventDecodeError),
-    #[error("dead letter disposition marker decode failed: {0}")]
-    DeadLetterDisposition(SystemEventDecodeError),
+    #[error("consumed fact decode failed: {0}")]
+    Consumed(SystemEventDecodeError),
+    #[error("lifecycle fact decode failed: {0}")]
+    Lifecycle(SystemEventDecodeError),
     #[error("domain event decode failed: {0}")]
     Domain(#[from] CodecError),
+    /// A row inside the framework's own namespace that no declaration of this
+    /// version owns — a record written by an earlier version, or by a later
+    /// one.  Either way the stream cannot be read, and reporting it as a
+    /// domain event would hand framework bookkeeping to the saga's codec.
+    #[error(
+        "`{0}` is inside the framework's reserved namespace and belongs to no \
+         declaration this version owns; the stream is corrupted or was written \
+         by another version"
+    )]
+    UnknownReservedRecord(EventType),
 }
 
 impl<E: Event> SagaPersisted<E> {
-    pub(crate) fn variant(&self) -> EventType {
-        match self {
-            SagaPersisted::Domain(event) => event.variant(),
-            SagaPersisted::Outbox(marker) => marker.variant(),
-            SagaPersisted::Schedule(marker) => marker.variant(),
-            SagaPersisted::DeadLetter(event) => event.variant(),
-            SagaPersisted::DeadLetterDisposition(marker) => marker.variant(),
-        }
-    }
-
-    pub(crate) fn encode(&self, codec: &dyn ErasedCodec<E>) -> Result<Bytes, CodecError> {
-        match self {
-            SagaPersisted::Domain(event) => codec.encode(event),
-            SagaPersisted::Outbox(marker) => Ok(marker.encode()),
-            SagaPersisted::Schedule(marker) => Ok(marker.encode()),
-            SagaPersisted::DeadLetter(event) => Ok(event.encode()),
-            SagaPersisted::DeadLetterDisposition(marker) => Ok(marker.encode()),
-        }
-    }
-
+    /// Read a stored row back as the content its declaration names.
+    ///
+    /// The three framework declarations
+    /// (`nitinol.saga.{schedule,consumed,lifecycle}`) are siblings, so a row
+    /// matches at most one of them and the order between those arms carries no
+    /// meaning.  Every path *outside* the reserved namespace belongs to the
+    /// domain and is handed to the user's own codec untouched — that catch-all
+    /// is what keeps the envelope transparent to event types this crate never
+    /// declared.
+    ///
+    /// A path *inside* the reserved namespace that matches none of the three is
+    /// refused rather than sent down the catch-all.  The judgement is about the
+    /// namespace, not about a list of names that once existed: a 0.4 outbox
+    /// marker and a record from a later version are the same situation, and a
+    /// marker's bytes may well decode cleanly as a domain event, so a
+    /// payload-only judgement would fold framework bookkeeping into the saga's
+    /// state.
     pub(crate) fn classify(
         event_type: EventType,
         payload: &[u8],
-        codec: &dyn ErasedCodec<E>,
     ) -> Result<Self, SagaPersistedDecodeError> {
-        // Classification order: outbox → schedule → dead_letter →
-        // dead_letter_disposition → domain.  The four framework families
-        // (`nitinol.saga.{outbox,schedule,dead_letter,dead_letter_disposition}`)
-        // are siblings, so a user event type can match none of them and the
-        // order between them carries no meaning.  The domain branch must stay
-        // last to preserve envelope transparency.
-        if is_outbox_event_type(event_type) {
-            Ok(SagaPersisted::Outbox(OutboxEvent::decode(payload)?))
-        } else if is_schedule_event_type(event_type) {
-            ScheduleEvent::decode(payload)
+        match event_type {
+            ScheduleEvent::EVENT_TYPE => ScheduleEvent::decode(payload)
                 .map(SagaPersisted::Schedule)
-                .map_err(SagaPersistedDecodeError::Schedule)
-        } else if is_dead_letter_event_type(event_type) {
-            DeadLetterEvent::decode(payload)
-                .map(SagaPersisted::DeadLetter)
-                .map_err(SagaPersistedDecodeError::DeadLetter)
-        } else if is_dead_letter_disposition_event_type(event_type) {
-            DeadLetterDispositionEvent::decode(payload)
-                .map(SagaPersisted::DeadLetterDisposition)
-                .map_err(SagaPersistedDecodeError::DeadLetterDisposition)
-        } else {
-            Ok(SagaPersisted::Domain(codec.decode(payload)?))
+                .map_err(SagaPersistedDecodeError::Schedule),
+            ConsumedPositionEvent::EVENT_TYPE => ConsumedPositionEvent::decode(payload)
+                .map(SagaPersisted::Consumed)
+                .map_err(SagaPersistedDecodeError::Consumed),
+            LifecycleEvent::EVENT_TYPE => LifecycleEvent::decode(payload)
+                .map(SagaPersisted::Lifecycle)
+                .map_err(SagaPersistedDecodeError::Lifecycle),
+            _ if is_within_reserved_namespace(event_type.family().as_str()) => {
+                Err(SagaPersistedDecodeError::UnknownReservedRecord(event_type))
+            }
+            _ => Ok(SagaPersisted::Domain(codec::decode::<E::Codec, E>(
+                payload,
+            )?)),
         }
     }
 }
@@ -88,20 +91,19 @@ impl<E: Event> SagaPersisted<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use nitinol_eventsource::codec::Codec;
-    use nitinol_persistence::{Family, TypeName};
+    use nitinol_persistence::__private::reserved_family;
+    use nitinol_persistence::{AggregateId, Family, TypeName};
     use serde::{Deserialize, Serialize};
 
-    use crate::outbox::OutboxAppender;
+    use crate::consumed::PositionSource;
+    use crate::id::SagaId;
+    use crate::scheduler::{ScheduleToken, TimerName};
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
     struct DomainEvt {
         note: String,
-    }
-
-    impl Event for DomainEvt {
-        const EVENT_TYPE: EventType =
-            EventType::new(Family::new("persisted_unit_test"), TypeName::new("Domain"));
     }
 
     struct JsonCodec;
@@ -118,91 +120,151 @@ mod tests {
         }
     }
 
-    fn codec() -> impl ErasedCodec<DomainEvt> {
-        JsonCodec
+    impl Event for DomainEvt {
+        const EVENT_TYPE: EventType =
+            EventType::new(Family::new("persisted_unit_test"), TypeName::new("Domain"));
+
+        type Codec = JsonCodec;
     }
 
     #[test]
-    fn non_outbox_path_classifies_as_domain_and_round_trips() {
-        let codec = codec();
+    fn a_domain_path_classifies_as_domain_and_round_trips() {
         let event = DomainEvt {
             note: "hello".to_owned(),
         };
         let payload = <JsonCodec as Codec<DomainEvt>>::encode(&event).expect("encode");
 
-        match SagaPersisted::classify(DomainEvt::EVENT_TYPE, &payload, &codec) {
+        match SagaPersisted::<DomainEvt>::classify(DomainEvt::EVENT_TYPE, &payload) {
             Ok(SagaPersisted::Domain(decoded)) => assert_eq!(decoded, event),
-            _ => panic!("a non-outbox path must classify as Domain"),
+            _ => panic!("a path outside the reserved namespace must classify as Domain"),
         }
     }
 
     #[test]
-    fn outbox_path_classifies_as_outbox_never_domain() {
-        let codec = codec();
-        let wire =
-            OutboxAppender::build_tell_requested(1, 7, None, "", jiff::Timestamp::UNIX_EPOCH);
-
-        match SagaPersisted::<DomainEvt>::classify(wire.event_type, &wire.payload, &codec) {
-            Ok(SagaPersisted::Outbox(OutboxEvent::TellRequested(m))) => assert_eq!(m.tell_id, 7),
-            _ => panic!("an outbox path must classify as Outbox"),
-        }
-    }
-
-    #[test]
-    fn encode_is_transparent_for_domain_events() {
-        let codec = codec();
-        let event = DomainEvt {
-            note: "raw".to_owned(),
+    fn schedule_path_classifies_as_schedule_never_domain() {
+        let marker = ScheduleEvent::Fired {
+            token: ScheduleToken {
+                saga_id: SagaId::new("saga-1"),
+                name: TimerName::new("reminder"),
+            },
+            fired_at_unix_millis: 1_700_000_000_000,
         };
-        let via_envelope = SagaPersisted::Domain(event.clone())
-            .encode(&codec)
-            .expect("envelope encode");
-        let direct = <JsonCodec as Codec<DomainEvt>>::encode(&event).expect("direct encode");
 
-        assert_eq!(
-            via_envelope, direct,
-            "the envelope must return the inner codec bytes verbatim (no double-encode)"
+        match SagaPersisted::<DomainEvt>::classify(ScheduleEvent::EVENT_TYPE, &marker.encode()) {
+            Ok(SagaPersisted::Schedule(ScheduleEvent::Fired { token, .. })) => {
+                assert_eq!(token.name, TimerName::new("reminder"));
+            }
+            _ => panic!("a schedule path must classify as Schedule"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_path_classifies_as_lifecycle_never_domain() {
+        match SagaPersisted::<DomainEvt>::classify(
+            LifecycleEvent::EVENT_TYPE,
+            &LifecycleEvent::Ended.encode(),
+        ) {
+            Ok(SagaPersisted::Lifecycle(LifecycleEvent::Ended)) => {}
+            _ => panic!("a lifecycle path must classify as Lifecycle"),
+        }
+    }
+
+    /// A position is the framework's own bookkeeping, so it must never reach
+    /// the user's codec — and never be handed back as a domain event for
+    /// `Saga::apply` to fold into the saga's state.
+    #[test]
+    fn consumed_path_classifies_as_a_position_never_domain() {
+        let position = ConsumedPositionEvent {
+            source: AggregateId::new("order-stream"),
+            source_event_type: PositionSource::of(DomainEvt::EVENT_TYPE),
+            sequence: 7,
+        };
+
+        match SagaPersisted::<DomainEvt>::classify(
+            ConsumedPositionEvent::EVENT_TYPE,
+            &position.encode(),
+        ) {
+            Ok(SagaPersisted::Consumed(read)) => {
+                assert_eq!(read.source.as_str(), "order-stream");
+                assert_eq!(read.sequence, 7);
+            }
+            _ => panic!("a consumed path must classify as Consumed"),
+        }
+    }
+
+    /// A reserved path no declaration owns is refused on the strength of its
+    /// identity, with bytes that *would* decode as a domain event — so a
+    /// catch-all that judged only the payload is ruled out here, not just in
+    /// the integration test that observes the refused load.
+    #[test]
+    fn an_unknown_reserved_path_is_refused_rather_than_read_as_domain() {
+        let released = EventType::new(reserved_family("nitinol.saga"), TypeName::new("outbox"));
+        let decodes_as_domain = <JsonCodec as Codec<DomainEvt>>::encode(&DomainEvt {
+            note: "disguised".to_owned(),
+        })
+        .expect("encode");
+
+        match SagaPersisted::<DomainEvt>::classify(released, &decodes_as_domain) {
+            Err(SagaPersistedDecodeError::UnknownReservedRecord(reported)) => {
+                assert_eq!(reported, released)
+            }
+            _ => panic!(
+                "a reserved path this version declares nothing for must be refused, \
+                 however readable its bytes happen to be"
+            ),
+        }
+    }
+
+    /// The refusal is a judgement about the namespace rather than a list of
+    /// names that once existed, so a reserved path this crate has never written
+    /// is refused on the same grounds.
+    #[test]
+    fn an_unheard_of_reserved_path_is_refused_on_the_same_grounds() {
+        let unheard_of = EventType::new(
+            reserved_family("nitinol.saga"),
+            TypeName::new("from_a_later_version"),
         );
-        assert_eq!(
-            SagaPersisted::Domain(event).variant(),
-            DomainEvt::EVENT_TYPE,
-            "the envelope must expose the inner event's own wire identity"
-        );
+
+        assert!(matches!(
+            SagaPersisted::<DomainEvt>::classify(unheard_of, &[]),
+            Err(SagaPersistedDecodeError::UnknownReservedRecord(_))
+        ));
+    }
+
+    #[test]
+    fn undecodable_consumed_payload_surfaces_a_consumed_decode_error() {
+        match SagaPersisted::<DomainEvt>::classify(ConsumedPositionEvent::EVENT_TYPE, &[]) {
+            Err(SagaPersistedDecodeError::Consumed(_)) => {}
+            _ => panic!(
+                "a position with no oneof kind must surface a Consumed decode error, \
+                 so the load is refused instead of reading it as a position of its own"
+            ),
+        }
+    }
+
+    #[test]
+    fn undecodable_schedule_payload_surfaces_a_schedule_decode_error() {
+        match SagaPersisted::<DomainEvt>::classify(ScheduleEvent::EVENT_TYPE, &[]) {
+            Err(SagaPersistedDecodeError::Schedule(_)) => {}
+            _ => panic!("a schedule fact with no oneof kind must surface a Schedule decode error"),
+        }
+    }
+
+    #[test]
+    fn undecodable_lifecycle_payload_surfaces_a_lifecycle_decode_error() {
+        match SagaPersisted::<DomainEvt>::classify(LifecycleEvent::EVENT_TYPE, &[]) {
+            Err(SagaPersistedDecodeError::Lifecycle(_)) => {}
+            _ => {
+                panic!("a lifecycle fact with no oneof kind must surface a Lifecycle decode error")
+            }
+        }
     }
 
     #[test]
     fn undecodable_domain_payload_surfaces_a_domain_decode_error() {
-        let codec = codec();
-        match SagaPersisted::<DomainEvt>::classify(DomainEvt::EVENT_TYPE, b"not json", &codec) {
+        match SagaPersisted::<DomainEvt>::classify(DomainEvt::EVENT_TYPE, b"not json") {
             Err(SagaPersistedDecodeError::Domain(_)) => {}
             _ => panic!("a bad domain payload must surface a Domain decode error"),
-        }
-    }
-
-    #[test]
-    fn undecodable_outbox_payload_surfaces_an_outbox_decode_error() {
-        let codec = codec();
-        let outbox_type =
-            OutboxAppender::build_tell_requested(1, 1, None, "", jiff::Timestamp::UNIX_EPOCH)
-                .event_type;
-        match SagaPersisted::<DomainEvt>::classify(outbox_type, &[], &codec) {
-            Err(SagaPersistedDecodeError::Outbox(_)) => {}
-            _ => panic!("an outbox marker with no oneof kind must surface an Outbox decode error"),
-        }
-    }
-
-    #[test]
-    fn undecodable_dead_letter_disposition_payload_surfaces_a_disposition_decode_error() {
-        let codec = codec();
-        match SagaPersisted::<DomainEvt>::classify(
-            DeadLetterDispositionEvent::EVENT_TYPE,
-            &[],
-            &codec,
-        ) {
-            Err(SagaPersistedDecodeError::DeadLetterDisposition(_)) => {}
-            _ => panic!(
-                "a disposition marker with no oneof kind must surface a DeadLetterDisposition decode error"
-            ),
         }
     }
 }

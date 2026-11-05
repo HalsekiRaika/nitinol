@@ -23,8 +23,9 @@ pub trait AggregateTellTarget<A: Aggregate>: Clone + Send + Sync + 'static {
     /// The id of the aggregate this target dispatches to — and, verbatim, the
     /// key of the stream that aggregate persists to.
     ///
-    /// Used by higher-level consumers (e.g. a saga's tell intent) to identify
-    /// this target without a round-trip to the aggregate's process.
+    /// Used by a caller that has to name whom it is about to address — in a
+    /// log line, or as the key of something it records — without a round-trip
+    /// to the aggregate's process.
     ///
     /// Implementations **must** return the id of the actual target aggregate.
     /// An empty [`AggregateId`] is a legitimate value in the framework at large

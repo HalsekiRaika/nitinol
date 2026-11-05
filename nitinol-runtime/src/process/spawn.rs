@@ -15,11 +15,8 @@ use std::time::Duration;
 use crate::ident::Pid;
 use crate::process::dead_letter::DeadLetterProxy;
 use crate::process::driver::Driver;
-use crate::process::lifecycle::{run, LifecycleConfig};
-use crate::process::props::{
-    resolve_idle_timeout, resolve_mailbox, resolve_pipe, resolve_stash, MailboxCapacity,
-    PipeCapacity, Props, StashCapacity,
-};
+use crate::process::lifecycle::{self, LifecycleConfig};
+use crate::process::props::{self, MailboxCapacity, PipeCapacity, Props, StashCapacity};
 use crate::process::registry::ProcessRegistry;
 use crate::process::{Process, ProcessProxy};
 
@@ -28,6 +25,11 @@ use crate::process::{Process, ProcessProxy};
 ///
 /// Construct via [`SpawnEnv::top_level`] for system-level spawns (no parent)
 /// or [`SpawnEnv::child`] for child spawns (parent = self).
+///
+/// `Clone` so a caller can hand an owned copy to a detached `tokio::spawn`ed
+/// task (e.g. `ResidentTable::resolve`) that must keep spawning after the
+/// original caller's own future is gone.
+#[derive(Clone)]
 pub(crate) struct SpawnEnv {
     registry: ProcessRegistry,
     dead_letter: Option<DeadLetterProxy>,
@@ -84,7 +86,7 @@ impl SpawnEnv {
 
     /// Construct an environment for detached (parentless) spawns with no
     /// system-level default idle timeout. Used for temporary one-shot processes
-    /// (e.g. ask proxies) that are independent of any actor hierarchy.
+    /// (e.g. ask proxies) that are independent of any process hierarchy.
     pub(crate) fn detached(
         registry: ProcessRegistry,
         dead_letter: Option<DeadLetterProxy>,
@@ -109,12 +111,13 @@ impl SpawnEnv {
         props: Props<P, D>,
     ) -> ProcessProxy<P> {
         let parts = props.into_parts();
-        let timeout = resolve_idle_timeout(parts.idle_timeout, self.default_idle_timeout);
+        let timeout = props::resolve_idle_timeout(parts.idle_timeout, self.default_idle_timeout);
         let mailbox_capacity =
-            resolve_mailbox(parts.mailbox_capacity, self.default_mailbox_capacity);
-        let pipe_capacity = resolve_pipe(parts.pipe_capacity, self.default_pipe_capacity);
-        let stash_capacity = resolve_stash(parts.stash_capacity, self.default_stash_capacity);
-        run(LifecycleConfig {
+            props::resolve_mailbox(parts.mailbox_capacity, self.default_mailbox_capacity);
+        let pipe_capacity = props::resolve_pipe(parts.pipe_capacity, self.default_pipe_capacity);
+        let stash_capacity =
+            props::resolve_stash(parts.stash_capacity, self.default_stash_capacity);
+        lifecycle::run(LifecycleConfig {
             process: parts.initial,
             process_name: parts.name,
             registry: self.registry.clone(),

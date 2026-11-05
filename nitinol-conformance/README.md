@@ -21,9 +21,9 @@ async fn my_executor_conforms() {
 resulting stream back and decodes it itself — an interpreter is never graded on
 its own account of what it did. Implementing `Interpretation` and `Interpreter`
 is the whole of the wiring: classify each raw outcome into `Interpreted` /
-`Unanswered` once, at your own boundary; delegate your codec to
-`LedgerEvent::encode` / `LedgerEvent::decode`; and give `quiesce` a real
-synchronisation point rather than a wait on a clock.
+`Unanswered` once, at your own boundary, and give `quiesce` a real
+synchronisation point rather than a wait on a clock. The format needs no wiring:
+`LedgerEvent` names `LedgerCodec` as the codec that writes it.
 
 The crate depends on no interpreter and on no async runtime — neither
 `nitinol-eventsource`, `nitinol-runtime` nor `tokio` appears in its dependency

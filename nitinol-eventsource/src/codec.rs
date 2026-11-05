@@ -1,49 +1,37 @@
+//! Calling the codec a domain type named, and classifying what it says.
+//!
+//! The trait itself lives in [`nitinol_contract`], next to the
+//! [`Event`](nitinol_contract::Event) and
+//! [`Snapshotable`](nitinol_contract::Snapshotable) traits that name one, and is
+//! re-exported here because this crate's API is stated in terms of it and this
+//! is the path downstream code already imports.
+//!
+//! What this module adds is the interpreter's half. A failure of a codec is one
+//! of the ways an append or a replay can fail, so it is classified into
+//! [`CodecError`] here rather than surfacing the domain's own error type through
+//! the framework's — and it is classified in one place, so every caller reports
+//! the same failure the same way.
+
 use bytes::Bytes;
 
 use crate::error::CodecError;
 
-/// User-facing codec trait for encoding and decoding event/snapshot types.
-///
-/// Both methods are associated functions (no `&self`) — codecs are stateless.
-/// The framework promotes any `Codec<E>` to [`ErasedCodec<E>`] via the blanket
-/// impl below so it can be stored as `Arc<dyn ErasedCodec<E>>`.
-pub trait Codec<E>: Send + Sync + 'static {
-    /// The error type produced when encoding or decoding fails.
-    type Error: std::error::Error + Send + Sync + 'static;
+pub use nitinol_contract::Codec;
 
-    /// Encode `event` to raw bytes.
-    fn encode(event: &E) -> Result<Bytes, Self::Error>;
-
-    /// Decode an event from raw bytes.
-    fn decode(payload: &[u8]) -> Result<E, Self::Error>;
-}
-
-/// Framework-internal, type-erased version of [`Codec<E>`].
-///
-/// Provides `&self` methods that wrap errors as [`CodecError`], allowing the
-/// framework to store codecs as `Arc<dyn ErasedCodec<E>>` without knowing the
-/// concrete codec type.
-///
-/// Do not implement this trait directly — the blanket impl below promotes any
-/// [`Codec<E>`] automatically.
-pub trait ErasedCodec<E>: Send + Sync + 'static {
-    /// Encode `event` to raw bytes, mapping errors to [`CodecError::Encode`].
-    fn encode(&self, event: &E) -> Result<Bytes, CodecError>;
-
-    /// Decode an event from raw bytes, mapping errors to [`CodecError::Decode`].
-    fn decode(&self, payload: &[u8]) -> Result<E, CodecError>;
-}
-
-/// Blanket impl: any [`Codec<E>`] is automatically an [`ErasedCodec<E>`].
-impl<E, C> ErasedCodec<E> for C
+/// Encode `value` through `C` — the codec its type named — reporting a failure
+/// of it as [`CodecError::Encode`].
+pub fn encode<C, T>(value: &T) -> Result<Bytes, CodecError>
 where
-    C: Codec<E>,
+    C: Codec<T>,
 {
-    fn encode(&self, event: &E) -> Result<Bytes, CodecError> {
-        C::encode(event).map_err(|e| CodecError::Encode(Box::new(e)))
-    }
+    C::encode(value).map_err(|e| CodecError::Encode(Box::new(e)))
+}
 
-    fn decode(&self, payload: &[u8]) -> Result<E, CodecError> {
-        C::decode(payload).map_err(|e| CodecError::Decode(Box::new(e)))
-    }
+/// Decode a value from `payload` through `C` — the codec its type named —
+/// reporting a failure of it as [`CodecError::Decode`].
+pub fn decode<C, T>(payload: &[u8]) -> Result<T, CodecError>
+where
+    C: Codec<T>,
+{
+    C::decode(payload).map_err(|e| CodecError::Decode(Box::new(e)))
 }

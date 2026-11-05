@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 use nitinol_persistence::error::SnapshotError;
-use nitinol_persistence::store::SnapshotStore;
+use nitinol_persistence::store::Album;
 use nitinol_persistence::{AggregateId, PersistedSnapshot};
+use nitinol_runtime::ident::Pid;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 use nitinol_runtime::{IdleTimeout, ProcessSystem, Props, SupervisionStrategy};
@@ -19,11 +18,34 @@ pub(crate) struct LoadLatestSnapshot {
 
 // SnapshotPersistor
 
-/// Persistence actor that exclusively owns an `Arc<dyn SnapshotStore>`.
+/// Persistence process that exclusively owns the supplier's [`Album`].
 ///
-/// All snapshot operations are serialized through this actor's message loop.
+/// All snapshot operations are serialized through this process's message loop.
+///
+/// # One per system, and no way to make a second
+///
+/// [`EventSourceSystem::snapshot_persistor`](crate::system::EventSourceSystem::snapshot_persistor)
+/// is the only way to reach one, and it answers with the single process its
+/// node memoises — the same one an activation of a
+/// [`Latest`](nitinol_contract::Latest) aggregate recovers through. There is no
+/// entry point that starts a persistor over a store a caller named, because the
+/// snapshot contract is written for a single consumer serialising its calls:
+///
+/// ```compile_fail
+/// # use nitinol_eventsource::SnapshotPersistor;
+/// # use nitinol_persistence::provider::PersistenceProvider;
+/// # use nitinol_persistence::store::InMemoryStore;
+/// # use nitinol_runtime::ProcessSystem;
+/// # async fn wiring() {
+/// # let ps = ProcessSystem::new().await;
+/// let persistence = PersistenceProvider::new(InMemoryStore::default());
+/// // `SnapshotPersistor::spawn` is not public: a system distributes the one
+/// // persistor it holds
+/// SnapshotPersistor::spawn(&ps, &persistence).await;
+/// # }
+/// ```
 pub struct SnapshotPersistor {
-    store: Arc<dyn SnapshotStore>,
+    store: Album,
 }
 
 impl Process for SnapshotPersistor {}
@@ -55,16 +77,20 @@ impl Receive<LoadLatestSnapshot> for SnapshotPersistor {
 }
 
 impl SnapshotPersistor {
-    /// Spawn a `SnapshotPersistor` on the given system and return a typed reference.
+    /// Spawn a `SnapshotPersistor` on `system`, over `store`, and return a typed
+    /// reference.
     ///
-    /// - Supervision: `Resume` — actor stays alive after handler errors.
+    /// - Supervision: `Resume` — the process stays alive after handler errors.
     /// - Idle timeout: `Persistent` — never stopped due to inactivity.
-    pub async fn spawn(
-        system: &ProcessSystem,
-        store: Arc<dyn SnapshotStore>,
-    ) -> SnapshotPersistorProxy {
+    ///
+    /// Crate-private, and called from exactly one place: the memoised cell a
+    /// system's node holds. The snapshot contract is written for a single
+    /// consumer serialising its calls, so a second process over one store would
+    /// be two consumers — which is why there is no public form of this and no
+    /// way to start a second persistor at all.
+    pub(crate) async fn spawn(system: &ProcessSystem, store: Album) -> SnapshotPersistorProxy {
         let props = Props::new(move || SnapshotPersistor {
-            store: Arc::clone(&store),
+            store: store.clone(),
         })
         .with_supervision_strategy(SupervisionStrategy::Resume)
         .with_idle_timeout(IdleTimeout::Persistent);
@@ -80,14 +106,25 @@ impl From<ProcessProxy<SnapshotPersistor>> for SnapshotPersistorProxy {
 
 // SnapshotPersistorRef
 
-/// Typed, cloneable handle to a `SnapshotPersistor` actor.
+/// Typed, cloneable handle to a `SnapshotPersistor` process.
 ///
 /// Callers save and load snapshots without holding any direct store reference.
 #[derive(Clone)]
 pub struct SnapshotPersistorProxy(ProcessProxy<SnapshotPersistor>);
 
 impl SnapshotPersistorProxy {
-    /// Save a snapshot via the `SnapshotPersistor` actor.
+    /// The process this handle addresses.
+    ///
+    /// What it is for is telling one persistor from two: the snapshot contract
+    /// is written for a single consumer serialising its calls, and a system
+    /// handing back a second process over one store would be two consumers —
+    /// which a round trip through the store cannot see, because both would
+    /// pass it.
+    pub fn pid(&self) -> Pid {
+        self.0.pid()
+    }
+
+    /// Save a snapshot via the `SnapshotPersistor` process.
     pub async fn save(&self, snapshot: PersistedSnapshot) -> Result<(), SnapshotError> {
         self.0
             .ask(SaveSnapshot { snapshot })
@@ -98,7 +135,7 @@ impl SnapshotPersistorProxy {
             })
     }
 
-    /// Load the latest snapshot via the `SnapshotPersistor` actor.
+    /// Load the latest snapshot via the `SnapshotPersistor` process.
     pub async fn load_latest(
         &self,
         aggregate_id: AggregateId,

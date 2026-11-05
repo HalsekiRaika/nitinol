@@ -1,0 +1,652 @@
+# Benchmarks
+
+What the single-node paths cost, measured with [criterion].
+
+These are a **baseline**, not a target. Nothing here says what any of it ought
+to cost: the point is to have a number from before a change so that a number
+from after it can be read as a regression, an improvement, or noise. Reading a
+conclusion off one of these — that something is too slow, that something needs
+optimising — is a separate judgement, and this file does not make it.
+
+criterion is a dev-dependency only, declared once in the workspace's
+`[workspace.dependencies]` with `default-features = false` and the features
+`async_tokio` and `cargo_bench_support`. No library gained a dependency, and
+`plotters` and `rayon` are left out — so **there are no HTML reports**, and what
+a run reports is what it prints.
+
+[criterion]: https://bheisler.github.io/criterion.rs/book/index.html
+
+## What there is
+
+| Crate | Bench target | Benchmark | What is timed | N |
+|---|---|---|---|---|
+| `nitinol-persistence` | `in_memory_event_store` | `in_memory_append/events/N` | the `append` call; each iteration appends under a key of its own into a store holding nothing | 1, 100 |
+| `nitinol-persistence` | `in_memory_event_store` | `in_memory_load/by_stream/N` | `load(by_stream)` and pulling every record it serves | 1, 100, 1000 |
+| `nitinol-persistence` | `in_memory_event_store` | `in_memory_load/from_global/N` | `load(from_global(1))` and pulling every record it serves | 1, 100, 1000 |
+| `nitinol-eventsource` | `event_source_system` | `activation/replay/N` | resolving an identity on a system that has no activation for it, and the `exec` that reads how far the replay got | 1, 100, 1000 |
+| `nitinol-eventsource` | `event_source_system` | `activation/snapshot/N` | the same, for an aggregate recovering from a snapshot taken at the stream's own length — so nothing is replayed after it | 1, 100, 1000 |
+| `nitinol-eventsource` | `event_source_system` | `projector_catchup/from_aggregate/N` | starting a projector and waiting until its read model has counted the whole stream | 1, 100, 1000 |
+| `nitinol-saga` | `saga_round_trip` | `saga_round_trip/poll_1ms` | `ask(PlaceOrder)` → the manager's subscription → the decision it journals → the delivery host → `ask(Reserve)` → the query that sees the reservation | — |
+| `nitinol-sqlx` | `postgres` | `postgres_event_store/append/N` | the `append` call, which is one round trip to the database | 1, 100 |
+| `nitinol-sqlx` | `postgres` | `postgres_offset_store/save_in_tx` | `pool.begin()`, the save inside that transaction, and the commit | — |
+| `nitinol-sqlx` | `postgres_system` | `postgres_activation/replay/N` | `activation/replay/N` over `PostgresStore`: resolving an identity on a system that has no activation for it, and the `exec` that reads how far the replay of N rows got | 1, 100, 1000, 10000 |
+| `nitinol-sqlx` | `postgres_system` | `postgres_activation/snapshot/N` | the same, for an aggregate recovering from a snapshot row taken at the stream's own length — so nothing is replayed after it | 1, 100, 1000, 10000 |
+| `nitinol-sqlx` | `postgres_system` | `postgres_projection/exactly_once/N` | starting a projector carrying a `TxProvider` over the run's pool, waiting until its in-memory read model has counted the whole stream, and waiting for the commit of that batch to return — one read and one batch: `begin`, `project` once per record inside that transaction, one offset save and one commit | 100, 1000 |
+
+What falls outside each timed window — seeding, wiring, building the records an
+append is handed — is stated on the benchmark itself, in the rustdoc of the file
+it lives in. So is what the iterations of one benchmark do to each other, which
+is worth reading before comparing two runs:
+
+| Benchmark | Carried in the number |
+|---|---|
+| `projector_catchup/*` | **The catch-up itself, and no poll interval when one read takes the whole stream.** A projector's poller reads as soon as it starts, so the framework's default interval of 250 ms — which the benchmark keeps, naming none — is in the window only for a turn after the first, one an interval after the read before it that did not reach the end of the stream. A number from before that first read stopped waiting carries about 250 ms of interval and is not comparable to one from after. |
+| `saga_round_trip/poll_1ms` | Both poll intervals — the manager's subscription and the delivery host's — named at one millisecond each, which is what the benchmark's name records. A number taken at another cadence is a different measurement. Every iteration also writes to the one in-memory journal, which this store walks in full on every load, so a run drifts upward as it goes. |
+| `activation/*` | Nothing in the window, but an idle activation per iteration stays on the process system: a live aggregate cannot be stopped from outside it. The group's `sample_size` and `measurement_time` are what bound how many. |
+| `postgres_event_store/*`, `postgres_offset_store/*` | Rows that nothing removes, so a later iteration writes into a fuller table than an earlier one. |
+| `postgres_activation/*` | An idle activation per iteration stays on the process system, as with `activation/*`. The rows read are the ones seeded before the group and no more: an activation only reads. |
+| `postgres_projection/exactly_once/*` | One batch: both lengths are within the default batch limit of 1000, so the catch-up is one read and one transaction — its `begin`, N runs of `project` inside it, one offset save and one commit. The window runs until the batch's save and commit have returned, so it holds that **one commit**; that the offset row was left at N is checked after the window closes. A number from before the projector settled a batch as one unit (N − 1 commits in the window) and one from just after it, when the window closed at the last `project` (no commit in the window), are not comparable to one from now. Each iteration's projection has an identifier of its own and leaves one offset row behind. The poll interval is not in it, for the reason given for `projector_catchup/*`. The one commit is one `fdatasync`, and on the bench host's virtual disk that is about 14 ms, served on a tick: a sample above about 25 ms per iteration holds a commit that waited several ticks or a stall of the disk, not more work. Compare the fast group of samples, not the median (the 2026-10-31 set). |
+
+## Running them
+
+```console
+$ cargo bench -p nitinol-persistence
+$ cargo bench -p nitinol-eventsource
+$ cargo bench -p nitinol-saga
+$ cargo bench -p nitinol-sqlx
+```
+
+One crate at a time rather than `cargo bench --workspace`: `providers/` and the
+examples are workspace members outside `default-members`, and the examples carry
+no benchmarks at all.
+
+Each crate's benchmarks are sized to finish in well under a minute on the
+machine in the table below, which is also what keeps them cheap enough to run
+before and after a change rather than once a release.
+
+`nitinol-sqlx` carries two bench targets, and `--bench postgres` or `--bench
+postgres_system` runs one of them alone: `postgres` is the store's two write
+paths and takes seconds, while `postgres_system` is mostly measurement time —
+a second for each activation benchmark, and about 13 s on that machine for
+its projection group, warm-up included.
+
+`cargo test --workspace --all-targets` runs every benchmark **once** without
+measuring it, which is what catches a benchmark that no longer compiles or no
+longer completes. That is a plain part of the test run and needs nothing added
+to the command. The quality gate (`.takt/quality-gates/rust-quality.sh`) runs
+its tests through `cargo nextest`, which does not run bench targets, so it
+runs `cargo test --workspace --benches` after them for the same once-over —
+with `DATABASE_URL` unset on purpose, so the provider's benchmarks skip rather
+than measure inside the gate.
+
+### The provider's benchmarks need a database
+
+They run against the one `DATABASE_URL` names and against nothing else:
+
+```console
+$ DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres cargo bench -p nitinol-sqlx
+```
+
+With no `DATABASE_URL`, the run says so on stderr and exits successfully, having
+registered no benchmark at all:
+
+```console
+$ cargo bench -p nitinol-sqlx
+nitinol-sqlx benches: nothing to run against, so nothing was measured (no DATABASE_URL)
+nitinol-sqlx benches: nothing to run against, so nothing was measured (no DATABASE_URL)
+```
+
+One line per bench target, and each has registered nothing.
+
+There is deliberately no fallback that starts a database. A throwaway container
+brought up per run measures that container's cold caches and its host's spare
+capacity, and a number like that is not a baseline anything can be compared
+against later. The contract tests do start one — judging a clause needs any
+database, while measuring needs the *same* database twice.
+
+A database to point it at, kept between runs:
+
+```console
+$ docker run -d --name nitinol-bench-pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:17-alpine
+```
+
+`providers/nitinol-sqlx/README.md` has a compose file for the same thing.
+
+Each run creates a schema of its own — `nitinol_sqlx_bench_<pid>` — migrates it,
+and drops it on the way out. A **panic** leaves it behind, so a crashed run is
+cleaned up by hand:
+
+```console
+$ psql "$DATABASE_URL" -c "DROP SCHEMA nitinol_sqlx_bench_<pid> CASCADE"
+```
+
+## Comparing two runs
+
+Save a baseline, change something, and compare against it:
+
+```console
+$ cargo bench -p nitinol-persistence -- --save-baseline first
+$ cargo bench -p nitinol-persistence -- --baseline first
+```
+
+The second run prints a `change:` line per benchmark and says whether it reads
+as an improvement, a regression, or no change at all.
+
+Arguments after `--` reach criterion directly. They can do that because every
+crate carrying benchmarks sets `bench = false` on its `[lib]` target: a library
+is otherwise a benchmark target in its own right, run through libtest's harness
+rather than criterion's, and that harness would take `--save-baseline` for its
+own and reject it. Nothing in these libraries is a benchmark, so there is
+nothing lost by leaving the argument to criterion.
+
+Baselines are written under `target/criterion/<benchmark>/<name>/`, which
+`.gitignore` keeps out of the repository: a baseline belongs to the machine it
+was taken on, so there is nothing to commit and nothing to compare across two
+of them.
+
+## Measurements
+
+One row per benchmark per measurement run. The value is criterion's point
+estimate for the median, and it is only comparable to another row taken on
+the same machine.
+
+### 2026-10-19, `cc87e8a`
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8) |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Toolchain | rustc 1.98.1, cargo 1.98.1 |
+| Database | PostgreSQL 17.11 (`postgres:17-alpine`), in a container on the same machine, default settings |
+
+| Crate | Benchmark | Median |
+|---|---|---|
+| `nitinol-persistence` | `in_memory_append/events/1` | 331.05 ns |
+| `nitinol-persistence` | `in_memory_append/events/100` | 12.693 µs |
+| `nitinol-persistence` | `in_memory_load/by_stream/1` | 165.68 ns |
+| `nitinol-persistence` | `in_memory_load/by_stream/100` | 10.069 µs |
+| `nitinol-persistence` | `in_memory_load/by_stream/1000` | 95.698 µs |
+| `nitinol-persistence` | `in_memory_load/from_global/1` | 151.06 ns |
+| `nitinol-persistence` | `in_memory_load/from_global/100` | 9.9895 µs |
+| `nitinol-persistence` | `in_memory_load/from_global/1000` | 96.295 µs |
+| `nitinol-eventsource` | `activation/replay/1` | 36.857 µs |
+| `nitinol-eventsource` | `activation/replay/100` | 46.700 µs |
+| `nitinol-eventsource` | `activation/replay/1000` | 153.35 µs |
+| `nitinol-eventsource` | `activation/snapshot/1` | 29.939 µs |
+| `nitinol-eventsource` | `activation/snapshot/100` | 33.097 µs |
+| `nitinol-eventsource` | `activation/snapshot/1000` | 61.659 µs |
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/1` | 251.25 ms |
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/100` | 251.79 ms |
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/1000` | 255.09 ms |
+| `nitinol-saga` | `saga_round_trip/poll_1ms` | 2.9496 ms |
+| `nitinol-sqlx` | `postgres_event_store/append/1` | 14.085 ms |
+| `nitinol-sqlx` | `postgres_event_store/append/100` | 14.127 ms |
+| `nitinol-sqlx` | `postgres_offset_store/save_in_tx` | 14.106 ms |
+
+Three things about this set, so that the next person reading it does not mistake
+them for properties of the code:
+
+* The catch-up numbers are the 250 ms poll interval and very little else: at
+  this commit a projector's poller waited out its interval before its first
+  read. They are in here because that is the number a deployment waited, not
+  because the catch-up is slow. The first read no longer waits, so a later set
+  carries what the table above says instead and is not comparable with these.
+* The Postgres numbers are a commit each, against a container writing through an
+  overlay filesystem with `fsync` on. They say what this machine's durability
+  costs; another database will read differently, and a managed one across a
+  network differently again.
+* `postgres_event_store/append/100` is barely above `append/1`, which is what
+  one round trip carrying a hundred rows versus one row looks like when the
+  commit dominates.
+
+### 2026-10-24, `4443f69` + #167
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8) |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Toolchain | rustc 1.98.1, cargo 1.98.1 |
+
+| Crate | Benchmark | Median |
+|---|---|---|
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/1` | 36.009 µs |
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/100` | 475.07 µs |
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/1000` | 4.5047 ms |
+
+Measured on dev `4443f69` with the #167 changes applied, before they were
+merged.
+
+Only the catch-up benchmarks were run again; the rest of the 2026-10-19 set
+still stands for this machine. The first read no longer waits out the poll
+interval, so these numbers are the catch-up itself, as the table at the top
+says, and they grow with the stream's length where the earlier ones did not.
+
+### 2026-10-24, `315d6ab` + #169
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8) |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Toolchain | rustc 1.98.1, cargo 1.98.1 |
+| Database | PostgreSQL 17.11 (`postgres:17-alpine`), in a container on the same machine, default settings, `fsync` on. The container's root is an overlay filesystem; its data directory is a Docker volume on the host's ext4 |
+
+| Crate | Benchmark | Median |
+|---|---|---|
+| `nitinol-sqlx` | `postgres_event_store/append/1` | 14.267 ms |
+| `nitinol-sqlx` | `postgres_event_store/append/100` | 14.266 ms |
+| `nitinol-sqlx` | `postgres_offset_store/save_in_tx` | 14.130 ms |
+| `nitinol-sqlx` | `postgres_activation/replay/1` | 356.55 µs |
+| `nitinol-sqlx` | `postgres_activation/replay/100` | 523.45 µs |
+| `nitinol-sqlx` | `postgres_activation/replay/1000` | 1.5437 ms |
+| `nitinol-sqlx` | `postgres_activation/replay/10000` | 12.569 ms |
+| `nitinol-sqlx` | `postgres_activation/snapshot/1` | 674.16 µs |
+| `nitinol-sqlx` | `postgres_activation/snapshot/100` | 650.79 µs |
+| `nitinol-sqlx` | `postgres_activation/snapshot/1000` | 653.22 µs |
+| `nitinol-sqlx` | `postgres_activation/snapshot/10000` | 1.5320 ms |
+| `nitinol-sqlx` | `postgres_projection/exactly_once/100` | 1.4401 s (69.4 events/s) |
+| `nitinol-sqlx` | `postgres_projection/exactly_once/1000` | 18.596 s (53.8 events/s) |
+
+Measured on dev `315d6ab` with the #169 changes applied, before they were
+merged, in one pass of
+`DATABASE_URL=postgres://postgres:postgres@localhost:55432/postgres cargo bench -p nitinol-sqlx`,
+which took 4 min 23 s. Events per second is N over the median; criterion's own
+`thrpt` line divides by the mean instead and reads lower.
+
+* **Snapshot recovery is flat up to 1000 and not at 10000.** At 1, 100 and 1000
+  it is about 650 µs whatever the length, where the in-memory
+  `activation/snapshot/N` grows from 30 to 62 µs. Below 1000 it is *slower*
+  than a replay, because it is two queries — the snapshot row, then the journal
+  above it — against one. At 10000 its median rose to 1.53 ms, and its 95 %
+  interval ran from 0.67 to 3.67 ms; a second run of the snapshot benchmarks
+  alone gave 3.66 ms, tightly. What the length changes there is the size of the
+  whole journal (22 202 rows by then, against 2 202 at the `1000` step), not the
+  rows replayed, which are none. The likely cause is the plan Postgres caches
+  for the load statement: it is one prepared statement for every kind of query
+  (`$1 IS NULL OR persistence_id = $1`, …, `ORDER BY global_sequence`), and
+  `EXPLAIN ANALYZE` over the same 22 202 rows shows its generic plan walking
+  the `global_sequence` index and filtering every row out (about 3.6–4.2 ms),
+  where a plan built for the actual arguments reads the primary key and takes
+  0.05 ms. Which plan each pooled connection held during the run was not
+  observed.
+* **An `ExactlyOnce` catch-up is about one commit per event, when it is
+  fast.** `save_in_tx` — a begin, one save, a commit — is 14.1 ms here, so one
+  transaction per event caps a projection near 71 events/s. `exactly_once/100`
+  came out at 14.4 ms per event, 69.4 events/s. `exactly_once/1000`'s samples
+  fell into two groups: five at 23.5–29.1 s and five at 13.3–13.7 s, about
+  13.5 ms per event, and the median of 18.6 s lies between them and describes
+  neither. A second run of the projection benchmarks alone gave 13.25 s for
+  1000 (two slow samples, then eight at 12.4–15.4 s) but 2.63 s for 100. So the
+  same work costs 13 or 25–29 ms an event from one stretch of a run to the
+  next, and what moves it was not established by these runs; read a difference
+  between two runs of these against that spread.
+
+### 2026-10-29, `7908045` + #168
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8) |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Toolchain | rustc 1.98.1, cargo 1.98.1 |
+| Database | PostgreSQL 17.11 (`postgres:17-alpine`), in the `nitinol-bench-pg` container on the same machine, default settings |
+
+| Crate | Benchmark | Median | Samples | Before |
+|---|---|---|---|---|
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/1` | 39.605 µs | 37.6–41.5 µs | 36.009 µs |
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/100` | 207.69 µs | 199.7–215.4 µs | 475.07 µs |
+| `nitinol-eventsource` | `projector_catchup/from_aggregate/1000` | 1.8238 ms | 1.736–1.887 ms | 4.5047 ms |
+| `nitinol-sqlx` | `postgres_projection/exactly_once/100` | 1.4797 ms | 1.401–1.584 ms | 1.4401 s |
+| `nitinol-sqlx` | `postgres_projection/exactly_once/1000` | 4.2102 ms | 4.153–4.387 ms | 18.596 s |
+
+Measured on dev `7908045` with the #168 changes applied, before they were
+merged, with
+`DATABASE_URL=postgres://postgres:postgres@localhost:55432/postgres cargo bench -p nitinol-sqlx --bench postgres_system -- postgres_projection`
+and `cargo bench -p nitinol-eventsource -- projector_catchup`. Only these were
+run again; the rest of the earlier sets still stands for this machine. "Before"
+is the median the 2026-10-24 sets record — `4443f69` + #167 for the catch-up,
+`315d6ab` + #169 for the projection — and was not measured again in this run.
+"Samples" is the per-iteration time of the fastest and the slowest of
+criterion's ten samples.
+
+* **The Postgres numbers no longer hold a commit.** The projector now settles
+  what one read returned as one batch, and both lengths are within the default
+  limit of 1000, so a catch-up is one transaction. The window closes when the
+  last `project` has run, which is before that transaction's one save and
+  commit (as the table at the top then said), so what is left in it is the
+  read, the `begin` and N runs of `project` in memory. The commit — about
+  14 ms here, the `save_in_tx` of the 2026-10-24 set — is still paid once per
+  catch-up, outside the window. Before, the window held N − 1 of them, which
+  is the difference between the two columns: a 1000-record catch-up that paid
+  about 14 s of commits pays one. Adding one such commit back to the median
+  gives about 18 ms for 1000 records against 18.6 s — an estimate, since the
+  commit was not timed in this run.
+* **No two groups this time.** `exactly_once/1000` had split into samples at
+  13.3–13.7 s and at 23.5–29.1 s; its ten samples here fall within 4.15–4.39 ms
+  of one another. The slow stretches were in the commits, which this window no
+  longer holds, so this says nothing about whether they still happen to the one
+  commit a catch-up pays.
+* **The in-memory catch-up gained at length.** At 100 and 1000 it is less than
+  half what it was. What the change took out of each record's path is an
+  offset save and an `ask` from the poller to the projector; how the remaining
+  time divides was not profiled. At 1 it reads about 10 % higher, 39.6 µs
+  against 36.0 µs, where the work is one record and one save either way.
+  Whether that is the batch's own bookkeeping or a difference between the two
+  days' runs was not established.
+
+### 2026-10-29, `7877839` + #174
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8) |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Toolchain | rustc 1.98.1, cargo 1.98.1 |
+| Database | PostgreSQL 17.11 (`postgres:17-alpine`), in the `nitinol-bench-pg` container on the same machine, default settings |
+
+| Crate | Benchmark | Median | Samples | Before |
+|---|---|---|---|---|
+| `nitinol-sqlx` | `postgres_projection/exactly_once/100` | 17.422 ms | 17.10–20.27 ms | 1.4797 ms |
+| `nitinol-sqlx` | `postgres_projection/exactly_once/1000` | 19.161 ms | 17.84–77.94 ms | 4.2102 ms |
+
+Measured on dev `7877839` with the #174 changes applied, before they were
+merged, with
+`DATABASE_URL=postgres://postgres:postgres@localhost:55432/postgres cargo bench -p nitinol-sqlx --bench postgres_system -- postgres_projection`.
+Only these were run again; the rest of the earlier sets still stands for this
+machine. "Samples" is the per-iteration time of the fastest and the slowest of
+criterion's ten samples. "Before" is the median the `7908045` + #168 set
+records and was not measured again in this run.
+
+* **Before and after do not measure the same thing.** The window now closes
+  when the batch's offset save and commit have returned, so it holds the read,
+  the `begin`, N runs of `project`, one save and one commit. The "Before"
+  column is the #168 window, which closed at the last `project` and held no
+  commit, so the two columns are not comparable; neither is the N − 1 commits
+  of the sets before #168.
+* **The estimate held.** The #168 set estimated about 18 ms for 1000 records
+  once the one commit was added back; this run's median is 19.161 ms, and two
+  later runs of the same command gave 18.200 ms and 17.892 ms.
+* **Two groups again, in this run.** The 2026-10-24 set saw samples split
+  into a 13 ms and a 25–29 ms group an event. Here `exactly_once/1000`'s ten
+  samples fell into six at 17.84–19.33 ms and four at 40.48–77.94 ms, which is
+  where the spread above comes from. The two later runs showed no such split:
+  17.72–23.35 ms and 17.74–20.02 ms. `exactly_once/100` had no second group in
+  any of the three; its one sample apart from the rest was a single 26.16 ms
+  in the third.
+
+### 2026-10-30, `d34c638` + #172
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8) |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Toolchain | rustc 1.98.1, cargo 1.98.1 |
+| Database | PostgreSQL 17.11 (`postgres:17-alpine`), in the `nitinol-bench-pg` container on the same machine, default settings |
+
+| Crate | Benchmark | Median | Samples | Before |
+|---|---|---|---|---|
+| `nitinol-sqlx` | `postgres_activation/replay/1` | 327.02 µs | 309.0–342.2 µs | 396.92 µs |
+| `nitinol-sqlx` | `postgres_activation/replay/100` | 519.42 µs | 491.0–558.6 µs | 580.40 µs |
+| `nitinol-sqlx` | `postgres_activation/replay/1000` | 1.6698 ms | 1.574–1.835 ms | 1.7505 ms |
+| `nitinol-sqlx` | `postgres_activation/replay/10000` | 14.622 ms | 12.97–15.70 ms | 12.202 ms |
+| `nitinol-sqlx` | `postgres_activation/snapshot/1` | 681.23 µs | 627.7–741.6 µs | 738.23 µs |
+| `nitinol-sqlx` | `postgres_activation/snapshot/100` | 671.34 µs | 644.7–698.5 µs | 728.97 µs |
+| `nitinol-sqlx` | `postgres_activation/snapshot/1000` | 649.05 µs | 620.0–665.6 µs | 702.36 µs |
+| `nitinol-sqlx` | `postgres_activation/snapshot/10000` | 687.17 µs | 631.9–702.5 µs | 1.3059 ms |
+
+Measured with
+`DATABASE_URL=postgres://postgres:postgres@localhost:55432/postgres cargo bench -p nitinol-sqlx --bench postgres_system -- postgres_activation`,
+"Before" on dev `d34c638` as it stands and the median on `d34c638` with the
+#172 changes applied, before they were merged, in the same sitting. Only these
+were run; the rest of the earlier sets still stands for this machine.
+"Samples" is the per-iteration time of the fastest and the slowest of
+criterion's ten samples. By the `10000` step the journal holds 22 202 rows.
+
+* **The slow recoveries were the generic plan.** Before the change
+  `snapshot/10000` split into five samples at 0.68–0.77 ms and five at
+  1.84–1.92 ms, and a second run of the same command split the same way
+  (1.3259 ms; five at 0.68–0.83 ms, five at 1.83–2.15 ms). The same run with
+  `SET plan_cache_mode = force_custom_plan` added to the benchmark pool's
+  connections — for that run only, not kept — gave 786.28 µs, all ten samples
+  within 739.5–825.1 µs. `EXPLAIN` over a 22 202-row journal laid out the way
+  the benchmark seeds it shows what the generic plan did: the old statement's
+  generic plan walks `nitinol_journal_global_sequence_key` with every
+  condition as a filter, and for the snapshotted stream above its snapshot it
+  removed all 22 202 rows to return none, in 4.8–5.1 ms; the plan built for
+  the actual arguments reads `nitinol_journal_pkey` and takes 0.04 ms. A
+  statement prepared in that session and run five times with a replay's
+  arguments switched to the generic plan on the sixth run, the snapshot
+  recovery.
+* **After it, snapshot recovery is flat.** `snapshot/10000` is 38 µs above
+  `snapshot/1000`, and its samples no longer split; a second run gave
+  683.13 µs against 666.52 µs. The statement a recovery now runs names the
+  stream and the sequence and nothing else, and its generic plan reads the
+  primary key: 0.05 ms for the same recovery. A limit is written into a
+  statement only when the query has one, because a `LIMIT` parameter alone is
+  enough for the generic plan to walk the global order again — `EXPLAIN
+  (GENERIC_PLAN)` of the stream-and-sequence statement with `LIMIT $3` added
+  goes back to `nitinol_journal_global_sequence_key`.
+* **`replay/10000` moves by as much between two runs as between before and
+  after.** Its median is 14.622 ms here against 12.202 ms, but the second run
+  of each gave 13.190 ms after and 13.395 ms before, and the samples of all
+  four runs overlap within 12.0–15.7 ms. Measured in the database alone, the
+  replay's statement is not slower: 3.4–3.9 ms for the new statement's
+  generic plan, against 5.9–6.7 ms for the old statement's generic plan and
+  4.4–4.8 ms for its custom one. At 1, 100 and 1000 both runs of the replay
+  are below their "Before".
+* **Below 1000 a snapshot is still slower than a replay.** It is two queries —
+  the snapshot row, then the journal above it — against one, which this change
+  does not touch.
+
+### 2026-10-31, `39b6801` + #173
+
+Why `postgres_projection/exactly_once/*` splits into two groups. Nothing in the
+code changed for this set; the bench ran twice with the server logging every
+statement's duration (`log_min_duration_statement = 0`,
+`track_wal_io_timing = on`, both reset afterwards), and the host's disk was
+measured on its own.
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 7 2700X, 8 cores (`nproc` = 8), a QEMU guest |
+| Disk | one QEMU virtual disk (`sda`, write-back cache); the container's volume and the workspace share it |
+| OS | NixOS 26.05, Linux 6.18.50 |
+| Database | PostgreSQL 17.11 (`postgres:17-alpine`), in the `nitinol-bench-pg` container on the same machine, default settings (`synchronous_commit = on`, `wal_sync_method = fdatasync`) |
+
+| Run | Benchmark | Samples (ms per iteration, sorted) |
+|---|---|---|
+| 1 | `exactly_once/100` | 17.02 17.25 17.30 17.42 17.46 17.49 17.79 17.84 17.94 **320.98** |
+| 1 | `exactly_once/1000` | 17.65 17.78 17.81 17.97 18.04 18.59 19.59 20.59 **93.03 122.33** |
+| 2 | `exactly_once/100` | 17.15 17.24 17.35 17.51 17.51 17.54 17.56 17.62 17.72 17.84 |
+| 2 | `exactly_once/1000` | 17.78 17.78 17.81 17.85 17.90 18.04 18.31 18.51 18.57 23.73 |
+
+What the server's log says about the commits inside those windows:
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| `COMMIT`s logged | 258 | 283 |
+| at 10–15 ms | 195 | 231 |
+| at 15–20 ms | 40 | 35 |
+| at 25–80 ms | 11 | 14 |
+| at 100–330 ms | 3 | 2 |
+| at 1.3–1.6 s | 3 | 0 |
+| `ROLLBACK`s | 0 | 0 |
+| WAL syncs, mean (`pg_stat_wal`) | 273, 33.5 ms | 320, 16.7 ms |
+
+* **A commit is one `fdatasync` of the WAL, and on this disk that is about
+  14 ms.** `pg_test_fsync` inside the container: `fdatasync` 71 ops/s
+  (14.0 ms an op), `open_datasync` the same, two 8 kB writes under
+  `open_datasync` 29.7 ms. Measured from the host with `dd oflag=dsync`, 300
+  writes landed in peaks near 9, 23, 37 and 53 ms, about 14 ms apart: the
+  virtual disk completes flushes on something like a 14 ms tick, and a sync
+  waits one tick or several. Everything else in the transaction is under a
+  millisecond: the `BEGIN` 0.03 ms, the journal read 0.45 ms on average, the
+  offset upsert 0.07 ms. One iteration at 17.5 ms is that one sync plus the
+  round trips around it, which is why neither length can go below about 17 ms
+  here and why `/100` and `/1000` are 0.3 ms apart.
+* **The second group is the same commit waiting longer for the disk.** Each
+  iteration is still one `BEGIN`, one read, one upsert and one `COMMIT` — the
+  log shows no second transaction and no rollback, so neither an extra round
+  trip nor a refused offset and redelivery is behind it. What varies is the
+  `COMMIT`: a few in every run take two to five ticks (25–80 ms), and run 1
+  had three that took 1.3–1.6 s, about 5.5 s apart. One such stall inside a
+  sample of 18 iterations adds 70–90 ms to that sample's mean, and a 1.6 s
+  stall inside a sample of 5 adds 320 ms, which are the slow samples above.
+  Run 2, under the same logging a minute later, had no stall and no slow
+  sample. The 2026-10-24 set's 13 ms and 25–29 ms per event — one commit per
+  event then — reads as one tick against two for each commit over a stretch;
+  that shape of the bench no longer exists, so this is the reading, not a
+  re-measurement.
+* **Not checkpoints.** `log_checkpoints` is on and no checkpoint started or
+  finished inside either window; the checkpointer's timed count moved by one
+  over the whole hour. What spaced the three stalls 5.5 s apart was not
+  identified; the guest's dirty-page writeback runs every 5 s
+  (`vm.dirty_writeback_centisecs = 500`), and the statement logging itself was
+  writing to the journal during run 1, so that run is not clean evidence for
+  the stall's cause, only for its size and its effect on the samples.
+* **How to read these two rows.** Compare the fast group, not the median: the
+  lower eight or nine samples of a run sit within a millisecond of each other
+  and are the cost of the work; a sample above about 25 ms per iteration holds
+  a disk stall and says nothing about the code. For a before/after, put the two
+  sorted sample lists side by side and compare their lower ends; a median can
+  land on either side of a stall. On this host no number that holds a commit
+  can be below about 14 ms, and a difference smaller than one tick between two
+  one-commit benchmarks is not a difference the disk can show.
+
+## What the quality gate itself costs
+
+The gate (`.takt/quality-gates/rust-quality.sh`) is paid on every TAKT step
+and by anyone running it by hand, so its own time is measured here the same
+way the benchmarks are: on the machine in the tables above, against a target
+directory that starts empty, with sccache holding nothing for the toolchain in
+use. That is what a TAKT worktree pays, since each run is a fresh clone.
+
+### 2026-10-30, `423e17d`, before and after #166
+
+| Phase | Before | After |
+|---|---|---|
+| `cargo fmt` | 2 s | 1 s |
+| `cargo clippy --workspace --all-targets` | 76 s | 46 s |
+| `cargo dylint --all` | 87 s | 95 s |
+| building the test targets | 1195 s | about 760 s |
+| running the tests | 596 s, 302 binaries one after another | 45 s, 1306 tests across 302 binaries under nextest |
+| the gate as a whole | about 33 min | 16 min |
+| `target/` afterwards | 50 GB | 25 GB |
+
+"Before" is dev `423e17d` as it was; "after" is the same tree with the #166
+changes: mold as the linker (`.cargo/config.toml`), `debug =
+"line-tables-only"` for the dev and test profiles, the umbrella crate's
+`build.rs` removed, and the gate running its tests through `cargo nextest`.
+The build and run times under "after" are read off one gate run whose test
+phase took 814 s in all, with the nextest run measured again warm at 45 s; the
+build figure is the remainder and is approximate.
+
+* **The umbrella crate's `build.rs` rebuilt most of the workspace on every
+  cargo invocation.** It declared `rerun-if-changed=migrations` for a directory
+  that does not exist, and cargo treats a missing path as changed every time.
+  Every `cargo test` after the first rebuilt the umbrella and everything that
+  depends on it — the examples, `nitinol-saga`'s 120 test binaries, the
+  macros' tests — which took 748 s on this machine before a no-op second build
+  of 29 s. A gate pays this once per cargo command, so it hid inside the gate's
+  numbers; a developer running `cargo test` twice paid it in full.
+* **Running the test binaries one after another was the larger half of the
+  test phase.** `cargo test` runs one binary at a time and the tests inside it
+  in parallel; with 302 binaries most of which hold one or two tests, the run
+  is the sum of 302 short sequential runs. nextest schedules the tests of all
+  binaries together.
+* **The sqlx contract tests share a container.** Without `DATABASE_URL`, the
+  harness now starts one Postgres per test binary rather than one per test,
+  held for as long as any of the binary's tests is running: `cargo test -p
+  nitinol-sqlx --tests` started 14 containers for 14 binaries. The gate
+  instead starts one container for the whole run and hands it to the tests
+  through `DATABASE_URL`, the route they already took when one was named.
+* **What was not changed.** The 302 test binaries are still built one by one,
+  which is where the build time goes; folding each crate's `tests/*.rs` into
+  one binary per crate is a separate change. Doctests have never been in the
+  gate: `cargo test --all-targets` does not run them, and neither does
+  nextest, so the gate's coverage is what it was.
+
+### 2026-10-31, `9c309ec`, before and after #177
+
+AMD Ryzen 7 2700X (8 threads), 31 GB, Linux 6.18.50, rustc 1.98.1,
+cargo-nextest 0.9.146, mold 3.0.0, sccache 0.19.0 as `RUSTC_WRAPPER`.
+
+| | Before | After |
+|---|---|---|
+| `cargo nextest run --workspace --no-run` | 495 s | 169 s |
+| binaries nextest lists | 304, of them 264 integration-test binaries | 84, of them 44 integration-test binaries |
+| tests nextest lists | 1316, none ignored | 1316, none ignored |
+| `target/` afterwards | 19 GB | 8.7 GB |
+
+"Before" is dev `9c309ec` checked out in a temporary worktree; "after" is the
+same commit with each crate's `tests/*.rs` moved under `tests/integration/` and
+declared as modules of one `tests/integration.rs`. Each build started from an
+empty `CARGO_TARGET_DIR` of its own, and the times are the ones cargo reports
+when it finishes. The tests' names are unchanged apart from the binary they sit
+in: `cargo test -p nitinol-saga --test integration e2e_saga::` runs what
+`--test e2e_saga` ran.
+
+| Crate | Integration-test binaries before | After |
+|---|---|---|
+| `nitinol-saga` | 120 | 9 |
+| `nitinol-eventsource` | 53 | 6 |
+| `nitinol-runtime` | 32 | 1 |
+| `nitinol-persistence` | 20 | 2 |
+| `nitinol-sqlx` | 14 | 1 |
+
+* **The build was spent compiling and linking one binary per file.** With 264
+  integration-test binaries, every file paid for its own compile of the test
+  crate and its own link against the whole dependency graph; folded, each crate
+  pays for that once. The build takes about a third of the time, and the target
+  directory is under half the size.
+* **sccache was on in both builds and served the same.** In each build, 313
+  Rust compilations missed the cache and 30 C and assembler compilations hit
+  it, so the dependencies were compiled in both rather than taken from the
+  cache. The two builds ran under the same condition; neither figure is what a
+  machine without sccache pays, since those 30 compilations would also run.
+* **Some tests keep a binary of their own.** A test that installs a process-wide
+  tracing subscriber reads every record it captures as its own, and a process
+  holds one subscriber, so it cannot share a process with other tests under
+  `cargo test`: in `nitinol-saga` the two tracing tests and the six
+  deadline-index tests that read the index's records, and in
+  `nitinol-eventsource` `tell_refusal_is_observable`,
+  `occ_conflict_is_observable`, `interpreter_conformance` and
+  `interpreter_equivalence`. `nitinol-eventsource`'s `ui` drives the compiler
+  over fixtures of its own, and `nitinol-persistence`'s
+  `event_registry_link_collision` links entries that collide on purpose, which
+  a binary whose registry has to build cannot hold.
+* **Both runners pass.** `cargo nextest run --workspace --lib --bins --tests
+  --examples` and `cargo test --workspace --tests`, each against one Postgres
+  named by `DATABASE_URL`, ran the 1316 tests with none failing. Under
+  `cargo test` the tests of one crate now run in one process, in parallel,
+  which is what the tests of one file already did.
+
+## Profiling one of them
+
+Benchmarks say what something costs. A profiler says where.
+
+### Flame graph
+
+```console
+$ cargo install flamegraph
+$ CARGO_PROFILE_BENCH_DEBUG=true cargo flamegraph --bench event_source_system -p nitinol-eventsource -- --bench --profile-time 10
+```
+
+`--bench` is what tells criterion it is being run as a benchmark rather than as
+a test, and `--profile-time 10` is what tells it to iterate for ten seconds and
+do no analysis at all — which keeps criterion's own statistics out of the graph.
+`CARGO_PROFILE_BENCH_DEBUG=true` asks for the symbols rather than adding a
+`[profile.bench]` to the workspace, so nothing about an ordinary run changes.
+
+### tokio-console
+
+For what the runtime's tasks are doing rather than where the CPU went.
+`examples/runtime/4.watching` is the worked example: it carries the
+`console-subscriber` dependency behind a `console` feature, and the subscriber
+needs the unstable tokio cfg:
+
+```console
+$ cargo install tokio-console
+$ RUSTFLAGS="--cfg tokio_unstable" cargo run -p watching --features console
+```
+
+The benchmarks here do not carry that subscriber, and the libraries do not
+either: it is a dependency an application opts into, and a benchmark measuring
+with a task collector attached would be measuring the collector too.

@@ -1,0 +1,419 @@
+// Integration tests for AggregateProcess, AggregateProps, and AggregateProxy.
+//
+// Tests verify the full request lifecycle: spawn → ask/tell/exec → persistence → state.
+//
+// The activation holds the Journal the system it was spawned on distributes:
+// the EventPersistor process was removed and the process now calls store.append
+// / store.load inline.
+
+use bytes::Bytes;
+
+use nitinol_eventsource::system::EventSourceSystem;
+use nitinol_eventsource::{
+    codec::Codec, Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, Event,
+    Never, Query, TellError,
+};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::{InMemoryEventStore, Journal};
+use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+use nitinol_runtime::ProcessSystem;
+
+// Fixtures: event
+
+/// A unit event representing one successful increment.
+#[derive(Clone, PartialEq, Debug)]
+struct Incremented;
+
+impl Event for Incremented {
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Incremented"));
+
+    type Codec = TestCodec;
+}
+
+// Fixtures: aggregate
+
+#[derive(Default)]
+struct Counter {
+    value: u64,
+}
+
+impl Aggregate for Counter {
+    type Event = Incremented;
+    type Recover = Never;
+
+    fn apply(&mut self, _event: Incremented) {
+        self.value += 1;
+    }
+}
+
+// Fixtures: commands and messages
+
+/// Command: always succeeds, emits one Incremented event.
+struct Increment;
+
+/// Command: emits N Incremented events in a single Persist batch.
+struct IncrementBy(u64);
+
+/// Command: fails when value >= threshold (tests rejection path).
+struct IncrementIfLessThan(u64);
+
+/// Query message: returns current count without mutating state.
+struct GetCount;
+
+#[derive(Debug, thiserror::Error)]
+#[error("counter already at max: {0}")]
+struct AtMaxError(u64);
+
+impl Decider<Increment> for Counter {
+    type Output = ();
+    type Rejection = std::convert::Infallible;
+
+    fn decide(&self, _cmd: Increment) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented]).output(())
+    }
+}
+
+impl Decider<IncrementBy> for Counter {
+    type Output = ();
+    type Rejection = std::convert::Infallible;
+
+    fn decide(&self, cmd: IncrementBy) -> Decision<Incremented, (), Self::Rejection> {
+        Decision::persist(vec![Incremented; cmd.0 as usize]).output(())
+    }
+}
+
+impl Decider<IncrementIfLessThan> for Counter {
+    type Output = ();
+    type Rejection = AtMaxError;
+
+    fn decide(&self, cmd: IncrementIfLessThan) -> Decision<Incremented, (), AtMaxError> {
+        if self.value >= cmd.0 {
+            return Decision::reject(AtMaxError(self.value));
+        }
+        Decision::persist(vec![Incremented]).output(())
+    }
+}
+
+impl Query<GetCount> for Counter {
+    type Response = u64;
+    type Error = std::convert::Infallible;
+
+    fn query(&self, _msg: GetCount) -> Result<u64, Self::Error> {
+        Ok(self.value)
+    }
+}
+
+// Fixtures: test codec
+
+/// Pass-through codec for Incremented (unit struct — no data to encode).
+/// Encodes to empty bytes; decodes by returning Incremented regardless of payload.
+struct TestCodec;
+
+impl Codec<Incremented> for TestCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Incremented) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Incremented, Self::Error> {
+        Ok(Incremented)
+    }
+}
+
+// Helper: spawn a Counter process on a system over a fresh Journal
+
+/// A system over `store`, on a process system of its own.
+///
+/// A second activation of one aggregate is a second system over the same
+/// journal: one system resolves an identity to one activation, so asking the
+/// same system again would reach the resident state rather than replay the
+/// stream.
+async fn system_over(store: Journal) -> EventSourceSystem<Journal> {
+    EventSourceSystem::builder(ProcessSystem::new().await)
+        .with_persistence(PersistenceProvider::new(store))
+        .build()
+}
+
+/// Spawns a Counter AggregateProcess on a system over a fresh `Journal`.
+///
+/// Returns (system, proxy).  Caller must keep `_system` alive.
+async fn spawn_counter(
+    aggregate_id: AggregateId,
+) -> (EventSourceSystem<Journal>, AggregateProxy<Counter>) {
+    let system = system_over(Journal::from(InMemoryEventStore::default())).await;
+    let proxy = AggregateProps::<Counter>::new(aggregate_id)
+        .spawn(&system)
+        .await;
+    (system, proxy)
+}
+
+// ask<Increment>: events are persisted and replayable via shared Journal
+
+/// After ask(Increment) on process 1, a second process sharing the same
+/// `Journal` replays the stored event and restores the count to 1.
+#[tokio::test]
+async fn ask_persists_events_to_event_store() {
+    // Given
+    let store = Journal::from(InMemoryEventStore::default());
+    let writing = system_over(store.clone()).await;
+    let id = AggregateId::new("agg-ask-persist");
+
+    let proxy = AggregateProps::<Counter>::new(id.clone())
+        .spawn(&writing)
+        .await;
+
+    // When
+    proxy.ask(Increment).await.expect("ask must succeed");
+
+    // Then: a fresh process for the same aggregate_id replays through the same Journal.
+    let restarted = system_over(store).await;
+    let proxy2 = AggregateProps::<Counter>::new(id).spawn(&restarted).await;
+
+    let count = proxy2.exec(GetCount).await.expect("exec must succeed");
+    assert_eq!(
+        count, 1,
+        "replayed process must see 1 event written by the first process"
+    );
+}
+
+// ask<Increment>: sequential asks accumulate state
+
+/// Three sequential ask(Increment) calls advance the counter to 3.
+#[tokio::test]
+async fn ask_sequential_increments_accumulate_state() {
+    // Given
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-seq")).await;
+
+    // When
+    proxy.ask(Increment).await.expect("ask 1 must succeed");
+    proxy.ask(Increment).await.expect("ask 2 must succeed");
+    proxy.ask(Increment).await.expect("ask 3 must succeed");
+
+    // Then
+    let count = proxy
+        .exec(GetCount)
+        .await
+        .expect("exec(GetCount) must succeed");
+    assert_eq!(count, 3, "state must be 3 after three Increment asks");
+}
+
+// tell<Increment>: fire-and-forget returns Ok(())
+
+/// tell(Increment) returns Ok(()) without a response payload.
+#[tokio::test]
+async fn tell_increment_returns_unit() {
+    // Given
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-tell-unit")).await;
+
+    // When / Then
+    let result: Result<(), TellError> = proxy.tell(Increment).await;
+    result.expect("tell(Increment) must return Ok(())");
+}
+
+// tell then exec: state is reflected after tell
+
+/// After tell(Increment), exec(GetCount) returns 1.
+/// The mpsc task queue guarantees tell is processed before exec.
+#[tokio::test]
+async fn tell_then_exec_sees_updated_state() {
+    // Given
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-tell-exec")).await;
+
+    // When: tell is queued first; exec is queued second and processed after tell.
+    proxy.tell(Increment).await.expect("tell must succeed");
+    let count = proxy.exec(GetCount).await.expect("exec must succeed");
+
+    // Then
+    assert_eq!(
+        count, 1,
+        "exec(GetCount) must return 1 after tell(Increment)"
+    );
+}
+
+// exec<GetCount>: does not mutate state
+
+/// Two consecutive exec(GetCount) calls return the same value.
+#[tokio::test]
+async fn exec_does_not_mutate_state() {
+    // Given
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-exec-immut")).await;
+    proxy.ask(Increment).await.expect("ask must succeed");
+    proxy.ask(Increment).await.expect("ask must succeed");
+
+    // When
+    let first: u64 = proxy.exec(GetCount).await.expect("first exec must succeed");
+    let second: u64 = proxy
+        .exec(GetCount)
+        .await
+        .expect("second exec must succeed");
+
+    // Then
+    assert_eq!(first, 2, "first exec must return 2");
+    assert_eq!(
+        second, 2,
+        "second exec must return same value — exec must not mutate state"
+    );
+}
+
+// Multiple Decider implementations: ask with IncrementBy(n)
+
+/// A second Decider (IncrementBy) coexists with Increment on the same Aggregate.
+/// ask(IncrementBy(3)) advances the state by 3.
+#[tokio::test]
+async fn ask_second_decider_increment_by() {
+    // Given
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-incby")).await;
+
+    // When
+    proxy
+        .ask(IncrementBy(3))
+        .await
+        .expect("ask(IncrementBy(3)) must succeed");
+
+    // Then
+    let count = proxy.exec(GetCount).await.expect("exec must succeed");
+    assert_eq!(count, 3, "state must advance by 3 after IncrementBy(3)");
+}
+
+// ask: rejection returns AskError::Rejection
+
+/// ask(IncrementIfLessThan(0)) is rejected because value (0) >= threshold (0).
+#[tokio::test]
+async fn ask_rejected_command_returns_rejection_error() {
+    // Given
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-ask-reject")).await;
+
+    // When
+    let result = proxy.ask(IncrementIfLessThan(0)).await;
+
+    // Then
+    match result {
+        Err(AskError::Rejection(err)) => {
+            assert_eq!(err.0, 0, "rejection must carry current value (0)");
+        }
+        Ok(_) => panic!("ask must fail when value >= threshold"),
+        Err(other) => panic!("unexpected error variant: {:?}", other),
+    }
+}
+
+// ask/exec ordering: interleaved operations maintain consistent sequence
+
+/// Interleaved ask + exec calls maintain correct sequence numbers and state.
+/// This also validates that sequence is updated correctly across multiple Persist operations.
+#[tokio::test]
+async fn interleaved_ask_and_exec_maintain_consistent_state() {
+    // Given
+    let (_system, proxy) = spawn_counter(AggregateId::new("agg-interleaved")).await;
+
+    // When
+    proxy.ask(Increment).await.expect("ask 1 must succeed");
+    let after_first = proxy.exec(GetCount).await.expect("exec after first ask");
+    proxy.ask(IncrementBy(2)).await.expect("ask IncrementBy(2)");
+    let after_second = proxy.exec(GetCount).await.expect("exec after IncrementBy");
+
+    // Then
+    assert_eq!(after_first, 1, "count must be 1 after first ask");
+    assert_eq!(after_second, 3, "count must be 3 after IncrementBy(2)");
+}
+
+// The identity the aggregate persist path writes into the column
+
+/// An enum event: one declaration, whichever arm a value holds.
+#[derive(Clone, PartialEq, Debug)]
+enum CounterOp {
+    Incremented,
+    Decremented,
+}
+
+impl Event for CounterOp {
+    const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("CounterOp"));
+
+    type Codec = CounterOpCodec;
+}
+
+#[derive(Default)]
+struct CounterEnum {
+    value: i64,
+}
+
+impl Aggregate for CounterEnum {
+    type Event = CounterOp;
+    type Recover = Never;
+
+    fn apply(&mut self, event: CounterOp) {
+        match event {
+            CounterOp::Incremented => self.value += 1,
+            CounterOp::Decremented => self.value -= 1,
+        }
+    }
+}
+
+struct SwingOp;
+
+impl Decider<SwingOp> for CounterEnum {
+    type Output = ();
+    type Rejection = std::convert::Infallible;
+
+    fn decide(&self, _cmd: SwingOp) -> Decision<CounterOp, (), Self::Rejection> {
+        Decision::persist(vec![CounterOp::Incremented, CounterOp::Decremented]).output(())
+    }
+}
+
+struct CounterOpCodec;
+
+impl Codec<CounterOp> for CounterOpCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &CounterOp) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<CounterOp, Self::Error> {
+        Ok(CounterOp::Incremented)
+    }
+}
+
+/// Given an aggregate whose event type is an enum, When two different arms are
+/// persisted in one acceptance, Then both rows carry the event type the
+/// declaration states.
+///
+/// The column names the declaration, and the declaration names the codec that
+/// reads the payload back; which arm a row holds is the payload's to say. A
+/// persist path that derived a per-value identity instead would write a path no
+/// declaration answers for, and the rows would fail their load.
+#[tokio::test]
+async fn aggregate_persist_stores_the_declared_event_type_for_every_arm() {
+    use futures_util::TryStreamExt;
+    use nitinol_persistence::LoadQuery;
+
+    // Given
+    let store = Journal::from(InMemoryEventStore::default());
+    let system = system_over(store.clone()).await;
+    let id = AggregateId::new("agg-enum-identity-persist");
+
+    let proxy = AggregateProps::<CounterEnum>::new(id.clone())
+        .spawn(&system)
+        .await;
+
+    // When: persist two different arms of the enum in one acceptance
+    proxy.ask(SwingOp).await.expect("ask(SwingOp) must succeed");
+
+    // Then
+    let events: Vec<_> = store
+        .load(LoadQuery::by_stream(id.as_str()))
+        .await
+        .expect("store.load must succeed")
+        .try_collect()
+        .await
+        .expect("stream collect must succeed");
+
+    assert_eq!(events.len(), 2, "exactly two events must be stored");
+    for event in &events {
+        assert_eq!(
+            event.event_type,
+            CounterOp::EVENT_TYPE,
+            "a row of a declared event carries that declaration's canonical path"
+        );
+    }
+}

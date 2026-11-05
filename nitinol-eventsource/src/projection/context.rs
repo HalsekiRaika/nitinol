@@ -1,5 +1,5 @@
+use crate::projection::ProjectionId;
 use nitinol_persistence::store::DeliveryMode;
-use nitinol_persistence::ProjectionId;
 
 pub struct ProjectionContext<'a, Tx> {
     projection_id: &'a ProjectionId,

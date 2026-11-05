@@ -12,22 +12,38 @@ pub type EventStream<'a> = Pin<Box<dyn Stream<Item = Result<LoadedEvent, LoadErr
 /// Append-and-load surface for events.
 ///
 /// The `append` and `load` methods take the stream key as `&str` rather than a
-/// typed identifier so the trait remains dyn-compatible (`Arc<dyn EventStore>`
-/// is the framework's primary handle for plugging in a backend).  Callers
-/// supply the key via `id.borrow()` (or `id.as_str()`) on their newtype —
+/// typed identifier so the trait remains dyn-compatible
+/// ([`Journal`](crate::store::Journal), which wraps a `Box<dyn EventStore>`, is
+/// the framework's primary handle for plugging in a backend).  Callers supply
+/// the key via `id.borrow()` (or `id.as_str()`) on their newtype —
 /// `AggregateId` and `SagaId` both implement `Borrow<str>`.
+///
+/// # What an implementor owes beyond the clauses
+///
+/// [`Clone`], through the [`EventStoreClone`] supertrait. A store is
+/// distributed by being cloned rather than by being shared, so deriving
+/// `Clone` over the backend's own handle is what lets the framework hand the
+/// journal to every wiring point. Deriving it is the whole of it — the
+/// `clone_box` the erasure needs comes from the blanket implementation.
 #[async_trait]
-pub trait EventStore: Send + Sync {
+pub trait EventStore: EventStoreClone + Send + Sync {
     /// Appends `events` to the stream identified by `key`.
     ///
     /// The clauses below are the optimistic-concurrency-control (OCC) contract
     /// every backend must reproduce.  They are what a third-party
     /// implementation may rely on — the incidental behaviour of any particular
-    /// backend is not part of the interface.  Each clause carries a stable
-    /// label (`OCC-1` … `OCC-4`) shared with the executable record in
-    /// `nitinol-persistence/tests/event_store_occ.rs`, which runs against
-    /// [`InMemoryEventStore`](crate::store::InMemoryEventStore) as the
-    /// reference implementation.
+    /// backend is not part of the interface — and they change only as the
+    /// crate's version does.  Each clause carries a stable label (`OCC-1` …
+    /// `OCC-5`).
+    ///
+    /// Two executable records share those labels.
+    /// `nitinol-persistence/tests/event_store_occ.rs` runs the deterministic
+    /// clauses against [`InMemoryEventStore`](crate::store::InMemoryEventStore)
+    /// as the reference implementation.  `nitinol-store-conformance` is the
+    /// suite any backend is put through, reference implementation included; it
+    /// is where a clause that needs a reader and a writer at the same time is
+    /// fixed, and a backend that has not been through it has not been shown to
+    /// keep this contract.
     ///
     /// # OCC-1: `unique(stream, sequence)`
     ///
@@ -76,10 +92,11 @@ pub trait EventStore: Send + Sync {
     /// Monotonicity and all-or-nothing commit are fixed by
     /// `occ_3_conflict_does_not_advance_global_sequence_numbering`,
     /// `occ_3_batch_conflict_is_all_or_nothing_and_consumes_no_global_sequence`,
-    /// and `occ_3_load_returns_events_in_ascending_global_sequence_order`.  The
-    /// concurrent-reader visibility clause binds backends but is not fixed by a
-    /// test: those tests pin deterministic invariants only and race no
-    /// concurrent readers or writers.
+    /// and `occ_3_load_returns_events_in_ascending_global_sequence_order`,
+    /// which race no concurrent readers or writers, and by the deterministic
+    /// half of `nitinol-store-conformance` for any other backend.  *When* a
+    /// commit may become visible to a reader that is already reading is OCC-5's
+    /// subject, and is fixed there.
     ///
     /// # OCC-4: no internal retry (tripwire semantics)
     ///
@@ -106,11 +123,106 @@ pub trait EventStore: Send + Sync {
     /// `occ_4_conflicting_append_leaves_observable_state_unchanged`.  The
     /// conditions on backend transaction re-runs bind backends but are not
     /// fixed by a test.
+    ///
+    /// # OCC-5: a reader's checkpoint is never undercut
+    ///
+    /// Once a reader has observed `global_sequence = N`, no event carrying a
+    /// `global_sequence` at or below `N` becomes newly visible afterwards.
+    ///
+    /// *Newly visible* means visible for the first time, in the same store and
+    /// the same global ordering.  Reading events a reader has already passed is
+    /// not covered: replaying from an older checkpoint, or widening a query's
+    /// filter, makes nothing visible that was not visible before.
+    ///
+    /// This is the clause that makes a checkpoint-following reader safe.  Such
+    /// a reader records the highest `global_sequence` it has observed and asks
+    /// only for what lies beyond it — the semantics
+    /// `nitinol_eventsource`'s global cursor is built on — so an event
+    /// appearing below that mark is read by nobody.  Nothing detects it: the
+    /// event is stored, it is intact, every append returned success, and no
+    /// error is raised at the writer, at the reader, or in between.
+    ///
+    /// A backend breaks this clause by assigning `global_sequence` outside the
+    /// transaction that commits the event — a plain auto-increment column taken
+    /// before the commit is the usual way — because two concurrent writers then
+    /// commit in an order other than the one they were numbered in.  Under
+    /// appends from several nodes at once that is the normal case, not an edge
+    /// one.  Numbering and becoming visible have to happen in the one order.
+    ///
+    /// Fixed by the concurrency half of `nitinol-store-conformance`, which runs
+    /// concurrent writers against a reader following the global order by
+    /// checkpoint and requires that reader to have observed every committed
+    /// event exactly once.
     async fn append(
         &self,
         key: &str,
         events: Vec<AppendingEvent>,
     ) -> Result<AppendOutcome, AppendError>;
 
+    /// Serves the stored events a [`LoadQuery`] selects.
+    ///
+    /// # LOAD-1: a query's conditions are a conjunction
+    ///
+    /// Every condition a `LoadQuery` names applies to every event served: what
+    /// comes back satisfies all of them, in ascending `global_sequence` order,
+    /// and nothing else does. A condition left absent selects nothing out.
+    ///
+    /// In particular `event_type_prefix` and `from_global_sequence` named
+    /// together serve the events within that prefix **and** at or above that
+    /// position. Neither one widens the other: an event within the prefix below
+    /// the position is left out, and so is an event above the position outside
+    /// the prefix.
+    ///
+    /// `from_global_sequence` includes the position it names, so a consumer
+    /// asks for what it has not seen by naming the position after the one it
+    /// finished with.
+    ///
+    /// This is the reading every checkpoint-following consumer of one event
+    /// type rests on, and both halves matter to it. An event of another type
+    /// coming back would be handed to a consumer that cannot read it; an event
+    /// at or below the position would be handed over a second time. Ascending
+    /// order is what lets such a consumer take the last event it finished with
+    /// as its progress.
+    ///
+    /// A prefix matches on path boundaries: a stored path is within the prefix
+    /// when it is the prefix itself, or when the prefix is followed by a
+    /// separator. A canonical path — a family and a type name, with nothing
+    /// after it — has no descendant of its own, so naming one selects that
+    /// declaration's events alone.
+    ///
+    /// Fixed by `nitinol-store-conformance` for any backend, and by
+    /// `nitinol-persistence/tests/event_store_load_query_conjunction.rs`
+    /// against the reference implementation.
     async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError>;
+}
+
+/// How a journal whose backend type has been erased is cloned.
+///
+/// A supertrait of [`EventStore`] rather than a bound callers name: the
+/// blanket implementation below supplies it for every backend that derives
+/// [`Clone`], so an implementor writes nothing. What it buys is
+/// [`Journal`](crate::store::Journal) — a `Box<dyn EventStore>` the framework
+/// can clone, which is how the registered store is distributed once its type is
+/// out of the signature.
+///
+/// Cloning a boxed journal is therefore the *backend's* clone, one level down,
+/// which is what carries `PRV-1` through the erasure.
+pub trait EventStoreClone {
+    /// This store's own clone, boxed.
+    fn clone_box(&self) -> Box<dyn EventStore>;
+}
+
+impl<T> EventStoreClone for T
+where
+    T: EventStore + Clone + 'static,
+{
+    fn clone_box(&self) -> Box<dyn EventStore> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn EventStore> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }

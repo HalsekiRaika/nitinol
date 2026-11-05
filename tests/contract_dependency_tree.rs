@@ -1,4 +1,5 @@
-//! Acceptance scenario "tokio 非依存の契約層": the normal dependency tree of
+//! Acceptance scenario "a contract layer that does not depend on tokio": the
+//! normal dependency tree of
 //! `nitinol = { features = ["contract"] }` must not contain `tokio` or
 //! `nitinol-runtime`.
 //!
@@ -61,6 +62,8 @@ fn contract_feature_tree_has_no_tokio_and_no_runtime() {
             "--no-default-features",
             "--features",
             "contract",
+            "--color",
+            "never",
         ])
         .output()
         .expect("`cargo tree` must be spawnable");
@@ -103,7 +106,15 @@ fn conformance_kit_tree_carries_no_interpreter_and_no_runtime() {
 
     let output = Command::new(cargo)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["tree", "-p", "nitinol-conformance", "-e", "normal"])
+        .args([
+            "tree",
+            "-p",
+            "nitinol-conformance",
+            "-e",
+            "normal",
+            "--color",
+            "never",
+        ])
         .output()
         .expect("`cargo tree` must be spawnable");
 

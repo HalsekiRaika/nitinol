@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "takt": {
+      "type": "stdio",
+      "command": "takt-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
