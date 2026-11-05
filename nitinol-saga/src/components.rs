@@ -76,6 +76,15 @@ impl<S: Saga> SagaComponents<S> {
     /// the journal its supplier distributes — so a saga that has to tell an
     /// aggregate resolves the reference from here rather than from a clone of
     /// the system captured outside the spawn.
+    ///
+    /// That includes an aggregate whose [`Recover`](nitinol_eventsource::Aggregate::Recover)
+    /// is [`Latest`](nitinol_eventsource::Latest): the handle carries the host's
+    /// snapshot slot as a value, so such an aggregate recovers from the
+    /// snapshots its typed system keeps. Where the host's store holds no
+    /// snapshot slot, every dispatch to it fails with
+    /// [`AskError::Activation`](nitinol_eventsource::AskError::Activation) —
+    /// [`TellError::Activation`](nitinol_eventsource::TellError::Activation) for
+    /// a `tell` — which `retryability` reads as permanent.
     pub fn system(&self) -> &SystemHandle {
         &self.host
     }

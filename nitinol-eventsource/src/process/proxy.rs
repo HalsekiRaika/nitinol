@@ -4,7 +4,9 @@ use nitinol_contract::{Aggregate, Decider, Latest, Query, Snapshotable};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::AggregateId;
 
-use crate::error::{AskError, ExecError, PersistError, SnapshotSaveError, TellError};
+use crate::error::{
+    AskError, ExecError, MissingSnapshotSlot, PersistError, SnapshotSaveError, TellError,
+};
 use crate::process::aggregate_process::{AskCmd, ExecMsg, SnapshotCmd, TellCmd};
 use crate::process::resolve::{AggregateResolver, Incarnation};
 
@@ -90,17 +92,20 @@ impl<A: Aggregate> Resolution<A> {
     }
 
     /// The live activation of this identity, resolving one when the cache is
-    /// empty.
-    async fn incarnation(&self) -> Incarnation<A> {
+    /// empty, or why this identity cannot be activated.
+    ///
+    /// A refusal is not cached: nothing was resolved, and the resolver answers
+    /// the same refusal on every call.
+    async fn incarnation(&self) -> Result<Incarnation<A>, MissingSnapshotSlot> {
         let hit = self.inner.cached.lock().expect(CACHE_LOCK).clone();
         if let Some(incarnation) = hit {
-            return incarnation;
+            return Ok(incarnation);
         }
         // Two dispatches racing here both resolve, and the registry's single
         // flight hands them the same activation.
-        let incarnation = self.inner.resolver.resolve().await;
+        let incarnation = self.inner.resolver.resolve().await?;
         *self.inner.cached.lock().expect(CACHE_LOCK) = Some(incarnation.clone());
-        incarnation
+        Ok(incarnation)
     }
 
     /// Report `dead` as gone, emptying the cache only while it is still the
@@ -140,8 +145,12 @@ impl<A: Aggregate> AggregateProxy<A> {
 
     /// Resolve now, so an entry point that promises a running aggregate returns
     /// with one.
+    ///
+    /// An identity that cannot be activated returns with nothing started. The
+    /// refusal is not lost by being ignored here: the resolver keeps it, and
+    /// every dispatch through this reference answers with it.
     pub(crate) async fn activate(&self) {
-        self.incarnation().await;
+        let _ = self.incarnation().await;
     }
 
     /// The aggregate's stream key.
@@ -169,7 +178,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         <A as Decider<C>>::Output: Send + 'static,
         <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
-        let incarnation = self.incarnation().await;
+        let incarnation = self.incarnation().await.map_err(AskError::Activation)?;
         let outcome = incarnation.ask(AskCmd(cmd)).await.map_err(AskError::from);
         if signals_stopped_activation(&outcome) {
             self.invalidate(&incarnation);
@@ -193,7 +202,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         C: Send + Sync + 'static,
         <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
-        let incarnation = self.incarnation().await;
+        let incarnation = self.incarnation().await.map_err(TellError::Activation)?;
         let outcome = incarnation
             .tell(TellCmd(cmd))
             .await
@@ -217,7 +226,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         <A as Query<M>>::Response: Send + 'static,
         <A as Query<M>>::Error: std::error::Error + Send + Sync + 'static,
     {
-        let incarnation = self.incarnation().await;
+        let incarnation = self.incarnation().await.map_err(ExecError::Activation)?;
         let outcome = incarnation.ask(ExecMsg(msg)).await.map_err(ExecError::from);
         if matches!(outcome, Err(ExecError::Send(_))) {
             self.invalidate(&incarnation);
@@ -225,8 +234,12 @@ impl<A: Aggregate> AggregateProxy<A> {
         outcome
     }
 
-    /// The activation this dispatch goes to.
-    async fn incarnation(&self) -> Incarnation<A> {
+    /// The activation this dispatch goes to, or why there can be none.
+    ///
+    /// A refusal goes back to the caller without reaching
+    /// [`invalidate`][Self::invalidate]: nothing was activated, so there is no
+    /// activation to report as gone.
+    async fn incarnation(&self) -> Result<Incarnation<A>, MissingSnapshotSlot> {
         self.resolution.incarnation().await
     }
 
@@ -268,7 +281,10 @@ where
     /// [`Latest`](nitinol_contract::Latest) has this method: one that never
     /// recovers from a snapshot has nothing that would read the save back.
     pub async fn snapshot(&self) -> Result<u64, SnapshotSaveError> {
-        let incarnation = self.incarnation().await;
+        let incarnation = self
+            .incarnation()
+            .await
+            .map_err(SnapshotSaveError::Activation)?;
         let outcome = incarnation
             .ask(SnapshotCmd)
             .await
@@ -385,8 +401,16 @@ mod tests {
         let via_system = system.aggregate_props::<Counted>(id).spawn().await;
 
         assert_eq!(
-            via_props.incarnation().await.pid(),
-            via_system.incarnation().await.pid(),
+            via_props
+                .incarnation()
+                .await
+                .expect("a `Never` aggregate is activated on any store")
+                .pid(),
+            via_system
+                .incarnation()
+                .await
+                .expect("a `Never` aggregate is activated on any store")
+                .pid(),
             "the props-first and system-first entry points must resolve the \
              same identity to one activation, not two"
         );

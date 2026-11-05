@@ -65,6 +65,10 @@ impl Store for PostgresStore {
     fn events(&self) -> Journal {
         self.events.clone()
     }
+
+    fn snapshot_slot(&self) -> Option<Album> {
+        Some(self.snapshots.clone())
+    }
 }
 
 impl SnapshotSlot for PostgresStore {

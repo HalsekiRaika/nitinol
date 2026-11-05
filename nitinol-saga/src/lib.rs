@@ -175,6 +175,12 @@
 //!   one of the saga's own events to the commands it implies and whom each is
 //!   addressed to, and [`host`](SagaSystemExt::host) starts the host that
 //!   carries them, on the contract [`SagaDeliveryProps`] states.
+//!   Any aggregate may be addressed, one that recovers from its newest
+//!   snapshot included: the host reaches its targets through the system's
+//!   erased handle, which carries the deployment's snapshot slot as a value.
+//!   On a deployment whose store holds no snapshot slot, a delivery to such an
+//!   aggregate is a permanent failure and holds its partition, as described in
+//!   [`SagaDelivery::new`].
 //!   The host subscribes across every instance of the saga type — it names the
 //!   declared event type to the store together with the cursor it has
 //!   finished with, so no row of another type is fetched to be discarded — and

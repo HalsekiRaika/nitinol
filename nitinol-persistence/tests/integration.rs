@@ -7,6 +7,8 @@
 mod arc_handle_api_removed;
 #[path = "integration/checkpoint_api_removed.rs"]
 mod checkpoint_api_removed;
+#[path = "integration/erased_store_carries_only_the_snapshot_slot.rs"]
+mod erased_store_carries_only_the_snapshot_slot;
 #[path = "integration/event_registry.rs"]
 mod event_registry;
 #[path = "integration/event_registry_constructors_are_not_public.rs"]
@@ -39,5 +41,7 @@ mod offset_store;
 mod persistence_provider;
 #[path = "integration/reserved_namespace.rs"]
 mod reserved_namespace;
+#[path = "integration/snapshot_slot_store_answers_with_its_album.rs"]
+mod snapshot_slot_store_answers_with_its_album;
 #[path = "integration/snapshot_store.rs"]
 mod snapshot_store;

@@ -38,6 +38,8 @@ mod saga_codec_injection_api_removed;
 mod saga_combine_persist_single_append;
 #[path = "integration/saga_components_system.rs"]
 mod saga_components_system;
+#[path = "integration/saga_components_system_reaches_latest_aggregates.rs"]
+mod saga_components_system_reaches_latest_aggregates;
 #[path = "integration/saga_consumed_fact_declaration.rs"]
 mod saga_consumed_fact_declaration;
 #[path = "integration/saga_consumed_position.rs"]
@@ -98,6 +100,8 @@ mod saga_delivery_partition_function;
 mod saga_delivery_poll_interval;
 #[path = "integration/saga_delivery_preserves_instance_order.rs"]
 mod saga_delivery_preserves_instance_order;
+#[path = "integration/saga_delivery_reaches_a_latest_target.rs"]
+mod saga_delivery_reaches_a_latest_target;
 #[path = "integration/saga_delivery_reaches_target.rs"]
 mod saga_delivery_reaches_target;
 #[path = "integration/saga_delivery_rejection_is_observed.rs"]

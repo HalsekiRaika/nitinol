@@ -3,9 +3,9 @@ use std::sync::{Arc, OnceLock};
 use crate::projection::ProjectionId;
 use nitinol_contract::Aggregate;
 use nitinol_persistence::provider::{
-    PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
+    ErasedStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
 };
-use nitinol_persistence::store::{Album, Journal};
+use nitinol_persistence::store::Album;
 use nitinol_persistence::{AggregateId, LoadedEvent};
 use nitinol_runtime::ident::ProcessName;
 use nitinol_runtime::ProcessSystem;
@@ -28,9 +28,10 @@ pub struct PersistenceUnset;
 /// Wiring whose types are fixed before a deployment's store is known — a saga's
 /// dispatch mapping names the system type it delivers through when the mapping
 /// is written — names this one type for every store. It reaches the same
-/// process system, the same aggregate registry and the same journal the system
-/// it was erased from does.
-pub type SystemHandle = EventSourceSystem<Journal>;
+/// process system, the same aggregate registry, the same journal and — where
+/// the store held one — the same snapshot slot the system it was erased from
+/// does.
+pub type SystemHandle = EventSourceSystem<ErasedStore>;
 
 /// Props that have not named the system they start on yet, so `spawn` takes
 /// one.
@@ -165,7 +166,9 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
 ///
 /// A slot the store does not hold is a **compile error** at the wiring that
 /// needs it, rather than a failure at the first save — which is the whole of
-/// why the store is a type parameter here.
+/// why the store is a type parameter here. The one system whose type cannot say
+/// is the handle [`erase_store`][Self::erase_store] answers with, which carries
+/// the snapshot slot as a value instead.
 ///
 /// # Two ways to say one wiring
 ///
@@ -251,8 +254,8 @@ struct Inner<St> {
     /// after it.
     ///
     /// Erasing is on the hosted spawn path — every entry point carries one into
-    /// the props it hands back — so the journal is taken out of the supplier
-    /// once per system rather than once per spawn.
+    /// the props it hands back — so the journal and the snapshot slot are
+    /// taken out of the supplier once per system rather than once per spawn.
     erased: OnceLock<SystemHandle>,
 }
 
@@ -308,9 +311,9 @@ impl Node {
     ///
     /// `snapshots` is the asking system's own snapshot store, and it is the same
     /// one every time: a node is built with one supplier, clones carry it, and
-    /// the erased handle has no snapshot slot to ask through. So the process the
-    /// first caller starts is over the store every later caller would have
-    /// named.
+    /// the erased handle carries the very album that supplier's store answered
+    /// with. So the process the first caller starts is over the store every
+    /// later caller would have named.
     async fn snapshot_persistor(&self, snapshots: Album) -> SnapshotPersistorProxy {
         self.inner
             .snapshot_persistor
@@ -384,6 +387,19 @@ impl<St> EventSourceSystem<St> {
     /// What a reference needs to resolve, and re-resolve, its aggregate here.
     pub(crate) fn resolve_handle(&self) -> ResolveHandle {
         self.inner.node.resolve_handle()
+    }
+
+    /// What an activation of a `Recover = Latest` aggregate resolves this
+    /// system's one persistor through, once it is running.
+    ///
+    /// `snapshots` is this system's own snapshot store, taken by the caller from
+    /// wherever the store type says it is: the slot of a typed store, or the
+    /// value an erased store carries.
+    pub(crate) fn snapshot_source(&self, snapshots: Album) -> SnapshotSource {
+        SnapshotSource {
+            node: self.inner.node.clone(),
+            snapshots,
+        }
     }
 }
 
@@ -546,10 +562,16 @@ impl<St: Store> EventSourceSystem<St> {
     /// call after it — including the ones the hosted entry points make on the
     /// caller's behalf, so a spawn takes nothing out of the supplier.
     ///
-    /// Only the journal survives the erasure — a [`Journal`] *is* the store
-    /// holding the journal alone, and it holds no other slot — so a slot a
-    /// deployment did not supply stays a compile error rather than becoming
-    /// reachable through a handle that lost the type saying so:
+    /// # What survives the erasure
+    ///
+    /// The store's type is gone; whether it held a snapshot slot is not. The
+    /// handle's store is an [`ErasedStore`]: the journal, and the snapshot slot
+    /// as a value — the store's own album where it held one, nothing where it
+    /// did not. Erasing the erased handle again keeps that value.
+    ///
+    /// What a value cannot do is satisfy a bound, so wiring compiled against a
+    /// slot's trait still refuses the erased handle, whatever the store it came
+    /// from supplied. Its own snapshot persistor is one such entry point:
     ///
     /// ```compile_fail
     /// # use nitinol_eventsource::system::EventSourceSystem;
@@ -561,24 +583,36 @@ impl<St: Store> EventSourceSystem<St> {
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
     ///     .build();
-    /// // the erased handle has no snapshot slot, whatever the store it came
-    /// // from supplied
+    /// // the erased handle's store is not a `SnapshotSlot`, whatever the
+    /// // store it came from supplied
     /// system.erase_store().snapshot_persistor().await;
     /// # }
     /// ```
     ///
-    /// The same applies to an aggregate whose [`Recover`](Aggregate::Recover) is
-    /// [`Latest`](nitinol_contract::Latest): it asks its system for a snapshot
-    /// store, and a handle that lost the type saying there is one cannot answer.
-    /// Such an aggregate is resolved through the typed system it was built on;
-    /// wiring written against the erased handle — a saga's dispatch mapping,
-    /// say — addresses aggregates that replay their streams.
+    /// # A `Latest` aggregate through the erased handle
+    ///
+    /// An aggregate whose [`Recover`](Aggregate::Recover) is
+    /// [`Latest`](nitinol_contract::Latest) does resolve here, because the slot
+    /// it asks for is read from the value. Where the deployment holds the slot,
+    /// it recovers from the snapshot this system's own persistor keeps, exactly
+    /// as it would through the typed system. Where the deployment holds none,
+    /// the activation fails permanently: nothing is started, the stream is not
+    /// replayed in place of the missing snapshot, and every dispatch through
+    /// the reference answers [`MissingSnapshotSlot`](crate::error::MissingSnapshotSlot)
+    /// — an [`AskError::Activation`](crate::AskError::Activation) that
+    /// [`retryability`](crate::AskError::retryability) reads as permanent.
+    ///
+    /// That is a wiring mistake, and the typed system still says so when it is
+    /// compiled: spawning the same aggregate there on the same deployment does
+    /// not compile.
     pub fn erase_store(&self) -> SystemHandle {
         self.inner
             .erased
             .get_or_init(|| EventSourceSystem {
                 inner: Arc::new(Inner {
-                    persistence: PersistenceProvider::new(self.inner.persistence.event_store()),
+                    persistence: PersistenceProvider::new(ErasedStore::of(
+                        self.inner.persistence.store(),
+                    )),
                     node: self.inner.node.clone(),
                     erased: OnceLock::new(),
                 }),
@@ -616,16 +650,9 @@ impl<St: SnapshotSlot> EventSourceSystem<St> {
     /// # }
     /// ```
     pub async fn snapshot_persistor(&self) -> SnapshotPersistorProxy {
-        self.snapshot_source().resolve().await
-    }
-
-    /// What an activation of a `Recover = Latest` aggregate resolves this
-    /// system's one persistor through, once it is running.
-    pub(crate) fn snapshot_source(&self) -> SnapshotSource {
-        SnapshotSource {
-            node: self.inner.node.clone(),
-            snapshots: self.inner.persistence.snapshot_store(),
-        }
+        self.snapshot_source(self.inner.persistence.snapshot_store())
+            .resolve()
+            .await
     }
 }
 

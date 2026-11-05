@@ -58,6 +58,8 @@ mod e2e_projection;
 mod e2e_replay;
 #[path = "integration/e2e_snapshot.rs"]
 mod e2e_snapshot;
+#[path = "integration/erased_handle_carries_the_snapshot_slot.rs"]
+mod erased_handle_carries_the_snapshot_slot;
 #[path = "integration/event_appending.rs"]
 mod event_appending;
 #[path = "integration/event_type_identity.rs"]

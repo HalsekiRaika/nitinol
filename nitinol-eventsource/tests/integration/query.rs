@@ -241,6 +241,10 @@ async fn exec_delivers_query_error_as_exec_error_domain() {
             "a domain error must not be reported as a transport failure: {:?}",
             err
         ),
+        Err(ExecError::Activation(err)) => panic!(
+            "a domain error must not be reported as an activation failure: {:?}",
+            err
+        ),
         Ok(label) => panic!("exec(GetLabel) must fail on a counter at 0, got {label:?}"),
     }
 }

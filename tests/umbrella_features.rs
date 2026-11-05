@@ -149,6 +149,7 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
         EventSet,
         EventUnset,
         ExecError,
+        MissingSnapshotSlot,
         OriginSet,
         OriginUnset,
         ProjectionContext,
@@ -188,12 +189,14 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
 fn eventsource_error_facade_exposes_user_facing_types() {
     #[allow(unused_imports)]
     use nitinol::eventsource::error::{
-        AskError, CodecError, ExecError, PersistError, SnapshotSaveError, TellError,
+        AskError, CodecError, ExecError, MissingSnapshotSlot, PersistError, SnapshotSaveError,
+        TellError,
     };
 
-    // CodecError, PersistError and SnapshotSaveError are concrete enums; verify
-    // they are in scope.
+    // CodecError, PersistError and SnapshotSaveError are concrete enums, and
+    // MissingSnapshotSlot a concrete struct; verify they are in scope.
     let _ = std::marker::PhantomData::<CodecError>;
+    let _ = std::marker::PhantomData::<MissingSnapshotSlot>;
     let _ = std::marker::PhantomData::<PersistError>;
     let _ = std::marker::PhantomData::<SnapshotSaveError>;
     // AskError<R>, ExecError<E> have type parameters — use Infallible as a stand-in.

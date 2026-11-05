@@ -14,6 +14,11 @@
 //!     Then it compiles
 //!     And the aggregate recovers from that snapshot and replays only the
 //!         events above its position
+//!
+//!   Scenario: the store answers with its snapshot slot through `Store` alone
+//!     Given a PostgresStore over a migrated schema
+//!     When its snapshot slot is asked for through `Store` and saved through
+//!     Then `SnapshotSlot::snapshots` reads that save back
 //! ```
 //!
 //! What this holds up that the store's own clauses cannot: whether an
@@ -61,7 +66,7 @@ use nitinol_eventsource::{
     Aggregate, AggregateProps, AggregateProxy, Decider, Decision, Event, Latest, Query,
     Snapshotable,
 };
-use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::provider::{PersistenceProvider, SnapshotSlot, Store};
 use nitinol_persistence::{
     AggregateId, EventRegistryEntry, EventType, Family, PersistedSnapshot, TypeName, EVENT_REGISTRY,
 };
@@ -261,5 +266,49 @@ async fn an_aggregate_recovers_from_its_snapshot_and_replays_only_what_followed(
          the events above that position: a count of {EVENTS} is a replay from the first event \
          with the snapshot never read, and a count of {SNAPSHOT_STATE} is a recovery that never \
          replayed what followed it"
+    );
+}
+
+/// The store answers with its snapshot slot through `Store` alone, and that
+/// album is the slot `SnapshotSlot::snapshots` names.
+///
+/// Erasing a store's type keeps only what `Store` says about it, so a store that
+/// implements `SnapshotSlot` and answered "no slot" here would have every
+/// `Recover = Latest` aggregate refused through the erased handle on a
+/// deployment that holds the slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_store_answers_with_its_snapshot_slot_through_store_alone() {
+    let Some(backend) = harness::postgres_backend().await else {
+        return;
+    };
+    let schema = backend.migrated_schema().await;
+    let store = PostgresStore::new(schema.pool())
+        .expect("the event types this test binary linked claim distinct canonical paths");
+    let aggregate = AggregateId::new("sqlx.snapshot.slot-by-value");
+
+    store
+        .snapshot_slot()
+        .expect(
+            "a store implementing `SnapshotSlot` must not answer that it holds no snapshot slot",
+        )
+        .save(PersistedSnapshot {
+            aggregate_id: aggregate.clone(),
+            sequence: SNAPSHOT_AT,
+            payload: Bytes::from(SNAPSHOT_STATE.to_be_bytes().to_vec()),
+            created_at: fixture::fixed_instant(),
+        })
+        .await
+        .expect("a save through the album answered by value must be taken");
+
+    let read_back = store
+        .snapshots()
+        .load_latest(&aggregate)
+        .await
+        .expect("loading through the snapshot slot must succeed")
+        .map(|found| found.sequence);
+    assert_eq!(
+        read_back,
+        Some(SNAPSHOT_AT),
+        "the album answered through `Store` must reach the rows `SnapshotSlot::snapshots` reads"
     );
 }

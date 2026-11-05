@@ -23,9 +23,11 @@ use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::{Aggregate, AggregateProxy, Decider, Decision, Event, Never, Query};
+use nitinol_eventsource::{
+    Aggregate, AggregateProxy, Decider, Decision, Event, Latest, Never, Query, Snapshotable,
+};
 use nitinol_persistence::error::{AppendError, LoadError, OffsetError};
-use nitinol_persistence::provider::{CustomStore, PersistenceProvider, Unprovided};
+use nitinol_persistence::provider::{CustomStore, PersistenceProvider, SagaOffsetSlot, Unprovided};
 use nitinol_persistence::store::{
     EventStore, EventStream, InMemoryEventStore, Journal, OffsetScope, OffsetStore,
 };
@@ -35,7 +37,7 @@ use nitinol_persistence::{
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{
     Saga, SagaContext, SagaDelivery, SagaDeliveryId, SagaDeliveryProxy, SagaEffect, SagaId,
-    SagaManagerProps, SagaSubscribe, Subscription,
+    SagaManagerProps, SagaSubscribe, SagaSystemExt, Subscription,
 };
 
 /// How long a probe waits for work the host performs on its own poll loop.
@@ -232,6 +234,110 @@ impl Saga for DeliverySaga {
                 operation: event.operation.clone(),
             },
         )]
+    }
+
+    async fn handle(
+        &mut self,
+        _input: Self::Subscribe,
+        _ctx: &mut SagaContext,
+    ) -> Result<SagaEffect<Self::Event>, Self::Error> {
+        Ok(SagaEffect::None)
+    }
+}
+
+/// A receiver that recovers from its newest snapshot.
+///
+/// Its snapshot is the list of operations it has carried out, so a test can
+/// save one holding an operation its stream never recorded. An activation that
+/// answers with that operation started from the snapshot, which an activation
+/// replaying the stream alone could not have done.
+#[derive(Default)]
+pub struct Shelf {
+    operations: Vec<String>,
+}
+
+impl Aggregate for Shelf {
+    type Event = Recorded;
+    type Recover = Latest;
+
+    fn apply(&mut self, event: Recorded) {
+        self.operations.push(event.operation);
+    }
+}
+
+impl Snapshotable for Shelf {
+    type Snapshot = Vec<String>;
+    type Codec = DeliveryCodec;
+
+    fn capture(&self) -> Vec<String> {
+        self.operations.clone()
+    }
+
+    fn recover(snapshot: Vec<String>) -> Self {
+        Self {
+            operations: snapshot,
+        }
+    }
+}
+
+/// The same receive [`Ledger`] has, so a delivery to either is the same
+/// command and only the recovery marker differs.
+impl Decider<Record> for Shelf {
+    type Output = ();
+    type Rejection = std::convert::Infallible;
+
+    fn decide(&self, cmd: Record) -> Decision<Recorded, (), Self::Rejection> {
+        if self.operations.contains(&cmd.operation) {
+            return Decision::persist(Vec::new()).output(());
+        }
+        Decision::persist(vec![Recorded {
+            operation: cmd.operation,
+        }])
+        .output(())
+    }
+}
+
+impl Query<Operations> for Shelf {
+    type Response = Vec<String>;
+    type Error = std::convert::Infallible;
+
+    fn query(&self, _msg: Operations) -> Result<Vec<String>, Self::Error> {
+        Ok(self.operations.clone())
+    }
+}
+
+/// Stream key suffix [`ShelvingSaga`] addresses a [`Shelf`] by.
+pub const SHELF_SUFFIX: &str = "-shelf";
+
+/// Routes by what the decision says: a target named with [`SHELF_SUFFIX`] goes
+/// to a [`Shelf`], anything else to a [`Ledger`].
+///
+/// A `Recover = Latest` target and a `Recover = Never` one from one saga type
+/// is what lets a test hold a partition on the first and read the second
+/// resume behind it.
+#[derive(Default)]
+pub struct ShelvingSaga;
+
+#[async_trait]
+impl Saga for ShelvingSaga {
+    type Subscribe = Observed;
+    type Event = Decided;
+    type Error = std::convert::Infallible;
+
+    fn correlate(_input: &Self::Subscribe) -> Option<SagaId> {
+        None
+    }
+
+    fn dispatch(event: &Self::Event) -> Vec<SagaDelivery> {
+        let target = AggregateId::new(event.target.clone());
+        let command = Record {
+            operation: event.operation.clone(),
+        };
+        if event.target.ends_with(SHELF_SUFFIX) {
+            vec![SagaDelivery::new::<Shelf, Record>(target, command)]
+        } else {
+            vec![SagaDelivery::new::<Ledger, Record>(target, command)]
+        }
     }
 
     async fn handle(
@@ -540,6 +646,70 @@ where
         .await
         .delivery()
         .clone()
+}
+
+/// Host the saga `S` on `system` through the system's own entry point, with
+/// `partitions` delivery partitions, and answer the delivery half of what it
+/// started.
+///
+/// [`spawn_host`] for any store that can host a saga, rather than for
+/// [`DeliveryStore`] alone. The hosted entry point is the one a deployment
+/// writes, and the store is what the clauses using this vary.
+pub async fn spawn_hosted<S, St>(
+    system: &EventSourceSystem<St>,
+    partitions: usize,
+) -> SagaDeliveryProxy<S>
+where
+    S: Saga<Subscribe = Observed> + Default,
+    St: SagaOffsetSlot,
+{
+    system
+        .host::<S>(|_| S::default())
+        .observing::<Triggered>(Subscription::stream(TRIGGER_KEY))
+        .with_delivery_id(delivery_id())
+        .with_partitions(partition_count(partitions))
+        .with_delivery_poll_interval(TEST_POLL_INTERVAL)
+        .spawn()
+        .await
+        .delivery()
+        .clone()
+}
+
+/// Append one decision to a saga's own stream through an erased journal, and
+/// answer its global position.
+///
+/// What [`append_decided`] does, for a store whose backend handle is not
+/// reachable, such as [`InMemoryStore`](nitinol_persistence::store::InMemoryStore),
+/// whose journal is answered only as a [`Journal`].
+pub async fn append_decided_to(
+    journal: &Journal,
+    saga_id: &SagaId,
+    sequence: u64,
+    target: &str,
+    operation: &str,
+) -> u64 {
+    let payload = serde_json::to_vec(&Decided {
+        target: target.to_owned(),
+        operation: operation.to_owned(),
+    })
+    .map(Bytes::from)
+    .expect("a fixture event encodes");
+    let outcome = journal
+        .append(
+            saga_id.as_str(),
+            vec![AppendingEvent {
+                sequence,
+                event_type: Decided::EVENT_TYPE,
+                payload,
+                occurred_at: jiff::Timestamp::now(),
+            }],
+        )
+        .await
+        .expect("appending a fixture row succeeds");
+    *outcome
+        .assigned_sequences
+        .first()
+        .expect("a one-event append is assigned one global sequence")
 }
 
 /// Append one row to `stream` under the identity `E` declares.

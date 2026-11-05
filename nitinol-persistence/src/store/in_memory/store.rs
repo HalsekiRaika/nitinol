@@ -45,6 +45,10 @@ impl Store for InMemoryStore {
     fn events(&self) -> Journal {
         self.events.clone()
     }
+
+    fn snapshot_slot(&self) -> Option<Album> {
+        Some(self.snapshots.clone())
+    }
 }
 
 impl SnapshotSlot for InMemoryStore {

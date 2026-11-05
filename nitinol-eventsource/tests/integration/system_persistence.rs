@@ -24,10 +24,10 @@
 //!     Then it read the store's journal
 //!     And it recorded its position in the store's projection slot
 //!
-//!   Scenario: the erased handle is the system over a `Journal`
+//!   Scenario: the erased handle is the system over an `ErasedStore`
 //!     Given a system built on a store that supplies every slot
 //!     When its store type is erased
-//!     Then the handle is an `EventSourceSystem<Journal>`, which is the one
+//!     Then the handle is an `EventSourceSystem<ErasedStore>`, which is the one
 //!          type wiring written before a deployment's store names
 //!     And an aggregate spawned on the original system is read through the
 //!         erased handle's journal
@@ -67,7 +67,7 @@ use nitinol_eventsource::{
     ProjectorProps,
 };
 use nitinol_persistence::provider::{
-    CustomStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot,
+    CustomStore, ErasedStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot,
 };
 use nitinol_persistence::store::{
     Album, EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore,
@@ -637,7 +637,7 @@ async fn the_erased_handle_is_the_system_over_the_stores_journal() {
          was built on, so wiring that holds one reads what the aggregates wrote"
     );
 
-    // And: the store the handle's supplier distributes is the journal itself —
+    // And: the store the handle's supplier distributes is the erased store —
     // which is what makes `SystemHandle` one type for every deployment.
-    let _: fn(&SystemHandle) -> &PersistenceProvider<Journal> = SystemHandle::persistence;
+    let _: fn(&SystemHandle) -> &PersistenceProvider<ErasedStore> = SystemHandle::persistence;
 }

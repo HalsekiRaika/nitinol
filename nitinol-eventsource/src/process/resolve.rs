@@ -144,6 +144,7 @@ use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::{ProcessSystem, Props, SupervisionStrategy};
 use tokio::sync::watch;
 
+use crate::error::MissingSnapshotSlot;
 use crate::process::aggregate_process::AggregateProcess;
 
 /// A handle to one activation of an aggregate.
@@ -410,7 +411,12 @@ impl ResolveHandle {
 pub(crate) struct AggregateResolver<A: Aggregate> {
     handle: ResolveHandle,
     key: ResolveKey,
-    activation: Activation<A>,
+    /// How an activation is built, or why none can be on this system.
+    ///
+    /// The refusal is kept rather than reported once, because the deployment
+    /// it describes does not change: every resolve through this identity
+    /// answers it again.
+    activation: Result<Activation<A>, MissingSnapshotSlot>,
 }
 
 impl<A: Aggregate> Clone for AggregateResolver<A> {
@@ -418,13 +424,17 @@ impl<A: Aggregate> Clone for AggregateResolver<A> {
         Self {
             handle: self.handle.clone(),
             key: self.key.clone(),
-            activation: Arc::clone(&self.activation),
+            activation: self.activation.clone(),
         }
     }
 }
 
 impl<A: Aggregate> AggregateResolver<A> {
-    pub(crate) fn new(handle: ResolveHandle, id: AggregateId, activation: Activation<A>) -> Self {
+    pub(crate) fn new(
+        handle: ResolveHandle,
+        id: AggregateId,
+        activation: Result<Activation<A>, MissingSnapshotSlot>,
+    ) -> Self {
         Self {
             handle,
             key: ResolveKey::new::<A>(id),
@@ -432,31 +442,38 @@ impl<A: Aggregate> AggregateResolver<A> {
         }
     }
 
-    /// The live activation of this identity, starting one if there is none.
-    pub(crate) async fn resolve(&self) -> Incarnation<A> {
+    /// The live activation of this identity, starting one if there is none,
+    /// or why this identity cannot be activated here.
+    ///
+    /// A refusal is answered before the key is claimed. Claiming it would
+    /// leave a placeholder for an activation nobody can start, and joining an
+    /// activation another reference started would hand this one an aggregate
+    /// its own wiring cannot recover.
+    pub(crate) async fn resolve(&self) -> Result<Incarnation<A>, MissingSnapshotSlot> {
+        let activation = self.activation.as_ref().map_err(|missing| *missing)?;
         loop {
             match self.handle.registry.claim(&self.key) {
-                Claim::Resident(resident) => return resident.downcast::<A>(),
+                Claim::Resident(resident) => return Ok(resident.downcast::<A>()),
                 Claim::Awaiting(pending) => {
                     if let Some(resident) = await_resident(pending).await {
-                        return resident.downcast::<A>();
+                        return Ok(resident.downcast::<A>());
                     }
                     // The winner was dropped mid-spawn and took its placeholder
                     // with it; race for the key again rather than wait forever.
                 }
                 Claim::Activate(claim) => {
-                    let incarnation = self.activate().await;
+                    let incarnation = self.activate(activation).await;
                     claim.settle(Resident::of(&incarnation));
-                    return incarnation;
+                    return Ok(incarnation);
                 }
             }
         }
     }
 
-    async fn activate(&self) -> Incarnation<A> {
+    async fn activate(&self, activation: &Activation<A>) -> Incarnation<A> {
         self.handle
             .system
-            .spawn(activation_props(Arc::clone(&self.activation)))
+            .spawn(activation_props(Arc::clone(activation)))
             .await
     }
 

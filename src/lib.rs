@@ -83,6 +83,7 @@ pub mod eventsource {
         pub use nitinol_eventsource::error::AskError;
         pub use nitinol_eventsource::error::CodecError;
         pub use nitinol_eventsource::error::ExecError;
+        pub use nitinol_eventsource::error::MissingSnapshotSlot;
         pub use nitinol_eventsource::error::PersistError;
         pub use nitinol_eventsource::error::Retryability;
         pub use nitinol_eventsource::error::SnapshotSaveError;
@@ -105,7 +106,7 @@ pub mod eventsource {
     pub use nitinol_eventsource::Query;
     pub use nitinol_eventsource::{AggregateProps, AggregateProxy, AggregateTellTarget};
     pub use nitinol_eventsource::{
-        AskError, ExecError, Retryability, SnapshotSaveError, TellError,
+        AskError, ExecError, MissingSnapshotSlot, Retryability, SnapshotSaveError, TellError,
     };
     pub use nitinol_eventsource::{
         CursorSet, CursorUnset, DurableStream, DurableStreamProxy, DurableSubscription,

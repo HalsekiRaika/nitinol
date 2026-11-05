@@ -5,7 +5,7 @@ use futures_core::future::BoxFuture;
 use nitinol_eventsource::error::Retryability;
 use nitinol_eventsource::system::SystemHandle;
 use nitinol_eventsource::{Aggregate, Decider, RecoverOn};
-use nitinol_persistence::store::Journal;
+use nitinol_persistence::provider::ErasedStore;
 use nitinol_persistence::AggregateId;
 
 /// Why a delivery did not land, classified once.
@@ -50,17 +50,24 @@ impl SagaDelivery {
     ///
     /// # What a target may be
     ///
-    /// A mapping is written once and names one system type for every
-    /// deployment, so a host addresses its targets through the handle a system's
-    /// store type is erased to — and only the journal survives that erasure. An
-    /// aggregate whose [`Recover`](Aggregate::Recover) is
-    /// [`Latest`](nitinol_eventsource::Latest) asks its system for a snapshot
-    /// store, which that handle cannot answer for, so naming one here is a
-    /// compile error. A saga delivers to aggregates that replay their streams.
+    /// Any aggregate. A mapping is written once and names one system type for
+    /// every deployment, so a host addresses its targets through the handle a
+    /// system's store type is erased to, and that handle carries whether the
+    /// deployment holds a snapshot slot as a value. The `RecoverOn` bound below
+    /// is therefore one every aggregate meets, whichever
+    /// [`Recover`](Aggregate::Recover) it names.
+    ///
+    /// An aggregate whose `Recover` is [`Latest`](nitinol_eventsource::Latest)
+    /// recovers from the deployment's snapshot slot. If the store of the
+    /// deployment the saga was started on holds none, that delivery is a
+    /// permanent failure and its partition holds, the way it does for any
+    /// verdict. That is a wiring mistake rather than a condition to wait out:
+    /// spawning the same aggregate on the same deployment through the typed
+    /// system is a compile error.
     pub fn new<A, C>(target: AggregateId, command: C) -> Self
     where
         A: Aggregate + Decider<C>,
-        A::Recover: RecoverOn<A, Journal>,
+        A::Recover: RecoverOn<A, ErasedStore>,
         C: Send + Sync + 'static,
         <A as Decider<C>>::Output: Send + 'static,
         <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,

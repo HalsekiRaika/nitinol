@@ -56,10 +56,9 @@ use crate::store::event_store::{EventStore, EventStream};
 /// # Why it implements `Store`
 ///
 /// A store holding the journal alone *is* the journal, so there is no separate
-/// erased-store type beside this one. That is what lets wiring whose types are
-/// fixed before a deployment's store is known name a single type: a saga's
-/// dispatch mapping names its system when the mapping is written, and
-/// `nitinol_eventsource`'s `SystemHandle` is the system over a `Journal`.
+/// journal-only store type beside this one: a journal handed to a
+/// [`PersistenceProvider`](crate::provider::PersistenceProvider) is distributed
+/// as itself.
 ///
 /// The slots beyond the journal are deliberately absent. A journal has no
 /// snapshot store and no offset store to answer with, so wiring that needs one

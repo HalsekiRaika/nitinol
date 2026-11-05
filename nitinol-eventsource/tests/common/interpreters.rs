@@ -202,6 +202,7 @@ impl Interpreter for ActivationInterpreter {
                 Err(AskError::AlreadyCreated) => Interpreted::AlreadyCreated,
                 Err(AskError::Persist(failure)) => Interpreted::Failed(Fault::new(failure)),
                 Err(AskError::Send(failure)) => Interpreted::Failed(Fault::new(failure)),
+                Err(AskError::Activation(failure)) => Interpreted::Failed(Fault::new(failure)),
             }
         })
     }
@@ -225,6 +226,7 @@ impl Interpreter for ActivationInterpreter {
                 Ok(response) => Ok(response),
                 Err(ExecError::Domain(unanswerable)) => Err(Unanswered::Domain(unanswerable)),
                 Err(ExecError::Send(failure)) => Err(Unanswered::Failed(Fault::new(failure))),
+                Err(ExecError::Activation(failure)) => Err(Unanswered::Failed(Fault::new(failure))),
             }
         })
     }

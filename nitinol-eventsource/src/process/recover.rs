@@ -6,14 +6,21 @@
 //! snapshot store too. Both are stated as an implementation of one trait over
 //! the store type, so an aggregate spawned onto a store that cannot supply what
 //! its marker asks for has no impl to resolve and the wiring does not compile.
+//!
+//! The one store whose type cannot say is the
+//! [`ErasedStore`](nitinol_persistence::provider::ErasedStore) a system's store
+//! erases to: it carries the snapshot slot as a value. There a [`Latest`]
+//! aggregate resolves, and the deployment's answer is read when the reference
+//! is built — a deployment without the slot is a [`MissingSnapshotSlot`] every
+//! dispatch through that reference answers with.
 
 use std::sync::Arc;
 
 use nitinol_contract::{Aggregate, Latest, Never, Recovery, Snapshotable};
-use nitinol_persistence::provider::{SnapshotSlot, Store};
+use nitinol_persistence::provider::{SnapshotsForRecovery, Store};
 
 use crate::codec;
-use crate::error::CodecError;
+use crate::error::{CodecError, MissingSnapshotSlot};
 use crate::system::{EventSourceSystem, SnapshotSource};
 
 /// How a snapshot payload becomes the aggregate it was captured from.
@@ -60,41 +67,58 @@ impl<A> SnapshotRecovery<A> {
 /// [`Recover`](Aggregate::Recover) marker allows.
 ///
 /// This is the bound every aggregate spawn carries. It is satisfied for
-/// [`Never`] on any [`Store`] and for [`Latest`] only on a [`SnapshotSlot`], so
-/// "this aggregate recovers from snapshots and this deployment's store holds
-/// none" is a trait-bound error at the wiring rather than an activation that
-/// quietly replays from the beginning.
+/// [`Never`] on any [`Store`] and for [`Latest`] only on a store
+/// [`SnapshotsForRecovery`] admits: one whose type holds the snapshot slot, or
+/// the erased store. So "this aggregate recovers from snapshots and this
+/// deployment's store holds none" is a trait-bound error at the typed wiring
+/// rather than an activation that quietly replays from the beginning, and
+/// through the erased handle it is a [`MissingSnapshotSlot`].
 ///
 /// Sealed by its supertrait: [`Recovery`] has no implementors outside
 /// `nitinol-contract`, and this trait is this crate's, so the two markers below
 /// are the whole of it.
 pub trait RecoverOn<A: Aggregate, St: Store>: Recovery<A> {
-    /// What the activation carries to recover with, or nothing when the marker
-    /// says to replay the whole stream.
+    /// What the activation carries to recover with, nothing when the marker
+    /// says to replay the whole stream, or why the aggregate cannot be
+    /// activated on this system at all.
+    ///
+    /// Only the erased store can answer the last: on a store whose type says
+    /// what it holds, both markers answer `Ok`.
     #[doc(hidden)]
-    fn recovery(system: &EventSourceSystem<St>) -> Option<SnapshotRecovery<A>>;
+    fn recovery(
+        system: &EventSourceSystem<St>,
+    ) -> Result<Option<SnapshotRecovery<A>>, MissingSnapshotSlot>;
 }
 
 impl<A: Aggregate, St: Store> RecoverOn<A, St> for Never {
-    fn recovery(_system: &EventSourceSystem<St>) -> Option<SnapshotRecovery<A>> {
-        None
+    fn recovery(
+        _system: &EventSourceSystem<St>,
+    ) -> Result<Option<SnapshotRecovery<A>>, MissingSnapshotSlot> {
+        Ok(None)
     }
 }
 
 impl<A, St> RecoverOn<A, St> for Latest
 where
     A: Aggregate + Snapshotable,
-    St: SnapshotSlot,
+    St: SnapshotsForRecovery,
 {
-    fn recovery(system: &EventSourceSystem<St>) -> Option<SnapshotRecovery<A>> {
-        Some(SnapshotRecovery {
-            source: system.snapshot_source(),
+    fn recovery(
+        system: &EventSourceSystem<St>,
+    ) -> Result<Option<SnapshotRecovery<A>>, MissingSnapshotSlot> {
+        let snapshots = system
+            .persistence()
+            .store()
+            .snapshots_for_recovery()
+            .ok_or(MissingSnapshotSlot)?;
+        Ok(Some(SnapshotRecovery {
+            source: system.snapshot_source(snapshots),
             // No codec argument anywhere: the aggregate named the format
             // alongside the snapshot value it writes.
             recover: Arc::new(|payload: &[u8]| {
                 codec::decode::<<A as Snapshotable>::Codec, A::Snapshot>(payload).map(A::recover)
             }),
-        })
+        }))
     }
 }
 
@@ -102,8 +126,8 @@ where
 mod tests {
     use bytes::Bytes;
     use nitinol_contract::{Codec, Event};
-    use nitinol_persistence::provider::PersistenceProvider;
-    use nitinol_persistence::store::InMemoryStore;
+    use nitinol_persistence::provider::{CustomStore, ErasedStore, PersistenceProvider};
+    use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore};
     use nitinol_persistence::{EventType, Family, TypeName};
     use nitinol_runtime::ProcessSystem;
 
@@ -195,6 +219,7 @@ mod tests {
         // When: the exact recovery a `Latest` aggregate's activation carries
         // resolves its persistor
         let recovery = <Latest as RecoverOn<Probe, InMemoryStore>>::recovery(&system)
+            .expect("Latest on a SnapshotSlot store is never refused")
             .expect("Latest on a SnapshotSlot store must carry a recovery");
         let activation_pid = recovery.persistor().await.pid();
 
@@ -205,6 +230,56 @@ mod tests {
             "a system distributes one snapshot persistor, so the recovery an \
              activation carries must resolve the same process as \
              EventSourceSystem::snapshot_persistor"
+        );
+    }
+
+    /// The same clause through the erased handle: the recovery a `Latest`
+    /// aggregate resolved there carries resolves the typed system's one
+    /// persistor, rather than a second process over the slot the handle
+    /// carries.
+    #[tokio::test]
+    async fn erased_recovery_resolves_the_same_persistor_the_system_distributes() {
+        // Given
+        let system = in_memory_system().await;
+        let erased = system.erase_store();
+
+        // When
+        let recovery = <Latest as RecoverOn<Probe, ErasedStore>>::recovery(&erased)
+            .expect("the erased handle of a deployment holding a snapshot slot is not refused")
+            .expect("Latest through the erased handle must carry a recovery");
+        let activation_pid = recovery.persistor().await.pid();
+
+        // Then
+        assert_eq!(
+            activation_pid,
+            system.snapshot_persistor().await.pid(),
+            "the erased handle shares the typed system's node, so the recovery \
+             it builds must resolve the one persistor that system distributes"
+        );
+    }
+
+    /// Through the erased handle of a deployment without a snapshot slot,
+    /// `Latest` answers the refusal rather than a recovery or "replay the whole
+    /// stream".
+    #[tokio::test]
+    async fn latest_through_an_erased_handle_without_a_snapshot_slot_is_refused() {
+        // Given
+        let store = CustomStore::builder()
+            .eventstore(InMemoryEventStore::default())
+            .build();
+        let system = EventSourceSystem::builder(ProcessSystem::new().await)
+            .with_persistence(PersistenceProvider::new(store))
+            .build();
+
+        // When
+        let recovery = <Latest as RecoverOn<Probe, ErasedStore>>::recovery(&system.erase_store());
+
+        // Then
+        assert!(
+            matches!(recovery, Err(MissingSnapshotSlot)),
+            "a deployment without a snapshot slot must refuse a `Latest` \
+             aggregate, not answer `Ok(None)` and have it replay in place of a \
+             snapshot"
         );
     }
 }

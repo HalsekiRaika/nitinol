@@ -236,16 +236,18 @@ where
     // identical.
     let handle = system.resolve_handle();
     let store = system.persistence().event_store();
-    let recovery = <A::Recover as RecoverOn<A, St>>::recovery(system);
 
     let identity = aggregate_id.clone();
-    let activation: Activation<A> = Arc::new(move || AggregateProcess {
-        state: A::default(),
-        aggregate_id: identity.clone(),
-        store: store.clone(),
-        sequence: 0,
-        recovery: recovery.clone(),
-    });
+    let activation =
+        <A::Recover as RecoverOn<A, St>>::recovery(system).map(|recovery| -> Activation<A> {
+            Arc::new(move || AggregateProcess {
+                state: A::default(),
+                aggregate_id: identity.clone(),
+                store: store.clone(),
+                sequence: 0,
+                recovery: recovery.clone(),
+            })
+        });
 
     let resolver = AggregateResolver::new(handle, aggregate_id.clone(), activation);
     AggregateProxy::resolved(aggregate_id, resolver)

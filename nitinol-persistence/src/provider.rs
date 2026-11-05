@@ -19,10 +19,12 @@
 //! through.
 
 mod custom_store;
+mod erased_store;
 
 use crate::store::{Album, Journal, OffsetStore};
 
 pub use self::custom_store::{CustomStore, CustomStoreBuilder, EventStoreUnset, Unprovided};
+pub use self::erased_store::ErasedStore;
 
 /// The storage a deployment runs on, as one cloneable handle.
 ///
@@ -150,6 +152,24 @@ pub trait Store: Clone + Send + Sync + 'static {
     /// named once, where the store is assembled, and every wiring point reads
     /// one handle type.
     fn events(&self) -> Journal;
+
+    /// The snapshot slot this store holds, as a value, or `None` where it
+    /// holds none.
+    ///
+    /// [`SnapshotSlot`] says the same thing in the type, which is where wiring
+    /// that is compiled against this store reads it. This is what remains of
+    /// it once the store's type is erased: an [`ErasedStore`] is taken from
+    /// what `Store` alone can say, so a store holding the slot has to say so
+    /// here too.
+    ///
+    /// A store that implements [`SnapshotSlot`] therefore answers `Some` with
+    /// the album [`SnapshotSlot::snapshots`] answers with, never `None`. One
+    /// that left this at its default would compile, and every aggregate
+    /// recovering from a snapshot would be refused through the erased handle
+    /// of a deployment that holds the slot.
+    fn snapshot_slot(&self) -> Option<Album> {
+        None
+    }
 }
 
 /// A store that also holds somewhere to keep aggregate snapshots.
@@ -157,11 +177,49 @@ pub trait Store: Clone + Send + Sync + 'static {
 /// Wiring that needs snapshots takes this bound, so a store without the slot is
 /// refused while the wiring is compiled rather than when a save is first
 /// attempted.
+///
+/// A store implementing this also overrides [`Store::snapshot_slot`] to answer
+/// the same album, so the slot survives the erasure of the store's type.
 pub trait SnapshotSlot: Store {
     /// Where aggregate snapshots are kept.
     ///
     /// Erased for the reason [`Store::events`] is.
     fn snapshots(&self) -> Album;
+}
+
+/// A store an aggregate recovering from a snapshot can be resolved on: one
+/// whose type says it holds the slot, or the erased store, which may hold it
+/// as a value.
+///
+/// This is the bound that keeps both readings in one place. Through a
+/// [`SnapshotSlot`] store the answer is always `Some`, because the type
+/// promised the slot when the wiring was compiled. Through an [`ErasedStore`]
+/// it is whatever the store the erased one was taken from held, so `None` is a
+/// deployment without the slot, found when the program runs.
+///
+/// Sealed: a store that holds no snapshot slot by type could otherwise
+/// implement this to have its wiring compile, and the refusal `PRV-3` puts at
+/// the compiler would move to the first activation. The two implementations
+/// below are the whole of it.
+pub trait SnapshotsForRecovery: Store + sealed::Sealed {
+    /// The album an activation recovers from, or `None` where the deployment
+    /// holds no snapshot slot.
+    fn snapshots_for_recovery(&self) -> Option<Album>;
+}
+
+/// Answered from the type rather than from [`Store::snapshot_slot`], so a
+/// store whose type holds the slot is never refused on the strength of an
+/// override it forgot.
+impl<S: SnapshotSlot> SnapshotsForRecovery for S {
+    fn snapshots_for_recovery(&self) -> Option<Album> {
+        Some(self.snapshots())
+    }
+}
+
+impl<S: SnapshotSlot> sealed::Sealed for S {}
+
+mod sealed {
+    pub trait Sealed {}
 }
 
 /// A store that also holds somewhere to keep how far a projection has been

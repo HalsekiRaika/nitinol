@@ -213,12 +213,42 @@ where
 
 impl<S, P, Sg> Store for CustomStore<S, P, Sg>
 where
-    S: Clone + Send + Sync + 'static,
+    S: sealed::NamedSnapshots,
     P: Clone + Send + Sync + 'static,
     Sg: Clone + Send + Sync + 'static,
 {
     fn events(&self) -> Journal {
         self.events.clone()
+    }
+
+    fn snapshot_slot(&self) -> Option<Album> {
+        self.snapshots.named()
+    }
+}
+
+/// What the snapshot parameter of a [`CustomStore`] says, as a value.
+///
+/// The builder moves that parameter from [`Unprovided`] to [`Album`] and to
+/// nothing else, so these two are the whole of it, and one [`Store`]
+/// implementation answers for both rather than one per state.
+mod sealed {
+    use crate::provider::Unprovided;
+    use crate::store::Album;
+
+    pub trait NamedSnapshots: Clone + Send + Sync + 'static {
+        fn named(&self) -> Option<Album>;
+    }
+
+    impl NamedSnapshots for Unprovided {
+        fn named(&self) -> Option<Album> {
+            None
+        }
+    }
+
+    impl NamedSnapshots for Album {
+        fn named(&self) -> Option<Album> {
+            Some(self.clone())
+        }
     }
 }
 
@@ -234,7 +264,7 @@ where
 
 impl<S, P, Sg> ProjectionOffsetSlot for CustomStore<S, P, Sg>
 where
-    S: Clone + Send + Sync + 'static,
+    S: sealed::NamedSnapshots,
     P: OffsetStore + Clone + 'static,
     Sg: Clone + Send + Sync + 'static,
 {
@@ -247,7 +277,7 @@ where
 
 impl<S, P, Sg> SagaOffsetSlot for CustomStore<S, P, Sg>
 where
-    S: Clone + Send + Sync + 'static,
+    S: sealed::NamedSnapshots,
     P: Clone + Send + Sync + 'static,
     Sg: OffsetStore + Clone + 'static,
 {

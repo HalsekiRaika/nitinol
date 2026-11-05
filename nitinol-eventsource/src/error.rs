@@ -61,6 +61,22 @@ pub enum Retryability {
     Permanent,
 }
 
+/// Why a reference could not activate its aggregate at all: the aggregate
+/// recovers from its newest snapshot, and the deployment it was resolved on
+/// holds no snapshot slot.
+///
+/// On a system whose store type is known this is a compile error at the
+/// wiring. It reaches the caller as a value only through the handle a system's
+/// store type is erased to, where the slot is carried as a value. The
+/// deployment does not grow a slot later, so every dispatch through such a
+/// reference answers with this, and none of them activates anything or replays
+/// the stream in place of the missing snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the aggregate recovers from its newest snapshot, and the deployment's store holds no snapshot slot"
+)]
+pub struct MissingSnapshotSlot;
+
 /// Error returned by `AggregateProxy::ask`.
 #[derive(Debug, thiserror::Error)]
 pub enum AskError<R: std::error::Error + Send + Sync + 'static> {
@@ -78,6 +94,9 @@ pub enum AskError<R: std::error::Error + Send + Sync + 'static> {
     Persist(PersistError),
     #[error("process send error: {0}")]
     Send(nitinol_runtime::error::SendError),
+    /// The aggregate could not be activated, so the command reached nothing.
+    #[error("the aggregate could not be activated: {0}")]
+    Activation(MissingSnapshotSlot),
 }
 
 impl<R> AskError<R>
@@ -96,6 +115,9 @@ where
             // stopping — including one stopped by a conflict of its own.
             AskError::Send(_) => Retryability::Transient,
             AskError::Persist(e) => e.retryability(),
+            // The deployment lacks what the aggregate's recovery needs, and
+            // re-resolving reaches the same deployment.
+            AskError::Activation(_) => Retryability::Permanent,
         }
     }
 }
@@ -122,6 +144,23 @@ impl PersistError {
 pub enum TellError {
     #[error("process send error: {0}")]
     Send(#[from] nitinol_runtime::error::SendError),
+    /// The aggregate could not be activated, so the command was not accepted
+    /// for delivery.
+    #[error("the aggregate could not be activated: {0}")]
+    Activation(MissingSnapshotSlot),
+}
+
+impl TellError {
+    /// Whether re-telling the command is worth attempting.
+    ///
+    /// The same reading [`AskError::retryability`] gives the failures the two
+    /// share.
+    pub fn retryability(&self) -> Retryability {
+        match self {
+            TellError::Send(_) => Retryability::Transient,
+            TellError::Activation(_) => Retryability::Permanent,
+        }
+    }
 }
 
 /// Error returned by `AggregateProxy::exec`.
@@ -131,13 +170,17 @@ pub enum ExecError<E: std::error::Error + Send + Sync + 'static> {
     Domain(E),
     #[error("process send error: {0}")]
     Send(nitinol_runtime::error::SendError),
+    /// The aggregate could not be activated, so there is no state to ask.
+    #[error("the aggregate could not be activated: {0}")]
+    Activation(MissingSnapshotSlot),
 }
 
 /// Error returned by `AggregateProxy::snapshot`.
 ///
-/// Only [`Encode`](Self::Encode) says that nothing was handed to the persistor:
-/// the activation encodes the snapshot before it saves it. The other variants
-/// report what the caller was told, not what the store holds.
+/// Only [`Encode`](Self::Encode) and [`Activation`](Self::Activation) say that
+/// nothing was handed to the persistor: the aggregate is activated and its
+/// snapshot encoded before it is saved. The other variants report what the
+/// caller was told, not what the store holds.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotSaveError {
     /// The codec the aggregate names could not write its captured state.
@@ -151,6 +194,10 @@ pub enum SnapshotSaveError {
     /// No answer to the snapshot request came back from an activation.
     #[error("process send error: {0}")]
     Send(nitinol_runtime::error::SendError),
+    /// The aggregate could not be activated, so there is no state to capture.
+    /// Nothing was handed to the persistor.
+    #[error("the aggregate could not be activated: {0}")]
+    Activation(MissingSnapshotSlot),
 }
 
 /// Internal error produced by `AggregateProcess::recv` for snapshot requests.

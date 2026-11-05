@@ -1,22 +1,21 @@
 //! A journal answers for the journal and for nothing beside it.
 //!
 //! ```gherkin
-//!   Scenario: the erased handle names no offset slot
+//!   Scenario: a journal names no offset slot
 //!     Given a `Journal`
 //!     When an offset slot's verb is called on it
 //!     Then the crate claims neither name for it, so a projector or a saga
-//!          attachment wired over the erased handle has no slot to resolve
+//!          attachment wired over a journal has no slot to resolve
 //! ```
 //!
 //! `Journal` implements [`Store`](nitinol_persistence::provider::Store) because
-//! a store holding the journal alone *is* the journal, and that is what fixes
-//! the type-erased system handle on a single type. The slots beyond the journal
-//! are the half that has to stay absent: wiring that needs an offset store takes
-//! the slot's bound, so an erased handle reaching for one is refused while the
-//! wiring is compiled rather than at the first save. That is `PRV-3`, and the
-//! erased handle is where it is easiest to give up — implementing a slot for
-//! `Journal` to make some wiring compile would answer with a destination the
-//! journal was never assembled over.
+//! a store holding the journal alone *is* the journal. The slots beyond the
+//! journal are the half that has to stay absent: wiring that needs an offset
+//! store takes the slot's bound, so a journal reaching for one is refused while
+//! the wiring is compiled rather than at the first save. That is `PRV-3`, and a
+//! store with nothing beyond its journal is where it is easiest to give up —
+//! implementing a slot for `Journal` to make some wiring compile would answer
+//! with a destination the journal was never assembled over.
 //!
 //! The refusal is the compiler's, so what is settled here is the fact it rests
 //! on: that neither offset slot is `Journal`'s. It is read by the second of the
@@ -28,9 +27,11 @@
 //! resolves. The `Declined` label is what makes a resolution in the crate's
 //! favour fail to compile rather than pass quietly.
 //!
-//! The snapshot half of the same absence, and the refusal at the wiring points
-//! themselves, are fixed where the wiring is — on
-//! `EventSourceSystem::erase_store` in `nitinol-eventsource`.
+//! The refusal at the wiring points themselves is fixed where the wiring is, by
+//! the `compile_fail` doctests on the entry points that take a slot's bound.
+//! The store a system's type is erased to is not `Journal`: it carries the
+//! snapshot slot as a value, and what it implements is fixed in
+//! `erased_store_carries_only_the_snapshot_slot.rs`.
 //!
 //! Run with:
 //! `cargo test -p nitinol-persistence --test integration journal_names_no_slot_beyond_itself::`.

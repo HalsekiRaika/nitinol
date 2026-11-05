@@ -2,7 +2,7 @@
 //! `Arc` layer leaves no surface behind.
 //!
 //! ```gherkin
-//!   Scenario: the erased store type is named `Journal`
+//!   Scenario: the journal-only store is named `Journal`
 //!     Given user code naming DynStore
 //!     When it is compiled against this crate
 //!     Then compilation fails — the journal-only store is `Journal` itself, and
@@ -133,9 +133,8 @@ fn the_erased_store_type_name_belongs_to_a_downstream_definition() {
         DynStore { owner: PROBE_OWNER }.owner,
         PROBE_OWNER,
         "`nitinol-persistence` must not export `DynStore`: a store holding the \
-         journal alone is `Journal` itself, which is what the erased system \
-         handle is fixed on, so a second type naming the same thing would be a \
-         wrapper whose clone did not reach the backend's"
+         journal alone is `Journal` itself, so a second type naming the same \
+         thing would be a wrapper whose clone did not reach the backend's"
     );
 }
 

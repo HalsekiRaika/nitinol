@@ -380,7 +380,9 @@ where
 /// Why an activation asked for a snapshot always carries a recovery: the
 /// request is sent only by `AggregateProxy::snapshot`, which exists only for a
 /// `Latest` aggregate, and a `Latest` aggregate's activation is always built
-/// with one.
+/// with one. A `Latest` aggregate whose deployment holds no snapshot slot has
+/// no activation at all: its reference answers the refusal before anything is
+/// sent.
 const RECOVERY_UNDER_LATEST: &str =
     "a snapshot is requested only of a `Latest` aggregate, whose activation always carries a recovery";
 

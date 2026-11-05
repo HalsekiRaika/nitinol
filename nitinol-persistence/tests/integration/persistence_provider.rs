@@ -778,10 +778,9 @@ async fn a_journal_taken_from_a_reference_is_the_clone_of_that_journal() {
 
 /// A store holding the journal alone *is* the journal.
 ///
-/// This is what wiring whose types are fixed before a deployment's store is
-/// known names: a saga's dispatch mapping names one system type when the mapping
-/// is written. The handle it names is a `Journal`, and handing one to a supplier
-/// has to reach the records it holds.
+/// A journal handed to a supplier is a store like any other, so the supplier
+/// has to distribute that journal and reach the records it holds, not a
+/// wrapper around it.
 #[tokio::test]
 async fn a_journal_handed_to_a_supplier_is_the_store_it_distributes() {
     // Given
