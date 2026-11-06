@@ -14,7 +14,7 @@
 //!     Then it is handed that system
 //! ```
 //!
-//! Both entry points hand the instance a `&SystemHandle`, because a saga is
+//! Both entry points hand the instance a `&ContingentSystem`, because a saga is
 //! started on a system and has no other way to be started: there is no longer
 //! an unhosted spawn for a clause to describe.  So the second clause asks the
 //! same question of the props-first form and reads the same answer, and the
@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::system::{EventSourceSystem, SystemHandle};
+use nitinol_eventsource::system::{ContingentSystem, EventSourceSystem};
 use nitinol_eventsource::{Aggregate, Decider, Decision, Event, Never};
 use nitinol_persistence::provider::{PersistenceProvider, Store};
 use nitinol_persistence::store::{InMemoryStore, Journal};
@@ -162,18 +162,18 @@ struct Report {
 /// A saga whose only dependency is the system that hosts it.
 struct HostedSaga {
     /// The host the components answered with.
-    host: SystemHandle,
+    host: ContingentSystem,
     report: Arc<Report>,
 }
 
 /// Build one incarnation, recording that a host was handed over.
 ///
 /// The annotation is the contract: a `system()` answering an `Option` has no
-/// coercion to `&SystemHandle` and does not compile here.
+/// coercion to `&ContingentSystem` and does not compile here.
 fn producer(report: &Arc<Report>) -> impl Fn(SagaComponents<HostedSaga>) -> HostedSaga {
     let report = Arc::clone(report);
     move |components| {
-        let hosting: &SystemHandle = components.system();
+        let hosting: &ContingentSystem = components.system();
         report.host_present.store(true, Ordering::SeqCst);
         HostedSaga {
             host: hosting.clone(),

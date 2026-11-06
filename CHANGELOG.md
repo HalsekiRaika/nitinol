@@ -13,33 +13,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   variant carrying it on `AskError`, `TellError`, `ExecError` and
   `SnapshotSaveError`. It is how a reference reports that its aggregate cannot
   be activated at all: the aggregate's `Recover` is `Latest` and the
-  deployment it was resolved on holds no snapshot slot. Only the erased handle
-  (`EventSourceSystem::erase_store`) can answer it; on a typed system the same
-  wiring is still a compile error. Nothing is activated for such a reference,
-  the stream is not replayed in place of the missing snapshot, and every
-  dispatch through it answers the same error. `AskError::retryability` reads
-  `Activation` as `Permanent`. `TellError::retryability` is new and reads
-  `Send` as `Transient` and `Activation` as `Permanent`, as `AskError` does.
+  deployment it was resolved on holds no snapshot slot. Only a
+  `ContingentSystem` (`EventSourceSystem::to_contingent`) can answer it; on a
+  typed system the same wiring is still a compile error. Nothing is activated
+  for such a reference, the stream is not replayed in place of the missing
+  snapshot, and every dispatch through it answers the same error.
+  `AskError::retryability` reads `Activation` as `Permanent`.
+  `TellError::retryability` is new and reads `Send` as `Transient` and
+  `Activation` as `Permanent`, as `AskError` does.
   `MissingSnapshotSlot` is re-exported from the crate root and from
   `nitinol::eventsource` and `nitinol::eventsource::error`.
 
-- (`nitinol-persistence`): `provider::ErasedStore`, the store a system's store
-  erases to. It holds the journal and the snapshot slot as an
-  `Option<Album>`, both clones of the store it was taken from, and is built with
-  `ErasedStore::of(&store)`. It implements `Store` and no slot trait, so wiring
-  compiled against a slot's bound still refuses it (`PRV-3`).
+- (`nitinol-eventsource`): `system::ContingentSystem`, a non-generic,
+  cheap-clone view of an `EventSourceSystem` that names no store type, and
+  `EventSourceSystem::to_contingent`, which is how one is obtained. It shares
+  the typed system's node — the same process system, aggregate registry,
+  journal and snapshot persistor — and carries whether the deployment holds a
+  snapshot slot as a value. It offers `aggregate_proxy`, `spawn_aggregate`,
+  `event_store`, `snapshot_store` (an `Option<Album>`, the one place the
+  missing guarantee is visible) and `process_system`, and nothing that relies
+  on a slot's bound: no `snapshot_persistor`, no `aggregate_props` and no
+  `persistence`. A clone keeps the same journal and the same answer about the
+  snapshot slot. Re-exported as `nitinol::eventsource::system::ContingentSystem`.
+
+- (`nitinol-eventsource`): `RecoverOnContingent<A>`, the sealed bound the
+  `ContingentSystem` entry points carry. Both recovery markers implement it:
+  `Never` answers no recovery, and `Latest` answers one built from
+  `snapshot_store()` or `MissingSnapshotSlot` where the deployment holds none.
+  Re-exported from the crate root and from `nitinol::eventsource`.
 
 - (`nitinol-persistence`): `Store::snapshot_slot`, a provided method answering
   the snapshot slot a store holds as a value, `None` by default. A store that
   implements `SnapshotSlot` answers `Some` with the album `snapshots()`
   answers. `InMemoryStore`, `CustomStore<Album, _, _>` and
   `nitinol_sqlx::PostgresStore` do. A third-party store implementing
-  `SnapshotSlot` has to override it as well, or its erased handle refuses every
-  `Recover = Latest` aggregate.
-
-- (`nitinol-persistence`): `provider::SnapshotsForRecovery`, the sealed bound a
-  `Recover = Latest` aggregate is resolved under: every `SnapshotSlot` store,
-  answered from the type, and `ErasedStore`, answered from its value.
+  `SnapshotSlot` has to override it as well, or the `ContingentSystem` taken
+  from its system refuses every `Recover = Latest` aggregate.
 
 - (nitinol-eventsource): `AggregateProxy::snapshot()`, the save side of
   `Recover = Latest`. It exists only on an aggregate whose `Recover` is
@@ -241,9 +250,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what `nitinol_eventsource::system::SystemHandle` names. It implements no slot
   beyond the journal, so wiring that needs a snapshot store or an offset store
   is still refused while it is compiled (`PRV-3`) rather than at the first save.
-  (`SystemHandle` has since moved to `ErasedStore`, which carries the snapshot
-  slot as a value; see the `SystemHandle` entry under Changed. `Journal` is
-  still the store holding the journal alone.)
+  (`SystemHandle` has since been removed in favour of `ContingentSystem`; see
+  the `SystemHandle` entry under Changed. `Journal` is still the store holding
+  the journal alone.)
 
 - (`nitinol-persistence`): `store::EventStoreClone` and
   `store::SnapshotStoreClone` carry a store's own `Clone` through the erasure.
@@ -813,31 +822,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING** (`nitinol-eventsource`, `nitinol-saga`): `system::SystemHandle`
-  is `EventSourceSystem<ErasedStore>` rather than
-  `EventSourceSystem<Journal>`. `EventSourceSystem::erase_store` keeps whether
-  the store held a snapshot slot, as a value, where it used to keep the journal
-  alone. The node it shares with the typed system is unchanged, and so is its
-  memoisation. `SystemHandle::persistence()` therefore answers a
-  `PersistenceProvider<ErasedStore>`, and `erase_store().snapshot_persistor()`
-  still does not compile: an `ErasedStore` is not a `SnapshotSlot`.
+- **BREAKING** (`nitinol-eventsource`): `system::SystemHandle` and
+  `EventSourceSystem::erase_store` are removed. `EventSourceSystem::to_contingent`
+  answers a `ContingentSystem` in their place. Where a `SystemHandle` was a
+  typed system over an erased store, with every method the typed system has,
+  a `ContingentSystem` is its own type and offers only what holds whatever the
+  deployment's store: there is no `persistence()` to reach the store through and
+  no `snapshot_persistor()`. The view is not memoised per typed system: each
+  `to_contingent` builds one over the same node, so the registry and the
+  snapshot persistor are still one.
 
   This supersedes what the entries below say about the erased handle holding
   the journal alone, and about `SagaDelivery::new` requiring
   `A::Recover: RecoverOn<A, Journal>`.
 
-- **BREAKING** (`nitinol-eventsource`): `RecoverOn::recovery` answers
-  `Result<Option<SnapshotRecovery<A>>, MissingSnapshotSlot>` rather than
-  `Option<SnapshotRecovery<A>>`. `Never` answers `Ok(None)` and `Latest` on a
-  store whose type holds the snapshot slot answers `Ok(Some(..))`, always.
-  `Latest` is implemented once, over `St: SnapshotsForRecovery`, rather than
-  over `St: SnapshotSlot`; through an `ErasedStore` it answers `Err` where the
-  deployment holds no slot. The typed bounds are unchanged: spawning a
-  `Latest` aggregate on a typed system whose store holds no snapshot slot is
-  still a compile error.
+- **BREAKING** (`nitinol-saga`): `SagaComponents::system()` answers
+  `&ContingentSystem` rather than `&SystemHandle`.
 
-- (`nitinol-saga`): `SagaDelivery::new::<A, C>` requires
-  `A::Recover: RecoverOn<A, ErasedStore>`, which every aggregate meets, in place
+- **BREAKING** (`nitinol-saga`): `SagaDelivery::new::<A, C>` requires
+  `A::Recover: RecoverOnContingent<A>`, which every aggregate meets, in place
   of `RecoverOn<A, Journal>`. A delivery may be addressed to a `Recover = Latest`
   aggregate.
 
@@ -1045,10 +1048,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names one system type for every deployment, so a host addresses its targets
   through the handle a system's store type is erased to — and only the journal
   survives that erasure. A `Latest` aggregate cannot be a delivery target; it is
-  resolved through the typed system it was built on. (Since lifted: the erased
-  handle carries the snapshot slot as a value and `SagaDelivery::new` takes
-  `RecoverOn<A, ErasedStore>`; see the `SystemHandle` entry under Changed and
-  the delivery entry under Fixed.)
+  resolved through the typed system it was built on. (Since lifted: the host
+  reaches its targets through a `ContingentSystem`, which carries the snapshot
+  slot as a value, and `SagaDelivery::new` takes `RecoverOnContingent<A>`; see
+  the `SystemHandle` entry under Changed and the delivery entry under Fixed.)
 
   The vocabulary follows the mechanism: an event is **replayed**, a snapshot is
   **recovered**. `restore` is not used for either.
@@ -1354,8 +1357,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   took a `ProcessSystem` and ignored it. `system::SystemHandle` is the system
   with the store's type erased, and `EventSourceSystem::erase_store` is how a
   caller gets one; only the journal survives the erasure, so a slot nobody
-  supplied stays unreachable through it. (The snapshot slot now survives it as
-  a value; see the `SystemHandle` entry under Changed.)
+  supplied stays unreachable through it. (Both are since replaced by
+  `ContingentSystem` and `EventSourceSystem::to_contingent`, through which the
+  snapshot slot survives as a value; see the `SystemHandle` entry under
+  Changed.)
 
   `SagaComponents::system` hands a saga the system hosting it — the same
   process system, the same aggregate registry and the same supplier — so a
@@ -1866,9 +1871,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same name with neither: `SystemHandle` is `EventSourceSystem<Journal>`, and
   `EventSourceSystem::erase_store` builds it from
   `PersistenceProvider::new(self.persistence.event_store())`. (`SystemHandle`
-  is now `EventSourceSystem<ErasedStore>`, built from
-  `ErasedStore::of(self.persistence.store())`; see the `SystemHandle` entry
-  under Changed.)
+  and `erase_store` are since removed; `EventSourceSystem::to_contingent`
+  answers a `ContingentSystem` instead. See the `SystemHandle` entry under
+  Changed.)
 
 - **BREAKING** (`nitinol-persistence`): the three blanket implementations that
   made a shared pointer a store — `impl<T: EventStore + ?Sized> EventStore for
@@ -2253,7 +2258,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (`nitinol-saga`): a saga can deliver a command to a `Recover = Latest`
   aggregate. `SagaDelivery::new` no longer refuses one at compile time: the
-  host reaches its targets through the erased handle, which now carries the
+  host reaches its targets through a `ContingentSystem`, which carries the
   deployment's snapshot slot, so the target recovers from the snapshot its
   typed system keeps. `SagaComponents::system()` reaches such an aggregate the
   same way. On a deployment whose store holds no snapshot slot, the delivery

@@ -1,9 +1,11 @@
-use std::sync::{Arc, OnceLock};
+mod contingent;
+
+use std::sync::Arc;
 
 use crate::projection::ProjectionId;
 use nitinol_contract::Aggregate;
 use nitinol_persistence::provider::{
-    ErasedStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
+    PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot, Store,
 };
 use nitinol_persistence::store::Album;
 use nitinol_persistence::{AggregateId, LoadedEvent};
@@ -17,21 +19,13 @@ use crate::process::{RecoverOn, SnapshotPersistor, SnapshotPersistorProxy};
 use crate::projection::ProjectorProps;
 use crate::{AggregateProps, AggregateProxy};
 
+pub use self::contingent::ContingentSystem;
+
 /// Marker type indicating no persistence supplier has been supplied yet.
 ///
 /// A builder in this state has no [`build`][EventSourceSystemBuilder::build],
 /// so there is no way to reach a system whose stores nobody named.
 pub struct PersistenceUnset;
-
-/// The system a handle onto any store erases to.
-///
-/// Wiring whose types are fixed before a deployment's store is known — a saga's
-/// dispatch mapping names the system type it delivers through when the mapping
-/// is written — names this one type for every store. It reaches the same
-/// process system, the same aggregate registry, the same journal and — where
-/// the store held one — the same snapshot slot the system it was erased from
-/// does.
-pub type SystemHandle = EventSourceSystem<ErasedStore>;
 
 /// Props that have not named the system they start on yet, so `spawn` takes
 /// one.
@@ -146,7 +140,6 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
             inner: Arc::new(Inner {
                 persistence: self.persistence,
                 node: Node::new(self.ps),
-                erased: OnceLock::new(),
             }),
         }
     }
@@ -166,9 +159,9 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
 ///
 /// A slot the store does not hold is a **compile error** at the wiring that
 /// needs it, rather than a failure at the first save — which is the whole of
-/// why the store is a type parameter here. The one system whose type cannot say
-/// is the handle [`erase_store`][Self::erase_store] answers with, which carries
-/// the snapshot slot as a value instead.
+/// why the store is a type parameter here. The one view whose type cannot say
+/// is the [`ContingentSystem`] [`to_contingent`][Self::to_contingent] answers
+/// with, which carries the snapshot slot as a value instead.
 ///
 /// # Two ways to say one wiring
 ///
@@ -229,10 +222,9 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
 ///
 /// # What holds what
 ///
-/// A system holds the one instance behind it: the supplier it was built with,
-/// the node state every handle onto it shares, and — once asked for — the
-/// erased handle it answers with. Nothing on the other side of those holds a
-/// system back. The registry keeps process proxies, a process proxy keeps a pid
+/// A system holds the one instance behind it: the supplier it was built with
+/// and the node state every handle onto it shares. Nothing on the other side of
+/// those holds a system back. The registry keeps process proxies, a process proxy keeps a pid
 /// and a channel, and a persistor keeps a snapshot store, so there is no strong
 /// cycle to leak: a handle lives as long as the processes holding it, and is
 /// released when they stop.
@@ -249,24 +241,16 @@ struct Inner<St> {
     /// than in the store.
     persistence: PersistenceProvider<St>,
     node: Node,
-    /// The handle this system erases to, built on the first
-    /// [`erase_store`][EventSourceSystem::erase_store] and named by every call
-    /// after it.
-    ///
-    /// Erasing is on the hosted spawn path — every entry point carries one into
-    /// the props it hands back — so the journal and the snapshot slot are
-    /// taken out of the supplier once per system rather than once per spawn.
-    erased: OnceLock<SystemHandle>,
 }
 
-/// The node state a system shares with its clones and with the handle its store
-/// type is erased from.
+/// The node state a system shares with its clones and with the contingent
+/// systems taken from it.
 ///
 /// Cheap-clone for the reason [`ProcessSystem`] is, and separate from
-/// [`Inner`] for one reason: none of it depends on the store type, so the
-/// erased handle is a second [`Inner`] over the same node rather than a second
-/// node. That is what makes the activation registry one table for the typed
-/// system and the erased handle both — and the snapshot persistor one process.
+/// [`Inner`] for one reason: none of it depends on the store type, so a
+/// [`ContingentSystem`] holds this same node rather than a second one. That is
+/// what makes the activation registry one table for the typed system and the
+/// contingent view of it both — and the snapshot persistor one process.
 #[derive(Clone)]
 struct Node {
     inner: Arc<NodeInner>,
@@ -280,7 +264,7 @@ struct NodeInner {
     registry: AggregateRegistry,
     /// The one snapshot persistor process a system distributes.
     ///
-    /// Shared across clones and across the erased handle, because the snapshot
+    /// Shared across clones and across contingent systems, because the snapshot
     /// contract is written for a single consumer serialising its calls: a second
     /// process over one store would be two.
     snapshot_persistor: OnceCell<SnapshotPersistorProxy>,
@@ -311,15 +295,28 @@ impl Node {
     ///
     /// `snapshots` is the asking system's own snapshot store, and it is the same
     /// one every time: a node is built with one supplier, clones carry it, and
-    /// the erased handle carries the very album that supplier's store answered
-    /// with. So the process the first caller starts is over the store every
-    /// later caller would have named.
+    /// a contingent system carries the very album that supplier's store
+    /// answered with. So the process the first caller starts is over the store
+    /// every later caller would have named.
     async fn snapshot_persistor(&self, snapshots: Album) -> SnapshotPersistorProxy {
         self.inner
             .snapshot_persistor
             .get_or_init(|| async { SnapshotPersistor::spawn(&self.inner.ps, snapshots).await })
             .await
             .clone()
+    }
+
+    /// What an activation of a `Recover = Latest` aggregate resolves this
+    /// node's one persistor through, once it is running.
+    ///
+    /// `snapshots` is the asking system's own snapshot store, taken by the
+    /// caller from wherever its type says it is: the slot of a typed store, or
+    /// the value a contingent system carries.
+    fn snapshot_source(&self, snapshots: Album) -> SnapshotSource {
+        SnapshotSource {
+            node: self.clone(),
+            snapshots,
+        }
     }
 }
 
@@ -352,8 +349,8 @@ impl SnapshotSource {
 /// builder's marker is not a store and has no clone to offer — so an assembly's
 /// choice of handle types would decide whether its system can be shared.
 ///
-/// A clone is another name for the one instance: the same supplier, the same
-/// node, and the same erased handle.
+/// A clone is another name for the one instance: the same supplier and the same
+/// node.
 impl<St> Clone for EventSourceSystem<St> {
     fn clone(&self) -> Self {
         Self {
@@ -387,19 +384,6 @@ impl<St> EventSourceSystem<St> {
     /// What a reference needs to resolve, and re-resolve, its aggregate here.
     pub(crate) fn resolve_handle(&self) -> ResolveHandle {
         self.inner.node.resolve_handle()
-    }
-
-    /// What an activation of a `Recover = Latest` aggregate resolves this
-    /// system's one persistor through, once it is running.
-    ///
-    /// `snapshots` is this system's own snapshot store, taken by the caller from
-    /// wherever the store type says it is: the slot of a typed store, or the
-    /// value an erased store carries.
-    pub(crate) fn snapshot_source(&self, snapshots: Album) -> SnapshotSource {
-        SnapshotSource {
-            node: self.inner.node.clone(),
-            snapshots,
-        }
     }
 }
 
@@ -551,73 +535,30 @@ impl<St: Store> EventSourceSystem<St> {
         self.aggregate_props::<A>(id).into_reference()
     }
 
-    /// The same system, with the store's type erased.
+    /// A view of this system that names no store type.
     ///
-    /// It is a handle, not a copy: the same process system, the same aggregate
-    /// registry, the same journal and the same snapshot persistor. Resolving an
-    /// identity through the erased handle reaches the activation the original
+    /// It is the same node, not a copy: the same process system, the same
+    /// aggregate registry, the same journal and the same snapshot persistor.
+    /// Resolving an identity through it reaches the activation this system
     /// would.
     ///
-    /// One handle per system, built here on the first call and cloned by every
-    /// call after it — including the ones the hosted entry points make on the
-    /// caller's behalf, so a spawn takes nothing out of the supplier.
-    ///
-    /// # What survives the erasure
-    ///
     /// The store's type is gone; whether it held a snapshot slot is not. The
-    /// handle's store is an [`ErasedStore`]: the journal, and the snapshot slot
-    /// as a value — the store's own album where it held one, nothing where it
-    /// did not. Erasing the erased handle again keeps that value.
+    /// view carries the journal, and the snapshot slot as a value — the store's
+    /// own album where it holds one, nothing where it does not — which
+    /// [`ContingentSystem::snapshot_store`] answers with. A clone of the view
+    /// keeps that value.
     ///
-    /// What a value cannot do is satisfy a bound, so wiring compiled against a
-    /// slot's trait still refuses the erased handle, whatever the store it came
-    /// from supplied. Its own snapshot persistor is one such entry point:
-    ///
-    /// ```compile_fail
-    /// # use nitinol_eventsource::system::EventSourceSystem;
-    /// # use nitinol_persistence::provider::PersistenceProvider;
-    /// # use nitinol_persistence::store::InMemoryStore;
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # async fn wiring() {
-    /// # let ps = ProcessSystem::new().await;
-    /// let system = EventSourceSystem::builder(ps)
-    ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    ///     .build();
-    /// // the erased handle's store is not a `SnapshotSlot`, whatever the
-    /// // store it came from supplied
-    /// system.erase_store().snapshot_persistor().await;
-    /// # }
-    /// ```
-    ///
-    /// # A `Latest` aggregate through the erased handle
-    ///
-    /// An aggregate whose [`Recover`](Aggregate::Recover) is
-    /// [`Latest`](nitinol_contract::Latest) does resolve here, because the slot
-    /// it asks for is read from the value. Where the deployment holds the slot,
-    /// it recovers from the snapshot this system's own persistor keeps, exactly
-    /// as it would through the typed system. Where the deployment holds none,
-    /// the activation fails permanently: nothing is started, the stream is not
-    /// replayed in place of the missing snapshot, and every dispatch through
-    /// the reference answers [`MissingSnapshotSlot`](crate::error::MissingSnapshotSlot)
-    /// — an [`AskError::Activation`](crate::AskError::Activation) that
-    /// [`retryability`](crate::AskError::retryability) reads as permanent.
-    ///
-    /// That is a wiring mistake, and the typed system still says so when it is
-    /// compiled: spawning the same aggregate there on the same deployment does
-    /// not compile.
-    pub fn erase_store(&self) -> SystemHandle {
-        self.inner
-            .erased
-            .get_or_init(|| EventSourceSystem {
-                inner: Arc::new(Inner {
-                    persistence: PersistenceProvider::new(ErasedStore::of(
-                        self.inner.persistence.store(),
-                    )),
-                    node: self.inner.node.clone(),
-                    erased: OnceLock::new(),
-                }),
-            })
-            .clone()
+    /// What a value cannot do is satisfy a bound, so the view offers none of
+    /// the entry points this system offers on the strength of a slot's bound:
+    /// no snapshot persistor, no props and no supplier. The consequence for an
+    /// aggregate whose [`Recover`](Aggregate::Recover) is
+    /// [`Latest`](nitinol_contract::Latest) is stated on [`ContingentSystem`].
+    pub fn to_contingent(&self) -> ContingentSystem {
+        ContingentSystem::new(
+            self.inner.node.clone(),
+            self.inner.persistence.event_store(),
+            self.inner.persistence.store().snapshot_slot(),
+        )
     }
 }
 
@@ -650,9 +591,15 @@ impl<St: SnapshotSlot> EventSourceSystem<St> {
     /// # }
     /// ```
     pub async fn snapshot_persistor(&self) -> SnapshotPersistorProxy {
-        self.snapshot_source(self.inner.persistence.snapshot_store())
-            .resolve()
-            .await
+        self.snapshot_source().resolve().await
+    }
+
+    /// What an activation of a `Recover = Latest` aggregate resolves this
+    /// system's one persistor through, once it is running.
+    pub(crate) fn snapshot_source(&self) -> SnapshotSource {
+        self.inner
+            .node
+            .snapshot_source(self.inner.persistence.snapshot_store())
     }
 }
 

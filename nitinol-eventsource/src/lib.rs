@@ -109,12 +109,15 @@ pub use nitinol_contract::{DeclaresEventType, MatchesEventType};
 pub use self::error::{
     AskError, ExecError, MissingSnapshotSlot, Retryability, SnapshotSaveError, TellError,
 };
-pub use self::process::{AggregateProps, AggregateProxy, AggregateTellTarget, RecoverOn};
+pub use self::process::{
+    AggregateProps, AggregateProxy, AggregateTellTarget, RecoverOn, RecoverOnContingent,
+};
 pub use self::process::{SnapshotPersistor, SnapshotPersistorProxy};
 
 // The value an activation of a `Recover = Latest` aggregate carries. It appears
-// in `RecoverOn`'s signature, so it is public for the bound to be nameable, and
-// hidden because nothing outside this crate builds or reads one.
+// in the signatures of `RecoverOn` and `RecoverOnContingent`, so it is public
+// for the bounds to be nameable, and hidden because nothing outside this crate
+// builds or reads one.
 #[doc(hidden)]
 pub use self::process::SnapshotRecovery;
 

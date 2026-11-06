@@ -3,12 +3,14 @@ use std::sync::Arc;
 
 use nitinol_contract::Aggregate;
 use nitinol_persistence::provider::Store;
+use nitinol_persistence::store::Journal;
 use nitinol_persistence::AggregateId;
 
+use crate::error::MissingSnapshotSlot;
 use crate::process::aggregate_process::AggregateProcess;
 use crate::process::proxy::AggregateProxy;
-use crate::process::recover::RecoverOn;
-use crate::process::resolve::{Activation, AggregateResolver};
+use crate::process::recover::{RecoverOn, SnapshotRecovery};
+use crate::process::resolve::{Activation, AggregateResolver, ResolveHandle};
 use crate::system::{EventSourceSystem, Hosted, Unhosted};
 
 /// Which aggregate to start, and nothing else.
@@ -231,23 +233,40 @@ where
     St: Store,
     A::Recover: RecoverOn<A, St>,
 {
+    resolving_reference(
+        aggregate_id,
+        system.resolve_handle(),
+        system.persistence().event_store(),
+        Ok(<A::Recover as RecoverOn<A, St>>::recovery(system)),
+    )
+}
+
+/// A reference that resolves `aggregate_id` through `handle`, building each
+/// activation over `store` with `recovery` — or answering why none can be
+/// built.
+///
+/// The typed system and the contingent view of it both end here, so a
+/// reference taken from either resolves through one registry and builds one
+/// kind of activation.
+pub(crate) fn resolving_reference<A: Aggregate>(
+    aggregate_id: AggregateId,
+    handle: ResolveHandle,
+    store: Journal,
+    recovery: Result<Option<SnapshotRecovery<A>>, MissingSnapshotSlot>,
+) -> AggregateProxy<A> {
     // The handle carries the system a later re-resolve spawns on, so the
     // activation this reference may start and the one that replaces it are
     // identical.
-    let handle = system.resolve_handle();
-    let store = system.persistence().event_store();
-
     let identity = aggregate_id.clone();
-    let activation =
-        <A::Recover as RecoverOn<A, St>>::recovery(system).map(|recovery| -> Activation<A> {
-            Arc::new(move || AggregateProcess {
-                state: A::default(),
-                aggregate_id: identity.clone(),
-                store: store.clone(),
-                sequence: 0,
-                recovery: recovery.clone(),
-            })
-        });
+    let activation = recovery.map(|recovery| -> Activation<A> {
+        Arc::new(move || AggregateProcess {
+            state: A::default(),
+            aggregate_id: identity.clone(),
+            store: store.clone(),
+            sequence: 0,
+            recovery: recovery.clone(),
+        })
+    });
 
     let resolver = AggregateResolver::new(handle, aggregate_id.clone(), activation);
     AggregateProxy::resolved(aggregate_id, resolver)

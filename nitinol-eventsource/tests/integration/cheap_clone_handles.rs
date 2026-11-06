@@ -16,19 +16,19 @@
 //!     Then one activation numbers both appends, and the store the caller holds
 //!          is where they landed
 //!
-//!   Scenario: the erased handle shares the snapshot persistor
+//!   Scenario: the contingent system shares the snapshot persistor
 //!     Given a system over a store that holds a snapshot slot
-//!     When the persistor is taken, an aggregate is started through the erased
-//!          handle, and the persistor is taken again
+//!     When the persistor is taken, an aggregate is started through the
+//!          contingent system, and the persistor is taken again
 //!     Then every answer names the one persistor process
 //!
 //!   Scenario: hosted spawn reaches one activation
-//!     When spawn_aggregate, aggregate_proxy and the erased handle's own
+//!     When spawn_aggregate, aggregate_proxy and the contingent system's own
 //!          spawn_aggregate each dispatch to the same id
 //!     Then one writer numbers the three appends
 //!
 //!   Scenario: the registry is carried by value
-//!     Given two clones of a system and the handle it erases to
+//!     Given two clones of a system and its contingent system
 //!     When all three race to resolve one identity and then all dispatch
 //!     Then one activation accepted every append
 //!
@@ -67,7 +67,7 @@ use tokio::sync::{Barrier, Notify};
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::error::PersistError;
-use nitinol_eventsource::system::{EventSourceSystem, SystemHandle};
+use nitinol_eventsource::system::{ContingentSystem, EventSourceSystem};
 use nitinol_eventsource::{
     Aggregate, AggregateProps, AggregateProxy, AskError, Decider, Decision, DurableStream, Event,
     EventEnvelope, Never, Query, SequenceCursor,
@@ -244,37 +244,37 @@ async fn a_system_clone_shares_the_inner_instance() {
     );
 }
 
-// Scenario: the erased handle shares the snapshot persistor
+// Scenario: the contingent system shares the snapshot persistor
 
-/// One persistor process per system, across the erasure as well as across
-/// clones.
+/// One persistor process per system, across the contingent system as well as
+/// across clones.
 ///
 /// The process identifier is the clause: the snapshot contract is written for a
 /// single consumer serialising its calls, and a second process over one store
 /// would be two consumers — which a round trip through the store cannot see,
 /// because both would pass it.
 ///
-/// Taking the persistor *before* the erasure is what makes the order matter: a
-/// handle that answered from a cell of its own would leave the system it was
-/// erased from and the handle it produced disagreeing about which process is
-/// the one.
+/// Taking the persistor *before* the contingent system is taken is what makes
+/// the order matter: a contingent system that answered from a cell of its own
+/// would leave the system it was taken from and itself disagreeing about which
+/// process is the one.
 #[tokio::test]
-async fn the_erased_handle_shares_the_snapshot_persistor() {
+async fn the_contingent_system_shares_the_snapshot_persistor() {
     // Given: a system over a store that holds a snapshot slot
     let (system, _store) = counter_system().await;
-    let id = AggregateId::new("cheap-clone-erased-persistor");
+    let id = AggregateId::new("cheap-clone-contingent-persistor");
 
-    // When: the persistor is taken, an aggregate is started through the erased
-    // handle, and the persistor is taken again
+    // When: the persistor is taken, an aggregate is started through the
+    // contingent system, and the persistor is taken again
     let before = system.snapshot_persistor().await;
 
-    let erased: SystemHandle = system.erase_store();
-    erased
+    let contingent: ContingentSystem = system.to_contingent();
+    contingent
         .spawn_aggregate::<Counter>(id.clone())
         .await
         .ask(Increment)
         .await
-        .expect("the erased handle's own entry point must persist");
+        .expect("the contingent system's own entry point must persist");
 
     let after = system.snapshot_persistor().await;
     let through_clone = system.clone().snapshot_persistor().await;
@@ -284,7 +284,7 @@ async fn the_erased_handle_shares_the_snapshot_persistor() {
         before.pid(),
         after.pid(),
         "the persistor a system distributes is one process: passing through the \
-         erased handle must not leave a second one behind it"
+         contingent system must not leave a second one behind it"
     );
     assert_eq!(
         before.pid(),
@@ -296,23 +296,20 @@ async fn the_erased_handle_shares_the_snapshot_persistor() {
 
 // Scenario: hosted spawn reaches one activation
 
-/// Every hosted entry point reaches the one activation, including the erased
-/// handle's own.
+/// Every hosted entry point reaches the one activation, including the
+/// contingent system's own.
 ///
-/// The three entry points below all go through the erasure internally — that is
-/// what carries the registry to the props — and the last one erases a handle
-/// that was already erased. A step that rebuilt the system's shared state
-/// rather than naming it would put one activation per entry point on this
-/// stream, and the store's concurrency rule would reject all but one of their
-/// appends.
+/// A step that rebuilt the system's shared state rather than naming it would
+/// put one activation per entry point on this stream, and the store's
+/// concurrency rule would reject all but one of their appends.
 #[tokio::test]
-async fn hosted_entry_points_reach_one_activation_through_the_erased_handle() {
+async fn hosted_entry_points_reach_one_activation_through_the_contingent_system() {
     // Given
     let (system, store) = counter_system().await;
     let id = AggregateId::new("cheap-clone-hosted-entry-points");
 
-    // When: the awaited entry point, the synchronous one, and the erased
-    // handle's own each dispatch to the same identity
+    // When: the awaited entry point, the synchronous one, and the contingent
+    // system's own each dispatch to the same identity
     system
         .spawn_aggregate::<Counter>(id.clone())
         .await
@@ -327,12 +324,12 @@ async fn hosted_entry_points_reach_one_activation_through_the_erased_handle() {
         .expect("a synchronously built reference must dispatch to the same aggregate");
 
     system
-        .erase_store()
+        .to_contingent()
         .spawn_aggregate::<Counter>(id.clone())
         .await
         .ask(Increment)
         .await
-        .expect("the erased handle must dispatch to the same aggregate");
+        .expect("the contingent system must dispatch to the same aggregate");
 
     // Then
     assert_eq!(
@@ -346,7 +343,7 @@ async fn hosted_entry_points_reach_one_activation_through_the_erased_handle() {
 // Scenario: the registry is carried by value
 
 /// The number of callers that race for the same key: two clones of the typed
-/// system and the handle it erases to.
+/// system and its contingent system.
 const RACERS: usize = 3;
 
 /// Resolve `id` on `system` in lockstep with the other racers, then dispatch.
@@ -361,6 +358,26 @@ async fn race_to_resolve<St: Store>(
 ) -> (u64, Result<(), AskError<Infallible>>) {
     barrier.wait().await;
     let proxy = system.spawn_aggregate::<Counter>(id).await;
+    dispatch_in_lockstep(proxy, barrier).await
+}
+
+/// The same race, entered through a contingent system.
+async fn race_to_resolve_contingent(
+    system: ContingentSystem,
+    id: AggregateId,
+    barrier: Arc<Barrier>,
+) -> (u64, Result<(), AskError<Infallible>>) {
+    barrier.wait().await;
+    let proxy = system.spawn_aggregate::<Counter>(id).await;
+    dispatch_in_lockstep(proxy, barrier).await
+}
+
+/// Drain `proxy`'s replay, wait for every racer to have done the same, then
+/// dispatch.
+async fn dispatch_in_lockstep(
+    proxy: AggregateProxy<Counter>,
+    barrier: Arc<Barrier>,
+) -> (u64, Result<(), AskError<Infallible>>) {
     // Drain the replay while the stream is still empty, so whatever this call
     // activated is parked on the genesis sequence.
     let replayed = proxy
@@ -371,11 +388,11 @@ async fn race_to_resolve<St: Store>(
     (replayed, proxy.ask(Increment).await)
 }
 
-/// Two clones and the erased handle race one identity to one activation.
+/// Two clones and the contingent system race one identity to one activation.
 ///
 /// The registry is the system's own state rather than something a holder shares
-/// by wrapping it: a clone carries it, and so does the handle the store type is
-/// erased from. Both axes are raced here, because an erasure that built a
+/// by wrapping it: a clone carries it, and so does the contingent system taken
+/// from it. Both axes are raced here, because a contingent system that built a
 /// registry of its own would still pass a clause that only cloned.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn system_clones_race_one_identity_to_one_activation() {
@@ -394,11 +411,11 @@ async fn system_clones_race_one_identity_to_one_activation() {
             race_to_resolve(system, id, barrier).await
         }));
     }
-    let erased = system.erase_store();
-    let erased_id = id.clone();
-    let erased_barrier = Arc::clone(&barrier);
+    let contingent = system.to_contingent();
+    let contingent_id = id.clone();
+    let contingent_barrier = Arc::clone(&barrier);
     racers.push(tokio::spawn(async move {
-        race_to_resolve(erased, erased_id, erased_barrier).await
+        race_to_resolve_contingent(contingent, contingent_id, contingent_barrier).await
     }));
 
     // Then
@@ -424,7 +441,7 @@ async fn system_clones_race_one_identity_to_one_activation() {
         stored_sequences(&store.events(), &id).await,
         expected,
         "one writer must number every racer's append without a gap or a \
-         collision: the registry a clone and an erased handle carry is the one \
+         collision: the registry a clone and a contingent system carry is the one \
          the system holds"
     );
 }

@@ -24,13 +24,11 @@
 //!     Then it read the store's journal
 //!     And it recorded its position in the store's projection slot
 //!
-//!   Scenario: the erased handle is the system over an `ErasedStore`
+//!   Scenario: the contingent system reaches the store's journal
 //!     Given a system built on a store that supplies every slot
-//!     When its store type is erased
-//!     Then the handle is an `EventSourceSystem<ErasedStore>`, which is the one
-//!          type wiring written before a deployment's store names
-//!     And an aggregate spawned on the original system is read through the
-//!         erased handle's journal
+//!     When it is turned into a contingent system
+//!     Then an aggregate spawned on the original system is read through the
+//!          contingent system's journal
 //! ```
 //!
 //! Every clause reads the store the supplier was *configured with* rather than
@@ -62,12 +60,12 @@ use tokio::sync::Notify;
 
 use nitinol_eventsource::{
     codec::Codec,
-    system::{EventSourceSystem, SystemHandle},
+    system::{ContingentSystem, EventSourceSystem},
     Aggregate, Decider, Decision, Event, Never, ProjectionContext, ProjectionId, Projector,
     ProjectorProps,
 };
 use nitinol_persistence::provider::{
-    CustomStore, ErasedStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot,
+    CustomStore, PersistenceProvider, ProjectionOffsetSlot, SnapshotSlot,
 };
 use nitinol_persistence::store::{
     Album, EventStore, InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore,
@@ -169,7 +167,7 @@ async fn stream_event_types(store: &dyn EventStore, key: &AggregateId) -> Vec<Ev
 /// The same, through a handle the framework distributes.
 ///
 /// A [`Journal`] delegates `load` as an inherent method rather than
-/// implementing [`EventStore`], so the erased handle needs a reader of its own
+/// implementing [`EventStore`], so a framework handle needs a reader of its own
 /// rather than a `&dyn` coercion.
 async fn journal_event_types(journal: &Journal, key: &AggregateId) -> Vec<EventType> {
     let loaded: Vec<_> = journal
@@ -602,42 +600,36 @@ async fn projector_props_resolves_both_slots_from_the_system_it_is_spawned_on() 
     );
 }
 
-// The handle whose store type is erased
+// The contingent system
 
-/// Erasing the store type keeps the journal the system was built on, and the
-/// handle it answers with is the one type such wiring names.
+/// The contingent system keeps the journal the system was built on.
 ///
-/// Both halves are the clause. A saga's dispatch mapping names its system type
-/// when the mapping is written, long before a deployment assembles a store, so
-/// the erasure has to land on one type for every store — and it has to reach the
-/// records that store holds rather than a region built at the erasure. An
-/// erasure that boxed a journal of its own would hand back a working handle onto
-/// an empty one, and the mapping holding it would read nothing while the
-/// aggregates carried on writing.
+/// A saga's dispatch mapping names `ContingentSystem` when the mapping is
+/// written, long before a deployment assembles a store, so it has to reach the
+/// records that store holds rather than a region built when it was taken. A
+/// contingent system that boxed a journal of its own would hand back a working
+/// handle onto an empty one, and the mapping holding it would read nothing
+/// while the aggregates carried on writing.
 #[tokio::test]
-async fn the_erased_handle_is_the_system_over_the_stores_journal() {
+async fn the_contingent_system_reaches_the_journal_the_system_was_built_on() {
     // Given
     let store = InMemoryStore::default();
     let system = EventSourceSystem::builder(ProcessSystem::new().await)
         .with_persistence(PersistenceProvider::new(store.clone()))
         .build();
-    let id = AggregateId::new("system-persistence-erased");
+    let id = AggregateId::new("system-persistence-contingent");
 
-    // When: the aggregate is spawned on the original system, and the handle is
-    // erased
+    // When: the aggregate is spawned on the original system, and the system is
+    // turned into a contingent system
     let proxy = system.spawn_aggregate::<Counter>(id.clone()).await;
     proxy.ask(Increment).await.expect("ask must succeed");
-    let erased: SystemHandle = system.erase_store();
+    let contingent: ContingentSystem = system.to_contingent();
 
-    // Then: the erased handle's journal is the store's
+    // Then: the contingent system's journal is the store's
     assert_eq!(
-        journal_event_types(&erased.persistence().event_store(), &id).await,
+        journal_event_types(&contingent.event_store(), &id).await,
         vec![Incremented::EVENT_TYPE],
-        "the erased handle reaches the journal the system it was erased from \
+        "the contingent system reaches the journal the system it was taken from \
          was built on, so wiring that holds one reads what the aggregates wrote"
     );
-
-    // And: the store the handle's supplier distributes is the erased store —
-    // which is what makes `SystemHandle` one type for every deployment.
-    let _: fn(&SystemHandle) -> &PersistenceProvider<ErasedStore> = SystemHandle::persistence;
 }

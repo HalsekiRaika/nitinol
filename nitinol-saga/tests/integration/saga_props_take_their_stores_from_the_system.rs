@@ -16,7 +16,7 @@
 //!     And its decision is on that same journal
 //!     And the delivery host carries the command the decision implies to its
 //!         target
-//!     And SagaComponents::system() answers a &SystemHandle rather than an
+//!     And SagaComponents::system() answers a &ContingentSystem rather than an
 //!         Option
 //! ```
 //!
@@ -39,7 +39,7 @@
 //!
 //! The components clause is a type annotation inside the producer rather than a
 //! runtime check, because what changed is the answer's type; the flag beside it
-//! is there so "a `&SystemHandle` was handed over" is distinguishable from "the
+//! is there so "a `&ContingentSystem` was handed over" is distinguishable from "the
 //! producer was never called".
 //!
 //! Run with:
@@ -55,7 +55,7 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use nitinol_eventsource::codec::Codec;
-use nitinol_eventsource::system::{EventSourceSystem, SystemHandle};
+use nitinol_eventsource::system::{ContingentSystem, EventSourceSystem};
 use nitinol_eventsource::{Aggregate, AggregateProxy, Decider, Decision, Event, Never, Query};
 use nitinol_persistence::provider::PersistenceProvider;
 use nitinol_persistence::store::{InMemoryStore, Journal};
@@ -244,13 +244,13 @@ const INVENTORY_KEY: &str = "saga-props-from-system-inventory";
 /// A producer that records having been handed the hosting system.
 ///
 /// The annotation is the contract: a `system()` answering an `Option` has no
-/// coercion to `&SystemHandle` and does not compile here.
+/// coercion to `&ContingentSystem` and does not compile here.
 fn producer(
     saw_system: &Arc<AtomicBool>,
 ) -> impl Fn(SagaComponents<ReservationSaga>) -> ReservationSaga + Send + Sync + 'static {
     let saw_system = Arc::clone(saw_system);
     move |components| {
-        let _hosting: &SystemHandle = components.system();
+        let _hosting: &ContingentSystem = components.system();
         saw_system.store(true, Ordering::SeqCst);
         ReservationSaga
     }

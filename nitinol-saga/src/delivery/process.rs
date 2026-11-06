@@ -9,7 +9,7 @@ use std::time::Duration;
 use futures_util::{FutureExt, StreamExt};
 
 use nitinol_eventsource::codec;
-use nitinol_eventsource::system::SystemHandle;
+use nitinol_eventsource::system::ContingentSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::store::{Journal, OffsetScope, OffsetStore};
 use nitinol_persistence::{LoadQuery, LoadedEvent};
@@ -68,7 +68,7 @@ pub struct SagaDeliveryPartition<S: Saga, Cs: OffsetStore> {
     scope: OffsetScope,
     journal: Journal,
     offsets: Cs,
-    system: SystemHandle,
+    system: ContingentSystem,
     poll_interval: Duration,
     /// Absent until the recorded progress has been read.
     ///
@@ -95,7 +95,7 @@ where
         partitions: NonZeroUsize,
         journal: Journal,
         offsets: Cs,
-        system: SystemHandle,
+        system: ContingentSystem,
         poll_interval: Duration,
     ) -> Self {
         Self {

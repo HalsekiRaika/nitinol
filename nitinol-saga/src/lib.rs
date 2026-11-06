@@ -177,7 +177,7 @@
 //!   carries them, on the contract [`SagaDeliveryProps`] states.
 //!   Any aggregate may be addressed, one that recovers from its newest
 //!   snapshot included: the host reaches its targets through the system's
-//!   erased handle, which carries the deployment's snapshot slot as a value.
+//!   contingent view, which carries the deployment's snapshot slot as a value.
 //!   On a deployment whose store holds no snapshot slot, a delivery to such an
 //!   aggregate is a permanent failure and holds its partition, as described in
 //!   [`SagaDelivery::new`].

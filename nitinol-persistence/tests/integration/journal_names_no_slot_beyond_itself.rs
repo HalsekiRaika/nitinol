@@ -29,9 +29,8 @@
 //!
 //! The refusal at the wiring points themselves is fixed where the wiring is, by
 //! the `compile_fail` doctests on the entry points that take a slot's bound.
-//! The store a system's type is erased to is not `Journal`: it carries the
-//! snapshot slot as a value, and what it implements is fixed in
-//! `erased_store_carries_only_the_snapshot_slot.rs`.
+//! What a system's contingent view carries beside the journal — the snapshot
+//! slot, as a value — is fixed in `nitinol-eventsource`, where that view is.
 //!
 //! Run with:
 //! `cargo test -p nitinol-persistence --test integration journal_names_no_slot_beyond_itself::`.

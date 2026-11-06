@@ -66,8 +66,9 @@ pub enum Retryability {
 /// holds no snapshot slot.
 ///
 /// On a system whose store type is known this is a compile error at the
-/// wiring. It reaches the caller as a value only through the handle a system's
-/// store type is erased to, where the slot is carried as a value. The
+/// wiring. It reaches the caller as a value only through a
+/// [`ContingentSystem`](crate::system::ContingentSystem), where the slot is
+/// carried as a value. The
 /// deployment does not grow a slot later, so every dispatch through such a
 /// reference answers with this, and none of them activates anything or replays
 /// the stream in place of the missing snapshot.

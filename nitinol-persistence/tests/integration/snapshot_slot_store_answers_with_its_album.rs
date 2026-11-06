@@ -8,12 +8,13 @@
 //!     And that album reaches the records `SnapshotSlot::snapshots` reaches
 //! ```
 //!
-//! Erasing a store's type keeps only what `Store` can say about it, so whether
-//! a deployment holds a snapshot slot survives the erasure only if `Store` says
-//! it. The rule this fixes is the one-way half: a store that implements
-//! `SnapshotSlot` never answers "no slot" here. A store that did would compile,
-//! and every `Recover = Latest` aggregate reached through the erased handle
-//! would then be refused on a deployment that holds the slot.
+//! A system's contingent view names no store type and keeps only what `Store`
+//! can say about it, so whether a deployment holds a snapshot slot survives
+//! into that view only if `Store` says it. The rule this fixes is the one-way
+//! half: a store that implements `SnapshotSlot` never answers "no slot" here. A
+//! store that did would compile, and every `Recover = Latest` aggregate reached
+//! through the contingent view would then be refused on a deployment that
+//! holds the slot.
 //!
 //! Answering `Some` is not enough on its own. An album built at the call — a
 //! fresh in-memory store, say — would be `Some` and reach nothing the typed

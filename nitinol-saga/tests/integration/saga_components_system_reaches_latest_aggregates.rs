@@ -15,7 +15,7 @@
 //! ```
 //!
 //! The handle is the one an instance's producer is given, captured as it is
-//! given. Nothing in this file builds an erased handle any other way. A
+//! given. Nothing in this file builds a contingent system any other way. A
 //! deployment without the slot is a wiring mistake that the typed system turns
 //! into a compile error. Through this handle it has to come back as a verdict a
 //! saga will not retry.
@@ -32,7 +32,7 @@ use delivery::{
     FIXTURE_LOCK, PROBE_TIMEOUT, SHELF_SUFFIX, TRIGGER_KEY,
 };
 
-use nitinol_eventsource::system::{EventSourceSystem, SystemHandle};
+use nitinol_eventsource::system::{ContingentSystem, EventSourceSystem};
 use nitinol_eventsource::{AskError, Event, Retryability};
 use nitinol_persistence::provider::{PersistenceProvider, SagaOffsetSlot};
 use nitinol_persistence::store::{InMemoryEventStore, InMemoryStore, Journal};
@@ -45,13 +45,13 @@ use nitinol_saga::{
 /// The handle an instance's producer was given, once it has been.
 #[derive(Default)]
 struct Captured {
-    handle: Mutex<Option<SystemHandle>>,
+    handle: Mutex<Option<ContingentSystem>>,
     notify: Notify,
 }
 
 impl Captured {
     /// Wait until a producer has been handed a system, then answer it.
-    async fn handle(&self) -> SystemHandle {
+    async fn handle(&self) -> ContingentSystem {
         tokio::time::timeout(PROBE_TIMEOUT, async {
             loop {
                 let notified = self.notify.notified();
@@ -99,7 +99,7 @@ fn producer(captured: &Arc<Captured>) -> impl Fn(SagaComponents<CapturingSaga>) 
 
 /// Host [`CapturingSaga`] on `system`, trigger one instance, and answer the
 /// system its producer was handed.
-async fn hosted_handle<St: SagaOffsetSlot>(system: &EventSourceSystem<St>) -> SystemHandle {
+async fn hosted_handle<St: SagaOffsetSlot>(system: &EventSourceSystem<St>) -> ContingentSystem {
     let captured = Arc::new(Captured::default());
     let _host = system
         .host::<CapturingSaga>(producer(&captured))

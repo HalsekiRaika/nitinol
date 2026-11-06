@@ -3,9 +3,8 @@
 use futures_core::future::BoxFuture;
 
 use nitinol_eventsource::error::Retryability;
-use nitinol_eventsource::system::SystemHandle;
-use nitinol_eventsource::{Aggregate, Decider, RecoverOn};
-use nitinol_persistence::provider::ErasedStore;
+use nitinol_eventsource::system::ContingentSystem;
+use nitinol_eventsource::{Aggregate, Decider, RecoverOnContingent};
 use nitinol_persistence::AggregateId;
 
 /// Why a delivery did not land, classified once.
@@ -24,7 +23,7 @@ pub(crate) struct DeliveryFailure {
 }
 
 type Dispatch =
-    Box<dyn FnOnce(SystemHandle) -> BoxFuture<'static, Result<(), DeliveryFailure>> + Send>;
+    Box<dyn FnOnce(ContingentSystem) -> BoxFuture<'static, Result<(), DeliveryFailure>> + Send>;
 
 /// One command, addressed to one aggregate.
 ///
@@ -51,10 +50,11 @@ impl SagaDelivery {
     /// # What a target may be
     ///
     /// Any aggregate. A mapping is written once and names one system type for
-    /// every deployment, so a host addresses its targets through the handle a
-    /// system's store type is erased to, and that handle carries whether the
-    /// deployment holds a snapshot slot as a value. The `RecoverOn` bound below
-    /// is therefore one every aggregate meets, whichever
+    /// every deployment, so a host addresses its targets through the
+    /// [`ContingentSystem`] its system is viewed as, and that view carries
+    /// whether the deployment holds a snapshot slot as a value. The
+    /// `RecoverOnContingent` bound below is therefore one every aggregate
+    /// meets, whichever
     /// [`Recover`](Aggregate::Recover) it names.
     ///
     /// An aggregate whose `Recover` is [`Latest`](nitinol_eventsource::Latest)
@@ -67,7 +67,7 @@ impl SagaDelivery {
     pub fn new<A, C>(target: AggregateId, command: C) -> Self
     where
         A: Aggregate + Decider<C>,
-        A::Recover: RecoverOn<A, ErasedStore>,
+        A::Recover: RecoverOnContingent<A>,
         C: Send + Sync + 'static,
         <A as Decider<C>>::Output: Send + 'static,
         <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
@@ -75,7 +75,7 @@ impl SagaDelivery {
         let addressed = target.clone();
         Self {
             target,
-            dispatch: Box::new(move |system: SystemHandle| {
+            dispatch: Box::new(move |system: ContingentSystem| {
                 Box::pin(async move {
                     // Asking rather than telling is what makes a refusal
                     // something the host can see: a dispatch with no answer
@@ -99,7 +99,7 @@ impl SagaDelivery {
     }
 
     /// Issue the command and wait for the receiver's answer.
-    pub(crate) async fn deliver(self, system: SystemHandle) -> Result<(), DeliveryFailure> {
+    pub(crate) async fn deliver(self, system: ContingentSystem) -> Result<(), DeliveryFailure> {
         (self.dispatch)(system).await
     }
 }

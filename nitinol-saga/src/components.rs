@@ -23,7 +23,7 @@ pub(crate) mod deadline;
 
 use std::marker::PhantomData;
 
-use nitinol_eventsource::system::SystemHandle;
+use nitinol_eventsource::system::ContingentSystem;
 
 use crate::saga::Saga;
 use crate::subscribe::{HasDeadline, SagaSubscribe};
@@ -45,7 +45,7 @@ pub use self::deadline::{Deadline, DeadlineMessage, PendingDeadline};
 /// ever resolved to arm it.
 pub struct SagaComponents<S: Saga> {
     pending_deadlines: PendingDeadlines,
-    host: SystemHandle,
+    host: ContingentSystem,
     _saga: PhantomData<fn() -> S>,
 }
 
@@ -55,7 +55,7 @@ impl<S: Saga> SagaComponents<S> {
     /// Called once per incarnation, so the cell the process writes and the one
     /// the saga's [`Deadline`] reads are the same cell — and a restarted
     /// incarnation starts from an empty one, which replay then fills.
-    pub(crate) fn new(pending_deadlines: PendingDeadlines, host: SystemHandle) -> Self {
+    pub(crate) fn new(pending_deadlines: PendingDeadlines, host: ContingentSystem) -> Self {
         Self {
             pending_deadlines,
             host,
@@ -72,20 +72,20 @@ impl<S: Saga> SagaComponents<S> {
     /// [`SagaSystemExt::host`](crate::SagaSystemExt::host) — so there is always
     /// one to answer with.
     ///
-    /// The handle reaches the host's process system, its aggregate registry and
-    /// the journal its supplier distributes — so a saga that has to tell an
+    /// The contingent system reaches the host's process system, its aggregate
+    /// registry and the journal its supplier distributes — so a saga that has to tell an
     /// aggregate resolves the reference from here rather than from a clone of
     /// the system captured outside the spawn.
     ///
     /// That includes an aggregate whose [`Recover`](nitinol_eventsource::Aggregate::Recover)
-    /// is [`Latest`](nitinol_eventsource::Latest): the handle carries the host's
-    /// snapshot slot as a value, so such an aggregate recovers from the
+    /// is [`Latest`](nitinol_eventsource::Latest): the contingent system carries
+    /// the host's snapshot slot as a value, so such an aggregate recovers from the
     /// snapshots its typed system keeps. Where the host's store holds no
     /// snapshot slot, every dispatch to it fails with
     /// [`AskError::Activation`](nitinol_eventsource::AskError::Activation) —
     /// [`TellError::Activation`](nitinol_eventsource::TellError::Activation) for
     /// a `tell` — which `retryability` reads as permanent.
-    pub fn system(&self) -> &SystemHandle {
+    pub fn system(&self) -> &ContingentSystem {
         &self.host
     }
 

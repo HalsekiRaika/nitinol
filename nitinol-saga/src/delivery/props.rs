@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use nitinol_eventsource::system::SystemHandle;
+use nitinol_eventsource::system::ContingentSystem;
 use nitinol_eventsource::Event;
 use nitinol_persistence::store::{Journal, OffsetStore};
 use nitinol_runtime::process::SupervisionStrategy;
@@ -240,7 +240,7 @@ impl<S: Saga> SagaDeliveryProps<S> {
         self,
         journal: Journal,
         offsets: Cs,
-        host: SystemHandle,
+        host: ContingentSystem,
     ) -> SagaDeliveryProxy<S>
     where
         Cs: OffsetStore + Clone + 'static,

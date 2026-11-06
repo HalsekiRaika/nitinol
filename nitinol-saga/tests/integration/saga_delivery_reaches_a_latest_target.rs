@@ -10,8 +10,8 @@
 //!     And the command landed on the state the snapshot recovered
 //! ```
 //!
-//! The host reaches its targets through the system's erased handle. That
-//! handle carries the deployment's snapshot slot, so the receiver is activated
+//! The host reaches its targets through the system's contingent system. That
+//! carries the deployment's snapshot slot, so the receiver is activated
 //! from the snapshot its typed system saved. The snapshot holds an operation
 //! the receiver's stream never recorded, so an activation that replayed the
 //! stream without it would answer with the delivered operation alone.
@@ -19,7 +19,7 @@
 //! The receiver is not touched through the typed system until the host has
 //! recorded the delivery. The two share one aggregate registry, so a typed
 //! dispatch beforehand would be the activation the delivery reached, and the
-//! clause would no longer be about the erased handle.
+//! clause would no longer be about the contingent system.
 //!
 //! Whether the activation resolved the very process the typed system's
 //! `snapshot_persistor()` hands out is compared by process identifier in

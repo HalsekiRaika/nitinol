@@ -283,7 +283,7 @@ enum Slot {
 /// wait on the winner's result instead of racing it (R-1).
 ///
 /// A clone is another name for the one table, so the system, every clone of it,
-/// the handle its store type is erased from, each [`ResolveHandle`] and each
+/// every contingent system taken from it, each [`ResolveHandle`] and each
 /// in-flight [`Activating`] hold this by value rather than sharing one through a
 /// holder of their own.  Two tables over one node would be two writers per key,
 /// which is the state R-1 exists to prevent.

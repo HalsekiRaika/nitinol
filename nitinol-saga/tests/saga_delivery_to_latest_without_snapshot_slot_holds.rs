@@ -21,7 +21,7 @@
 //! ```
 //!
 //! The typed system turns this wiring mistake into a compile error. The host
-//! reaches its targets through the erased handle, where no type can say it, so
+//! reaches its targets through the contingent system, where no type can say it, so
 //! the delivery has to come back as a verdict: retrying would hammer an
 //! activation that cannot exist, and skipping would drop the delivery without
 //! anyone deciding to. A permanent hold is the answer the host already has for

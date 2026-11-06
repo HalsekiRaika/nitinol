@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_core::future::BoxFuture;
-use nitinol_eventsource::system::SystemHandle;
+use nitinol_eventsource::system::ContingentSystem;
 use nitinol_persistence::store::Journal;
 use nitinol_runtime::process::ProcessProxy;
 use nitinol_runtime::Props;
@@ -116,7 +116,7 @@ pub(crate) struct SagaInstanceSpec<S: Saga> {
     /// reaches its host's resources without one being captured outside the
     /// spawn. It is a handle: holding it keeps the host's process system and
     /// registry alive, and neither holds a saga instance back.
-    pub(crate) host: SystemHandle,
+    pub(crate) host: ContingentSystem,
     pub(crate) scheduler: Option<SchedulerProxy>,
     pub(crate) delivery: ScheduleDelivery<S>,
 }

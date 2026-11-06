@@ -272,9 +272,9 @@ async fn an_aggregate_recovers_from_its_snapshot_and_replays_only_what_followed(
 /// The store answers with its snapshot slot through `Store` alone, and that
 /// album is the slot `SnapshotSlot::snapshots` names.
 ///
-/// Erasing a store's type keeps only what `Store` says about it, so a store that
-/// implements `SnapshotSlot` and answered "no slot" here would have every
-/// `Recover = Latest` aggregate refused through the erased handle on a
+/// A contingent system keeps only what `Store` says about the store, so a store
+/// that implements `SnapshotSlot` and answered "no slot" here would have every
+/// `Recover = Latest` aggregate refused through the contingent system of a
 /// deployment that holds the slot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_store_answers_with_its_snapshot_slot_through_store_alone() {

@@ -96,7 +96,9 @@ pub mod eventsource {
     pub use nitinol_eventsource::Event;
     pub use nitinol_eventsource::{Accepting, Decider, Decision};
     pub use nitinol_eventsource::{Aggregate, Snapshotable};
-    pub use nitinol_eventsource::{Latest, Never, RecoverOn, RecoverPolicy, Recovery};
+    pub use nitinol_eventsource::{
+        Latest, Never, RecoverOn, RecoverOnContingent, RecoverPolicy, Recovery,
+    };
 
     /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
     /// `use nitinol::eventsource::Event;` brings both into scope (trait in the

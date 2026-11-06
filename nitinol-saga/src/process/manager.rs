@@ -24,7 +24,7 @@ use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use nitinol_eventsource::system::SystemHandle;
+use nitinol_eventsource::system::ContingentSystem;
 use nitinol_persistence::store::Journal;
 use nitinol_runtime::process::{Process, ProcessContext, ProcessProxy, Receive, Terminated};
 use nitinol_runtime::IdleTimeout;
@@ -49,7 +49,7 @@ pub(crate) struct SagaManagerProcess<S: Saga> {
     /// Handed to every instance it spawns, so an instance reaches the host's
     /// resources without a reference to the system being captured outside the
     /// spawn.
-    pub(crate) host: SystemHandle,
+    pub(crate) host: ContingentSystem,
     /// The declared sources, each read by one partition per partition of the
     /// host, shared by every instance of that partition.
     ///

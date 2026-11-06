@@ -40,6 +40,8 @@ mod cheap_clone_handles;
 mod codec;
 #[path = "integration/codec_injection_api_removed.rs"]
 mod codec_injection_api_removed;
+#[path = "integration/contingent_system_carries_the_snapshot_slot.rs"]
+mod contingent_system_carries_the_snapshot_slot;
 #[path = "integration/delivery_mode.rs"]
 mod delivery_mode;
 #[path = "integration/durable_poller_config.rs"]
@@ -58,8 +60,6 @@ mod e2e_projection;
 mod e2e_replay;
 #[path = "integration/e2e_snapshot.rs"]
 mod e2e_snapshot;
-#[path = "integration/erased_handle_carries_the_snapshot_slot.rs"]
-mod erased_handle_carries_the_snapshot_slot;
 #[path = "integration/event_appending.rs"]
 mod event_appending;
 #[path = "integration/event_type_identity.rs"]

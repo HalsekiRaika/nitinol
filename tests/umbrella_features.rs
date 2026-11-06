@@ -172,6 +172,21 @@ fn eventsource_facade_exposes_user_api_without_system_event() {
     // The test passes if the above imports all compile.
 }
 
+/// The contingent system and the bound its entry points carry are reached
+/// through the facade, on the path `nitinol-eventsource` gives them.
+///
+/// A saga's dispatch mapping names both, so a user writing one against the
+/// umbrella has to be able to name them there. Compile-time only, like the
+/// facade check above.
+#[cfg(feature = "eventsource")]
+#[test]
+fn eventsource_facade_exposes_the_contingent_system() {
+    #[allow(unused_imports)]
+    use nitinol::eventsource::system::ContingentSystem;
+    #[allow(unused_imports)]
+    use nitinol::eventsource::RecoverOnContingent;
+}
+
 // Feature: eventsource — error facade exposes only user-facing types
 
 /// Regression guard: `nitinol::eventsource::error` must expose exactly the
