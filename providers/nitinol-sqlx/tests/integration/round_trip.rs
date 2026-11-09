@@ -174,6 +174,10 @@ async fn a_row_carrying_an_uncollected_event_type_fails_its_load_instead_of_vani
                  dropped a crate's declarations is told apart from a corrupt row"
             );
         }
+        Err(other) => panic!(
+            "a row whose event type nothing collected is a backend failure, and the store \
+             reported {other}"
+        ),
         Ok(event) => panic!(
             "a row whose event type nothing collected cannot be restored, and the store served it \
              as {:?}",

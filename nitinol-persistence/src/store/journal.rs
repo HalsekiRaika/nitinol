@@ -3,11 +3,14 @@
 
 use std::fmt;
 
+use nitinol_contract::Event;
+
 use crate::error::{AppendError, LoadError};
 use crate::event::AppendingEvent;
 use crate::provider::Store;
 use crate::query::{AppendOutcome, LoadQuery};
 use crate::store::event_store::{EventStore, EventStream};
+use crate::store::typed_load::{TypedEventStream, TypedLoad};
 
 /// The journal registered with the framework, with the backend's type erased.
 ///
@@ -84,6 +87,14 @@ impl Journal {
     /// [`EventStore::load`]'s clauses, unchanged.
     pub async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.0.load(query).await
+    }
+}
+
+/// [`TypedLoad::read`]'s clauses, unchanged: a journal is not an event store,
+/// so the read is handed to the registered store it erases.
+impl TypedLoad for Journal {
+    async fn read<E: Event>(&self, query: LoadQuery) -> Result<TypedEventStream<'_, E>, LoadError> {
+        self.0.read::<E>(query).await
     }
 }
 

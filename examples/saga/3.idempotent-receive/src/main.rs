@@ -11,12 +11,10 @@ use std::time::Duration;
 
 use futures_util::TryStreamExt;
 
-use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_eventsource::Event;
 use nitinol_persistence::provider::PersistenceProvider;
-use nitinol_persistence::store::{InMemoryStore, Journal};
-use nitinol_persistence::{AggregateId, LoadQuery, LoadedEvent};
+use nitinol_persistence::store::{InMemoryStore, Journal, TypedLoad};
+use nitinol_persistence::{AggregateId, LoadQuery};
 use nitinol_runtime::ProcessSystem;
 use nitinol_saga::{SagaSystemExt, Subscription};
 
@@ -145,45 +143,31 @@ async fn main() {
     );
 }
 
-/// Every record on the stream `key`, in stream order.
-async fn load_stream(store: &Journal, key: &str) -> Vec<LoadedEvent> {
+/// The reservations the stock item's own stream records, in stream order, each
+/// read back through the codec its event type names.
+async fn reservations(store: &Journal, stock_key: &str) -> Vec<StockReserved> {
     store
-        .load(LoadQuery::by_stream(key))
+        .read::<StockReserved>(LoadQuery::by_stream(stock_key))
         .await
-        .expect("load stream must succeed")
+        .expect("reading the stock item's reservations must succeed")
+        .map_ok(|reserved| reserved.event)
         .try_collect()
         .await
-        .expect("collect stream must succeed")
-}
-
-/// Read a stored record back through the codec its event type names.
-///
-/// The format belongs to the event, so this reads it from there rather than
-/// naming a serializer of its own.
-fn decode<E: Event>(event: &LoadedEvent) -> E {
-    <E::Codec as Codec<E>>::decode(&event.payload)
         .expect("a record this example wrote must decode with the codec its event names")
-}
-
-/// The reservations the stock item's own stream records, in stream order.
-async fn reservations(store: &Journal, stock_key: &str) -> Vec<StockReserved> {
-    load_stream(store, stock_key)
-        .await
-        .iter()
-        .filter(|event| event.event_type == StockReserved::EVENT_TYPE)
-        .map(decode::<StockReserved>)
-        .collect()
 }
 
 /// The fact event the order recorded — the upstream event the operation id is
 /// derived from.
 async fn order_fact(store: &Journal, order_key: &str) -> OrderPlaced {
-    let events = load_stream(store, order_key).await;
-    let placed = events
-        .iter()
-        .find(|event| event.event_type == OrderPlaced::EVENT_TYPE)
-        .expect("the placed order must be recorded on its own stream");
-    decode(placed)
+    store
+        .read::<OrderPlaced>(LoadQuery::by_stream(order_key))
+        .await
+        .expect("reading the order's stream must succeed")
+        .try_next()
+        .await
+        .expect("a record this example wrote must decode with the codec its event names")
+        .expect("the placed order must be recorded on its own stream")
+        .event
 }
 
 /// Poll the stock item's stream until the delivered reservation lands on it.

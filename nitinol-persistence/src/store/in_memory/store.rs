@@ -1,6 +1,10 @@
+use nitinol_contract::Event;
+
+use crate::error::LoadError;
 use crate::provider::{ProjectionOffsetSlot, SagaOffsetSlot, SnapshotSlot, Store};
+use crate::query::LoadQuery;
 use crate::store::in_memory::{InMemoryEventStore, InMemoryOffsetStore, InMemorySnapshotStore};
-use crate::store::{Album, Journal};
+use crate::store::{Album, Journal, TypedEventStream, TypedLoad};
 
 /// The in-memory reference [`Store`]: every slot, over the reference
 /// implementations.
@@ -38,6 +42,14 @@ impl Default for InMemoryStore {
             projection_offsets: InMemoryOffsetStore::default(),
             saga_offsets: InMemoryOffsetStore::default(),
         }
+    }
+}
+
+/// [`TypedLoad::read`]'s clauses, unchanged: the store is not an event store
+/// itself, so the read is handed to the journal it holds.
+impl TypedLoad for InMemoryStore {
+    async fn read<E: Event>(&self, query: LoadQuery) -> Result<TypedEventStream<'_, E>, LoadError> {
+        self.events.read::<E>(query).await
     }
 }
 

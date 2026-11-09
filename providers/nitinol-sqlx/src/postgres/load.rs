@@ -143,10 +143,12 @@ impl Conditions {
         // column is built with, so the two have to be changed together or the
         // index stops being reachable.
         //
-        // A stored path is a family and a type name with nothing after it, so
-        // the range reaches a declaration only from a family above it. The
-        // equality is what a query for one declaration lands on: it has no
-        // descendant of its own for the range to gather.
+        // A query for one declaration lands on the equality for that
+        // declaration's rows, and on the range for the rows of any deeper
+        // declaration whose family is that declaration's whole path: a family
+        // may extend another declaration's path, so a declaration's path can
+        // have descendants. Telling the one declaration apart is the reader's
+        // comparison of `event_type`, not this query's.
         if let Some(prefix) = self.event_type_prefix {
             statement
                 .push(joint)

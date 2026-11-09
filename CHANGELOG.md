@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- (`nitinol-persistence`): `store::TypedLoad`, a sealed extension of every
+  `EventStore` — `dyn EventStore` and `Journal` included — whose
+  `read::<E>(query)` serves the rows of one event type read back through
+  `E::Codec`, as `store::TypedEventStream` items of `store::TypedEvent<E>`
+  (the row's stream key, stream sequence, global position and instant, and the
+  decoded `event`). The type is conjoined to the query as `E`'s path, so the
+  store selects it; a query naming a prefix `E`'s path is not within serves
+  nothing. Rows of a deeper declaration that the path reaches are left out by
+  comparing `event_type`. Its clause is `LOAD-2`, derived from `LOAD-1` rather
+  than owed by a backend, so `nitinol-store-conformance` does not hold it. It
+  reads once under the store's conditions; it is not a search API and does not
+  follow the journal.
+
+- (`nitinol-persistence`): `LoadQuery::with_stream`,
+  `LoadQuery::with_event_type_prefix`, `LoadQuery::with_from_global` and
+  `LoadQuery::with_from_stream_sequence`, which add their condition to a query
+  and keep the ones it already carries, as `with_limit` does. The constructors
+  stay.
+
+- (`nitinol-persistence`): `LoadError::Decode { event_type, stream_key,
+  global_sequence, source }`, what a typed read serves in the place of a row
+  whose payload the event type's codec could not read, with the codec's own
+  error as its source. The rows after it are still read.
+
 - (`nitinol-eventsource`): `error::MissingSnapshotSlot`, and an `Activation`
   variant carrying it on `AskError`, `TellError`, `ExecError` and
   `SnapshotSaveError`. It is how a reference reports that its aggregate cannot
@@ -2289,6 +2313,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   withdrawn one could not do.
 
 ### Fixed
+
+- (`nitinol-persistence`): the documentation of `LOAD-1` and of
+  `LoadQuery::by_event_type` no longer says that a declaration's path has no
+  descendant. A family may begin with another declaration's whole path, so
+  naming a declaration's path also serves the rows of such a deeper
+  declaration; a reader that wants the one declaration compares `event_type`,
+  which `TypedLoad::read` does. The behaviour of `load` is unchanged.
 
 - (`nitinol-saga`): a saga can deliver a command to a `Recover = Latest`
   aggregate. `SagaDelivery::new` no longer refuses one at compile time: the

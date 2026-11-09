@@ -283,6 +283,10 @@ mod tests {
                 cause.downcast_ref::<InstantOutOfRange>().is_some(),
                 "a load's backend failure names the instant that was out of range"
             ),
+            LoadError::Decode { event_type, .. } => panic!(
+                "an out-of-range instant is a backend fault, not a payload of {event_type} \
+                 that could not be decoded"
+            ),
         }
     }
 }

@@ -40,6 +40,10 @@
 //! `nitinol-store-conformance` is those contracts as a suite to run against
 //! your implementation.
 //!
+//! [`store::TypedLoad`] carries `LOAD-2`, reading the rows of one event type
+//! back as that type. It is derived from [`store::EventStore`] rather than
+//! owed by a backend, so the suite does not hold it against yours.
+//!
 //! What the clauses fix is each store on its own.  A contract that holds only
 //! for a store *together with* the machinery driving it — that a projection's
 //! result and the offset covering it settle in one transaction — is fixed

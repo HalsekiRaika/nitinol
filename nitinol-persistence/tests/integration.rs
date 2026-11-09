@@ -27,6 +27,8 @@ mod event_store_str_key;
 mod journal_clone_shares_backend_state;
 #[path = "integration/journal_names_no_slot_beyond_itself.rs"]
 mod journal_names_no_slot_beyond_itself;
+#[path = "integration/load_query_combinators.rs"]
+mod load_query_combinators;
 #[path = "integration/offset_scope.rs"]
 mod offset_scope;
 #[path = "integration/offset_store.rs"]
@@ -39,3 +41,5 @@ mod reserved_namespace;
 mod snapshot_slot_store_answers_with_its_album;
 #[path = "integration/snapshot_store.rs"]
 mod snapshot_store;
+#[path = "integration/typed_load.rs"]
+mod typed_load;

@@ -186,9 +186,13 @@ pub trait EventStore: EventStoreClone + Send + Sync {
     ///
     /// A prefix matches on path boundaries: a stored path is within the prefix
     /// when it is the prefix itself, or when the prefix is followed by a
-    /// separator. A canonical path — a family and a type name, with nothing
-    /// after it — has no descendant of its own, so naming one selects that
-    /// declaration's events alone.
+    /// separator. Naming a declaration's path therefore selects that
+    /// declaration's events *and* the events of any deeper declaration whose
+    /// family begins with that whole path: the path of family
+    /// `shop.order.Opened` and type `Late` is within the path of
+    /// `shop.order` / `Opened`. A reader that wants one declaration alone
+    /// compares each event's `event_type` with it, which is what
+    /// [`TypedLoad::read`](crate::store::TypedLoad::read) does.
     ///
     /// Fixed by `nitinol-store-conformance` for any backend, and by
     /// `nitinol-persistence/tests/event_store_load_query_conjunction.rs`

@@ -33,3 +33,5 @@ mod snapshot_table_shape;
 mod snapshot_wiring;
 #[path = "integration/store_conformance.rs"]
 mod store_conformance;
+#[path = "integration/typed_read.rs"]
+mod typed_read;

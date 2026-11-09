@@ -200,9 +200,9 @@ async fn a_canonical_prefix_with_a_position_serves_that_type_alone() {
     assert_eq!(
         payloads(&served),
         vec![b"at-floor".as_slice()],
-        "a canonical path has no descendant of its own, so the pair selects one \
-         declaration's rows above the position and nothing else — which is what \
-         a consumer of a single event type asks for"
+        "the pair selects the declaration's rows above the position, and a \
+         declaration of the same type name in a deeper family of its family is \
+         not within its path, so its row is not served"
     );
 }
 
