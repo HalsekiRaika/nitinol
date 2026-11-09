@@ -46,15 +46,27 @@
 //! against a supplier and a projector at once instead; each trait's
 //! documentation names where.
 //!
+//! # Event identity
+//!
+//! The identity a stored row carries — [`EventType`] and its [`Family`] and
+//! [`TypeName`], the [`MaterializedPath`] it is written down as, the
+//! [`EventRegistryEntry`] a declaration tells the machinery its path with, and
+//! the reserved-namespace rule — is defined by `nitinol-contract`, as part of
+//! what a domain promises the machinery. This crate re-exports it because an
+//! event type is part of the shape of a row: a backend that depends on this
+//! crate alone names the same types the domain declared.
+//!
 //! # Reserved namespace
 //!
 //! `nitinol` is reserved for the framework's own records, across **both** the
 //! stream-key space and the event-type space — a single law with two
 //! enforcement points, because the two spaces learn a name at different times.
-//! An identifier inside it is refused when it is constructed; an event `family`
-//! inside it is refused by [`Family::new`] while the constant holding it is
-//! evaluated.  See [`reserved`] for the boundary rule, the constant, and the
-//! way the framework's own records get the names they reserved.
+//! The law is `nitinol-contract`'s, and so is the event-type enforcement point:
+//! an event `family` inside it is refused by [`Family::new`] while the constant
+//! holding it is evaluated. The stream-key enforcement point is here: an
+//! identifier inside it is refused when it is constructed. See [`reserved`] for
+//! the boundary rule, the constant, and the way the framework's own records get
+//! the names they reserved.
 //!
 //! # Restoring an event type
 //!
@@ -62,10 +74,11 @@
 //! [`EventType`] is a `&'static str`, so the path cannot become one again
 //! without leaking the string it was read into. [`EventRegistry`] is the way
 //! back, and what it answers for is collected by the linker rather than
-//! registered by hand: a declaration places an [`EventRegistryEntry`] in
-//! [`EVENT_REGISTRY`], and the framework builds one registry per process out of
-//! what the binary linked. There is nothing to construct and nothing to hand a
-//! store. See [`EVENT_REGISTRY`] for what link-time collection does not reach.
+//! registered by hand: a declaration places the [`EventRegistryEntry`] the
+//! contract defines in [`EVENT_REGISTRY`], which this crate owns, and the
+//! framework builds one registry per process out of what the binary linked.
+//! There is nothing to construct and nothing to hand a store. See
+//! [`EVENT_REGISTRY`] for what link-time collection does not reach.
 //!
 //! # One declaration per canonical path
 //!
@@ -85,9 +98,7 @@ pub mod store;
 mod event;
 mod event_registry;
 mod event_symbol;
-mod event_type;
 mod id;
-mod materialized_path;
 mod query;
 mod snapshot;
 
@@ -97,7 +108,9 @@ mod snapshot;
 /// [`Family::new`] and [`EventRegistryEntry::new`] refuse the `nitinol`
 /// namespace, which is the point of reserving it. The framework persists
 /// records under exactly those names, so it needs constructors that waive the
-/// namespace rule — and only that rule.
+/// namespace rule — and only that rule. Those constructors are
+/// `nitinol-contract`'s, since they build its identity types; the framework
+/// reaches them here, beside the registry machinery they feed.
 ///
 /// No stability is promised for anything below.
 ///
@@ -108,20 +121,24 @@ mod snapshot;
 pub mod __private {
     pub use linkme;
 
-    pub use crate::event_registry::{
-        event_registry_from_entries, linked_event_registry, reserved_event_registry_entry,
-    };
+    pub use nitinol_contract::__private::{reserved_event_registry_entry, reserved_family};
+
+    pub use crate::event_registry::{event_registry_from_entries, linked_event_registry};
     pub use crate::event_symbol::{
         is_verbatim_event_symbol, is_verbatim_event_symbol_byte, EVENT_UNIQUENESS_SYMBOL_PREFIX,
     };
-    pub use crate::event_type::reserved_family;
 }
 
 pub use event::{AppendingEvent, LoadedEvent};
-pub use event_registry::{EventRegistry, EventRegistryEntry, EventRegistryError, EVENT_REGISTRY};
-pub use event_type::{EventType, Family, ParsedEventType, TypeName};
+pub use event_registry::{EventRegistry, EventRegistryError, EVENT_REGISTRY};
 pub use id::AggregateId;
-pub use materialized_path::{MaterializedPath, MaterializedPathParseError};
+// The event identity is defined by `nitinol-contract`, as what a domain
+// promises the machinery, and named here too because it is part of the shape
+// of a stored row.
+pub use nitinol_contract::{
+    is_within_reserved_namespace, EventRegistryEntry, EventType, Family, MaterializedPath,
+    MaterializedPathParseError, ParsedEventType, TypeName, RESERVED_NAMESPACE,
+};
 pub use query::{AppendOutcome, LoadQuery};
-pub use reserved::{is_within_reserved_namespace, reject_reserved_id, RESERVED_NAMESPACE};
+pub use reserved::reject_reserved_id;
 pub use snapshot::PersistedSnapshot;

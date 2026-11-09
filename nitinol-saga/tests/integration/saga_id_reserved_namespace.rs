@@ -1,9 +1,11 @@
 //! `SagaId` obeys the same reserved-namespace law as every other identifier.
 //!
 //! A saga's id *is* its EventStore stream key, and the framework's own record
-//! types already live under `nitinol.saga`.  The law is owned by
-//! `nitinol-persistence` and its boundary rule is pinned there
-//! (`nitinol-persistence/tests/reserved_namespace.rs`); what this file pins is
+//! types already live under `nitinol.saga`.  The law and its boundary rule are
+//! owned by `nitinol-contract` and pinned there
+//! (`nitinol-contract/tests/reserved_namespace.rs`); its stream-key enforcement
+//! point is `nitinol-persistence`'s `reject_reserved_id`
+//! (`nitinol-persistence/tests/integration/reserved_namespace.rs`); what this file pins is
 //! that `SagaId` is subject to it, since a saga id is the one stream key a
 //! user names directly.
 

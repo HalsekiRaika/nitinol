@@ -1875,7 +1875,6 @@ name = "nitinol-contract"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "nitinol-persistence",
 ]
 
 [[package]]
@@ -1906,6 +1905,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "nitinol",
+ "nitinol-contract",
  "nitinol-persistence",
  "proc-macro2",
  "quote",
@@ -1924,6 +1924,7 @@ dependencies = [
  "futures-util",
  "jiff",
  "linkme",
+ "nitinol-contract",
  "thiserror",
  "tokio",
 ]

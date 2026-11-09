@@ -21,13 +21,28 @@ impl MaterializedPath {
 }
 
 /// Error raised when a string cannot be parsed as a [`MaterializedPath`].
-#[derive(Debug, thiserror::Error)]
+///
+/// `Display` and `Error` are written out by hand so that the identity contract
+/// takes on no dependency beyond `bytes`.
+#[derive(Debug)]
 pub enum MaterializedPathParseError {
-    #[error("a materialized path must contain at least one segment")]
     Empty,
-    #[error("materialized path `{input}` has an empty segment at position {index}")]
     EmptySegment { input: String, index: usize },
 }
+
+impl fmt::Display for MaterializedPathParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("a materialized path must contain at least one segment"),
+            Self::EmptySegment { input, index } => write!(
+                f,
+                "materialized path `{input}` has an empty segment at position {index}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MaterializedPathParseError {}
 
 impl FromStr for MaterializedPath {
     type Err = MaterializedPathParseError;

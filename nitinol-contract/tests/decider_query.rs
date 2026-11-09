@@ -1,6 +1,5 @@
 //! Acceptance scenario "implementing the contract runtime-free": with
-//! `nitinol-contract` and
-//! `nitinol-persistence` alone — no async runtime, no `async_trait`, no
+//! `nitinol-contract` alone — no async runtime, no `async_trait`, no
 //! `#[tokio::test]` anywhere in this file — a domain crate must be able to
 //! implement `Decider<C>` and `Query<M>` and unit- and property-test them.
 //!
@@ -15,8 +14,9 @@ use std::fmt;
 use std::rc::Rc;
 
 use bytes::Bytes;
-use nitinol_contract::{Aggregate, Codec, Decider, Decision, Event, Never, Query};
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol_contract::{
+    Aggregate, Codec, Decider, Decision, Event, EventType, Family, Never, Query, TypeName,
+};
 
 // Fixture: a wallet that holds a balance and an optional label.
 

@@ -42,8 +42,9 @@ fn eventsource_feature_exposes_aggregate_and_projection() {
     // These types come from nitinol::eventsource re-export
     use nitinol::contract::Codec;
     use nitinol::eventsource::{Aggregate, AggregateProps, Event, Never, ProjectorProps};
-    // EventType lives in nitinol-persistence; the eventsource feature transitively
-    // enables the persistence feature, so nitinol::persistence is re-exported.
+    // EventType is defined in nitinol-contract and re-exported by
+    // nitinol-persistence; the eventsource feature transitively enables the
+    // persistence feature, so nitinol::persistence names it too.
     use nitinol::persistence::{EventType, Family, TypeName};
 
     // Minimal dummy types satisfying the trait bounds required by AggregateProps<A: Aggregate>.

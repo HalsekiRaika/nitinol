@@ -16,6 +16,16 @@
 //! on `nitinol-eventsource` — or on the runtime beneath it — would let the kit
 //! measure a particular interpreter's machinery rather than the laws every
 //! interpreter owes, and would put it out of reach of anyone writing their own.
+//!
+//! The contract crate itself is checked on its own tree as well, for the
+//! reason the identity contract lives in it: the domain promises the machinery
+//! its event identities there, so the promise cannot depend on the machinery
+//! that receives it. `nitinol-persistence` depends on `nitinol-contract`, never
+//! the other way round, and the only package the contract reaches is `bytes`,
+//! the currency its codec signature is stated in. The umbrella's `contract`
+//! feature still carries `nitinol-persistence`, because the derive places its
+//! entry in the registry that crate owns — which is why the check above cannot
+//! stand in for this one.
 
 use std::process::Command;
 
@@ -32,6 +42,24 @@ const KIT_FORBIDDEN_PACKAGES: [&str; 3] = ["tokio", "nitinol-runtime", "nitinol-
 
 /// Presence anchors for the kit's tree, for the same reason as above.
 const KIT_REQUIRED_PACKAGES: [&str; 2] = ["nitinol-contract", "nitinol-persistence"];
+
+/// What the contract crate must not reach: the machinery its identities are
+/// promised to, the runtime that drives it, and the packages that machinery is
+/// built from (link-time collection and the store's timestamps).
+const CONTRACT_CRATE_FORBIDDEN_PACKAGES: [&str; 5] = [
+    "nitinol-persistence",
+    "tokio",
+    "nitinol-runtime",
+    "linkme",
+    "jiff",
+];
+
+/// Presence anchors for the contract crate's tree, for the same reason as
+/// above: the crate itself, and the one package it depends on.
+const CONTRACT_CRATE_REQUIRED_PACKAGES: [&str; 2] = ["nitinol-contract", "bytes"];
+
+/// The contract crate's direct dependencies, exactly.
+const CONTRACT_CRATE_DIRECT_DEPENDENCIES: [&str; 1] = ["bytes"];
 
 /// One package name per rendered tree line, with the tree-drawing prefix and
 /// the trailing `v<version> (<path>) (*)` decoration removed.
@@ -144,4 +172,82 @@ fn conformance_kit_tree_carries_no_interpreter_and_no_runtime() {
              interpreter's machinery instead of the laws every interpreter owes:\n{stdout}",
         );
     }
+}
+
+/// Runs `cargo tree` from the workspace root with `args`, and returns its
+/// stdout after asserting it succeeded.
+fn cargo_tree(args: &[&str]) -> String {
+    let cargo = std::env::var("CARGO").expect("CARGO is set by cargo for test processes");
+
+    let output = Command::new(cargo)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .arg("tree")
+        .args(args)
+        .output()
+        .expect("`cargo tree` must be spawnable");
+
+    let stdout = String::from_utf8(output.stdout).expect("`cargo tree` writes UTF-8 to stdout");
+    let stderr = String::from_utf8(output.stderr).expect("`cargo tree` writes UTF-8 to stderr");
+
+    assert!(
+        output.status.success(),
+        "`cargo tree {args}` exited with {status}:\n{stderr}",
+        args = args.join(" "),
+        status = output.status,
+    );
+
+    stdout
+}
+
+/// Given the contract crate's normal dependency tree, When its packages are
+/// read, Then nothing of the machinery is in it — not `nitinol-persistence`,
+/// not a runtime, not `linkme` or `jiff`.
+#[test]
+fn contract_crate_tree_reaches_none_of_the_machinery() {
+    let stdout = cargo_tree(&["-p", "nitinol-contract", "-e", "normal", "--color", "never"]);
+    let packages = package_names(&stdout);
+
+    for required in CONTRACT_CRATE_REQUIRED_PACKAGES {
+        assert!(
+            packages.contains(&required),
+            "`{required}` is missing from the contract crate's dependency tree, \
+             so the absence of {CONTRACT_CRATE_FORBIDDEN_PACKAGES:?} proves nothing:\n{stdout}",
+        );
+    }
+
+    for forbidden in CONTRACT_CRATE_FORBIDDEN_PACKAGES {
+        assert!(
+            !packages.contains(&forbidden),
+            "`{forbidden}` is reachable from `nitinol-contract`, so the identity a domain \
+             promises depends on the machinery it is promised to:\n{stdout}",
+        );
+    }
+}
+
+/// Given the contract crate's direct normal dependencies, When they are read,
+/// Then they are `bytes` and nothing else — a derive helper or an error crate
+/// added for convenience would be a dependency the contract does not need.
+#[test]
+fn contract_crate_depends_directly_on_bytes_alone() {
+    let stdout = cargo_tree(&[
+        "-p",
+        "nitinol-contract",
+        "-e",
+        "normal",
+        "--depth",
+        "1",
+        "--color",
+        "never",
+    ]);
+    let mut direct: Vec<&str> = package_names(&stdout)
+        .into_iter()
+        .filter(|package| *package != "nitinol-contract")
+        .collect();
+    direct.sort_unstable();
+    direct.dedup();
+
+    assert_eq!(
+        direct, CONTRACT_CRATE_DIRECT_DEPENDENCIES,
+        "`nitinol-contract` depends directly on exactly `bytes`:\n{stdout}",
+    );
 }

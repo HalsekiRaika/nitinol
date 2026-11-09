@@ -1,6 +1,5 @@
-use nitinol_persistence::EventType;
-
 use crate::codec::Codec;
+use crate::event_type::EventType;
 
 /// Marker trait for domain events.
 ///
@@ -57,8 +56,9 @@ impl<E: Event> DeclaresEventType for E {
 /// Asking a stored identity whether it is the one a given type declared.
 ///
 /// Stated as an extension of [`EventType`] rather than as an inherent method
-/// because the declaration lives here, in the contract, while `EventType` is
-/// the persistence layer's and knows nothing of it.
+/// so that the identity grammar knows nothing of the traits that declare it:
+/// an `EventType` is a family and a type name, and asking which declaration
+/// it belongs to is a question about [`DeclaresEventType`].
 ///
 /// A consumer imports this trait and not [`DeclaresEventType`]: the latter
 /// carries an `EVENT_TYPE` of its own, and bringing that name into a module

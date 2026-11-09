@@ -53,8 +53,7 @@ pub struct Never;
 ///
 /// ```compile_fail
 /// # use bytes::Bytes;
-/// # use nitinol_contract::{Aggregate, Codec, Event, Latest};
-/// # use nitinol_persistence::{EventType, Family, TypeName};
+/// # use nitinol_contract::{Aggregate, Codec, Event, EventType, Family, Latest, TypeName};
 /// # #[derive(Clone)]
 /// # struct Noted;
 /// # struct NotedCodec;

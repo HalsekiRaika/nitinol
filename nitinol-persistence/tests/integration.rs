@@ -23,14 +23,10 @@ mod event_store_occ;
 mod event_store_prefix_search;
 #[path = "integration/event_store_str_key.rs"]
 mod event_store_str_key;
-#[path = "integration/event_type.rs"]
-mod event_type;
 #[path = "integration/journal_clone_shares_backend_state.rs"]
 mod journal_clone_shares_backend_state;
 #[path = "integration/journal_names_no_slot_beyond_itself.rs"]
 mod journal_names_no_slot_beyond_itself;
-#[path = "integration/materialized_path.rs"]
-mod materialized_path;
 #[path = "integration/offset_scope.rs"]
 mod offset_scope;
 #[path = "integration/offset_store.rs"]

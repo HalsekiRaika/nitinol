@@ -598,9 +598,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transition, replay is deterministic, and none of them performs I/O — but they
   were defined in `nitinol-eventsource`, which requires Tokio. A domain-layer
   crate that keeps itself runtime-free therefore could not name the contract it
-  is written against. It now can: `nitinol-contract` depends only on
-  `nitinol-persistence`, and neither `tokio` nor `nitinol-runtime` appears in
-  the `contract` feature's dependency tree.
+  is written against. It now can: `nitinol-contract` depends on no other
+  nitinol crate — its only dependency is `bytes` — and `nitinol-persistence`
+  depends on it rather than the other way round. Neither `tokio` nor
+  `nitinol-runtime` appears in the `contract` feature's dependency tree.
 
   Nothing moves for existing users. `nitinol-eventsource` re-exports all three
   traits, so `nitinol::eventsource::{Event, Aggregate, Snapshotable}` and
@@ -843,6 +844,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `A::Recover: RecoverOnContingent<A>`, which every aggregate meets, in place
   of `RecoverOn<A, Journal>`. A delivery may be addressed to a `Recover = Latest`
   aggregate.
+
+- (`nitinol-contract`, `nitinol-persistence`, `nitinol-macros`, `nitinol`): the
+  event identity contract — `EventType`, `Family`, `TypeName`,
+  `ParsedEventType`, `MaterializedPath`, `MaterializedPathParseError`,
+  `EventRegistryEntry`, `RESERVED_NAMESPACE` and
+  `is_within_reserved_namespace` — is defined in `nitinol-contract`. It is what
+  a domain promises the machinery about the names its events are written down
+  under, so it belongs with the contract rather than with the machinery that
+  receives it. `nitinol-persistence` now depends on `nitinol-contract` and
+  re-exports every one of these items from its root (and the reserved-namespace
+  rule from `reserved`), because an event type is part of the shape of a stored
+  row; `nitinol_persistence::EventType` and `nitinol_contract::EventType` are
+  the same type, and code importing the persistence paths compiles unchanged.
+  What gathers and restores declarations — `EVENT_REGISTRY`, `EventRegistry`,
+  the uniqueness symbol and `reject_reserved_id` — stays in
+  `nitinol-persistence`, and `EVENT_REGISTRY` holds the contract's
+  `EventRegistryEntry`, which gains `declared_by()` and `event_types()` so the
+  machinery can read what an entry was built with.
+
+  The contract documents the identity as laws `ID-1` to `ID-4`, beside `L-1` to
+  `L-9`: one declaration, one canonical path that reads back one way; one
+  encoding both sides of the column agree on; one declaration per path; and the
+  `nitinol` namespace reserved for the framework, with its family-side
+  enforcement point in the contract and its stream-key one in
+  `nitinol-persistence`. They are fixed by compile-time refusals and the
+  contract's own tests rather than by a conformance suite.
+
+  `nitinol::contract` names the identity types too, so a `contract`-only build
+  reaches them without going through `nitinol::persistence`.
+  `#[derive(Event)]` generates `::nitinol::contract::{EventType, Family,
+  TypeName, EventRegistryEntry}` in place of the `::nitinol::persistence` paths
+  and still places its entry in `::nitinol::persistence::EVENT_REGISTRY`; code
+  that derives `Event` is unchanged.
 
 - (`nitinol-persistence`): `CustomStore`'s `Store`, `ProjectionOffsetSlot` and
   `SagaOffsetSlot` implementations bound the snapshot parameter by a sealed

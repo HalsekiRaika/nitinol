@@ -26,7 +26,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
-use nitinol_persistence::{EventType, Family, MaterializedPath, ParsedEventType, TypeName};
+use nitinol_contract::{EventType, Family, MaterializedPath, ParsedEventType, TypeName};
 
 fn hash_of<T: Hash>(value: &T) -> u64 {
     let mut hasher = DefaultHasher::new();

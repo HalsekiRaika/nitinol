@@ -29,8 +29,9 @@ use crate::decision::Decision;
 ///
 /// ```rust
 /// use bytes::Bytes;
-/// use nitinol_contract::{Aggregate, Codec, Decider, Decision, Event, Never};
-/// use nitinol_persistence::{EventType, Family, TypeName};
+/// use nitinol_contract::{
+///     Aggregate, Codec, Decider, Decision, Event, EventType, Family, Never, TypeName,
+/// };
 ///
 /// #[derive(Clone)]
 /// enum CounterEvent { Incremented }

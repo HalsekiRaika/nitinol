@@ -17,7 +17,7 @@
 //! carried by the payload the named codec wrote.
 //!
 //! Alongside the impl it places one
-//! `nitinol::persistence::EventRegistryEntry` in
+//! `nitinol::contract::EventRegistryEntry` in
 //! `nitinol::persistence::EVENT_REGISTRY`, carrying the one canonical path a
 //! stored row of this type can carry. That is what lets a store restore the
 //! type with nothing registered by hand, and a hand-written `impl Event` places
@@ -36,17 +36,21 @@
 //! infer it from.
 //!
 //! Generated code refers to the framework exclusively through the umbrella
-//! crate (`::nitinol::contract::Event`, `::nitinol::persistence::{...}`),
-//! mirroring how `serde`'s derive targets the single `serde` crate.  Both
-//! paths are reachable without an async runtime, so applying this derive never
-//! obliges the user to enable `eventsource` — and with it Tokio.
+//! crate, mirroring how `serde`'s derive targets the single `serde` crate: the
+//! trait and the identity it declares through `::nitinol::contract::{Event,
+//! EventType, Family, TypeName, EventRegistryEntry}`, and the slice the entry is
+//! placed in through `::nitinol::persistence::EVENT_REGISTRY`, which belongs to
+//! the machinery that collects it.  Both paths are reachable without an async
+//! runtime, so applying this derive never obliges the user to enable
+//! `eventsource` — and with it Tokio.
 //!
 //! # Reserved namespace
 //!
 //! `nitinol` is reserved for the framework's own records in both the stream-key
-//! and the event-type space (see `nitinol_persistence::reserved`).  Here the
-//! family is a literal known at expansion time, so the derive reads the same
-//! central rule (`nitinol_persistence::is_within_reserved_namespace`) and
+//! and the event-type space; the law is part of the event identity
+//! `nitinol-contract` defines.  Here the family is a literal known at expansion
+//! time, so the derive reads the same central rule
+//! (`nitinol_contract::is_within_reserved_namespace`) and
 //! refuses it before expansion: a family inside the reserved namespace is a
 //! compile error reported at the derive site, not a runtime surprise.
 //!
@@ -55,8 +59,9 @@
 //! through `EventRegistryEntry::new`, and both panic while the constant holding
 //! them is evaluated if the family names the reserved namespace — a compile
 //! error of a different shape, not a documentation-only convention. The one way
-//! past either enforcement point is `nitinol_persistence::__private`, reserved
-//! for the framework's own records and not a user surface.
+//! past either enforcement point is `nitinol_contract::__private` (re-exported
+//! by `nitinol_persistence::__private`), reserved for the framework's own
+//! records and not a user surface.
 
 mod subscribe;
 
@@ -64,10 +69,10 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{parse_macro_input, Data, DeriveInput, Lit, LitStr, Type};
 
+use nitinol_contract::{is_within_reserved_namespace, RESERVED_NAMESPACE};
 use nitinol_persistence::__private::{
     is_verbatim_event_symbol_byte, EVENT_UNIQUENESS_SYMBOL_PREFIX,
 };
-use nitinol_persistence::{is_within_reserved_namespace, RESERVED_NAMESPACE};
 
 /// Derives `nitinol::contract::Event` for a struct or enum.
 ///
@@ -182,9 +187,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     }
 
     let event_type = quote! {
-        ::nitinol::persistence::EventType::new(
-            ::nitinol::persistence::Family::new(#family),
-            ::nitinol::persistence::TypeName::new(stringify!(#ident)),
+        ::nitinol::contract::EventType::new(
+            ::nitinol::contract::Family::new(#family),
+            ::nitinol::contract::TypeName::new(stringify!(#ident)),
         )
     };
 
@@ -197,8 +202,8 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         #[linkme(crate = ::nitinol::__private::linkme)]
         #[doc(hidden)]
         #[allow(non_upper_case_globals)]
-        static #entry: ::nitinol::persistence::EventRegistryEntry =
-            ::nitinol::persistence::EventRegistryEntry::new(
+        static #entry: ::nitinol::contract::EventRegistryEntry =
+            ::nitinol::contract::EventRegistryEntry::new(
                 concat!(module_path!(), "::", stringify!(#ident)),
                 &[#event_type],
             );
@@ -220,7 +225,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     Ok(quote! {
         impl #impl_generics ::nitinol::contract::Event for #ident #ty_generics #where_clause {
-            const EVENT_TYPE: ::nitinol::persistence::EventType = #event_type;
+            const EVENT_TYPE: ::nitinol::contract::EventType = #event_type;
 
             type Codec = #codec;
         }

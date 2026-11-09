@@ -25,8 +25,9 @@ use std::convert::Infallible;
 use std::fmt;
 
 use bytes::Bytes;
-use nitinol_contract::{Aggregate, Codec, Event, Latest, Snapshotable};
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol_contract::{
+    Aggregate, Codec, Event, EventType, Family, Latest, Snapshotable, TypeName,
+};
 
 // Fixture: an event and the codec it names.
 

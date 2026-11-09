@@ -4,8 +4,9 @@
 //! `Aggregate`, `Snapshotable`, `Decider` and `Query` must be usable and
 //! behave as specified.
 //!
-//! Everything here is reached through `nitinol::contract` and
-//! `nitinol::persistence` only. Referring to `nitinol::eventsource` or
+//! Everything here is reached through `nitinol::contract` only — the event
+//! identity types included, since they are part of the contract a domain
+//! writes against. Referring to `nitinol::eventsource` or
 //! `nitinol::runtime` would make the file compile only in a Tokio-bearing
 //! configuration and would silently void the scenario.
 //!
@@ -14,9 +15,9 @@
 
 use bytes::Bytes;
 use nitinol::contract::{
-    Accepting, Aggregate, Codec, Decider, Decision, Event, Latest, Query, Snapshotable,
+    Accepting, Aggregate, Codec, Decider, Decision, Event, EventType, Family, Latest, Query,
+    Snapshotable, TypeName,
 };
-use nitinol::persistence::{EventType, Family, TypeName};
 
 #[derive(Clone, Event)]
 #[event(family = "shop.orders", codec = PlacedCodec)]
@@ -145,7 +146,7 @@ fn derived_struct_event_is_usable_through_the_contract_facade() {
 
 /// Given an enum deriving `Event` in a `contract`-only build, When its
 /// `EVENT_TYPE` is read, Then it is the identity named after the enum — proving
-/// the generated `::nitinol::persistence::{EventType, Family, TypeName}`
+/// the generated `::nitinol::contract::{EventType, Family, TypeName}`
 /// references resolve without the `eventsource` feature.
 #[test]
 fn derived_enum_event_is_usable_through_the_contract_facade() {
@@ -207,4 +208,34 @@ fn decider_and_query_are_usable_through_the_contract_facade() {
     assert!(matches!(decision, Decision::Accept { output: 1, .. }));
 
     assert_eq!(counter.query(CurrentValue), Ok(0));
+}
+
+/// Given a `contract`-only build, When the rest of the identity contract is
+/// named through the facade, Then it is there: the owned path and its
+/// decomposition, the parse refusal, the entry a declaration tells the
+/// machinery its path with, and the reserved-namespace rule.
+#[test]
+fn the_identity_contract_is_reachable_through_the_contract_facade() {
+    use nitinol::contract::{
+        is_within_reserved_namespace, EventRegistryEntry, MaterializedPath,
+        MaterializedPathParseError, ParsedEventType, RESERVED_NAMESPACE,
+    };
+
+    static DECLARED: &[EventType] = &[EventType::new(
+        Family::new("shop.orders"),
+        TypeName::new("Placed"),
+    )];
+    let entry = EventRegistryEntry::new("contract_feature::Placed", DECLARED);
+    assert_eq!(entry.event_types(), DECLARED);
+
+    let path: MaterializedPath = Placed::EVENT_TYPE.to_path();
+    let parsed = ParsedEventType::from_path(path);
+    assert_eq!(parsed, ParsedEventType::from(Placed::EVENT_TYPE));
+
+    assert!(matches!(
+        "".parse::<MaterializedPath>(),
+        Err(MaterializedPathParseError::Empty)
+    ));
+
+    assert!(is_within_reserved_namespace(RESERVED_NAMESPACE));
 }

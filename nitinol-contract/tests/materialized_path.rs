@@ -15,7 +15,9 @@
 //! segment boundaries. What changed is the projection — a path holds the
 //! family's segments and the type name, and nothing after it.
 
-use nitinol_persistence::{EventType, Family, MaterializedPath, TypeName};
+use std::error::Error;
+
+use nitinol_contract::{EventType, Family, MaterializedPath, MaterializedPathParseError, TypeName};
 
 fn path(s: &str) -> MaterializedPath {
     s.parse::<MaterializedPath>()
@@ -176,4 +178,73 @@ fn is_within_true_for_a_family_prefix_matching_every_type_declared_under_it() {
             "{declared} is declared under `saga.upstream` and must be selected by that prefix"
         );
     }
+}
+
+// Parse errors — what a column value that is not a path is refused with
+
+/// Given an empty string, When parsed, Then it is refused as `Empty` and the
+/// message says a path needs at least one segment.
+///
+/// The wording is what a failed load surfaces to whoever reads the store's
+/// error, so it is held to the exact text rather than to "some message".
+#[test]
+fn an_empty_string_is_refused_as_a_path_without_segments() {
+    let refused = ""
+        .parse::<MaterializedPath>()
+        .expect_err("an empty string has no segment to read a type name from");
+
+    assert!(
+        matches!(refused, MaterializedPathParseError::Empty),
+        "an empty string is the `Empty` refusal, not an empty segment: {refused:?}"
+    );
+    assert_eq!(
+        refused.to_string(),
+        "a materialized path must contain at least one segment"
+    );
+}
+
+/// Given strings with an empty segment at the front, in the middle and at the
+/// end, When parsed, Then each is refused as `EmptySegment` carrying the whole
+/// input and the position of the first empty segment, and the message names
+/// both.
+#[test]
+fn an_empty_segment_is_refused_with_the_input_and_its_position() {
+    for (input, position) in [(".a", 0), ("a..b", 1), ("a.", 1), ("a.b..c", 2)] {
+        let refused = input
+            .parse::<MaterializedPath>()
+            .expect_err("a path with an empty segment is not a canonical path");
+
+        match &refused {
+            MaterializedPathParseError::EmptySegment {
+                input: carried,
+                index,
+            } => {
+                assert_eq!(carried, input, "the refusal carries the input it refused");
+                assert_eq!(*index, position, "{input:?} is empty at segment {position}");
+            }
+            MaterializedPathParseError::Empty => {
+                panic!("{input:?} has segments, so it is not the `Empty` refusal")
+            }
+        }
+        assert_eq!(
+            refused.to_string(),
+            format!("materialized path `{input}` has an empty segment at position {position}")
+        );
+    }
+}
+
+/// Given a parse refusal, When it is handled as a `dyn Error`, Then it is one,
+/// its message is the same `Display` text, and it has no further source — the
+/// refusal is about the string itself, with nothing underneath it to chain.
+#[test]
+fn a_parse_refusal_is_a_std_error_without_a_source() {
+    let refused = "a..b"
+        .parse::<MaterializedPath>()
+        .expect_err("a path with an empty segment is refused");
+    // `Send + Sync + 'static` is what lets a store carry the refusal inside
+    // its own error type across an `.await`.
+    let as_error: &(dyn Error + Send + Sync + 'static) = &refused;
+
+    assert_eq!(as_error.to_string(), refused.to_string());
+    assert!(as_error.source().is_none());
 }

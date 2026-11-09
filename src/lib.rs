@@ -8,7 +8,7 @@
 //! |----------------|---------|
 //! | `runtime`      | `runtime` — process runtime (`ProcessSystem`, `Process`, …) |
 //! | `persistence`  | `persistence` — persistence abstractions (`EventStore`, IDs, …) |
-//! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Decider`, `Decision`, `Query`, `Event`, `Codec`, `Snapshotable`, `Recovery` / `Never` / `Latest`, `#[derive(Event)]`) |
+//! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Decider`, `Decision`, `Query`, `Event`, `Codec`, `Snapshotable`, `Recovery` / `Never` / `Latest`, `#[derive(Event)]`) and the event identity it is written in (`EventType`, `Family`, `TypeName`, `MaterializedPath`, `EventRegistryEntry`, …) |
 //! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
 //! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
 //! | `full`         | All of the above |
@@ -35,14 +35,21 @@ pub use nitinol_persistence as persistence;
 /// reaches no async runtime, so a crate that keeps itself Tokio-free can
 /// depend on `nitinol` through it alone.
 ///
+/// The event identity a domain declares — its family, type name, canonical path
+/// and registry entry, and the names the framework reserves — is part of the
+/// contract and is named here too; `nitinol::persistence` re-exports the same
+/// types as the shape of a stored row.
+///
 /// The `eventsource` feature re-exports these same trait items under
 /// `nitinol::eventsource`; the two paths are interchangeable. (That module is
 /// not linked here because it does not exist in a `contract`-only build.)
 #[cfg(feature = "contract")]
 pub mod contract {
     pub use nitinol_contract::{
-        Accepting, Aggregate, Codec, Decider, Decision, Event, Latest, Never, Query, RecoverPolicy,
-        Recovery, Snapshotable,
+        is_within_reserved_namespace, Accepting, Aggregate, Codec, Decider, Decision, Event,
+        EventRegistryEntry, EventType, Family, Latest, MaterializedPath,
+        MaterializedPathParseError, Never, ParsedEventType, Query, RecoverPolicy, Recovery,
+        Snapshotable, TypeName, RESERVED_NAMESPACE,
     };
 
     /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single

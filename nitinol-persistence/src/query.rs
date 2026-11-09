@@ -1,7 +1,6 @@
 use std::borrow::Borrow;
 
-use crate::event_type::EventType;
-use crate::materialized_path::MaterializedPath;
+use nitinol_contract::{EventType, MaterializedPath};
 
 #[derive(Debug, Clone, Default)]
 pub struct LoadQuery {

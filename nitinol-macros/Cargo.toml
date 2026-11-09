@@ -14,9 +14,13 @@ proc-macro = true
 syn = { version = "2", default-features = false, features = ["derive", "parsing", "printing", "proc-macro"] }
 quote = "1"
 proc-macro2 = "1"
-# The reserved-namespace law lives in `nitinol-persistence` and is enforced in
-# two spaces; the derive reads the same constant and predicate the identifier
-# constructors do rather than restating the boundary here.
+# The reserved-namespace law is part of the event identity `nitinol-contract`
+# defines, and is enforced in two spaces; the derive reads the same constant and
+# predicate the identifier constructors do rather than restating the boundary
+# here.
+nitinol-contract = { path = "../nitinol-contract" }
+# The uniqueness symbol a derived declaration exports belongs to the machinery
+# that collects declarations, so its prefix and byte set are read from there.
 nitinol-persistence = { path = "../nitinol-persistence" }
 
 [dev-dependencies]

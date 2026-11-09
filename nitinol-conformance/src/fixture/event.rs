@@ -1,6 +1,5 @@
 use bytes::{BufMut, Bytes, BytesMut};
-use nitinol_contract::{Codec, Event};
-use nitinol_persistence::{EventType, Family, TypeName};
+use nitinol_contract::{Codec, Event, EventType, Family, TypeName};
 
 const FAMILY: Family = Family::new("conformance.ledger");
 const TYPE_NAME: TypeName = TypeName::new("fact");

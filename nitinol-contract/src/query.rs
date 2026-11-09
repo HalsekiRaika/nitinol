@@ -16,8 +16,9 @@ use crate::aggregate::Aggregate;
 ///
 /// ```rust
 /// use bytes::Bytes;
-/// use nitinol_contract::{Aggregate, Codec, Event, Never, Query};
-/// use nitinol_persistence::{EventType, Family, TypeName};
+/// use nitinol_contract::{
+///     Aggregate, Codec, Event, EventType, Family, Never, Query, TypeName,
+/// };
 ///
 /// #[derive(Clone)]
 /// enum CounterEvent { Incremented }

@@ -8,6 +8,21 @@
 //! type name, and every segment before it is the family**. One path, one
 //! reading, one declaration.
 //!
+//! # The reserved namespace
+//!
+//! `nitinol` and everything beneath it belong to the framework, and a domain
+//! names neither an event family nor a stream key there. The law — the root,
+//! [`RESERVED_NAMESPACE`], and the boundary that decides membership,
+//! [`is_within_reserved_namespace`] — is defined here, beside [`Family`], as
+//! part of the identity a domain promises the machinery. It has two
+//! enforcement points, each placed with the side that learns the name: a family
+//! is refused by [`Family::new`] and [`EventRegistryEntry::new`] while the
+//! constant holding it is evaluated, and a stream key is refused when the
+//! identifier is constructed, by `nitinol-persistence`'s `reject_reserved_id`,
+//! which reads the same rule from here.
+//!
+//! [`EventRegistryEntry::new`]: crate::EventRegistryEntry::new
+//!
 //! # Design note — why `EventType` does not implement `FromStr`
 //!
 //! Both components of [`EventType`] are `&'static str`, making it `Copy` and
@@ -39,8 +54,8 @@ use crate::materialized_path::MaterializedPath;
 /// Defined here, beside [`Family`], because [`Family::new`] is the
 /// compile-time enforcement point: it panics while the `const`/`static`
 /// holding a reserved family is evaluated.
-/// `nitinol_persistence::reserved` re-exports this for the runtime-string
-/// enforcement point, [`reject_reserved_id`](crate::reject_reserved_id).
+/// `nitinol-persistence`'s `reserved` module re-exports this for the
+/// runtime-string enforcement point, `reject_reserved_id`.
 pub const RESERVED_NAMESPACE: &str = "nitinol";
 
 /// Is `path` the reserved root itself, or a name beneath it?
@@ -147,8 +162,8 @@ impl Family {
 /// the one way in, and it waives the namespace rule alone: a malformed family
 /// is malformed whoever declares it.
 ///
-/// Reachable only through `nitinol_persistence::__private`; it is not a user
-/// surface.
+/// Reachable only through this crate's `__private`, which `nitinol-persistence`
+/// re-exports in its own; it is not a user surface.
 pub const fn reserved_family(s: &'static str) -> Family {
     Family::well_formed(s)
 }

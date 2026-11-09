@@ -10,8 +10,9 @@
 //! Both the `Event` trait and the `Event` derive are reached through the single
 //! umbrella path `nitinol::eventsource::Event` (trait namespace vs. macro
 //! namespace). This is the compatibility re-export path; the generated code
-//! itself references the canonical `::nitinol::contract::Event` and
-//! `::nitinol::persistence::{...}`.
+//! itself references the canonical `::nitinol::contract::{Event, EventType,
+//! Family, TypeName, EventRegistryEntry}` and places the entry in
+//! `::nitinol::persistence::EVENT_REGISTRY`.
 //!
 //! `Event` also names the codec that writes the event down, so equivalence
 //! covers a second generated item: `#[event(codec = X)]` must produce
