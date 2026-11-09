@@ -358,11 +358,7 @@ async fn a_prefix_and_a_position_select_the_events_satisfying_both<S: StoreUnder
     for prefix in [fixture::FACT.to_path(), path("occ.conformance")] {
         let served = fixture::observe(
             &backend,
-            LoadQuery {
-                event_type_prefix: Some(prefix.clone()),
-                from_global_sequence: Some(floor),
-                ..LoadQuery::default()
-            },
+            LoadQuery::by_event_type_prefix(prefix.clone()).with_from_global(floor),
         )
         .await;
 
@@ -408,11 +404,7 @@ async fn a_prefix_no_stored_event_is_within_selects_nothing<S: StoreUnderTest>(s
     for floor in stored {
         let served = fixture::observe(
             &backend,
-            LoadQuery {
-                event_type_prefix: Some(absent.clone()),
-                from_global_sequence: Some(floor),
-                ..LoadQuery::default()
-            },
+            LoadQuery::by_event_type_prefix(absent.clone()).with_from_global(floor),
         )
         .await;
 

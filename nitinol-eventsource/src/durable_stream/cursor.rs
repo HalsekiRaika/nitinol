@@ -21,15 +21,10 @@ impl SequenceCursor {
     /// current position.
     pub(crate) fn to_load_query(&self) -> LoadQuery {
         match self {
-            SequenceCursor::Stream { key, after } => LoadQuery {
-                stream_key: Some(key.clone()),
-                from_stream_sequence: Some(after + 1),
-                ..Default::default()
-            },
-            SequenceCursor::Global { after } => LoadQuery {
-                from_global_sequence: Some(after + 1),
-                ..Default::default()
-            },
+            SequenceCursor::Stream { key, after } => {
+                LoadQuery::by_stream(key).with_from_stream_sequence(after + 1)
+            }
+            SequenceCursor::Global { after } => LoadQuery::from_global(after + 1),
         }
     }
 

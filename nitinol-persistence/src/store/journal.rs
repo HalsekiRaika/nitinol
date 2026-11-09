@@ -8,7 +8,7 @@ use nitinol_contract::Event;
 use crate::error::{AppendError, LoadError};
 use crate::event::AppendingEvent;
 use crate::provider::Store;
-use crate::query::{AppendOutcome, LoadQuery};
+use crate::query::{AppendOutcome, LoadQuery, Typed};
 use crate::store::event_store::{EventStore, EventStream};
 use crate::store::typed_load::{TypedEventStream, TypedLoad};
 
@@ -93,8 +93,11 @@ impl Journal {
 /// [`TypedLoad::read`]'s clauses, unchanged: a journal is not an event store,
 /// so the read is handed to the registered store it erases.
 impl TypedLoad for Journal {
-    async fn read<E: Event>(&self, query: LoadQuery) -> Result<TypedEventStream<'_, E>, LoadError> {
-        self.0.read::<E>(query).await
+    async fn read<E: Event>(
+        &self,
+        query: LoadQuery<Typed<E>>,
+    ) -> Result<TypedEventStream<'_, E>, LoadError> {
+        self.0.read(query).await
     }
 }
 

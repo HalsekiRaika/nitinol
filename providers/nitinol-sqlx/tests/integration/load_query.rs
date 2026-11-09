@@ -108,11 +108,7 @@ async fn a_load_serves_only_what_its_query_asks_for() {
 
     let from_stream_sequence = observe(
         &store,
-        LoadQuery {
-            stream_key: Some(STREAM.to_owned()),
-            from_stream_sequence: Some(2),
-            ..LoadQuery::default()
-        },
+        LoadQuery::by_stream(STREAM).with_from_stream_sequence(2),
     )
     .await;
     assert_eq!(

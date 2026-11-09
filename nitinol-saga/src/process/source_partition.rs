@@ -129,15 +129,10 @@ impl<A> UpstreamSource<A> {
     /// event type as it reads them, so the store is asked for no type.
     fn query_above(&self, position: u64) -> LoadQuery {
         match &self.floor {
-            SequenceCursor::Stream { key, .. } => LoadQuery {
-                stream_key: Some(key.clone()),
-                from_stream_sequence: Some(position + 1),
-                ..Default::default()
-            },
-            SequenceCursor::Global { .. } => LoadQuery {
-                from_global_sequence: Some(position + 1),
-                ..Default::default()
-            },
+            SequenceCursor::Stream { key, .. } => {
+                LoadQuery::by_stream(key).with_from_stream_sequence(position + 1)
+            }
+            SequenceCursor::Global { .. } => LoadQuery::from_global(position + 1),
         }
     }
 

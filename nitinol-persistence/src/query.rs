@@ -1,14 +1,89 @@
+//! The conditions a load is asked under, and the type its rows are read as.
+//!
+//! A store receives a [`LoadQuery<Untyped>`](LoadQuery) and serves stored rows.
+//! A [`LoadQuery<Typed<E>>`](LoadQuery) is handed to a typed read instead, or
+//! brought down to the untyped query a store receives with
+//! [`erase`](LoadQuery::erase).
+
 use std::borrow::Borrow;
+use std::marker::PhantomData;
 
-use nitinol_contract::{EventType, MaterializedPath};
+use nitinol_contract::{Event, EventType, MaterializedPath};
 
-#[derive(Debug, Clone, Default)]
-pub struct LoadQuery {
+mod read_type;
+
+pub use read_type::{Typed, Untyped};
+
+/// The conditions a load selects rows under, and what it reads them as.
+///
+/// `T` is the read type. [`Untyped`], the default, is the query
+/// [`EventStore::load`](crate::store::EventStore::load) receives: rows as they
+/// are stored. [`Typed<E>`] is the query
+/// [`TypedLoad::read`](crate::store::TypedLoad::read) receives: the rows of `E`
+/// read back as `E`. It is built by [`LoadQuery::of`] alone, and
+/// [`erase`](LoadQuery::erase) hands a store the same conditions with `E`'s
+/// path as the prefix.
+///
+/// A query is built from the constructors and combinators below rather than
+/// written out field by field: the read type is not a field a caller sets.
+#[derive(Debug, Clone)]
+pub struct LoadQuery<T = Untyped> {
     pub stream_key: Option<String>,
     pub event_type_prefix: Option<MaterializedPath>,
     pub from_global_sequence: Option<u64>,
     pub from_stream_sequence: Option<u64>,
     pub limit: Option<usize>,
+    #[expect(
+        dead_code,
+        reason = "the read type is held for the type it names; no value is read out of it"
+    )]
+    read_as: T,
+}
+
+/// Written out for the untyped query alone rather than derived: a derive would
+/// be generic over `T`, so `LoadQuery::default()` would no longer say which
+/// query it builds, and a typed query is built by [`LoadQuery::of`] alone.
+impl Default for LoadQuery {
+    fn default() -> Self {
+        Self {
+            stream_key: None,
+            event_type_prefix: None,
+            from_global_sequence: None,
+            from_stream_sequence: None,
+            limit: None,
+            read_as: Untyped,
+        }
+    }
+}
+
+impl<T> LoadQuery<T> {
+    /// Adds the stream condition to this query, keeping the others it carries.
+    ///
+    /// Takes the stream key in any form [`by_stream`](LoadQuery::by_stream)
+    /// takes.
+    pub fn with_stream<K: ?Sized + Borrow<str>>(mut self, key: &K) -> Self {
+        self.stream_key = Some(key.borrow().to_owned());
+        self
+    }
+
+    /// Adds the global position condition to this query, keeping the others it
+    /// carries. The position named is included.
+    pub fn with_from_global(mut self, seq: u64) -> Self {
+        self.from_global_sequence = Some(seq);
+        self
+    }
+
+    /// Adds the stream sequence condition to this query, keeping the others it
+    /// carries.
+    pub fn with_from_stream_sequence(mut self, seq: u64) -> Self {
+        self.from_stream_sequence = Some(seq);
+        self
+    }
+
+    pub fn with_limit(mut self, n: usize) -> Self {
+        self.limit = Some(n);
+        self
+    }
 }
 
 impl LoadQuery {
@@ -54,14 +129,6 @@ impl LoadQuery {
         }
     }
 
-    /// Adds the stream condition to this query, keeping the others it carries.
-    ///
-    /// Takes the stream key in any form [`by_stream`](Self::by_stream) takes.
-    pub fn with_stream<K: ?Sized + Borrow<str>>(mut self, key: &K) -> Self {
-        self.stream_key = Some(key.borrow().to_owned());
-        self
-    }
-
     /// Adds the event type prefix condition to this query, keeping the others
     /// it carries.
     pub fn with_event_type_prefix(mut self, prefix: MaterializedPath) -> Self {
@@ -69,23 +136,45 @@ impl LoadQuery {
         self
     }
 
-    /// Adds the global position condition to this query, keeping the others it
-    /// carries. The position named is included.
-    pub fn with_from_global(mut self, seq: u64) -> Self {
-        self.from_global_sequence = Some(seq);
-        self
+    /// The rows of `E`, read back as `E`, under no other condition yet.
+    ///
+    /// The query names `E`'s path as its prefix; the combinators every query
+    /// has add the rest.
+    pub fn of<E: Event>() -> LoadQuery<Typed<E>> {
+        LoadQuery {
+            stream_key: None,
+            event_type_prefix: Some(E::EVENT_TYPE.to_path()),
+            from_global_sequence: None,
+            from_stream_sequence: None,
+            limit: None,
+            read_as: Typed(PhantomData),
+        }
     }
+}
 
-    /// Adds the stream sequence condition to this query, keeping the others it
-    /// carries.
-    pub fn with_from_stream_sequence(mut self, seq: u64) -> Self {
-        self.from_stream_sequence = Some(seq);
-        self
-    }
-
-    pub fn with_limit(mut self, n: usize) -> Self {
-        self.limit = Some(n);
-        self
+impl<E: Event> LoadQuery<Typed<E>> {
+    /// The query the store receives: the same conditions, with `E`'s path as
+    /// the prefix.
+    ///
+    /// The prefix is `E`'s path whatever the prefix field was left holding, so
+    /// what a store is asked for is always the rows `E` names.
+    pub fn erase(self) -> LoadQuery {
+        let LoadQuery {
+            stream_key,
+            event_type_prefix: _,
+            from_global_sequence,
+            from_stream_sequence,
+            limit,
+            read_as: _,
+        } = self;
+        LoadQuery {
+            stream_key,
+            event_type_prefix: Some(E::EVENT_TYPE.to_path()),
+            from_global_sequence,
+            from_stream_sequence,
+            limit,
+            read_as: Untyped,
+        }
     }
 }
 

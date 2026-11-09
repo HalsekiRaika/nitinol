@@ -169,12 +169,8 @@ async fn load_query_uses_renamed_stream_fields() {
         .await
         .expect("append must succeed");
 
-    // When: build a query using the new field names directly
-    let query = LoadQuery {
-        stream_key: Some("stream-renamed".to_string()),
-        from_stream_sequence: Some(2),
-        ..Default::default()
-    };
+    // When: a query naming the stream and a stream sequence
+    let query = LoadQuery::by_stream("stream-renamed").with_from_stream_sequence(2);
     let stream = store.load(query).await.expect("load must succeed");
     let events: Vec<_> = stream.try_collect().await.expect("collect must succeed");
 

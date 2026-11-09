@@ -92,11 +92,7 @@ async fn load_1_a_prefix_and_a_position_are_both_required() {
 
     let rows = loaded(
         &store,
-        LoadQuery {
-            event_type_prefix: Some(SELECTED.to_path()),
-            from_global_sequence: Some(floor),
-            ..Default::default()
-        },
+        LoadQuery::by_event_type(SELECTED).with_from_global(floor),
     )
     .await;
 
@@ -118,11 +114,7 @@ async fn load_1_a_prefix_matching_nothing_returns_nothing_whatever_the_position(
     for floor in [1, positions[2], positions[4]] {
         let rows = loaded(
             &store,
-            LoadQuery {
-                event_type_prefix: Some(unmatched_prefix()),
-                from_global_sequence: Some(floor),
-                ..Default::default()
-            },
+            LoadQuery::by_event_type_prefix(unmatched_prefix()).with_from_global(floor),
         )
         .await;
 
@@ -143,15 +135,12 @@ async fn load_1_an_ancestor_prefix_admits_every_descendant_above_the_position() 
 
     let rows = loaded(
         &store,
-        LoadQuery {
-            event_type_prefix: Some(
-                "conj"
-                    .parse()
-                    .expect("a fixture prefix parses as a materialized path"),
-            ),
-            from_global_sequence: Some(floor),
-            ..Default::default()
-        },
+        LoadQuery::by_event_type_prefix(
+            "conj"
+                .parse()
+                .expect("a fixture prefix parses as a materialized path"),
+        )
+        .with_from_global(floor),
     )
     .await;
 
@@ -175,11 +164,7 @@ async fn load_1_the_position_is_inclusive_of_the_row_it_names() {
 
     let rows = loaded(
         &store,
-        LoadQuery {
-            event_type_prefix: Some(SELECTED.to_path()),
-            from_global_sequence: Some(positions[4]),
-            ..Default::default()
-        },
+        LoadQuery::by_event_type(SELECTED).with_from_global(positions[4]),
     )
     .await;
 

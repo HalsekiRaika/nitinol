@@ -14,7 +14,7 @@
 //!          store selects them
 //! ```
 //!
-//! The read narrows the query to the type's path before the store sees it, so
+//! The store is handed the erased query, whose prefix is the type's path, so
 //! the type is selected by the prefix comparison the journal's index serves.
 //! The second scenario is the one a read that loaded everything and sorted the
 //! rows out afterwards cannot pass: the limit would count rows of other types.
@@ -35,7 +35,7 @@ use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::Event;
 use nitinol_persistence::store::{Journal, TypedLoad};
 use nitinol_persistence::{
-    EventRegistryEntry, EventType, Family, LoadQuery, TypeName, EVENT_REGISTRY,
+    EventRegistryEntry, EventType, Family, LoadQuery, TypeName, Typed, EVENT_REGISTRY,
 };
 
 const READ: EventType = EventType::new(Family::new("sqlx.typed"), TypeName::new("Read"));
@@ -93,9 +93,9 @@ impl Codec<Read> for Tagged {
 
 /// The coordinates and value of every item a typed read serves, all of which
 /// the caller requires to be readable.
-async fn read(store: &Journal, query: LoadQuery) -> Vec<(String, u64, u64, String)> {
+async fn read(store: &Journal, query: LoadQuery<Typed<Read>>) -> Vec<(String, u64, u64, String)> {
     store
-        .read::<Read>(query)
+        .read(query)
         .await
         .unwrap_or_else(|failure| panic!("the store failed a typed read outright: {failure}"))
         .map_ok(|typed| {
@@ -149,7 +149,7 @@ async fn a_typed_read_is_the_load_of_its_path_with_its_own_rows_alone() {
         })
         .collect();
 
-    let served = read(&store, LoadQuery::default()).await;
+    let served = read(&store, LoadQuery::of::<Read>()).await;
 
     assert_eq!(
         served, expected,
@@ -192,7 +192,7 @@ async fn a_typed_read_is_narrowed_before_the_store_applies_the_rest_of_the_query
 
     let served = read(
         &store,
-        LoadQuery::default().with_stream(STREAM).with_limit(2),
+        LoadQuery::of::<Read>().with_stream(STREAM).with_limit(2),
     )
     .await;
 

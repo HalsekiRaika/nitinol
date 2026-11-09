@@ -11,7 +11,7 @@ use nitinol_contract::{Codec, Event};
 
 use crate::error::LoadError;
 use crate::event::LoadedEvent;
-use crate::query::LoadQuery;
+use crate::query::{LoadQuery, Typed};
 use crate::store::event_store::{EventStore, EventStream};
 
 /// The rows a typed read serves, each read back as `E` or failed in its place.
@@ -54,11 +54,58 @@ pub struct TypedEvent<E> {
 /// impl TypedLoad for Elsewhere {
 ///     async fn read<E: nitinol_contract::Event>(
 ///         &self,
-///         _: nitinol_persistence::LoadQuery,
+///         _: nitinol_persistence::LoadQuery<nitinol_persistence::Typed<E>>,
 ///     ) -> Result<nitinol_persistence::store::TypedEventStream<'_, E>, nitinol_persistence::error::LoadError> {
 ///         unimplemented!()
 ///     }
 /// }
+/// ```
+///
+/// The type a read decodes into is the one its query was built for, so a read
+/// is handed a query from [`LoadQuery::of`]:
+///
+/// ```
+/// # use nitinol_contract::{Event, EventType, Family, TypeName};
+/// # use nitinol_persistence::store::{InMemoryEventStore, TypedLoad};
+/// # use nitinol_persistence::LoadQuery;
+/// # #[derive(Clone)]
+/// # struct Opened;
+/// # struct Nothing;
+/// # impl nitinol_contract::Codec<Opened> for Nothing {
+/// #     type Error = std::convert::Infallible;
+/// #     fn encode(_: &Opened) -> Result<bytes::Bytes, Self::Error> { Ok(bytes::Bytes::new()) }
+/// #     fn decode(_: &[u8]) -> Result<Opened, Self::Error> { Ok(Opened) }
+/// # }
+/// # impl Event for Opened {
+/// #     const EVENT_TYPE: EventType = EventType::new(Family::new("shop.order"), TypeName::new("Opened"));
+/// #     type Codec = Nothing;
+/// # }
+/// # async fn reads(store: &InMemoryEventStore) {
+/// let opened = store.read(LoadQuery::of::<Opened>().with_stream("order-1")).await;
+/// # }
+/// ```
+///
+/// and a query built for no type is not one it reads:
+///
+/// ```compile_fail
+/// # use nitinol_contract::{Event, EventType, Family, TypeName};
+/// # use nitinol_persistence::store::{InMemoryEventStore, TypedLoad};
+/// # use nitinol_persistence::LoadQuery;
+/// # #[derive(Clone)]
+/// # struct Opened;
+/// # struct Nothing;
+/// # impl nitinol_contract::Codec<Opened> for Nothing {
+/// #     type Error = std::convert::Infallible;
+/// #     fn encode(_: &Opened) -> Result<bytes::Bytes, Self::Error> { Ok(bytes::Bytes::new()) }
+/// #     fn decode(_: &[u8]) -> Result<Opened, Self::Error> { Ok(Opened) }
+/// # }
+/// # impl Event for Opened {
+/// #     const EVENT_TYPE: EventType = EventType::new(Family::new("shop.order"), TypeName::new("Opened"));
+/// #     type Codec = Nothing;
+/// # }
+/// # async fn reads(store: &InMemoryEventStore) {
+/// let opened = store.read(LoadQuery::by_stream("order-1")).await;
+/// # }
 /// ```
 pub trait TypedLoad: sealed::Sealed {
     /// Serves the rows of `E` that `query` selects, each read through
@@ -66,17 +113,15 @@ pub trait TypedLoad: sealed::Sealed {
     ///
     /// # LOAD-2: a typed read is a load of the type's own rows
     ///
-    /// `read::<E>(q)` is what [`EventStore::load`] serves for `q` with `E`'s
-    /// path conjoined, keeping the rows whose `event_type` is `E::EVENT_TYPE`
-    /// and reading each through `E::Codec`, in the order and at the positions
-    /// `load` serves them.
+    /// `read(q)` is what [`EventStore::load`] serves for
+    /// [`q.erase()`](LoadQuery::erase), keeping the rows whose `event_type` is
+    /// `E::EVENT_TYPE` and reading each through `E::Codec`, in the order and at
+    /// the positions `load` serves them.
     ///
     /// It follows from `LOAD-1` and is not something a backend implements:
     ///
-    /// - The type is a condition of the query, so the store selects it. A query
-    ///   naming no prefix, or a prefix `E`'s path is within, is narrowed to
-    ///   `E`'s path; a query naming a prefix `E`'s path is not within names no
-    ///   row of `E`, so the read serves nothing, and that is not an error.
+    /// - The type is part of the query, so the store selects it: the query the
+    ///   store receives names `E`'s path as its prefix.
     /// - A prefix naming `E`'s path also reaches the rows of a deeper
     ///   declaration whose family is that whole path. Those rows are left out:
     ///   they are not `E`. A limit the query names counts them all the same,
@@ -90,36 +135,25 @@ pub trait TypedLoad: sealed::Sealed {
     /// the reference implementation.
     fn read<E: Event>(
         &self,
-        query: LoadQuery,
+        query: LoadQuery<Typed<E>>,
     ) -> impl Future<Output = Result<TypedEventStream<'_, E>, LoadError>> + Send;
 }
 
 impl<S: EventStore + ?Sized> TypedLoad for S {
-    async fn read<E: Event>(&self, query: LoadQuery) -> Result<TypedEventStream<'_, E>, LoadError> {
-        let rows = match narrowed::<E>(query) {
-            Some(query) => Some(self.load(query).await?),
-            None => None,
-        };
+    async fn read<E: Event>(
+        &self,
+        query: LoadQuery<Typed<E>>,
+    ) -> Result<TypedEventStream<'_, E>, LoadError> {
         Ok(Box::pin(TypedRows {
-            rows,
+            rows: self.load(query.erase()).await?,
             event: PhantomData::<fn() -> E>,
         }))
     }
 }
 
-/// `query` with `E`'s path conjoined, or `None` when the query names a prefix
-/// `E`'s path is not within and so selects no row of `E`.
-fn narrowed<E: Event>(query: LoadQuery) -> Option<LoadQuery> {
-    let path = E::EVENT_TYPE.to_path();
-    match &query.event_type_prefix {
-        Some(prefix) if !path.is_within(prefix) => None,
-        _ => Some(query.with_event_type_prefix(path)),
-    }
-}
-
-/// The rows a load served, read as `E` one at a time; `None` serves nothing.
+/// The rows a load served, read as `E` one at a time.
 struct TypedRows<'a, E> {
-    rows: Option<EventStream<'a>>,
+    rows: EventStream<'a>,
     // A function pointer rather than `E` itself, so that whether the stream is
     // `Unpin` does not depend on `E`.
     event: PhantomData<fn() -> E>,
@@ -129,9 +163,7 @@ impl<E: Event> Stream for TypedRows<'_, E> {
     type Item = Result<TypedEvent<E>, LoadError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let Some(rows) = self.get_mut().rows.as_mut() else {
-            return Poll::Ready(None);
-        };
+        let rows = &mut self.get_mut().rows;
         loop {
             match ready!(rows.as_mut().poll_next(cx)) {
                 None => return Poll::Ready(None),

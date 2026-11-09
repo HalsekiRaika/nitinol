@@ -155,11 +155,8 @@ where
             Err(hold) => return TickOutcome::Held(hold),
         };
 
-        let query = LoadQuery {
-            event_type_prefix: Some(<S::Event as Event>::EVENT_TYPE.to_path()),
-            from_global_sequence: Some(position.cursor + 1),
-            ..Default::default()
-        };
+        let query = LoadQuery::by_event_type(<S::Event as Event>::EVENT_TYPE)
+            .with_from_global(position.cursor + 1);
 
         let mut held = None;
         match self.journal.load(query).await {

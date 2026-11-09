@@ -175,11 +175,8 @@ impl<A: Aggregate> Process for AggregateProcess<A> {
             }
         }
 
-        let query = LoadQuery {
-            stream_key: Some(self.aggregate_id.as_str().to_owned()),
-            from_stream_sequence: Some(self.sequence + 1),
-            ..Default::default()
-        };
+        let query = LoadQuery::by_stream(self.aggregate_id.as_str())
+            .with_from_stream_sequence(self.sequence + 1);
 
         // A failed replay (load or stream error) leaves `self.sequence` at
         // whatever it was before this call — 0 for a fresh activation. Falling

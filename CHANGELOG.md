@@ -11,22 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - (`nitinol-persistence`): `store::TypedLoad`, a sealed extension of every
   `EventStore` — `dyn EventStore` and `Journal` included — whose
-  `read::<E>(query)` serves the rows of one event type read back through
-  `E::Codec`, as `store::TypedEventStream` items of `store::TypedEvent<E>`
-  (the row's stream key, stream sequence, global position and instant, and the
-  decoded `event`). The type is conjoined to the query as `E`'s path, so the
-  store selects it; a query naming a prefix `E`'s path is not within serves
-  nothing. Rows of a deeper declaration that the path reaches are left out by
-  comparing `event_type`. Its clause is `LOAD-2`, derived from `LOAD-1` rather
-  than owed by a backend, so `nitinol-store-conformance` does not hold it. It
-  reads once under the store's conditions; it is not a search API and does not
-  follow the journal.
+  `read(query: LoadQuery<Typed<E>>)` serves the rows of one event type read
+  back through `E::Codec`, as `store::TypedEventStream` items of
+  `store::TypedEvent<E>` (the row's stream key, stream sequence, global
+  position and instant, and the decoded `event`). The query is built by
+  `LoadQuery::of::<E>()`, so the type is named once, by the query, and `E` is
+  inferred from it. `LoadQuery::erase` hands the store the same conditions
+  with `E`'s path as the prefix, so the store selects the type, and a query
+  naming another prefix cannot be written. Rows of a deeper declaration that
+  the path reaches are left out by comparing `event_type`. Its clause is
+  `LOAD-2`, derived from `LOAD-1` rather than owed by a backend, so
+  `nitinol-store-conformance` does not hold it. It reads once under the
+  store's conditions; it is not a search API and does not follow the journal.
 
 - (`nitinol-persistence`): `LoadQuery::with_stream`,
   `LoadQuery::with_event_type_prefix`, `LoadQuery::with_from_global` and
   `LoadQuery::with_from_stream_sequence`, which add their condition to a query
   and keep the ones it already carries, as `with_limit` does. The constructors
-  stay.
+  stay. `LoadQuery` is generic over the type it reads as, `T = Untyped` by
+  default (`Untyped` and `Typed<E>` are exported beside it), and it is no
+  longer built with a struct literal: a query is built with the constructors
+  and the combinators.
 
 - (`nitinol-persistence`): `LoadError::Decode { event_type, stream_key,
   global_sequence, source }`, what a typed read serves in the place of a row

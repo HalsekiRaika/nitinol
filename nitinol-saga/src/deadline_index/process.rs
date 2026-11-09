@@ -144,11 +144,7 @@ impl<S: Saga> SagaDeadlineIndexPartition<S> {
     /// upstream record a saga ever consumed, and reading those would make a
     /// rebuild grow with the upstream's history rather than with the deadlines.
     fn above(event_type: EventType, cursor: u64) -> LoadQuery {
-        LoadQuery {
-            event_type_prefix: Some(event_type.to_path()),
-            from_global_sequence: Some(cursor + 1),
-            ..Default::default()
-        }
+        LoadQuery::by_event_type(event_type).with_from_global(cursor + 1)
     }
 
     /// Whether `fact` is about a saga this partition owns — the same

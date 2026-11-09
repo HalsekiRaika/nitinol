@@ -94,11 +94,7 @@ async fn a_load_for_one_event_type_reads_that_type_rather_than_the_journal() {
 
     let served = fixture::observe(
         &store,
-        LoadQuery {
-            event_type_prefix: Some(FOLLOWED.to_path()),
-            from_global_sequence: Some(FLOOR),
-            ..LoadQuery::default()
-        },
+        LoadQuery::by_event_type(FOLLOWED).with_from_global(FLOOR),
     )
     .await;
 

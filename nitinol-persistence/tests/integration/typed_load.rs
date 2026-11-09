@@ -1,10 +1,13 @@
 //! Reading the rows of one event type back as that type.
 //!
-//! `LOAD-2`: `read::<E>(q)` is what `load` answers for `q` with `E`'s path
-//! conjoined, keeping only the rows of `E` itself and reading each through
-//! `E::Codec`, in the order and at the positions `load` gives them. A payload
-//! the codec cannot read is an error in that row's place, and the stream goes
-//! on past it.
+//! `LOAD-2`: `read(q)` is what `load` answers for `q.erase()`, keeping only
+//! the rows of `E` itself and reading each through `E::Codec`, in the order
+//! and at the positions `load` gives them. A payload the codec cannot read is
+//! an error in that row's place, and the stream goes on past it.
+//!
+//! The type is part of the query: `LoadQuery::of::<E>()` is the only way to a
+//! `LoadQuery<Typed<E>>`, and `erase` hands the store the same conditions with
+//! `E`'s path as the prefix, whatever the prefix field was left holding.
 //!
 //! ```gherkin
 //!   Scenario: the rows of one type
@@ -14,11 +17,18 @@
 //!     Then only the `Wanted` rows come back, in ascending global order, at
 //!          the positions `load` serves them at
 //!
-//!   Scenario: a prefix the query already names
-//!     When the query names an ancestor of `Wanted`'s path, or that path itself
-//!     Then the read is narrowed to `Wanted`
-//!     When the query names a path `Wanted` is not within
-//!     Then nothing comes back, and that is not an error
+//!   Scenario: the query the store receives
+//!     Given a query built for `Wanted`
+//!     Then its erased form names `Wanted`'s path and every other condition
+//!          the query was given, and nothing else
+//!     When the typed query's prefix field is overwritten
+//!     Then its erased form still names `Wanted`'s path, and the read still
+//!          serves `Wanted`'s rows
+//!
+//!   Scenario: a deeper declaration
+//!     Given a declaration whose family is `Wanted`'s whole path
+//!     Then the load of the erased query serves its rows, and the read leaves
+//!          them out
 //!
 //!   Scenario: the rest of the query
 //!     Then the stream, the global position, the stream sequence and the limit
@@ -46,7 +56,8 @@ use nitinol_persistence::store::{
     EventStore, InMemoryEventStore, InMemoryStore, Journal, TypedEvent, TypedLoad,
 };
 use nitinol_persistence::{
-    AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, MaterializedPath, TypeName,
+    AppendingEvent, EventType, Family, LoadQuery, LoadedEvent, MaterializedPath, TypeName, Typed,
+    Untyped,
 };
 
 const FAMILY: Family = Family::new("typed.load");
@@ -155,10 +166,10 @@ async fn mixed() -> (InMemoryEventStore, Vec<u64>) {
 /// Every item a typed read yields, in order, errors included.
 async fn items<S: TypedLoad + ?Sized>(
     store: &S,
-    query: LoadQuery,
+    query: LoadQuery<Typed<Wanted>>,
 ) -> Vec<Result<TypedEvent<Wanted>, LoadError>> {
     store
-        .read::<Wanted>(query)
+        .read(query)
         .await
         .expect("a typed read over the reference implementation is served")
         .collect()
@@ -166,7 +177,7 @@ async fn items<S: TypedLoad + ?Sized>(
 }
 
 /// The values a typed read yields, which the caller requires to be all readable.
-async fn values<S: TypedLoad + ?Sized>(store: &S, query: LoadQuery) -> Vec<String> {
+async fn values<S: TypedLoad + ?Sized>(store: &S, query: LoadQuery<Typed<Wanted>>) -> Vec<String> {
     items(store, query)
         .await
         .into_iter()
@@ -183,6 +194,136 @@ fn path(text: &str) -> MaterializedPath {
         .expect("a fixture prefix parses as a materialized path")
 }
 
+/// Every condition the query a store receives carries, in a form that compares.
+///
+/// `LoadQuery` does not derive `PartialEq`, so the comparison is spelled out
+/// here over its public fields rather than by widening what the crate derives.
+#[derive(Debug, PartialEq)]
+struct Conditions {
+    stream_key: Option<String>,
+    event_type_prefix: Option<MaterializedPath>,
+    from_global_sequence: Option<u64>,
+    from_stream_sequence: Option<u64>,
+    limit: Option<usize>,
+}
+
+fn conditions(query: LoadQuery<Untyped>) -> Conditions {
+    Conditions {
+        stream_key: query.stream_key,
+        event_type_prefix: query.event_type_prefix,
+        from_global_sequence: query.from_global_sequence,
+        from_stream_sequence: query.from_stream_sequence,
+        limit: query.limit,
+    }
+}
+
+#[test]
+fn load_2_a_query_of_a_type_names_its_path_and_no_other_condition() {
+    assert_eq!(
+        conditions(LoadQuery::of::<Wanted>().erase()),
+        Conditions {
+            stream_key: None,
+            event_type_prefix: Some(WANTED.to_path()),
+            from_global_sequence: None,
+            from_stream_sequence: None,
+            limit: None,
+        },
+        "a query built for a type hands the store that type's path as its \
+         prefix, and no condition beside it"
+    );
+}
+
+#[test]
+fn load_2_erasing_keeps_every_condition_the_typed_query_was_given() {
+    let query = LoadQuery::of::<Wanted>()
+        .with_stream("stream-a")
+        .with_from_global(7)
+        .with_from_stream_sequence(3)
+        .with_limit(5);
+
+    assert_eq!(
+        conditions(query.erase()),
+        Conditions {
+            stream_key: Some("stream-a".to_owned()),
+            event_type_prefix: Some(WANTED.to_path()),
+            from_global_sequence: Some(7),
+            from_stream_sequence: Some(3),
+            limit: Some(5),
+        },
+        "the query the store receives carries the stream, the global position, \
+         the stream sequence and the limit the typed query was given, each in \
+         its own place, beside the type's path"
+    );
+}
+
+#[test]
+fn load_2_erasing_puts_the_types_own_path_back_whatever_the_prefix_field_holds() {
+    for (named, overwritten) in [
+        ("no prefix", None),
+        ("an ancestor family", Some(path("typed"))),
+        ("a sibling declaration", Some(SIBLING.to_path())),
+        ("a deeper declaration", Some(DEEPER.to_path())),
+        ("an unrelated family", Some(path("elsewhere"))),
+    ] {
+        let mut query = LoadQuery::of::<Wanted>().with_stream("stream-a");
+        query.event_type_prefix = overwritten;
+
+        assert_eq!(
+            conditions(query.erase()),
+            Conditions {
+                stream_key: Some("stream-a".to_owned()),
+                event_type_prefix: Some(WANTED.to_path()),
+                from_global_sequence: None,
+                from_stream_sequence: None,
+                limit: None,
+            },
+            "a typed query whose prefix field was overwritten with {named} \
+             still hands the store the type's own path, and keeps the stream"
+        );
+    }
+}
+
+#[tokio::test]
+async fn load_2_a_read_serves_its_own_rows_whatever_the_prefix_field_holds() {
+    let (store, _) = mixed().await;
+    let mut query = LoadQuery::of::<Wanted>();
+    query.event_type_prefix = Some(path("elsewhere"));
+
+    assert_eq!(
+        values(&store, query).await,
+        vec!["first", "second", "third"],
+        "the store is handed the erased query, so a prefix field overwritten \
+         with a path no row is within neither empties the read nor reaches \
+         the store"
+    );
+}
+
+#[tokio::test]
+async fn load_2_leaves_out_the_rows_of_a_deeper_declaration_its_path_reaches() {
+    let (store, _) = mixed().await;
+    let loaded: Vec<LoadedEvent> = store
+        .load(LoadQuery::of::<Wanted>().erase())
+        .await
+        .expect("loading from the reference implementation succeeds")
+        .try_collect()
+        .await
+        .expect("collecting a loaded stream succeeds");
+    assert!(
+        loaded.iter().any(|row| row.event_type == DEEPER),
+        "the load of the erased query serves the deeper declaration's row, or \
+         the read is not what leaves it out"
+    );
+
+    let read = values(&store, LoadQuery::of::<Wanted>()).await;
+
+    assert_eq!(
+        read,
+        vec!["first", "second", "third"],
+        "the read compares each row's type with its own: the deeper \
+         declaration's row the store served is not read as `Wanted`"
+    );
+}
+
 #[tokio::test]
 async fn load_2_reads_the_rows_of_its_own_type_and_no_other() {
     assert!(
@@ -193,7 +334,7 @@ async fn load_2_reads_the_rows_of_its_own_type_and_no_other() {
     let (store, _) = mixed().await;
 
     assert_eq!(
-        values(&store, LoadQuery::default()).await,
+        values(&store, LoadQuery::of::<Wanted>()).await,
         vec!["first", "second", "third"],
         "a read of one type keeps that type's rows alone: a sibling declaration \
          is not within its path, and a deeper declaration is within it but is \
@@ -205,7 +346,7 @@ async fn load_2_reads_the_rows_of_its_own_type_and_no_other() {
 async fn load_2_keeps_the_order_and_positions_load_serves_its_rows_at() {
     let (store, positions) = mixed().await;
     let loaded: Vec<LoadedEvent> = store
-        .load(LoadQuery::default())
+        .load(LoadQuery::of::<Wanted>().erase())
         .await
         .expect("loading from the reference implementation succeeds")
         .try_collect()
@@ -224,7 +365,7 @@ async fn load_2_keeps_the_order_and_positions_load_serves_its_rows_at() {
         })
         .collect();
 
-    let read: Vec<(String, u64, u64, Timestamp)> = items(&store, LoadQuery::default())
+    let read: Vec<(String, u64, u64, Timestamp)> = items(&store, LoadQuery::of::<Wanted>())
         .await
         .into_iter()
         .map(|item| {
@@ -254,51 +395,10 @@ async fn load_2_keeps_the_order_and_positions_load_serves_its_rows_at() {
 }
 
 #[tokio::test]
-async fn load_2_narrows_a_prefix_that_contains_its_own_path() {
-    let (store, _) = mixed().await;
-
-    for (named, query) in [
-        (
-            "an ancestor family",
-            LoadQuery::default().with_event_type_prefix(path("typed")),
-        ),
-        ("its own path", LoadQuery::by_event_type(WANTED)),
-    ] {
-        assert_eq!(
-            values(&store, query).await,
-            vec!["first", "second", "third"],
-            "a query naming {named} is narrowed to the read type: the sibling \
-             and the deeper declaration that prefix reaches are not read"
-        );
-    }
-}
-
-#[tokio::test]
-async fn load_2_a_prefix_its_own_path_is_not_within_reads_nothing() {
-    let (store, _) = mixed().await;
-
-    for (named, prefix) in [
-        ("a sibling declaration", SIBLING.to_path()),
-        ("a deeper declaration", DEEPER.to_path()),
-        ("an unrelated family", path("elsewhere")),
-    ] {
-        let read = items(&store, LoadQuery::by_event_type_prefix(prefix)).await;
-
-        assert!(
-            read.is_empty(),
-            "a query naming {named} names rows that are not `Wanted`, so the \
-             conjunction is empty: the read is served, and yields nothing \
-             rather than replacing the query's prefix with its own. It yielded \
-             {} items",
-            read.len()
-        );
-    }
-}
-
-#[tokio::test]
 async fn load_2_is_a_conjunction_with_the_rest_of_the_query() {
-    // Rows of another type sit between the `Wanted` ones on the queried
-    // stream, so a limit counted before the type is narrowed comes up short.
+    // Rows of a sibling type sit between the `Wanted` ones on the queried
+    // stream, so a limit the store counted over rows of every type comes up
+    // short.
     let (store, positions) = seeded(&[
         ("stream-a", WANTED, b"wanted:a1"),
         ("stream-b", WANTED, b"wanted:b1"),
@@ -313,7 +413,7 @@ async fn load_2_is_a_conjunction_with_the_rest_of_the_query() {
     assert_eq!(
         values(
             &store,
-            LoadQuery::default()
+            LoadQuery::of::<Wanted>()
                 .with_stream("stream-a")
                 .with_from_global(positions[1])
                 .with_limit(2),
@@ -327,7 +427,9 @@ async fn load_2_is_a_conjunction_with_the_rest_of_the_query() {
     assert_eq!(
         values(
             &store,
-            LoadQuery::by_stream("stream-a").with_from_stream_sequence(4),
+            LoadQuery::of::<Wanted>()
+                .with_stream("stream-a")
+                .with_from_stream_sequence(4),
         )
         .await,
         vec!["a3", "a4"],
@@ -345,7 +447,7 @@ async fn load_2_a_payload_its_codec_cannot_read_is_an_error_in_place_and_the_rea
     ])
     .await;
 
-    let read = items(&store, LoadQuery::default()).await;
+    let read = items(&store, LoadQuery::of::<Wanted>()).await;
 
     assert_eq!(
         read.len(),
@@ -417,7 +519,7 @@ async fn load_2_is_read_through_every_handle_onto_a_store() {
     }
 
     let through_backend: Vec<String> = store
-        .read::<Wanted>(LoadQuery::default())
+        .read(LoadQuery::of::<Wanted>())
         .await
         .expect("a read through the backend's own type is served")
         .map_ok(|typed| typed.event.0)
@@ -425,7 +527,7 @@ async fn load_2_is_read_through_every_handle_onto_a_store() {
         .await
         .expect("every row read through the backend's own type is readable");
     let through_erased: Vec<String> = erased
-        .read::<Wanted>(LoadQuery::default())
+        .read(LoadQuery::of::<Wanted>())
         .await
         .expect("a read through `&dyn EventStore` is served")
         .map_ok(|typed| typed.event.0)
@@ -433,7 +535,7 @@ async fn load_2_is_read_through_every_handle_onto_a_store() {
         .await
         .expect("every row read through `&dyn EventStore` is readable");
     let through_journal: Vec<String> = journal
-        .read::<Wanted>(LoadQuery::default())
+        .read(LoadQuery::of::<Wanted>())
         .await
         .expect("a read through a journal is served")
         .map_ok(|typed| typed.event.0)
@@ -442,7 +544,7 @@ async fn load_2_is_read_through_every_handle_onto_a_store() {
         .expect("every row read through a journal is readable");
 
     let through_whole_store: Vec<String> = whole_store
-        .read::<Wanted>(LoadQuery::default())
+        .read(LoadQuery::of::<Wanted>())
         .await
         .expect("a read through a whole in-memory store is served")
         .map_ok(|typed| typed.event.0)

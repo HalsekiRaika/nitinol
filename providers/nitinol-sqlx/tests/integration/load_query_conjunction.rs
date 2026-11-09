@@ -131,11 +131,7 @@ async fn a_prefix_and_a_position_are_both_required() {
 
     let served = observe(
         &store,
-        LoadQuery {
-            event_type_prefix: Some(prefix(WITHIN)),
-            from_global_sequence: Some(floor),
-            ..LoadQuery::default()
-        },
+        LoadQuery::by_event_type_prefix(prefix(WITHIN)).with_from_global(floor),
     )
     .await;
 
@@ -189,11 +185,7 @@ async fn a_canonical_prefix_with_a_position_serves_that_type_alone() {
 
     let served = observe(
         &store,
-        LoadQuery {
-            event_type_prefix: Some(SELECTED.to_path()),
-            from_global_sequence: Some(floor),
-            ..LoadQuery::default()
-        },
+        LoadQuery::by_event_type(SELECTED).with_from_global(floor),
     )
     .await;
 
@@ -227,11 +219,7 @@ async fn a_prefix_matching_nothing_serves_nothing_whatever_the_position() {
     for floor in [1u64, 2, 3] {
         let served = observe(
             &store,
-            LoadQuery {
-                event_type_prefix: Some(prefix("conj.absent")),
-                from_global_sequence: Some(floor),
-                ..LoadQuery::default()
-            },
+            LoadQuery::by_event_type_prefix(prefix("conj.absent")).with_from_global(floor),
         )
         .await;
 
@@ -285,13 +273,11 @@ async fn every_condition_at_once_is_a_conjunction_truncated_by_the_limit() {
     // numbers, so a value bound against the other's column moves the floor.
     let stream_sequence_binds = observe(
         &store,
-        LoadQuery {
-            stream_key: Some(FIRST_STREAM.to_owned()),
-            event_type_prefix: Some(prefix(WITHIN)),
-            from_global_sequence: Some(other_first),
-            from_stream_sequence: Some(3),
-            limit: Some(3),
-        },
+        LoadQuery::by_stream(FIRST_STREAM)
+            .with_event_type_prefix(prefix(WITHIN))
+            .with_from_global(other_first)
+            .with_from_stream_sequence(3)
+            .with_limit(3),
     )
     .await;
     assert_eq!(
@@ -307,13 +293,11 @@ async fn every_condition_at_once_is_a_conjunction_truncated_by_the_limit() {
     // stream sequence a2 onwards.
     let global_position_binds = observe(
         &store,
-        LoadQuery {
-            stream_key: Some(FIRST_STREAM.to_owned()),
-            event_type_prefix: Some(prefix(WITHIN)),
-            from_global_sequence: Some(other_second),
-            from_stream_sequence: Some(2),
-            limit: Some(2),
-        },
+        LoadQuery::by_stream(FIRST_STREAM)
+            .with_event_type_prefix(prefix(WITHIN))
+            .with_from_global(other_second)
+            .with_from_stream_sequence(2)
+            .with_limit(2),
     )
     .await;
     assert_eq!(
@@ -347,12 +331,9 @@ async fn a_limit_truncates_what_a_cursor_admits() {
     // What a projector following one stream asks for in a batch.
     let stream_cursor = observe(
         &store,
-        LoadQuery {
-            stream_key: Some(FIRST_STREAM.to_owned()),
-            from_stream_sequence: Some(2),
-            ..LoadQuery::default()
-        }
-        .with_limit(2),
+        LoadQuery::by_stream(FIRST_STREAM)
+            .with_from_stream_sequence(2)
+            .with_limit(2),
     )
     .await;
     assert_eq!(

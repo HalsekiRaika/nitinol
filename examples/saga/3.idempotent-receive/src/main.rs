@@ -147,7 +147,7 @@ async fn main() {
 /// read back through the codec its event type names.
 async fn reservations(store: &Journal, stock_key: &str) -> Vec<StockReserved> {
     store
-        .read::<StockReserved>(LoadQuery::by_stream(stock_key))
+        .read(LoadQuery::of::<StockReserved>().with_stream(stock_key))
         .await
         .expect("reading the stock item's reservations must succeed")
         .map_ok(|reserved| reserved.event)
@@ -160,7 +160,7 @@ async fn reservations(store: &Journal, stock_key: &str) -> Vec<StockReserved> {
 /// derived from.
 async fn order_fact(store: &Journal, order_key: &str) -> OrderPlaced {
     store
-        .read::<OrderPlaced>(LoadQuery::by_stream(order_key))
+        .read(LoadQuery::of::<OrderPlaced>().with_stream(order_key))
         .await
         .expect("reading the order's stream must succeed")
         .try_next()

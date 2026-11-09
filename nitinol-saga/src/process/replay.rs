@@ -79,11 +79,7 @@ async fn load_journal<S: Saga>(
     store: &Journal,
     from_sequence: u64,
 ) -> Result<JournalState, ()> {
-    let query = LoadQuery {
-        stream_key: Some(saga_id.as_str().to_owned()),
-        from_stream_sequence: Some(from_sequence + 1),
-        ..Default::default()
-    };
+    let query = LoadQuery::by_stream(saga_id.as_str()).with_from_stream_sequence(from_sequence + 1);
     let stream = match store.load(query).await {
         Ok(s) => s,
         Err(e) => {

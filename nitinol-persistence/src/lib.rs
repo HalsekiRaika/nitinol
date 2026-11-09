@@ -41,8 +41,10 @@
 //! your implementation.
 //!
 //! [`store::TypedLoad`] carries `LOAD-2`, reading the rows of one event type
-//! back as that type. It is derived from [`store::EventStore`] rather than
-//! owed by a backend, so the suite does not hold it against yours.
+//! back as that type out of a [`LoadQuery<Typed<E>>`](LoadQuery) built by
+//! [`LoadQuery::of`]. A store receives the same query with the type's path as
+//! its prefix, so `LOAD-2` is derived from [`store::EventStore`] rather than
+//! owed by a backend, and the suite does not hold it against yours.
 //!
 //! What the clauses fix is each store on its own.  A contract that holds only
 //! for a store *together with* the machinery driving it — that a projection's
@@ -143,6 +145,6 @@ pub use nitinol_contract::{
     is_within_reserved_namespace, EventRegistryEntry, EventType, Family, MaterializedPath,
     MaterializedPathParseError, ParsedEventType, TypeName, RESERVED_NAMESPACE,
 };
-pub use query::{AppendOutcome, LoadQuery};
+pub use query::{AppendOutcome, LoadQuery, Typed, Untyped};
 pub use reserved::reject_reserved_id;
 pub use snapshot::PersistedSnapshot;
