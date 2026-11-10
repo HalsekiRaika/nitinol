@@ -44,6 +44,7 @@
 
             pkgs.rustup
             pkgs.sccache
+            pkgs.cargo-release
             pkgs.cargo-nextest
             pkgs.mold-wrapped
 
