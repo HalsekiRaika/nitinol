@@ -16,6 +16,12 @@
 //! request: an index that slept through its interval first asks no sooner than
 //! that interval.
 //!
+//! The test runs on paused time, so the interval and the threshold are
+//! measured in the runtime's virtual time. Virtual time advances only when the
+//! runtime is idle, never because the machine is busy, so load cannot push a
+//! first read that did not wait past the threshold, and a first read that
+//! waited for the interval asks exactly one interval after the start.
+//!
 //! This binary hosts one deadline saga, which is what the process-wide
 //! capture of the index's records needs.
 //!
@@ -31,7 +37,9 @@ use deadline_index::{
     REMINDER, REQUESTED_ACTIVATION, SAGA_ID,
 };
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use nitinol_persistence::store::InMemoryStore;
 use nitinol_saga::{SagaId, Subscription};
@@ -42,13 +50,15 @@ const SAGA: &str = "deadline-index-first-read-is-immediate-1";
 /// for one that did not.
 const POLL: Duration = Duration::from_secs(2);
 
-/// Far shorter than [`POLL`], and still loose enough for a loaded machine.
+/// Far shorter than [`POLL`], in virtual time: it needs no margin for a loaded
+/// machine, only to tell a first read that waited for the interval from one
+/// that did not.
 const WELL_INSIDE: Duration = Duration::from_millis(500);
 
 /// A delay that had elapsed long before the host starts.
 const ELAPSED: Duration = Duration::ZERO;
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_index_asks_for_a_deadline_already_due_without_waiting_for_its_interval() {
     // Given
     let capture = Capture::installed();
@@ -92,11 +102,12 @@ async fn the_index_asks_for_a_deadline_already_due_without_waiting_for_its_inter
 
     // Then
     //
-    // A failure here has come up once under the load of a whole-workspace test
-    // run and not again in 60 runs under eight busy loops, so the message
-    // carries what the next one needs: how long the spawn itself took, and
-    // the records of the two paths that cost exactly one interval — a first
-    // read that failed, or a first turn that panicked and was rebuilt.
+    // On wall-clock time this once failed under the load of a whole-workspace
+    // test run, which is why the test now runs on paused time. A failure here
+    // is then a first read that waited, so the message carries what tells its
+    // cause: how long the spawn itself took, and the records of the two paths
+    // that cost exactly one interval — a first read that failed, or a first
+    // turn that panicked and was rebuilt.
     assert!(
         asked_in < WELL_INSIDE,
         "an index polling every {POLL:?} asked for a deadline already due \
