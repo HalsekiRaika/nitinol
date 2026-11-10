@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Aggregate + Projector catch-up and live subscription example"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [lib]
 name = "eventsource_projection"

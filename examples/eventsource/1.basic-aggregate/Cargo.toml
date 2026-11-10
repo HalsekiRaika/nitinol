@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Minimal counter aggregate example for nitinol-eventsource"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [lib]
 name = "eventsource_basic_aggregate"

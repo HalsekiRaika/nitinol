@@ -1,10 +1,12 @@
 [package]
 name = "nitinol-conformance"
-version = "0.1.0"
+version = "0.6.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Executable conformance suite for the laws any interpreter of the nitinol contract owes"
 
 # The point of this crate is what it may *not* depend on: an interpreter, or the
@@ -12,8 +14,8 @@ description = "Executable conformance suite for the laws any interpreter of the 
 # would measure that interpreter's machinery instead of the laws every
 # interpreter owes, and would be out of reach of anyone writing their own.
 [dependencies]
-nitinol-contract = { path = "../nitinol-contract" }
-nitinol-persistence = { path = "../nitinol-persistence" }
+nitinol-contract = { path = "../nitinol-contract", version = "0.6.0" }
+nitinol-persistence = { path = "../nitinol-persistence", version = "0.6.0" }
 async-trait = "0.1"
 bytes = "1"
 futures-core = "0.3"

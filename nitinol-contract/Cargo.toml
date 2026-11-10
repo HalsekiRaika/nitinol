@@ -1,10 +1,12 @@
 [package]
 name = "nitinol-contract"
-version = "0.1.0"
+version = "0.6.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "Runtime-free contract traits between nitinol and downstream domain code"
 
 # The point of this crate is what it may *not* depend on: an async runtime, and

@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "One aggregate with multiple Decider and Query implementations"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [lib]
 name = "eventsource_multiple_deciders"

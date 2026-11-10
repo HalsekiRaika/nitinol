@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Official fan-out pattern: one fact event, saga manager delivery, idempotent child creation"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [[bin]]
 name = "saga-fanout-pattern"

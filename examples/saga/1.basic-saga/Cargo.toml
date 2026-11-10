@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Minimal event-sourced process manager (Saga) example"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [lib]
 name = "saga_basic_saga"
