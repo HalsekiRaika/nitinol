@@ -39,9 +39,13 @@
 //! first read does not wait is the second, whose interval is long enough that
 //! waiting it out cannot pass for not waiting.
 //!
-//! "Well inside" is a loose bound on purpose: an interval far longer than the
-//! default against a bound far shorter than it, so a loaded machine does not
-//! turn a few milliseconds of scheduling into a failure.
+//! The tests run on paused time, so intervals, bounds and the moments the
+//! journal records are all measured in the runtime's virtual time. Virtual
+//! time advances only when the runtime is idle, never because the machine is
+//! busy, so load cannot push a first read that did not wait past "well
+//! inside", and a first read that waited for the interval comes exactly one
+//! interval after the start. [`SLACK`] and [`LATE_ALLOWANCE`] are margins in
+//! that virtual time, not room for a loaded machine.
 //!
 //! Run with:
 //! `cargo test -p nitinol-eventsource --test integration projector_poll_interval::`.
@@ -51,11 +55,12 @@ use recording_journal::RecordingJournal;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Notify;
+use tokio::time::Instant;
 
 use nitinol_eventsource::codec::Codec;
 use nitinol_eventsource::system::EventSourceSystem;
@@ -78,7 +83,9 @@ const SEEDED: u64 = 1_000;
 /// pass for one that did not.
 const LONG: Duration = Duration::from_secs(2);
 
-/// Far shorter than [`LONG`], and still loose enough for a loaded machine.
+/// Far shorter than [`LONG`], in virtual time: it needs no margin for a loaded
+/// machine, only to tell a first read that waited for the interval from one
+/// that did not.
 const WELL_INSIDE: Duration = Duration::from_millis(500);
 
 /// Far enough above the default that a poller still running at the default
@@ -94,8 +101,8 @@ const SLACK: Duration = Duration::from_millis(50);
 /// count as "about one interval".
 const LATE_ALLOWANCE: Duration = Duration::from_millis(1_500);
 
-/// How long any wait below gives the projector before it is a failure rather
-/// than a slow machine.
+/// How long, in virtual time, any wait below gives the projector before it is
+/// a failure.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Fixtures: the followed event
@@ -220,7 +227,7 @@ async fn append(journal: &RecordingJournal, stream: &AggregateId, from: u64, thr
 
 // Scenario: a deployment chooses how often a projector polls
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_short_interval_reaches_a_projector_spawned_on_a_system() {
     // Given
     let journal = RecordingJournal::default();
@@ -253,7 +260,7 @@ async fn a_short_interval_reaches_a_projector_spawned_on_a_system() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_short_interval_reaches_a_projector_from_the_systems_props() {
     // Given
     let journal = RecordingJournal::default();
@@ -289,7 +296,7 @@ async fn a_short_interval_reaches_a_projector_from_the_systems_props() {
 
 // Scenario: the first read does not wait for the interval
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_first_read_comes_at_once_and_the_next_one_an_interval_later() {
     // Given
     const ALREADY_THERE: u64 = 3;
@@ -370,7 +377,7 @@ async fn assert_reads_spaced_by(
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reads_of_a_projector_spawned_on_a_system_are_an_interval_apart() {
     // Given
     let journal = RecordingJournal::default();
@@ -395,7 +402,7 @@ async fn reads_of_a_projector_spawned_on_a_system_are_an_interval_apart() {
     assert_reads_spaced_by(&journal, &stream, 4, SPACED, "spawned on a system").await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reads_of_a_projector_from_the_systems_props_are_an_interval_apart() {
     // Given
     let journal = RecordingJournal::default();
@@ -422,7 +429,7 @@ async fn reads_of_a_projector_from_the_systems_props_are_an_interval_apart() {
 
 // Scenario: a projector that names no interval keeps the framework's
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_projector_that_names_no_interval_reads_at_the_framework_default() {
     // Given
     let journal = RecordingJournal::default();

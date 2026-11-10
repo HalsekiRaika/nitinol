@@ -24,6 +24,13 @@
 //! `saga_delivery_poll_interval.rs` and `saga_subscription_poll_interval.rs`
 //! pin, so it is not restated here.
 //!
+//! The tests run on paused time, so the interval, the threshold and the moments
+//! of the reads are measured in the runtime's virtual time. Virtual time
+//! advances only when the runtime is idle, never because the machine is busy,
+//! so load cannot push a first read that did not wait past the threshold, and a
+//! first read that waited for the interval asks exactly one interval after the
+//! spawn.
+//!
 //! Run with:
 //! `cargo test -p nitinol-saga --test integration saga_first_read_is_immediate::`.
 
@@ -35,7 +42,9 @@ use delivery::{
 };
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use async_trait::async_trait;
 use nitinol_persistence::error::{AppendError, LoadError};
@@ -47,7 +56,9 @@ use nitinol_saga::{SagaManagerProps, Subscription};
 /// for one that did not.
 const LONG: Duration = Duration::from_secs(2);
 
-/// Far shorter than [`LONG`], and still loose enough for a loaded machine.
+/// Far shorter than [`LONG`], in virtual time: it needs no margin for a loaded
+/// machine, only to tell a first read that waited for the interval from one
+/// that did not.
 const WELL_INSIDE: Duration = Duration::from_millis(500);
 
 /// The stream the observed-source scenario binds its source to.
@@ -100,7 +111,7 @@ impl EventStore for UpstreamRecorder {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_delivery_host_reads_once_before_its_interval_has_passed() {
     // Given
     let recording = RecordingEventStore::new(InMemoryEventStore::default());
@@ -128,7 +139,7 @@ async fn the_delivery_host_reads_once_before_its_interval_has_passed() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_observed_source_reads_once_before_its_interval_has_passed() {
     // Given
     let recorder = UpstreamRecorder::default();

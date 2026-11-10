@@ -5,9 +5,10 @@
 //! `load` is what a clause about "how long it waited" can read.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::time::Instant;
 
 use nitinol_persistence::error::{AppendError, LoadError};
 use nitinol_persistence::store::{EventStore, EventStream, InMemoryEventStore};
@@ -19,6 +20,10 @@ const RECORD_LOCK: &str = "the record lock guards only a push or a copy, so no h
 const PROBE_INTERVAL: Duration = Duration::from_millis(10);
 
 /// One `load`: the stream it named, if any, and when it was asked.
+///
+/// The moment is read from the runtime's clock, so a test on paused time
+/// compares it with its own start in the same virtual time, and one on a
+/// multi-threaded runtime reads the wall clock as before.
 type Load = (Option<String>, Instant);
 
 /// An [`EventStore`] that answers from memory and notes, for every `load`, the
