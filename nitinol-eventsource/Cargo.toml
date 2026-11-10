@@ -1,10 +1,12 @@
 [package]
 name = "nitinol-eventsource"
-version = "0.1.0"
+version = "0.6.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "Event sourcing runtime for nitinol: interprets the aggregate contract"
 
 # The library is a benchmark target too, and libtest's harness is what runs it,
@@ -18,9 +20,9 @@ bench = false
 test-helpers = []
 
 [dependencies]
-nitinol-contract = { path = "../nitinol-contract" }
-nitinol-runtime = { path = "../nitinol-runtime" }
-nitinol-persistence = { path = "../nitinol-persistence" }
+nitinol-contract = { path = "../nitinol-contract", version = "0.6.0" }
+nitinol-runtime = { path = "../nitinol-runtime", version = "0.6.0" }
+nitinol-persistence = { path = "../nitinol-persistence", version = "0.6.0" }
 async-trait = "0.1"
 bytes = "1"
 futures-core = "0.3"

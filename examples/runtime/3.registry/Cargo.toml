@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description.workspace = true
+publish = false
+
+[package.metadata.release]
+release = false
 
 # Expose counter.rs and greeter.rs as a library target so integration tests can import them.
 [lib]

@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Snapshotable aggregate example showing snapshot save and restore"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [lib]
 name = "eventsource_snapshot"

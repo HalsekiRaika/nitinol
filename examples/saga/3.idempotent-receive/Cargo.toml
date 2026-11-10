@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Official idempotent-receive pattern: an operation id carried as domain data, absorbed by the receiving aggregate"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [[bin]]
 name = "saga-idempotent-receive"

@@ -1,10 +1,12 @@
 [package]
 name = "nitinol-sqlx"
-version = "0.1.0"
+version = "0.6.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme = "README.md"
 description = "sqlx-backed EventStore provider for nitinol"
 
 # The library is a benchmark target too, and libtest's harness is what runs it,
@@ -23,7 +25,7 @@ default = ["postgres"]
 postgres = ["dep:sqlx", "sqlx/postgres", "dep:time"]
 
 [dependencies]
-nitinol-persistence = { path = "../../nitinol-persistence" }
+nitinol-persistence = { path = "../../nitinol-persistence", version = "0.6.0" }
 async-trait = "0.1"
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

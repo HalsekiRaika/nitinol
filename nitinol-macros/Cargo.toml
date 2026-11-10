@@ -1,10 +1,12 @@
 [package]
 name = "nitinol-macros"
-version = "0.1.0"
+version = "0.6.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "Derive macros for nitinol event sourcing"
 
 [lib]
@@ -18,10 +20,10 @@ proc-macro2 = "1"
 # defines, and is enforced in two spaces; the derive reads the same constant and
 # predicate the identifier constructors do rather than restating the boundary
 # here.
-nitinol-contract = { path = "../nitinol-contract" }
+nitinol-contract = { path = "../nitinol-contract", version = "0.6.0" }
 # The uniqueness symbol a derived declaration exports belongs to the machinery
 # that collects declarations, so its prefix and byte set are read from there.
-nitinol-persistence = { path = "../nitinol-persistence" }
+nitinol-persistence = { path = "../nitinol-persistence", version = "0.6.0" }
 
 [dev-dependencies]
 trybuild = "1"
