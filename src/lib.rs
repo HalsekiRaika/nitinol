@@ -18,7 +18,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! nitinol = { version = "0.4", features = ["eventsource"] }
+//! nitinol = { version = "0.6", features = ["eventsource"] }
 //! ```
 
 #[cfg(feature = "runtime")]
