@@ -194,7 +194,9 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     }
 
     /// Have this saga's delivery host ask the journal no more often than every
-    /// `interval` — see [`SagaDeliveryProps::with_poll_interval`].
+    /// `interval` — see [`SagaDeliveryProps::with_poll_interval`]. The latency
+    /// floor and the store load an interval implies are worked out on
+    /// [`DEFAULT_POLL_INTERVAL`](nitinol_eventsource::DEFAULT_POLL_INTERVAL).
     ///
     /// This is the *delivery* side's cadence, on the saga's own decisions, and
     /// the deadline index's: both read what the saga's own streams hold, so

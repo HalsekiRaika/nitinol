@@ -116,7 +116,8 @@ impl<P, Tx, E, O, H> ProjectorProps<P, Tx, E, O, H> {
     /// same reason the saga side names its cadence, on
     /// `nitinol_saga::Subscription::with_poll_interval` for an observed source
     /// and `nitinol_saga::SagaDeliveryProps::with_poll_interval` for a delivery
-    /// host.
+    /// host. The latency floor and the store load an interval implies are
+    /// worked out on [`DEFAULT_POLL_INTERVAL`].
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
         self

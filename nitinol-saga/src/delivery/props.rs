@@ -202,7 +202,9 @@ impl<S: Saga> SagaDeliveryProps<S> {
     /// Ask the store no more often than every `interval`.
     ///
     /// A pull consumer trades latency for load on the store, and which way a
-    /// deployment wants that is not something the framework can know.
+    /// deployment wants that is not something the framework can know. The
+    /// latency floor and the store load an interval implies are worked out on
+    /// [`DEFAULT_POLL_INTERVAL`](nitinol_eventsource::DEFAULT_POLL_INTERVAL).
     ///
     /// The first read does not wait for the interval: each partition, and the
     /// saga's deadline index, reads as soon as it is spawned — the same as a

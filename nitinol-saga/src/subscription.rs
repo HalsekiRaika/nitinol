@@ -126,7 +126,9 @@ impl Subscription {
     /// [`SagaDeliveryProps::with_poll_interval`](crate::SagaDeliveryProps::with_poll_interval)
     /// — and a deployment's choice for the same reason: a pull consumer trades
     /// latency for load on the store, and which way a deployment wants that is
-    /// not something the framework can know.
+    /// not something the framework can know. The latency floor and the store
+    /// load an interval implies are worked out on
+    /// [`DEFAULT_POLL_INTERVAL`](nitinol_eventsource::DEFAULT_POLL_INTERVAL).
     ///
     /// Named per source rather than per saga, because the sources of one saga
     /// are observed independently and need not be read at one cadence — a

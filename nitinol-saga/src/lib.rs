@@ -97,7 +97,13 @@
 //!   manager process that owns it; when the manager stops the runtime
 //!   cascade-stops every one of them automatically.
 //!   [`Subscription::with_poll_interval`] is how often one source is asked,
-//!   which is a deployment's choice rather than the framework's.
+//!   which is a deployment's choice rather than the framework's. One saga type
+//!   polls its store with as many pollers as there are partitions for each
+//!   observed source, as many again for its delivery host, and — when it
+//!   declares a deadline — one deadline-index poller per delivery partition;
+//!   the load that puts on the store is estimated by putting that count into
+//!   the reckoning on
+//!   [`DEFAULT_POLL_INTERVAL`](nitinol_eventsource::DEFAULT_POLL_INTERVAL).
 //! - Consumed inputs are de-duplicated by the framework, by the consumed
 //!   position — a fact on the saga's own stream rather than an offset, as
 //!   [the mental model](#mental-model) sets out.  Most consumed positions are
