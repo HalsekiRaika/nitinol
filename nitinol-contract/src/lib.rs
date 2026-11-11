@@ -34,8 +34,7 @@
 //! is observed.
 //!
 //! The execution-side abstractions — the aggregate activation, the projection
-//! layer, the error families — are deliberately *not* here: they describe how
-//! the runtime drives an aggregate, not what an aggregate is or what it decides.
+//! layer, the error families — are in `nitinol-eventsource`.
 //!
 //! # Laws
 //!
@@ -54,10 +53,7 @@
 //! They are executable. `nitinol-conformance` ships a suite that drives its own
 //! decider through any interpreter and reads the resulting stream back itself;
 //! each law below names the clause of that suite which fixes it, and a broken
-//! law is reported by name. What that crate makes checkable is the same claim
-//! stated here — the type and law of a `Decider`, a `Query` and a `Decision` —
-//! which is why the record of a law lives with the law rather than with any one
-//! interpreter.
+//! law is reported by name.
 //!
 //! - **L-1** — [`Decider::decide`] and [`Query::query`] are pure and
 //!   deterministic: no I/O, no clock, no randomness. Replaying the same events
@@ -110,8 +106,7 @@
 //! its events are written down under. No conformance suite fixes them —
 //! neither `nitinol-conformance` nor `nitinol-store-conformance` — since no
 //! interpreter and no store is involved: a broken promise is refused while the
-//! constant naming it is evaluated, and the tests of this crate fix the rest. Where the machinery enforces the promise, the test
-//! named is that of the crate enforcing it.
+//! constant naming it is evaluated.
 //!
 //! - **ID-1** — one declaration is written down under one canonical path. The
 //!   path is the family's segments followed by the type name, and a type name
@@ -119,26 +114,17 @@
 //!   segment before it as the family, with no other reading
 //!   ([`EventType`], [`Family::new`], [`TypeName::new`],
 //!   [`ParsedEventType::from_path`]). Which arm of an enum a row holds is the
-//!   payload's to say; the column names the declaration. Fixed by
-//!   `one_canonical_path_decomposes_into_one_pair_of_components`,
-//!   `a_canonical_path_is_the_family_segments_followed_by_the_type_name_alone`
-//!   and `type_name_with_dot_panics`.
+//!   payload's to say; the column names the declaration.
 //! - **ID-2** — an [`EventType`]'s `Display` and `to_path().to_string()` are the
 //!   same string, and it round-trips through `parse::<MaterializedPath>()` and
 //!   [`ParsedEventType::from_path`]. That string is the only encoding both
-//!   sides of the column agree on. Fixed by
-//!   `path_canonical_string_equals_event_type_display`,
-//!   `event_type_round_trips_as_materialized_path` and
-//!   `parsed_event_type_round_trips_every_shape`.
+//!   sides of the column agree on.
 //! - **ID-3** — one canonical path is claimed by one declaration. A
 //!   declaration tells the machinery its path as an [`EventRegistryEntry`], and
 //!   the machinery gathers the entries to restore a row's declaration from the
 //!   path the row carries. Two declarations claiming one path fail the build.
 //!   The contract states the obligation; the machinery enforces it, with an
-//!   exported symbol per path and with the registry it builds. Fixed by
-//!   `nitinol-persistence`'s
-//!   `a_canonical_path_two_declarations_claim_fails_the_build_and_names_both`
-//!   and `nitinol-macros`' `duplicate_canonical_path` compile-fail case.
+//!   exported symbol per path and with the registry it builds.
 //! - **ID-4** — `nitinol` and every name beneath it belong to the framework: a
 //!   domain names neither an event family nor a stream key there
 //!   ([`RESERVED_NAMESPACE`], [`is_within_reserved_namespace`]). The one law
@@ -146,26 +132,7 @@
 //!   a family is refused by [`Family::new`] and [`EventRegistryEntry::new`]
 //!   while the constant holding it is evaluated, here, and a stream key is
 //!   refused by `reject_reserved_id` when the identifier is constructed, in
-//!   `nitinol-persistence`. Fixed by
-//!   `family_new_refuses_a_family_inside_the_reserved_namespace` and
-//!   `event_registry_entry_new_refuses_an_event_type_of_a_reserved_family`
-//!   here, and by `nitinol-persistence`'s
-//!   `aggregate_id_refuses_a_name_inside_the_reserved_namespace`.
-//!
-//! # One home for the contract
-//!
-//! [`Decider`] is the only decision contract in the framework. The effectful
-//! trait of the same name that `nitinol-eventsource` used to define — async,
-//! handed a `Context`, returning an `Effect` ADT the runtime then interpreted —
-//! is gone rather than kept alongside this one. Two deciders would have meant
-//! two answers to "what does a command mean", and the effectful one answered it
-//! by describing machinery: it let a decision perform I/O, reach for the
-//! aggregate's identity and sequence number, and fan out into several appends,
-//! none of which a domain rule needs and all of which a replay must reproduce.
-//!
-//! Nor is a new `nitinol-core` crate introduced to hold the pure contract: this
-//! crate already *is* the runtime-free layer, and a second one would leave two
-//! plausible homes for every future contract.
+//!   `nitinol-persistence`.
 
 mod aggregate;
 mod codec;

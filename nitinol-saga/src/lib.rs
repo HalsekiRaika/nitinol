@@ -1,7 +1,7 @@
 //! Event-sourced process manager (Saga) for the `nitinol` framework.
 //!
-//! This crate is the Layer-2 (temporal coordination) counterpart of the
-//! aggregate command/decide loop in `nitinol-eventsource`.  A saga subscribes
+//! This crate is the counterpart of the aggregate command/decide loop in
+//! `nitinol-eventsource`.  A saga subscribes
 //! to upstream events, replays its own event stream to reconstruct state, and
 //! emits [`SagaEffect`]s that the runtime interprets to persist the saga's own
 //! decisions and to set or cancel its own deadlines.  What a decision means for
@@ -81,8 +81,7 @@
 //! [`Saga::correlate`] always answers the same [`SagaId`] is that manager with
 //! a single instance rather than a second mechanism.
 //!
-//! The runtime `Process` trait is intentionally hidden — the user only
-//! implements [`Saga`].
+//! A saga author implements only [`Saga`].
 //!
 //! # Capabilities
 //!
@@ -130,14 +129,7 @@
 //!   below.
 //! - Symmetric spawn: a saga is started in one of two forms and no more —
 //!   props-first, [`SagaManagerProps::new`]`(producer)…spawn(&system)`, or
-//!   system-first, [`SagaSystemExt::host`]`(producer)…spawn()`. The second is
-//!   the counterpart of `EventSourceSystem::spawn_aggregate`; both take the
-//!   `ProcessSystem` and every store from the system, meet on one private path,
-//!   and have the formats settled already by the event types themselves.  What
-//!   a wiring site still says is the binding of each declared source
-//!   ([`observing`](SagaManagerProps::observing)) and the instances' residency
-//!   ([`with_instance_passivation`](SagaManagerProps::with_instance_passivation)),
-//!   which is why one verb is enough.
+//!   system-first, [`SagaSystemExt::host`]`(producer)…spawn()`.
 //! - One supplier: a system is built with a
 //!   [`PersistenceProvider`](nitinol_persistence::provider::PersistenceProvider),
 //!   and the spawn resolves every store from it — the journal every instance's
@@ -211,9 +203,7 @@
 //!   and sets or cancels deadlines with [`Deadline::set`] / [`Deadline::cancel`],
 //!   whose effects the framework interprets as *append the fact, then arm the
 //!   timer*; a firing arrives in the deadline arm of [`Saga::handle`], like any
-//!   other input.  There is deliberately no handle on the timer core in a saga's
-//!   reach: arming a timer no stream knows about would not survive a restart, and
-//!   the restart would have no way to notice it was lost.  Deadlines are
+//!   other input.  A saga has no handle on the timer core.  Deadlines are
 //!   persisted in the saga's own event stream (`SagaPersisted::Schedule`), which
 //!   is where they durably live: the scheduler restores nothing of its own after
 //!   a restart, and an unfired deadline is re-armed when the instance that set it
@@ -259,9 +249,7 @@
 //!   points — see [`nitinol_persistence::reserved`] for the boundary rule and
 //!   for what a hand-written `impl Event` is expected to honour on its own.
 //! - No snapshotting: a saga replays from its own event stream, and the [`Saga`]
-//!   trait carries no snapshot surface.  Snapshot support is planned as a
-//!   separate opt-in `SagaSnapshotable` extension trait, symmetrical to
-//!   [`nitinol_eventsource::Snapshotable`].
+//!   trait carries no snapshot surface.
 //! - Correlation and routing are separate, and live in different places.
 //!   [`Saga::correlate`] is domain knowledge — it derives a process instance's
 //!   [`SagaId`] from a typed input, so it belongs to the saga type and never
@@ -290,12 +278,9 @@
 //! three facts the framework declares for itself, `nitinol.saga.schedule`,
 //! `nitinol.saga.consumed` and `nitinol.saga.lifecycle`.  A row inside the
 //! reserved namespace that matches none of those three is a corrupted stream or
-//! a version mismatch, and refuses the load rather than being read past: a
-//! withdrawn mechanism's bookkeeping may well decode cleanly as a domain event,
-//! so reading past it would fold it into the saga's state.
+//! a version mismatch, and refuses the load rather than being read past.
 //!
-//! This is also why 0.4 streams cannot be read by 0.5 — see the crate's
-//! CHANGELOG.
+//! Streams written by 0.4 cannot be read by 0.5 — see the crate's CHANGELOG.
 //!
 //! The framework attaches no metadata or causation envelope to a delivered
 //! command, so a receiver that must not carry an operation out twice recognises

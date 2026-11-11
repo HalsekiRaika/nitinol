@@ -66,10 +66,7 @@
 //! What the event cannot say is *why* the stream was overtaken.  A second
 //! activation of the same aggregate and an unrelated writer against the same
 //! store produce the same refusal, so this is a count of lost races and not a
-//! diagnosis of them.  Reading a rate off that count — against what total, over
-//! what period, at what replay cost, and whether it justifies a change of
-//! design — is the operator's judgement; this crate emits the events and draws
-//! no conclusion from them.
+//! diagnosis of them.
 
 mod appending;
 pub mod codec;

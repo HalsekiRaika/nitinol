@@ -17,15 +17,15 @@
 //! use in tests and examples, and [`store::InMemoryStore`] is a whole store
 //! over it.  Neither is intended for production use.
 //!
-//! # Third-party backends
+//! # Backends
 //!
-//! Production backends (Postgres, SQLite, DynamoDB, etc.) are intentionally
-//! out of scope for this crate.  Implement [`store::EventStore`],
-//! [`store::SnapshotStore`], and [`store::OffsetStore`] against your
-//! preferred storage engine, then either implement [`provider::Store`] over
-//! them or name your handles in a [`provider::CustomStore`] — and hand the
-//! result to [`provider::PersistenceProvider::new`], which is what every
-//! wiring point in the framework resolves its stores from.
+//! A backend implements [`store::EventStore`], [`store::SnapshotStore`] and
+//! [`store::OffsetStore`]; the Postgres backend is `nitinol-sqlx`. To write
+//! your own, implement them against your storage engine, then either implement
+//! [`provider::Store`] over them or name your handles in a
+//! [`provider::CustomStore`] — and hand the result to
+//! [`provider::PersistenceProvider::new`], which is what every wiring point in
+//! the framework resolves its stores from.
 //!
 //! All three store traits carry behavioural contracts a backend has to
 //! reproduce, stated as labelled clauses on the trait itself:

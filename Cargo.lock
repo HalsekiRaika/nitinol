@@ -1854,6 +1854,7 @@ dependencies = [
  "nitinol-saga",
  "nitinol-sqlx",
  "tokio",
+ "trybuild",
 ]
 
 [[package]]

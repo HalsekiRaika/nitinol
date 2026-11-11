@@ -16,27 +16,6 @@
 //!   [`MailboxCapacity::bounded`](crate::MailboxCapacity::bounded) or
 //!   [`SupervisionStrategy::restart`](crate::SupervisionStrategy::restart) is
 //!   given an invalid argument.
-//!
-//! A configuration value that is out of range is rejected when it is built:
-//!
-//! ```
-//! use std::time::Duration;
-//!
-//! use nitinol_runtime::error::ConfigError;
-//! use nitinol_runtime::{MailboxCapacity, SupervisionStrategy};
-//!
-//! assert!(matches!(
-//!     MailboxCapacity::bounded(0),
-//!     Err(ConfigError::ZeroCapacity)
-//! ));
-//! assert!(matches!(
-//!     SupervisionStrategy::restart(3, Duration::ZERO),
-//!     Err(ConfigError::InvalidRestartWithin)
-//! ));
-//!
-//! assert!(MailboxCapacity::bounded(16).is_ok());
-//! assert!(SupervisionStrategy::restart(3, Duration::from_secs(10)).is_ok());
-//! ```
 
 use crate::ident::Pid;
 

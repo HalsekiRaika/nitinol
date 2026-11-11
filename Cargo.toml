@@ -21,7 +21,7 @@ libraries = [
 
 [workspace.lints.rust.unexpected_cfgs]
 level = "warn"
-check-cfg = ["cfg(dylint_lib, values(any()))", "cfg(tokio_unstable)", "cfg(docsrs)"]
+check-cfg = ["cfg(dylint_lib, values(any()))", "cfg(tokio_unstable)"]
 
 [workspace.lints.clippy]
 manual_async_fn = "deny"
@@ -120,6 +120,8 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt-mul
 nitinol-persistence = { path = "nitinol-persistence" }
 # `Codec` is stated in `Bytes`, so a test fixture that names a codec spells it.
 bytes = "1"
+# A path the facade must not export can only be checked by failing to compile.
+trybuild = "1"
 
 # Line tables are enough for a backtrace with file and line; full debug info
 # makes every test binary and every link larger for nothing the tests use.

@@ -65,14 +65,10 @@
 //! own ordering guarantees; one that carries every dispatch out inline has
 //! nothing to wait for and returns immediately.
 //!
-//! # What this crate may not depend on
+//! # Async runtime
 //!
-//! No interpreter, and no async runtime. `nitinol-eventsource`,
-//! `nitinol-runtime` and `tokio` are absent from this crate's dependency tree
-//! on purpose: a suite that reached for one interpreter's machinery would be
-//! measuring that machinery instead of the laws every interpreter owes, and
-//! would be out of reach of anyone writing their own. Whichever runtime you
-//! await [`verify`] on is yours to choose.
+//! This crate depends on no async runtime, so [`verify`] can be awaited on
+//! whichever runtime you choose.
 
 mod counting_store;
 mod fixture;

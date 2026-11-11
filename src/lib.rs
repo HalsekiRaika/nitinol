@@ -139,9 +139,10 @@
 //! persist its decisions and set its deadlines; [`SagaSystemExt`](saga::SagaSystemExt)
 //! hosts it on an `EventSourceSystem`. See the [`saga`] module for details.
 //!
-//! [`sqlx`] is a Postgres backend for [`persistence`]. Hand a
-//! [`PostgresStore`](sqlx::PostgresStore) to `PersistenceProvider::new` to keep
-//! everything in one database, or use [`PostgresEventStore`](sqlx::PostgresEventStore)
+//! [`sqlx`], enabled by the `postgres` feature, is a Postgres backend for
+//! [`persistence`]. Hand a [`PostgresStore`](sqlx::PostgresStore) to
+//! `PersistenceProvider::new` to keep everything in one database, or use
+//! [`PostgresEventStore`](sqlx::PostgresEventStore)
 //! and its siblings one by one. See the [`sqlx`] module for details.
 //!
 //! # Examples
@@ -190,8 +191,7 @@ pub use nitinol_persistence as persistence;
 /// types as the shape of a stored row.
 ///
 /// The `eventsource` feature re-exports these same trait items under
-/// `nitinol::eventsource`; the two paths are interchangeable. (That module is
-/// not linked here because it does not exist in a `contract`-only build.)
+/// `nitinol::eventsource`; the two paths are interchangeable.
 #[cfg(feature = "contract")]
 #[cfg_attr(docsrs, doc(cfg(feature = "contract")))]
 pub mod contract {
@@ -211,32 +211,12 @@ pub mod contract {
 /// Facade for the `eventsource` feature.
 ///
 /// Re-exports all user-facing APIs from `nitinol-eventsource`.
-/// Framework-internal types (`SystemEvent`, `SystemEventDecodeError`,
-/// `DeclaresEventType`, `MatchesEventType`, `EventAppending`) are intentionally
-/// excluded so they are not discoverable through the umbrella entry point.
-/// Direct consumers of `nitinol-eventsource` can still reach them.
-///
-/// # Visibility contract — `error` sub-module
-///
-/// `SystemEventDecodeError` is a framework-internal type and is excluded from
-/// the `error` facade below. Attempting to import it via the umbrella must fail
-/// at compile time:
-///
-/// ```compile_fail
-/// // SystemEventDecodeError is framework-internal; umbrella must not expose it.
-/// use nitinol::eventsource::error::SystemEventDecodeError;
-/// ```
 #[cfg(feature = "eventsource")]
 #[cfg_attr(docsrs, doc(cfg(feature = "eventsource")))]
 pub mod eventsource {
     pub use nitinol_eventsource::codec;
 
     /// User-facing error types from the eventsource layer.
-    ///
-    /// Framework-internal errors (`SystemEventDecodeError`, `AskHandlerError`,
-    /// `ExecHandlerError`, `SnapshotHandlerError`, `ProjectionNotSettled`) are
-    /// intentionally excluded — they form part of the internal request/response
-    /// plumbing and are not part of the public API.
     pub mod error {
         pub use nitinol_eventsource::error::AskError;
         pub use nitinol_eventsource::error::CodecError;

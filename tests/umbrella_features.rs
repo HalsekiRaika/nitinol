@@ -195,8 +195,8 @@ fn eventsource_facade_exposes_the_contingent_system() {
 ///
 /// `SystemEventDecodeError` (framework-internal) must NOT be importable via
 /// `nitinol::eventsource::error`. The negative check is enforced structurally
-/// by the explicit re-export list in `src/lib.rs` and by the `compile_fail`
-/// doctest on the `eventsource` module.
+/// by the explicit re-export list in `src/lib.rs` and by the `trybuild`
+/// compile-fail test in `tests/eventsource_facade_visibility.rs`.
 ///
 /// This test covers the positive side: every user-facing type must be
 /// accessible through the `error` facade.
@@ -219,8 +219,8 @@ fn eventsource_error_facade_exposes_user_facing_types() {
     let _ = std::marker::PhantomData::<AskError<std::convert::Infallible>>;
     let _ = std::marker::PhantomData::<ExecError<std::convert::Infallible>>;
     let _ = std::marker::PhantomData::<TellError>;
-    // If `SystemEventDecodeError` were in the facade the `compile_fail` doctest
-    // in src/lib.rs would catch it at `cargo test --doc`.
+    // If `SystemEventDecodeError` were in the facade the compile-fail test in
+    // tests/eventsource_facade_visibility.rs would catch it.
 }
 
 // Feature: postgres

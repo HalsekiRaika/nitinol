@@ -3,9 +3,8 @@
 //! Two derives live here, and they differ in kind. `#[derive(Event)]` is sugar:
 //! it writes an impl a person could have written, and a hand-written one is
 //! equally valid. `#[derive(SagaSubscribe)]` writes a *type* as well — the
-//! binding typestate carrying one slot per declared source — because the orphan
-//! rule leaves no way to express that typestate over tuples in the declaring
-//! crate. Both are documented on their own derive.
+//! binding typestate carrying one slot per declared source. Both are documented
+//! on their own derive.
 //!
 //! `#[derive(Event)]` is pure sugar for the hand-written `impl Event` pattern:
 //! it generates the `EVENT_TYPE` const and the associated `Codec`. It provides
@@ -35,14 +34,8 @@
 //! the domain makes, and there is nothing in the shape of a type for a derive to
 //! infer it from.
 //!
-//! Generated code refers to the framework exclusively through the umbrella
-//! crate, mirroring how `serde`'s derive targets the single `serde` crate: the
-//! trait and the identity it declares through `::nitinol::contract::{Event,
-//! EventType, Family, TypeName, EventRegistryEntry}`, and the slice the entry is
-//! placed in through `::nitinol::persistence::EVENT_REGISTRY`, which belongs to
-//! the machinery that collects it.  Both paths are reachable without an async
-//! runtime, so applying this derive never obliges the user to enable
-//! `eventsource` — and with it Tokio.
+//! The derive needs only `nitinol` with its `contract` feature; applying it
+//! never obliges the user to enable `eventsource` — and with it Tokio.
 //!
 //! # Reserved namespace
 //!
@@ -58,10 +51,7 @@
 //! has to build its `EventType` through `Family::new` and its registry entry
 //! through `EventRegistryEntry::new`, and both panic while the constant holding
 //! them is evaluated if the family names the reserved namespace — a compile
-//! error of a different shape, not a documentation-only convention. The one way
-//! past either enforcement point is `nitinol_contract::__private` (re-exported
-//! by `nitinol_persistence::__private`), reserved for the framework's own
-//! records and not a user surface.
+//! error of a different shape, not a documentation-only convention.
 
 mod subscribe;
 
