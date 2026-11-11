@@ -16,9 +16,10 @@ dependency order.
 ## Branches
 
 - `dev` is where work lands. Every change is merged there first.
-- `master` holds what has been released. It only ever moves by fast-forwarding
-  to `dev` and by the release commit itself, so it always builds and passes CI.
-  `release.toml` refuses to run from any other branch.
+- `master` holds what has been released. It only ever moves by merging a
+  pull request from `dev` and by the release commit itself. The pull request
+  runs CI before anything reaches `master`, so `master` always builds and
+  passes CI. `release.toml` refuses to run from any other branch.
 
 ## Versioning
 
@@ -72,19 +73,29 @@ cargo install cargo-release
 
 Every `cargo release` command below is a dry run unless `--execute` is given.
 
-A release starts by bringing `master` up to `dev`, and ends by bringing the
-release commit back to `dev`:
+A release starts by bringing `master` up to `dev` through a pull request, and
+ends by bringing the release commit back to `dev`:
 
-```sh
-git checkout master
-git merge --ff-only dev
-cargo release … --execute     # one of the commands below
-git checkout dev
-git merge --ff-only master
-```
+1. Open a pull request from `dev` to `master` on GitHub and wait for CI.
+2. Merge it on GitHub.
+3. Release from a local checkout of `master`:
 
-If `dev` has moved on while the release was being cut, the last step is an
-ordinary merge instead of a fast-forward.
+   ```sh
+   git checkout master
+   git pull
+   cargo release … --execute     # one of the commands below
+   ```
+
+   The release commit is pushed to `master` directly.
+4. Bring the release commit back to `dev`:
+
+   ```sh
+   git checkout dev
+   git merge --ff-only master
+   ```
+
+   If `dev` has moved on while the release was being cut, this is an ordinary
+   merge instead of a fast-forward.
 
 The date written into `CHANGELOG.md` is the UTC date of the release.
 
