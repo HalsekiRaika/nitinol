@@ -24,6 +24,10 @@ use crate::process::{Process, Receive};
 
 use super::wiring;
 
+/// The running process, as seen from its own handlers and lifecycle hooks.
+///
+/// It gives the process its own pid, name and proxy, and lets it spawn
+/// children, watch other processes, stash messages and stop itself.
 pub struct ProcessContext<P: Process> {
     pub(crate) pid: Pid,
     pub(crate) name: Option<ProcessName>,

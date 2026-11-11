@@ -17,10 +17,9 @@ const DEAD_LETTERS_TOPIC: &str = "$dead-letters";
 /// The well-known process name for the dead-letter process.
 const DEAD_LETTER_PROCESS_NAME: &str = "$dead-letter";
 
-/// A handle to the system dead-letter stream with a stable, policy-compliant API.
+/// A handle to the system dead-letter stream.
 ///
-/// Wraps `ProcessProxy<Stream<Boxed>>` so that the internal proxy type is not
-/// exposed in the public API surface.
+/// Obtained from [`ProcessSystem::dead_letter_stream`].
 pub struct DeadLetterStream(ProcessProxy<Stream<BoxedMessage>>);
 
 impl DeadLetterStream {

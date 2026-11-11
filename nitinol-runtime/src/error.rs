@@ -1,3 +1,43 @@
+//! Errors returned by the runtime's operations.
+//!
+//! - [`SendError`] is returned when
+//!   [`tell`](crate::process::ProcessProxy::tell) or
+//!   [`stop`](crate::process::ProcessProxy::stop) finds the process already
+//!   stopped.
+//! - [`AskError`] is returned when [`ask`](crate::process::ProcessProxy::ask)
+//!   cannot deliver the message or gets no reply, or when the handler returns
+//!   an error.
+//! - [`SpawnError`] is returned when a [`StreamProps`](crate::StreamProps) is
+//!   spawned for a topic that already has a stream.
+//! - [`StashError`] is returned when
+//!   [`ProcessContext::stash`](crate::process::ProcessContext::stash) finds the
+//!   stash full.
+//! - [`ConfigError`] is returned when a configuration value such as
+//!   [`MailboxCapacity::bounded`](crate::MailboxCapacity::bounded) or
+//!   [`SupervisionStrategy::restart`](crate::SupervisionStrategy::restart) is
+//!   given an invalid argument.
+//!
+//! A configuration value that is out of range is rejected when it is built:
+//!
+//! ```
+//! use std::time::Duration;
+//!
+//! use nitinol_runtime::error::ConfigError;
+//! use nitinol_runtime::{MailboxCapacity, SupervisionStrategy};
+//!
+//! assert!(matches!(
+//!     MailboxCapacity::bounded(0),
+//!     Err(ConfigError::ZeroCapacity)
+//! ));
+//! assert!(matches!(
+//!     SupervisionStrategy::restart(3, Duration::ZERO),
+//!     Err(ConfigError::InvalidRestartWithin)
+//! ));
+//!
+//! assert!(MailboxCapacity::bounded(16).is_ok());
+//! assert!(SupervisionStrategy::restart(3, Duration::from_secs(10)).is_ok());
+//! ```
+
 use crate::ident::Pid;
 
 #[derive(Debug, thiserror::Error)]

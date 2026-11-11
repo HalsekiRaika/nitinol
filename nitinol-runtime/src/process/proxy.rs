@@ -17,6 +17,11 @@ use crate::process::signal::SystemSignal;
 use crate::process::task::{AskTask, TellTask, UserTask};
 use crate::process::{Process, Receive};
 
+/// A cloneable handle to a running process of type `P`.
+///
+/// [`tell`](Self::tell) returns once the message is in the process's mailbox
+/// and gives no reply, while [`ask`](Self::ask) waits for the handler's
+/// [`Response`](Receive::Response).
 pub struct ProcessProxy<P> {
     pub(crate) pid: Pid,
     pub(crate) user_tx: mpsc::Sender<UserTask<P>>,

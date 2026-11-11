@@ -57,8 +57,9 @@ capacity_enum!(
 capacity_enum!(
     /// Capacity declaration for a process's stash buffer.
     ///
-    /// The stash machinery itself is implemented in a follow-up issue; this
-    /// enum reserves the API surface so call sites can compile today.
+    /// When the stash is full,
+    /// [`ProcessContext::stash`](crate::process::ProcessContext::stash) returns
+    /// [`StashError::Full`](crate::error::StashError::Full).
     StashCapacity
 );
 

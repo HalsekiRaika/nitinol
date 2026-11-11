@@ -2,6 +2,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(0);
 
+/// The identifier of a process.
+///
+/// Each spawned process gets a new `Pid`, unique across every
+/// [`ProcessSystem`](crate::ProcessSystem) in the program. It displays as a
+/// plain number.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Pid(u64);
 

@@ -51,8 +51,8 @@ pub(crate) struct UnsubscribeMsg(pub Pid);
 /// A built-in pub/sub process.
 ///
 /// Topic-scoped: each unique topic name maps to exactly one `Stream` instance
-/// in a `ProcessSystem`. Subscribers are stored as type-erased `Dispatcher<T>`,
-/// keyed by PID for O(1) removal on termination or unsubscribe.
+/// in a `ProcessSystem`. A subscriber is removed when it terminates or is
+/// unsubscribed.
 pub struct Stream<T = BoxedMessage> {
     subscribers: HashMap<Pid, Box<dyn Dispatcher<T>>>,
 }

@@ -32,9 +32,7 @@ impl RestartConfig {
 /// `Err`.
 ///
 /// Constructed via the smart constructors [`Self::stop`], [`Self::resume`],
-/// and [`Self::restart`]. The `Restart` variant carries a [`RestartConfig`]
-/// with private fields so that external code cannot bypass the `restart()`
-/// validation (which rejects `within = Duration::ZERO`).
+/// and [`Self::restart`].
 #[derive(Debug, Clone)]
 pub enum SupervisionStrategy {
     Stop,
