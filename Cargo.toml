@@ -21,7 +21,7 @@ libraries = [
 
 [workspace.lints.rust.unexpected_cfgs]
 level = "warn"
-check-cfg = ["cfg(dylint_lib, values(any()))", "cfg(tokio_unstable)"]
+check-cfg = ["cfg(dylint_lib, values(any()))", "cfg(tokio_unstable)", "cfg(docsrs)"]
 
 [workspace.lints.clippy]
 manual_async_fn = "deny"
@@ -76,6 +76,10 @@ include = [
 pre-release-replacements = [
   { file = "CHANGELOG.md", search = '## \[Unreleased\]', replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
 ]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true
