@@ -23,8 +23,11 @@ target/
 
 # AI Assistants
 project_plans.md
+.mcp.json
+AGENTS.md
 CLAUDE.md
 .claude/*
+.codex/*
 .kiro/
 
 # AI Assistants Exclude

@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Minimal event-sourced process manager (Saga) example"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [lib]
 name = "saga_basic_saga"
@@ -29,3 +33,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints]
+workspace = true

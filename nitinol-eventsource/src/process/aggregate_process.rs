@@ -1,26 +1,19 @@
 use std::borrow::Borrow;
-use std::sync::Arc;
 
+use bytes::Bytes;
 use futures_util::StreamExt;
-use nitinol_contract::{Aggregate, Decider, Decision, Event, Query};
+use nitinol_contract::{Aggregate, Decider, Decision, Event, Query, Snapshotable};
 use nitinol_persistence::error::AppendError;
-use nitinol_persistence::store::EventStore;
-use nitinol_persistence::{AggregateId, AppendingEvent, LoadQuery};
+use nitinol_persistence::store::Journal;
+use nitinol_persistence::{AggregateId, LoadQuery, PersistedSnapshot};
 use nitinol_runtime::process::{Process, ProcessContext, Receive};
 
-use crate::codec::ErasedCodec;
-use crate::error::{AskHandlerError, CodecError, ExecHandlerError, PersistError};
-use crate::process::snapshot_persistor::SnapshotPersistorProxy;
-
-// Type alias for the snapshot restoration callback
-
-/// A heap-allocated, shareable function that restores an aggregate from a
-/// snapshot payload.  Stored as `Option<SnapshotRestoreFn<A>>` so it is set
-/// only when both `Snapshotable` and a snapshot persistor are in use.
-///
-/// The function decodes the raw bytes to the snapshot domain value (via the
-/// snapshot codec) and then calls `A::restore`.
-pub(crate) type SnapshotRestoreFn<A> = Arc<dyn Fn(&[u8]) -> Result<A, CodecError> + Send + Sync>;
+use crate::appending::EventAppending;
+use crate::codec;
+use crate::error::{
+    AskHandlerError, CodecError, ExecHandlerError, PersistError, SnapshotHandlerError,
+};
+use crate::process::recover::SnapshotRecovery;
 
 // Internal message wrappers
 //
@@ -45,6 +38,12 @@ pub(crate) struct TellCmd<C>(pub(crate) C);
 
 /// Routes a domain query through the `contract::Query<M>` path.
 pub(crate) struct ExecMsg<M>(pub(crate) M);
+
+/// Asks the activation to save its own state as a snapshot.
+///
+/// Sent only by `AggregateProxy::snapshot`, which exists only for an aggregate
+/// whose `Recover` marker is `Latest`.
+pub(crate) struct SnapshotCmd;
 
 // AggregateProcess
 
@@ -86,10 +85,22 @@ pub(crate) struct ExecMsg<M>(pub(crate) M);
 /// References to the aggregate outlive the stop and resolve it again, so a
 /// caller sees a transient failure rather than a dead reference.
 ///
+/// That self-repair is invisible from the outside, so the conflict is recorded
+/// on the way through: one `tracing` event per overtaken append, under the name
+/// `non_genesis_sequence_conflict` and the target `nitinol_eventsource::occ`,
+/// carrying the stream it was refused on and the sequence it was refused at.
+/// Those two values are what an operator's filter is written against, so they
+/// are part of this crate's API and stated as such in its crate documentation;
+/// renaming either is a breaking change.  What is counted is the rejection, not
+/// its cause — a second activation and an unrelated writer against the same
+/// store are indistinguishable here.
+///
 /// Fixed by `non_genesis_conflict_stops_the_losing_writer`,
 /// `replay_failure_does_not_masquerade_as_a_genesis_conflict` and
 /// `replay_decode_failure_does_not_masquerade_as_a_genesis_conflict` in
-/// `nitinol-eventsource/tests/aggregate_conflict.rs`.
+/// `nitinol-eventsource/tests/aggregate_conflict.rs`.  The record it leaves
+/// behind is fixed by `a_non_genesis_conflict_is_observed_once_and_nothing_else_is`
+/// in `nitinol-eventsource/tests/occ_conflict_is_observable.rs`.
 ///
 /// # C-2: a genesis conflict means the aggregate already exists
 ///
@@ -127,43 +138,45 @@ pub(crate) struct ExecMsg<M>(pub(crate) M);
 pub struct AggregateProcess<A: Aggregate> {
     pub(crate) state: A,
     pub(crate) aggregate_id: AggregateId,
-    pub(crate) store: Arc<dyn EventStore>,
-    pub(crate) snapshot_ref: Option<SnapshotPersistorProxy>,
-    pub(crate) codec: Arc<dyn ErasedCodec<A::Event>>,
+    pub(crate) store: Journal,
     pub(crate) sequence: u64,
-    /// Restores aggregate state from a snapshot payload.
-    /// Set only when the aggregate implements `Snapshotable` and a snapshot
-    /// persistor was provided via `AggregateProps::with_snapshot_persistor`.
-    pub(crate) snapshot_restore: Option<SnapshotRestoreFn<A>>,
+    /// Where the newest snapshot is read from and saved to, and how it is read
+    /// back as `A`.
+    ///
+    /// `Some` exactly when the aggregate's own
+    /// [`Recover`](Aggregate::Recover) marker is
+    /// [`Latest`](nitinol_contract::Latest). Nothing at the wiring sets this:
+    /// the marker decides it, and the system supplies the one persistor it
+    /// resolves through.
+    pub(crate) recovery: Option<SnapshotRecovery<A>>,
 }
 
 impl<A: Aggregate> Process for AggregateProcess<A> {
     async fn on_start(&mut self, ctx: &mut ProcessContext<Self>) {
-        if let (Some(restore_fn), Some(snapshot_proxy)) =
-            (self.snapshot_restore.clone(), self.snapshot_ref.clone())
-        {
-            match snapshot_proxy.load_latest(self.aggregate_id.clone()).await {
-                Ok(Some(snapshot)) => match restore_fn(&snapshot.payload) {
-                    Ok(restored) => {
-                        self.state = restored;
+        if let Some(recovery) = self.recovery.clone() {
+            // Resolved here rather than at the wiring: starting the system's
+            // persistor is asynchronous, and a reference is built without
+            // awaiting.
+            let persistor = recovery.persistor().await;
+            match persistor.load_latest(self.aggregate_id.clone()).await {
+                Ok(Some(snapshot)) => match recovery.recover(&snapshot.payload) {
+                    Ok(recovered) => {
+                        self.state = recovered;
                         self.sequence = snapshot.sequence;
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "snapshot decode failed; restoring from default state");
+                        tracing::error!(error = %e, "snapshot decode failed; replaying from the start of the stream");
                     }
                 },
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::error!(error = ?e, "snapshot load failed; proceeding without snapshot");
+                    tracing::error!(error = ?e, "snapshot load failed; proceeding without recovering");
                 }
             }
         }
 
-        let query = LoadQuery {
-            stream_key: Some(self.aggregate_id.as_str().to_owned()),
-            from_stream_sequence: Some(self.sequence + 1),
-            ..Default::default()
-        };
+        let query = LoadQuery::by_stream(self.aggregate_id.as_str())
+            .with_from_stream_sequence(self.sequence + 1);
 
         // A failed replay (load or stream error) leaves `self.sequence` at
         // whatever it was before this call — 0 for a fresh activation. Falling
@@ -197,7 +210,7 @@ impl<A: Aggregate> Process for AggregateProcess<A> {
                     return;
                 }
             };
-            match self.codec.decode(&loaded.payload) {
+            match codec::decode::<<A::Event as Event>::Codec, A::Event>(&loaded.payload) {
                 Ok(event) => {
                     self.state.apply(event);
                     self.sequence = loaded.sequence;
@@ -324,6 +337,66 @@ where
     }
 }
 
+// Receive<SnapshotCmd>: saving the activation's own state
+//
+// The capture and the sequence are read in one handler, between two messages
+// of a mailbox that runs one at a time, so the payload is the state at exactly
+// the sequence it is saved under.
+
+impl<A> Receive<SnapshotCmd> for AggregateProcess<A>
+where
+    A: Aggregate + Snapshotable,
+{
+    type Response = u64;
+    type Error = SnapshotHandlerError;
+
+    async fn recv(
+        &mut self,
+        _msg: SnapshotCmd,
+        _ctx: &mut ProcessContext<Self>,
+    ) -> Result<Self::Response, Self::Error> {
+        let payload = self
+            .encode_snapshot()
+            .map_err(SnapshotHandlerError::Encode)?;
+        let recovery = self.recovery.clone().expect(RECOVERY_UNDER_LATEST);
+        recovery
+            .persistor()
+            .await
+            .save(PersistedSnapshot {
+                aggregate_id: self.aggregate_id.clone(),
+                sequence: self.sequence,
+                payload,
+                created_at: jiff::Timestamp::now(),
+            })
+            .await
+            .map_err(SnapshotHandlerError::Persist)?;
+        Ok(self.sequence)
+    }
+}
+
+/// Why an activation asked for a snapshot always carries a recovery: the
+/// request is sent only by `AggregateProxy::snapshot`, which exists only for a
+/// `Latest` aggregate, and a `Latest` aggregate's activation is always built
+/// with one. A `Latest` aggregate whose deployment holds no snapshot slot has
+/// no activation at all: its reference answers the refusal before anything is
+/// sent.
+const RECOVERY_UNDER_LATEST: &str =
+    "a snapshot is requested only of a `Latest` aggregate, whose activation always carries a recovery";
+
+impl<A> AggregateProcess<A>
+where
+    A: Aggregate + Snapshotable,
+{
+    /// The current state, captured and written by the codec the aggregate
+    /// names.
+    ///
+    /// Synchronous so the captured value — which need not be `Send` — is gone
+    /// before the handler awaits the save.
+    fn encode_snapshot(&self) -> Result<Bytes, CodecError> {
+        codec::encode::<<A as Snapshotable>::Codec, A::Snapshot>(&self.state.capture())
+    }
+}
+
 // Writing an acceptance down
 
 /// Why the facts of an accepted decision are not in the stream.
@@ -339,7 +412,10 @@ enum NotAppended {
     Persist(#[from] PersistError),
 }
 
-impl<R: std::error::Error + Send + Sync + 'static> From<NotAppended> for AskHandlerError<R> {
+impl<R> From<NotAppended> for AskHandlerError<R>
+where
+    R: std::error::Error + Send + Sync + 'static,
+{
     fn from(e: NotAppended) -> Self {
         match e {
             NotAppended::AlreadyCreated => AskHandlerError::AlreadyCreated,
@@ -377,13 +453,11 @@ impl<A: Aggregate> AggregateProcess<A> {
         let mut appending = Vec::with_capacity(events.len());
         for event in &events {
             next_sequence += 1;
-            let payload = self.codec.encode(event).map_err(PersistError::Codec)?;
-            appending.push(AppendingEvent {
-                sequence: next_sequence,
-                event_type: event.variant(),
-                payload,
-                occurred_at: jiff::Timestamp::now(),
-            });
+            appending.push(
+                event
+                    .appending(next_sequence, jiff::Timestamp::now())
+                    .map_err(PersistError::Codec)?,
+            );
         }
 
         match self
@@ -406,6 +480,23 @@ impl<A: Aggregate> AggregateProcess<A> {
             // whole response: reloading and retrying would only re-enter the
             // race this activation has already lost.
             Err(conflict @ AppendError::SequenceConflict(_)) => {
+                // The head of the refused batch rather than its tail: the
+                // counter has not moved yet, so this is the sequence the store
+                // said was taken.  `next_sequence` would name the last sequence
+                // a multi-event acceptance asked for, which nothing arbitrated.
+                let refused_at = self.sequence + 1;
+                // Named and targeted explicitly rather than left to the
+                // defaults, because how often this happens is what decides
+                // whether restricting an aggregate to one activation is worth
+                // its cost, and a filter written against a module path and a
+                // line number stops matching as soon as the code moves.
+                tracing::warn!(
+                    name: "non_genesis_sequence_conflict",
+                    target: "nitinol_eventsource::occ",
+                    aggregate_id = self.aggregate_id.as_str(),
+                    sequence = refused_at,
+                    "an append lost the stream to another writer; this activation stops"
+                );
                 // Signalled explicitly rather than left to the supervision
                 // strategy, because stopping is a property of the conflict: no
                 // strategy may resume or restart this activation into writing

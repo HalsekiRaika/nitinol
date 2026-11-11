@@ -1,0 +1,5 @@
+error[E0599]: no method named `persistence` found for reference `&ContingentSystem` in the current scope
+ --> tests/ui/fail/contingent_system_has_no_persistence.rs:8:20
+  |
+8 |     let _ = system.persistence();
+  |                    ^^^^^^^^^^^ method not found in `&ContingentSystem`

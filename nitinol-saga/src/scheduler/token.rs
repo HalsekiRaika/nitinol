@@ -19,8 +19,8 @@ impl TimerName {
     }
 }
 
-/// The globally-unique handle a [`crate::SchedulerProxy`] uses to key a
-/// registered timer.
+/// The globally-unique handle the resident timer core uses to key a registered
+/// timer.
 ///
 /// Distinguished by the pair `(saga_id, name)`: two schedules in different
 /// sagas may share a [`TimerName`] without colliding.
@@ -28,4 +28,15 @@ impl TimerName {
 pub struct ScheduleToken {
     pub saga_id: SagaId,
     pub name: TimerName,
+}
+
+impl ScheduleToken {
+    /// The handle addressing `name` within `saga_id`.
+    ///
+    /// Registration, cancellation, firing and replay all address the same
+    /// timer, so the pair is settled here rather than paired again at each of
+    /// them.
+    pub fn new(saga_id: SagaId, name: TimerName) -> Self {
+        Self { saga_id, name }
+    }
 }

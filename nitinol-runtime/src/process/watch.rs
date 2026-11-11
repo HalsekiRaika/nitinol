@@ -23,8 +23,8 @@ pub enum TerminatedReason {
 /// Internal message routed through DeadLetter to trigger `Terminated{NotFound}`.
 ///
 /// When `ctx.watch(pid)` finds that `pid` is absent from the registry, this
-/// request is wrapped in a `DeadLetterEnvelope` and sent to `DeadLetterActor`.
-/// The actor detects the type, looks up the watcher, and sends back
+/// request is wrapped in a `DeadLetterEnvelope` and sent to `DeadLetterProcess`.
+/// The process detects the type, looks up the watcher, and sends back
 /// `SystemSignal::Terminated { why: NotFound }`.
 pub(crate) struct WatchRequest {
     pub(crate) watched: Pid,

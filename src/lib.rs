@@ -6,18 +6,19 @@
 //!
 //! | Feature        | Contents |
 //! |----------------|---------|
-//! | `runtime`      | `runtime` — actor runtime (`ProcessSystem`, `Process`, …) |
+//! | `runtime`      | `runtime` — process runtime (`ProcessSystem`, `Process`, …) |
 //! | `persistence`  | `persistence` — persistence abstractions (`EventStore`, IDs, …) |
-//! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Decider`, `Decision`, `Query`, `Event`, `Snapshotable`, `#[derive(Event)]`) |
+//! | `contract`     | `contract` — runtime-free aggregate contract (`Aggregate`, `Decider`, `Decision`, `Query`, `Event`, `Codec`, `Snapshotable`, `Recovery` / `Never` / `Latest`, `#[derive(Event)]`) and the event identity it is written in (`EventType`, `Family`, `TypeName`, `MaterializedPath`, `EventRegistryEntry`, …) |
 //! | `eventsource`  | `eventsource` — event sourcing layer (`Aggregate`, `Projector`, …) |
 //! | `saga`         | `saga` — event-sourced process manager (`Saga`, `SagaEffect`, …) |
 //! | `full`         | All of the above |
+//! | `postgres`     | `sqlx` — Postgres backend (`PostgresEventStore`, `PostgresSnapshotStore`, `PostgresOffsetStore`) |
 //!
 //! # Example
 //!
 //! ```toml
 //! [dependencies]
-//! nitinol = { version = "0.4", features = ["eventsource"] }
+//! nitinol = { version = "0.6", features = ["eventsource"] }
 //! ```
 
 #[cfg(feature = "runtime")]
@@ -34,13 +35,21 @@ pub use nitinol_persistence as persistence;
 /// reaches no async runtime, so a crate that keeps itself Tokio-free can
 /// depend on `nitinol` through it alone.
 ///
+/// The event identity a domain declares — its family, type name, canonical path
+/// and registry entry, and the names the framework reserves — is part of the
+/// contract and is named here too; `nitinol::persistence` re-exports the same
+/// types as the shape of a stored row.
+///
 /// The `eventsource` feature re-exports these same trait items under
 /// `nitinol::eventsource`; the two paths are interchangeable. (That module is
 /// not linked here because it does not exist in a `contract`-only build.)
 #[cfg(feature = "contract")]
 pub mod contract {
     pub use nitinol_contract::{
-        Accepting, Aggregate, Decider, Decision, Event, Query, Snapshotable,
+        is_within_reserved_namespace, Accepting, Aggregate, Codec, Decider, Decision, Event,
+        EventRegistryEntry, EventType, Family, Latest, MaterializedPath,
+        MaterializedPathParseError, Never, ParsedEventType, Query, RecoverPolicy, Recovery,
+        Snapshotable, TypeName, RESERVED_NAMESPACE,
     };
 
     /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
@@ -52,9 +61,9 @@ pub mod contract {
 /// Facade for the `eventsource` feature.
 ///
 /// Re-exports all user-facing APIs from `nitinol-eventsource`.
-/// Framework-internal types (`SystemEvent`, `appending_system_event`,
-/// `SystemEventDecodeError`) are intentionally excluded so they are not
-/// discoverable through the umbrella entry point.
+/// Framework-internal types (`SystemEvent`, `SystemEventDecodeError`,
+/// `DeclaresEventType`, `MatchesEventType`, `EventAppending`) are intentionally
+/// excluded so they are not discoverable through the umbrella entry point.
 /// Direct consumers of `nitinol-eventsource` can still reach them.
 ///
 /// # Visibility contract — `error` sub-module
@@ -74,14 +83,17 @@ pub mod eventsource {
     /// User-facing error types from the eventsource layer.
     ///
     /// Framework-internal errors (`SystemEventDecodeError`, `AskHandlerError`,
-    /// `ExecHandlerError`) are intentionally excluded — they form part of the
-    /// internal request/response plumbing and are not part of the public API.
+    /// `ExecHandlerError`, `SnapshotHandlerError`, `ProjectionNotSettled`) are
+    /// intentionally excluded — they form part of the internal request/response
+    /// plumbing and are not part of the public API.
     pub mod error {
         pub use nitinol_eventsource::error::AskError;
         pub use nitinol_eventsource::error::CodecError;
         pub use nitinol_eventsource::error::ExecError;
+        pub use nitinol_eventsource::error::MissingSnapshotSlot;
         pub use nitinol_eventsource::error::PersistError;
         pub use nitinol_eventsource::error::Retryability;
+        pub use nitinol_eventsource::error::SnapshotSaveError;
         pub use nitinol_eventsource::error::TellError;
     }
 
@@ -91,6 +103,9 @@ pub mod eventsource {
     pub use nitinol_eventsource::Event;
     pub use nitinol_eventsource::{Accepting, Decider, Decision};
     pub use nitinol_eventsource::{Aggregate, Snapshotable};
+    pub use nitinol_eventsource::{
+        Latest, Never, RecoverOn, RecoverOnContingent, RecoverPolicy, Recovery,
+    };
 
     /// `#[derive(Event)]` macro, co-located with the `Event` trait so a single
     /// `use nitinol::eventsource::Event;` brings both into scope (trait in the
@@ -98,20 +113,38 @@ pub mod eventsource {
     pub use nitinol_macros::Event;
 
     pub use nitinol_eventsource::Query;
+    pub use nitinol_eventsource::{AggregateProps, AggregateProxy, AggregateTellTarget};
     pub use nitinol_eventsource::{
-        AggregateProps, AggregateProxy, AggregateTellTarget, CodecSet, CodecUnset,
+        AskError, ExecError, MissingSnapshotSlot, Retryability, SnapshotSaveError, TellError,
     };
-    pub use nitinol_eventsource::{AskError, ExecError, Retryability, TellError};
     pub use nitinol_eventsource::{
         CursorSet, CursorUnset, DurableStream, DurableStreamProxy, DurableSubscription,
         SequenceCursor,
     };
     pub use nitinol_eventsource::{
-        EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext, Projector,
-        ProjectorProps, TxProvider,
+        EventEnvelope, EventSet, EventUnset, OriginSet, OriginUnset, ProjectionContext,
+        ProjectionId, Projector, ProjectorProps, TxProvider,
     };
     pub use nitinol_eventsource::{SnapshotPersistor, SnapshotPersistorProxy};
 }
 
 #[cfg(feature = "saga")]
 pub use nitinol_saga as saga;
+
+#[cfg(feature = "postgres")]
+pub use nitinol_sqlx as sqlx;
+
+/// What the code `#[derive(Event)]` writes reaches, and nothing a user writes.
+///
+/// The expansion places an entry in
+/// [`persistence::EVENT_REGISTRY`](nitinol_persistence::EVENT_REGISTRY), which
+/// takes the machinery that fills that slice — and a user who derives `Event`
+/// is obliged to depend on `nitinol` and on nothing else, so the derive reaches
+/// it here rather than through a dependency the user would have to add.
+///
+/// No stability is promised for anything below.
+#[cfg(feature = "contract")]
+#[doc(hidden)]
+pub mod __private {
+    pub use linkme;
+}

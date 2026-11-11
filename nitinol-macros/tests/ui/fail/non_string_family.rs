@@ -4,7 +4,7 @@
 use nitinol::eventsource::Event;
 
 #[derive(Clone, Event)]
-#[event(family = 42)]
+#[event(family = 42, codec = ())]
 struct Bad;
 
 fn main() {}

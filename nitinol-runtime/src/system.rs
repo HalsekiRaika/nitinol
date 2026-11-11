@@ -7,14 +7,14 @@ use crate::process::spawn::SpawnEnv;
 use crate::process::spawnable::SpawnDispatch;
 use crate::process::{
     AnyProxy, BoxedMessage, DeadLetterProcess, DeadLetterProxy, MailboxCapacity, PipeCapacity,
-    Process, ProcessProxy, ProcessRegistry, Props, Receive, StashCapacity, Stream,
-    SupervisionStrategy,
+    Process, ProcessProxy, ProcessRegistry, Props, Receive, Resident, ResidentTable, StashCapacity,
+    Stream, SupervisionStrategy,
 };
 
 /// The well-known topic name for the dead-letter stream.
 const DEAD_LETTERS_TOPIC: &str = "$dead-letters";
 
-/// The well-known process name for the dead-letter actor.
+/// The well-known process name for the dead-letter process.
 const DEAD_LETTER_PROCESS_NAME: &str = "$dead-letter";
 
 /// A handle to the system dead-letter stream with a stable, policy-compliant API.
@@ -83,12 +83,12 @@ impl ProcessSystemBuilder {
     /// configured defaults into the handle that is returned.
     ///
     /// This is construction, not just configuration — the dead-letter stream and
-    /// actor are running by the time it returns, so the first spawn already has
+    /// process are running by the time it returns, so the first spawn already has
     /// somewhere to route to.
     pub async fn build(self) -> ProcessSystem {
         let registry = ProcessRegistry::new();
 
-        // Bootstrap env for the dead-letter stream + actor. The configured
+        // Bootstrap env for the dead-letter stream + process. The configured
         // defaults are deliberately withheld from it: the dead-letter
         // infrastructure is persistent, and a system that reaped its own
         // dead-letter stream on the caller's idle timeout would silently lose
@@ -102,7 +102,7 @@ impl ProcessSystemBuilder {
         let dl_stream: ProcessProxy<Stream<BoxedMessage>> =
             bootstrap_env.spawn(dl_stream_props).await;
 
-        // Spawn the dead-letter actor (persistent — captures the stream proxy and registry).
+        // Spawn the dead-letter process (persistent — captures the stream proxy and registry).
         let dl_stream_for_producer = dl_stream.clone();
         let registry_for_producer = registry.clone();
         let dl_process_props = Props::new(move || {
@@ -120,6 +120,7 @@ impl ProcessSystemBuilder {
                 registry,
                 dead_letter_proxy: DeadLetterProxy::new(dl_process.user_tx.clone()),
                 dead_letter_stream: DeadLetterStream(dl_stream),
+                residents: ResidentTable::new(),
                 default_idle_timeout: self.default_idle_timeout,
                 default_mailbox_capacity: self.default_mailbox_capacity,
                 default_stash_capacity: self.default_stash_capacity,
@@ -153,6 +154,7 @@ struct SystemInner {
     registry: ProcessRegistry,
     dead_letter_proxy: DeadLetterProxy,
     dead_letter_stream: DeadLetterStream,
+    residents: ResidentTable,
     default_idle_timeout: Option<Duration>,
     default_mailbox_capacity: MailboxCapacity,
     default_stash_capacity: StashCapacity,
@@ -257,15 +259,45 @@ impl ProcessSystem {
     /// ```
     #[allow(private_bounds)]
     pub async fn spawn<S: SpawnDispatch>(&self, spawnable: S) -> S::Output {
-        let env = SpawnEnv::top_level(
+        let env = self.spawn_env();
+        spawnable.spawn_with(&env).await
+    }
+
+    /// Resolve the resident process of type `P`, starting it on the first ask.
+    ///
+    /// The type is the key. The first call starts the lifecycle `P` declared
+    /// through [`Resident::props`]; every later call through this system — or
+    /// through any clone of it — hands back a proxy to that same process, so at
+    /// most one process of the type exists. This is the opposite of
+    /// [`spawn`][Self::spawn], which starts a lifecycle on every call and never
+    /// resolves a running one.
+    ///
+    /// Callers racing on the first ask converge: one lifecycle is started and
+    /// all of them receive a proxy to it.
+    ///
+    /// A resident is persistent. Neither the system default idle timeout nor an
+    /// [`IdleTimeout`](crate::IdleTimeout) the declaration set for itself will
+    /// reap it, so the proxy handed back stays answerable however long the
+    /// process sits idle.
+    ///
+    /// The runtime supplies the mechanism only: it knows no resident type by
+    /// name, and `P` comes from the crate that declares it.
+    pub async fn spawn_resident<P: Resident>(&self) -> ProcessProxy<P> {
+        let env = self.spawn_env();
+        self.inner.residents.resolve::<P>(&env).await
+    }
+
+    /// The resolved parameters shared by every top-level spawn through this
+    /// system, whether the caller asked for a plain spawn or for a resident.
+    fn spawn_env(&self) -> SpawnEnv {
+        SpawnEnv::top_level(
             self.inner.registry.clone(),
             self.inner.dead_letter_proxy.clone(),
             self.inner.default_idle_timeout,
             self.inner.default_mailbox_capacity,
             self.inner.default_stash_capacity,
             self.inner.default_pipe_capacity,
-        );
-        spawnable.spawn_with(&env).await
+        )
     }
 
     pub async fn lookup(&self, pid: Pid) -> Option<AnyProxy> {

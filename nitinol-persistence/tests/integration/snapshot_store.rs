@@ -1,0 +1,116 @@
+//! Snapshot contract tests for [`InMemorySnapshotStore`].
+//!
+//! These tests are the record of the snapshot behaviour every `SnapshotStore`
+//! backend must reproduce, as the reference implementation keeps it.  What binds
+//! a backend is the contract on [`SnapshotStore`]; what a backend of its own is
+//! put through is `nitinol-store-conformance`, which runs these same labels
+//! against any store.  Each contract carries a stable label, which the doc of
+//! the test fixing it here begins with:
+//!
+//! | Label | Contract |
+//! |---|---|
+//! | `SNAP-1` | Nothing saved is a condition, not a failure: `load_latest` for an aggregate the store holds no snapshot for answers `Ok(None)`. |
+//! | `SNAP-2` | One save reads back whole: the `aggregate_id` a save was for, the `sequence` it was taken at, and the `payload` holding the state there are read back together. |
+//! | `SNAP-3` | The save that came last is what a load answers with: after several saves at ascending `sequence`es, `load_latest` answers with the last one's `sequence` and its `payload`. |
+//!
+//! Two things the contract leaves open are not asserted here either.
+//! `created_at` is stored and read back, but no consumer in the framework reads
+//! it, so what precision a backend keeps it to is its own business.  And a save
+//! at a `sequence` the stored snapshot has already reached, or behind it, is the
+//! backend's to answer: this implementation keeps whichever save came last,
+//! which is its behaviour rather than a clause.
+//!
+//! `SNAP-4` — that one aggregate's snapshot is never another's — has no test in
+//! this file, where every test holds a single aggregate. It is fixed by the
+//! `snapshot` module of `nitinol-store-conformance`, for this store and for any
+//! other.
+
+use bytes::Bytes;
+use jiff::Timestamp;
+use nitinol_persistence::store::{InMemorySnapshotStore, SnapshotStore};
+use nitinol_persistence::{AggregateId, PersistedSnapshot};
+
+fn make_snapshot(
+    aggregate_id: AggregateId,
+    sequence: u64,
+    payload: &'static [u8],
+) -> PersistedSnapshot {
+    PersistedSnapshot {
+        aggregate_id,
+        sequence,
+        payload: Bytes::from_static(payload),
+        created_at: Timestamp::now(),
+    }
+}
+
+/// SNAP-2: A saved Snapshot comes back from load_latest with the same contents.
+#[tokio::test]
+async fn save_and_load_latest_roundtrip() {
+    // Given: an empty store and one snapshot to save
+    let store = InMemorySnapshotStore::default();
+    let agg = AggregateId::new("agg-1");
+    let snapshot = make_snapshot(agg.clone(), 42, b"state-at-42");
+
+    // When: the snapshot is saved and then loaded
+    store.save(snapshot).await.expect("save should succeed");
+    let loaded = store
+        .load_latest(&agg)
+        .await
+        .expect("load_latest should succeed");
+
+    // Then: the loaded snapshot matches what was saved
+    let loaded = loaded.expect("snapshot should be present");
+    assert_eq!(loaded.aggregate_id, agg);
+    assert_eq!(loaded.sequence, 42);
+    assert_eq!(loaded.payload, Bytes::from_static(b"state-at-42"));
+}
+
+/// SNAP-3: Several saves against one Aggregate return the one saved last.
+#[tokio::test]
+async fn multiple_saves_return_latest_snapshot() {
+    // Given: an empty store
+    let store = InMemorySnapshotStore::default();
+    let agg = AggregateId::new("agg-1");
+
+    // When: three snapshots are saved in order for the same aggregate
+    store
+        .save(make_snapshot(agg.clone(), 1, b"state-1"))
+        .await
+        .expect("save seq=1 should succeed");
+    store
+        .save(make_snapshot(agg.clone(), 5, b"state-5"))
+        .await
+        .expect("save seq=5 should succeed");
+    store
+        .save(make_snapshot(agg.clone(), 10, b"state-10"))
+        .await
+        .expect("save seq=10 should succeed");
+
+    let loaded = store
+        .load_latest(&agg)
+        .await
+        .expect("load_latest should succeed");
+
+    // Then: the most recently saved snapshot (seq=10) is returned
+    let loaded = loaded.expect("snapshot should be present");
+    assert_eq!(loaded.sequence, 10);
+    assert_eq!(loaded.payload, Bytes::from_static(b"state-10"));
+}
+
+/// SNAP-1: load_latest for an unsaved Aggregate returns Ok(None), and is not an
+/// error.
+#[tokio::test]
+async fn load_latest_for_unknown_aggregate_returns_none() {
+    // Given: an empty store
+    let store = InMemorySnapshotStore::default();
+    let agg = AggregateId::new("nonexistent");
+
+    // When: loading the latest snapshot for an aggregate that has none
+    let result = store
+        .load_latest(&agg)
+        .await
+        .expect("load_latest should succeed even for unknown aggregate");
+
+    // Then: Ok(None) is returned
+    assert!(result.is_none());
+}

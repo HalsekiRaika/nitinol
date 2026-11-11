@@ -62,4 +62,4 @@ impl<P: Process, D: Driver<P>> SpawnDispatch for crate::process::Props<P, D> {
     }
 }
 
-impl<T: 'static + Send + Sync> sealed::Sealed for crate::process::StreamProps<T> {}
+impl<T> sealed::Sealed for crate::process::StreamProps<T> where T: 'static + Send + Sync {}

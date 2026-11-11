@@ -1,0 +1,25 @@
+# A release is a publish to crates.io and nothing else: no git tag, and so no
+# GitHub Release. The version bump is committed and pushed to the branch the
+# release was cut from. See RELEASING.md.
+#
+# Releases are cut from `master` only. `dev` is where work lands; `master`
+# holds what has been released, so it always builds and passes CI.
+allow-branch = ["master"]
+tag = false
+push = true
+publish = true
+
+consolidate-commits = true
+# A consolidated commit has no single crate or version to name, so the message
+# uses no placeholder.
+pre-release-commit-message = "chore(release): bump versions and publish"
+
+# `shared-version` is not set: each crate is versioned on its own. Raising a
+# member raises the requirement every dependent states on it.
+dependent-version = "upgrade"
+
+# The first release publishes ten crates that crates.io has never seen, and the
+# tool's default of five new packages per run would refuse it before anything
+# is published. `existing-packages` keeps its default.
+[rate-limit]
+new-packages = 10

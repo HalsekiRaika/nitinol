@@ -1,0 +1,11 @@
+error[E0599]: the method `snapshot` exists for struct `AggregateProxy<Counter>`, but its trait bounds were not satisfied
+  --> tests/ui/fail/snapshot_on_never_aggregate.rs:72:19
+   |
+45 | struct Counter {
+   | -------------- doesn't satisfy `<_ as Aggregate>::Recover = Latest`
+...
+72 |     let _ = proxy.snapshot().await;
+   |                   ^^^^^^^^ method cannot be called on `AggregateProxy<Counter>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `<Counter as Aggregate>::Recover = nitinol_eventsource::Latest`

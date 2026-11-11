@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Aggregate-to-aggregate communication via a saga"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [lib]
 name = "eventsource_aggregate_communication"
@@ -31,3 +35,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 futures-util = "0.3"
+
+[lints]
+workspace = true

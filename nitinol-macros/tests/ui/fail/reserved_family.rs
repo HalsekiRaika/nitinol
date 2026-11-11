@@ -6,7 +6,7 @@
 use nitinol::eventsource::Event;
 
 #[derive(Clone, Event)]
-#[event(family = "nitinol.saga")]
+#[event(family = "nitinol.saga", codec = ())]
 struct Bad;
 
 fn main() {}

@@ -1,7 +1,6 @@
 use bytes::Bytes;
 use jiff::Timestamp;
-
-use crate::event_type::EventType;
+use nitinol_contract::EventType;
 
 /// Append only. Does not carry `global_sequence` because it is assigned by the DB.
 ///

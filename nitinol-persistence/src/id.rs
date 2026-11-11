@@ -32,23 +32,3 @@ impl Borrow<str> for AggregateId {
         &self.0
     }
 }
-
-/// Identifier of a projection, used as its checkpoint key.
-///
-/// # Invariants
-///
-/// The same reserved-namespace rule as [`AggregateId`] applies.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProjectionId(String);
-
-impl ProjectionId {
-    pub fn new(s: impl Into<String>) -> Self {
-        let id = s.into();
-        reject_reserved_id("projection id", &id);
-        Self(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}

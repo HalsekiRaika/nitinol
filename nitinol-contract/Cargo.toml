@@ -1,14 +1,22 @@
 [package]
 name = "nitinol-contract"
-version = "0.1.0"
+version = "0.6.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme.workspace = true
 description = "Runtime-free contract traits between nitinol and downstream domain code"
 
-# The point of this crate is what it may *not* depend on: an async runtime.
-# `nitinol-persistence` supplies the event identity types the contract is
-# written in terms of and is itself runtime-free.
+# The point of this crate is what it may *not* depend on: an async runtime, and
+# any other part of nitinol.  The event identity a domain promises the machinery
+# is defined here, so the machinery depends on the contract and never the other
+# way round — `nitinol-persistence` re-exports the identity types.
 [dependencies]
-nitinol-persistence = { path = "../nitinol-persistence" }
+# The codec signature is stated in `Bytes`, the same currency the persistence
+# layer's payloads are in.  A byte buffer is not an async runtime.
+bytes = "1"
+
+[lints]
+workspace = true

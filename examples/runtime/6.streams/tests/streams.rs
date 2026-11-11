@@ -38,24 +38,6 @@ async fn wait_for_count(counter: &AtomicU32, expected: u32) {
 
 // ─── TemperatureReading ───────────────────────────────────────────────────────
 
-/// TemperatureReading must derive Clone so the Stream can broadcast one value
-/// to multiple subscribers without deep copying (Stream<T> requires T: Clone).
-#[tokio::test]
-async fn temperature_reading_implements_clone_preserving_all_fields() {
-    // Given: a TemperatureReading with known values
-    let original = TemperatureReading {
-        sensor: "sensor-1".to_string(),
-        celsius: 37.5,
-    };
-
-    // When: cloned
-    let cloned = original.clone();
-
-    // Then: all fields are preserved
-    assert_eq!(cloned.sensor, "sensor-1");
-    assert!((cloned.celsius - 37.5).abs() < f64::EPSILON);
-}
-
 /// TemperatureReading must satisfy Message (= 'static + Send + Sync) so it can
 /// be published to a Stream<BoxedMessage> via publish<M: Message>.
 #[tokio::test]

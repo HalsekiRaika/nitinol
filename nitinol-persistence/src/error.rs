@@ -1,3 +1,5 @@
+use nitinol_contract::EventType;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppendError {
     /// A double append to an already-taken `(stream, sequence)` pair was
@@ -24,6 +26,20 @@ pub enum AppendError {
 pub enum LoadError {
     #[error("backend failure: {0}")]
     Backend(Box<dyn std::error::Error + Send + Sync>),
+    /// A stored row of `event_type` that the event type's codec could not read.
+    ///
+    /// The failure belongs to that one row: a typed read reports it in the
+    /// row's place and goes on with the rows after it.
+    #[error(
+        "the payload of the {event_type} row at global position {global_sequence} \
+         in stream {stream_key:?} could not be decoded: {source}"
+    )]
+    Decode {
+        event_type: EventType,
+        stream_key: String,
+        global_sequence: u64,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -33,7 +49,7 @@ pub enum SnapshotError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CheckpointError {
+pub enum OffsetError {
     #[error("backend failure: {0}")]
     Backend(Box<dyn std::error::Error + Send + Sync>),
 }

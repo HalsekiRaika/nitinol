@@ -1,0 +1,11 @@
+error[E0599]: no method named `snapshot_persistor` found for reference `&ContingentSystem` in the current scope
+ --> tests/ui/fail/contingent_system_has_no_snapshot_persistor.rs:8:20
+  |
+8 |     let _ = system.snapshot_persistor();
+  |                    ^^^^^^^^^^^^^^^^^^
+  |
+help: there is a method `snapshot_store` with a similar name
+  |
+8 -     let _ = system.snapshot_persistor();
+8 +     let _ = system.snapshot_store();
+  |

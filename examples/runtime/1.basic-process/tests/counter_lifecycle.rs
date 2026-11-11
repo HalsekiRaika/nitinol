@@ -8,29 +8,6 @@ use std::time::Duration;
 use basic_process::counter::Counter;
 use nitinol_runtime::{ProcessSystem, Props};
 
-// ─── Counter::new ─────────────────────────────────────────────────────────────
-
-#[test]
-fn counter_new_with_zero_does_not_panic() {
-    // Given / When: create a counter starting at zero
-    let _counter = Counter::new(0);
-    // Then: no panic
-}
-
-#[test]
-fn counter_new_with_nonzero_does_not_panic() {
-    // Given / When: create a counter with an arbitrary initial value
-    let _counter = Counter::new(42);
-    // Then: no panic
-}
-
-#[test]
-fn counter_new_with_max_u32_does_not_panic() {
-    // Given / When: boundary check at the maximum representable count
-    let _counter = Counter::new(u32::MAX);
-    // Then: no panic
-}
-
 // ─── Process lifecycle via ProcessSystem ──────────────────────────────────────
 
 #[tokio::test]

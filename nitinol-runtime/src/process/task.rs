@@ -1,12 +1,9 @@
-use std::any::TypeId;
-
 use async_trait::async_trait;
 use tokio::sync::oneshot;
 
 use crate::error::HandlerError;
 use crate::ident::Pid;
 use crate::process::dead_letter::DeadLetterEnvelope;
-use crate::process::message::BoxedMessage;
 use crate::process::{Process, ProcessContext, Receive};
 
 pub(crate) type UserTask<P> = Box<dyn Task<P>>;
@@ -27,24 +24,6 @@ pub(crate) trait Task<P: Process>: 'static + Sync + Send {
         sender: Option<Pid>,
         suppress_log: bool,
     ) -> DeadLetterEnvelope;
-}
-
-fn build_envelope<M>(
-    msg: M,
-    destination: Pid,
-    sender: Option<Pid>,
-    suppress_log: bool,
-) -> DeadLetterEnvelope
-where
-    M: 'static + Send + Sync,
-{
-    DeadLetterEnvelope {
-        destination,
-        message: BoxedMessage::new(msg),
-        sender,
-        suppress_log,
-        message_type_id: TypeId::of::<M>(),
-    }
 }
 
 pub(crate) struct TellTask<M> {
@@ -81,7 +60,7 @@ where
         sender: Option<Pid>,
         suppress_log: bool,
     ) -> DeadLetterEnvelope {
-        build_envelope(self.msg, destination, sender, suppress_log)
+        DeadLetterEnvelope::new(self.msg, destination, sender, suppress_log)
     }
 }
 
@@ -128,6 +107,6 @@ where
         sender: Option<Pid>,
         suppress_log: bool,
     ) -> DeadLetterEnvelope {
-        build_envelope(self.msg, destination, sender, suppress_log)
+        DeadLetterEnvelope::new(self.msg, destination, sender, suppress_log)
     }
 }

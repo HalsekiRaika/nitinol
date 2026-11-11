@@ -1,4 +1,4 @@
-use nitinol_persistence::error::AppendError;
+use nitinol_persistence::error::{AppendError, SnapshotError};
 
 /// Error produced when decoding a [`crate::SystemEvent`] payload fails.
 ///
@@ -16,7 +16,10 @@ impl SystemEventDecodeError {
     }
 }
 
-/// Error produced when a [`crate::codec::ErasedCodec`] operation fails.
+/// Error produced when the codec a domain type named fails.
+///
+/// The codec's own error is boxed rather than surfaced, so a domain's choice of
+/// wire format does not become part of the framework's error family.
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
     #[error("encode error: {0}")]
@@ -58,6 +61,23 @@ pub enum Retryability {
     Permanent,
 }
 
+/// Why a reference could not activate its aggregate at all: the aggregate
+/// recovers from its newest snapshot, and the deployment it was resolved on
+/// holds no snapshot slot.
+///
+/// On a system whose store type is known this is a compile error at the
+/// wiring. It reaches the caller as a value only through a
+/// [`ContingentSystem`](crate::system::ContingentSystem), where the slot is
+/// carried as a value. The
+/// deployment does not grow a slot later, so every dispatch through such a
+/// reference answers with this, and none of them activates anything or replays
+/// the stream in place of the missing snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the aggregate recovers from its newest snapshot, and the deployment's store holds no snapshot slot"
+)]
+pub struct MissingSnapshotSlot;
+
 /// Error returned by `AggregateProxy::ask`.
 #[derive(Debug, thiserror::Error)]
 pub enum AskError<R: std::error::Error + Send + Sync + 'static> {
@@ -75,9 +95,15 @@ pub enum AskError<R: std::error::Error + Send + Sync + 'static> {
     Persist(PersistError),
     #[error("process send error: {0}")]
     Send(nitinol_runtime::error::SendError),
+    /// The aggregate could not be activated, so the command reached nothing.
+    #[error("the aggregate could not be activated: {0}")]
+    Activation(MissingSnapshotSlot),
 }
 
-impl<R: std::error::Error + Send + Sync + 'static> AskError<R> {
+impl<R> AskError<R>
+where
+    R: std::error::Error + Send + Sync + 'static,
+{
     /// Whether re-issuing the command is worth attempting.
     pub fn retryability(&self) -> Retryability {
         match self {
@@ -90,6 +116,9 @@ impl<R: std::error::Error + Send + Sync + 'static> AskError<R> {
             // stopping — including one stopped by a conflict of its own.
             AskError::Send(_) => Retryability::Transient,
             AskError::Persist(e) => e.retryability(),
+            // The deployment lacks what the aggregate's recovery needs, and
+            // re-resolving reaches the same deployment.
+            AskError::Activation(_) => Retryability::Permanent,
         }
     }
 }
@@ -116,6 +145,23 @@ impl PersistError {
 pub enum TellError {
     #[error("process send error: {0}")]
     Send(#[from] nitinol_runtime::error::SendError),
+    /// The aggregate could not be activated, so the command was not accepted
+    /// for delivery.
+    #[error("the aggregate could not be activated: {0}")]
+    Activation(MissingSnapshotSlot),
+}
+
+impl TellError {
+    /// Whether re-telling the command is worth attempting.
+    ///
+    /// The same reading [`AskError::retryability`] gives the failures the two
+    /// share.
+    pub fn retryability(&self) -> Retryability {
+        match self {
+            TellError::Send(_) => Retryability::Transient,
+            TellError::Activation(_) => Retryability::Permanent,
+        }
+    }
 }
 
 /// Error returned by `AggregateProxy::exec`.
@@ -125,12 +171,52 @@ pub enum ExecError<E: std::error::Error + Send + Sync + 'static> {
     Domain(E),
     #[error("process send error: {0}")]
     Send(nitinol_runtime::error::SendError),
+    /// The aggregate could not be activated, so there is no state to ask.
+    #[error("the aggregate could not be activated: {0}")]
+    Activation(MissingSnapshotSlot),
+}
+
+/// Error returned by `AggregateProxy::snapshot`.
+///
+/// Only [`Encode`](Self::Encode) and [`Activation`](Self::Activation) say that
+/// nothing was handed to the persistor: the aggregate is activated and its
+/// snapshot encoded before it is saved. The other variants report what the
+/// caller was told, not what the store holds.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotSaveError {
+    /// The codec the aggregate names could not write its captured state.
+    /// Nothing was handed to the persistor.
+    #[error("encoding the snapshot failed: {0}")]
+    Encode(CodecError),
+    /// The system's snapshot persistor reported an error while saving the
+    /// snapshot. What the store holds after that is the store's to say.
+    #[error("saving the snapshot failed: {0}")]
+    Persist(SnapshotError),
+    /// No answer to the snapshot request came back from an activation.
+    #[error("process send error: {0}")]
+    Send(nitinol_runtime::error::SendError),
+    /// The aggregate could not be activated, so there is no state to capture.
+    /// Nothing was handed to the persistor.
+    #[error("the aggregate could not be activated: {0}")]
+    Activation(MissingSnapshotSlot),
+}
+
+/// Internal error produced by `AggregateProcess::recv` for snapshot requests.
+///
+/// Carried to the caller as [`SnapshotSaveError`] by the `From` below.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotHandlerError {
+    #[error("encode: {0}")]
+    Encode(CodecError),
+    #[error("persist: {0}")]
+    Persist(SnapshotError),
 }
 
 /// Internal error produced by `AggregateProcess::recv` for command messages.
 ///
-/// Mapped variant-for-variant to `AskError<R>` by `AggregateProxy`, which adds
-/// only the failures it can observe itself.
+/// Carried to the caller as [`AskError`], variant for variant, by the `From`
+/// below; the failures the reference boundary can observe itself are the ones
+/// that conversion adds.
 #[derive(Debug, thiserror::Error)]
 pub enum AskHandlerError<R: std::error::Error + Send + Sync + 'static> {
     #[error("rejection: {0}")]
@@ -143,9 +229,92 @@ pub enum AskHandlerError<R: std::error::Error + Send + Sync + 'static> {
 
 /// Internal error produced by `AggregateProcess::recv` for query messages.
 ///
-/// Mapped to `ExecError<E>` by `AggregateProxy`.
+/// Carried to the caller as [`ExecError`] by the `From` below.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecHandlerError<E: std::error::Error + Send + Sync + 'static> {
     #[error("domain error: {0}")]
     Domain(E),
 }
+
+/// What an activation's answer to a command becomes at the reference boundary.
+///
+/// The handler's verdict keeps its meaning, and every way the dispatch could
+/// fail to arrive collapses to [`AskError::Send`]: nothing was decided, because
+/// the command reached no aggregate that could judge it. Which way it failed to
+/// arrive is the runtime's to report; what this layer says is only that no
+/// verdict exists.
+impl<R> From<nitinol_runtime::error::AskError<AskHandlerError<R>>> for AskError<R>
+where
+    R: std::error::Error + Send + Sync + 'static,
+{
+    fn from(e: nitinol_runtime::error::AskError<AskHandlerError<R>>) -> Self {
+        match e {
+            nitinol_runtime::error::AskError::Handler(h) => match h {
+                AskHandlerError::Rejection(r) => AskError::Rejection(r),
+                AskHandlerError::AlreadyCreated => AskError::AlreadyCreated,
+                AskHandlerError::Persist(e) => AskError::Persist(e),
+            },
+            nitinol_runtime::error::AskError::DeadLetter { .. }
+            | nitinol_runtime::error::AskError::ReplyDropped
+            | nitinol_runtime::error::AskError::Timeout { .. } => {
+                AskError::Send(nitinol_runtime::error::SendError)
+            }
+        }
+    }
+}
+
+/// What an activation's answer to a query becomes at the reference boundary.
+///
+/// The query surface's counterpart of the conversion above, and the same
+/// reading of an undelivered dispatch.
+impl<E> From<nitinol_runtime::error::AskError<ExecHandlerError<E>>> for ExecError<E>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    fn from(e: nitinol_runtime::error::AskError<ExecHandlerError<E>>) -> Self {
+        match e {
+            nitinol_runtime::error::AskError::Handler(h) => match h {
+                ExecHandlerError::Domain(e) => ExecError::Domain(e),
+            },
+            nitinol_runtime::error::AskError::DeadLetter { .. }
+            | nitinol_runtime::error::AskError::ReplyDropped
+            | nitinol_runtime::error::AskError::Timeout { .. } => {
+                ExecError::Send(nitinol_runtime::error::SendError)
+            }
+        }
+    }
+}
+
+/// What an activation's answer to a snapshot request becomes at the reference
+/// boundary.
+///
+/// The same reading of an undelivered dispatch as the conversions above.
+impl From<nitinol_runtime::error::AskError<SnapshotHandlerError>> for SnapshotSaveError {
+    fn from(e: nitinol_runtime::error::AskError<SnapshotHandlerError>) -> Self {
+        match e {
+            nitinol_runtime::error::AskError::Handler(h) => match h {
+                SnapshotHandlerError::Encode(e) => SnapshotSaveError::Encode(e),
+                SnapshotHandlerError::Persist(e) => SnapshotSaveError::Persist(e),
+            },
+            nitinol_runtime::error::AskError::DeadLetter { .. }
+            | nitinol_runtime::error::AskError::ReplyDropped
+            | nitinol_runtime::error::AskError::Timeout { .. } => {
+                SnapshotSaveError::Send(nitinol_runtime::error::SendError)
+            }
+        }
+    }
+}
+
+/// Internal error produced by `ProjectorProcess::recv` when no event of a
+/// batch settled.
+///
+/// Returning this error value from the handler is how the projector's poller
+/// (via `ask()`) is told not to advance the subscription cursor at all: a batch
+/// the projector could not apply any of is redelivered from its first event on
+/// the next poll rather than overtaken by the events behind it and lost. A
+/// batch that settled part-way is answered with how far it got instead.  The
+/// cause is already reported by the delivery engine at the stage that failed,
+/// so this type carries no payload of its own.
+#[derive(Debug, thiserror::Error)]
+#[error("event application did not settle; the event must not be treated as processed")]
+pub struct ProjectionNotSettled;

@@ -1,13 +1,12 @@
 mod instance;
 mod interpreter;
-mod manager;
+pub(crate) mod manager;
+mod manager_offsets;
 mod manager_props;
-mod outbox_executor;
-mod props;
 mod proxy;
 mod replay;
 pub(crate) mod saga_process;
+mod source_partition;
 
-pub use self::manager_props::SagaManagerProps;
-pub use self::props::{CodecSet, CodecUnset, SagaProps, SubscriptionSet, SubscriptionUnset};
-pub use self::proxy::{SagaManagerProxy, SagaProxy};
+pub use self::manager_props::{SagaHosted, SagaManagerProps};
+pub use self::proxy::{SagaHostProxy, SagaManagerProxy};

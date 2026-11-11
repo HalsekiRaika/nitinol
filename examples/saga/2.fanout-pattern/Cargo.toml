@@ -6,12 +6,20 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Official fan-out pattern: one fact event, saga manager delivery, idempotent child creation"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [[bin]]
 name = "saga-fanout-pattern"
 path = "src/main.rs"
 
 [dependencies]
+# The code `#[derive(SagaSubscribe)]` writes names the framework through the
+# umbrella crate, as `#[derive(Event)]` does, so a crate that declares a saga
+# alphabet has to resolve that path.
+nitinol = { path = "../../..", features = ["saga"] }
 nitinol-saga = { path = "../../../nitinol-saga" }
 nitinol-eventsource = { path = "../../../nitinol-eventsource" }
 nitinol-persistence = { path = "../../../nitinol-persistence" }
@@ -24,3 +32,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 
 [dev-dependencies]
 futures-util = "0.3"
+
+[lints]
+workspace = true

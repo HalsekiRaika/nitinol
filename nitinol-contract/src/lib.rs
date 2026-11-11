@@ -3,23 +3,39 @@
 //! | Item | Purpose |
 //! |---|---|
 //! | [`Event`] | Marker for domain events; carries their persisted identity |
+//! | [`Codec`] | The format a domain value is written to and read back from |
 //! | [`Aggregate`] | Domain state holder; evolves state by applying events |
 //! | [`Snapshotable`] | Opt-in snapshot support for faster replay |
+//! | [`Recovery`] | What [`Aggregate::Recover`] may name: [`Never`] or [`Latest`] |
 //! | [`Decider`] | Decides what a command means for the current state |
 //! | [`Decision`] | A decider's conclusion: facts and an answer, or a refusal |
 //! | [`Query`] | Asks the current state a question |
+//! | [`EventType`], [`Family`], [`TypeName`] | The identity an event declares: its family and its type name |
+//! | [`MaterializedPath`], [`ParsedEventType`], [`MaterializedPathParseError`] | The canonical path an identity is written down as, and how it is read back |
+//! | [`EventRegistryEntry`] | How a declaration tells the machinery the path it is written down as |
+//! | [`RESERVED_NAMESPACE`], [`is_within_reserved_namespace`] | The names the framework keeps for its own records |
 //!
 //! Every one of them is pure: no I/O, no `async`, and therefore no async
-//! runtime. They live here rather than in `nitinol-eventsource` so that a
-//! domain-layer crate can define and property-test its aggregates, decisions
-//! and queries against the framework's contract without taking on the execution
-//! machinery — or Tokio — that runs them. `nitinol-eventsource` re-exports all
-//! of them, so the framework-side paths are unchanged.
+//! runtime. The identity types are plain values — `&'static str` and owned
+//! strings — so naming an event depends on nothing a store or a runtime brings.
+//! They live here rather than in `nitinol-eventsource` or
+//! `nitinol-persistence` so that a domain-layer crate can define and
+//! property-test its events, aggregates, decisions and queries against the
+//! framework's contract without taking on the execution machinery — or Tokio —
+//! that runs them. `nitinol-eventsource` re-exports the traits and
+//! `nitinol-persistence` re-exports the identity types, so the framework-side
+//! paths are unchanged.
 //!
-//! The execution-side abstractions — the aggregate activation, `Codec`, the
-//! projection layer, the error families — are deliberately *not* here: they
-//! describe how the runtime drives an aggregate, not what an aggregate is or
-//! what it decides.
+//! [`Codec`] is here for the same reason: [`Event`] and [`Snapshotable`] each
+//! *name* the codec that writes their values down, so stating a format is part
+//! of defining a domain type rather than part of wiring one up. What a failure
+//! of that codec means to an interpreter — how it is classified, whether it is
+//! worth retrying — stays in `nitinol-eventsource`, which is where the failure
+//! is observed.
+//!
+//! The execution-side abstractions — the aggregate activation, the projection
+//! layer, the error families — are deliberately *not* here: they describe how
+//! the runtime drives an aggregate, not what an aggregate is or what it decides.
 //!
 //! # Laws
 //!
@@ -88,6 +104,54 @@
 //!   the machinery passed in. Fixed by
 //!   `the_holder_is_a_domain_fact_and_not_the_stream_key`.
 //!
+//! ## Event identity
+//!
+//! Laws ID-1 to ID-4 are what a domain promises the machinery about the names
+//! its events are written down under. No conformance suite fixes them —
+//! neither `nitinol-conformance` nor `nitinol-store-conformance` — since no
+//! interpreter and no store is involved: a broken promise is refused while the
+//! constant naming it is evaluated, and the tests of this crate fix the rest. Where the machinery enforces the promise, the test
+//! named is that of the crate enforcing it.
+//!
+//! - **ID-1** — one declaration is written down under one canonical path. The
+//!   path is the family's segments followed by the type name, and a type name
+//!   is a single segment, so the last segment reads as the type name and every
+//!   segment before it as the family, with no other reading
+//!   ([`EventType`], [`Family::new`], [`TypeName::new`],
+//!   [`ParsedEventType::from_path`]). Which arm of an enum a row holds is the
+//!   payload's to say; the column names the declaration. Fixed by
+//!   `one_canonical_path_decomposes_into_one_pair_of_components`,
+//!   `a_canonical_path_is_the_family_segments_followed_by_the_type_name_alone`
+//!   and `type_name_with_dot_panics`.
+//! - **ID-2** — an [`EventType`]'s `Display` and `to_path().to_string()` are the
+//!   same string, and it round-trips through `parse::<MaterializedPath>()` and
+//!   [`ParsedEventType::from_path`]. That string is the only encoding both
+//!   sides of the column agree on. Fixed by
+//!   `path_canonical_string_equals_event_type_display`,
+//!   `event_type_round_trips_as_materialized_path` and
+//!   `parsed_event_type_round_trips_every_shape`.
+//! - **ID-3** — one canonical path is claimed by one declaration. A
+//!   declaration tells the machinery its path as an [`EventRegistryEntry`], and
+//!   the machinery gathers the entries to restore a row's declaration from the
+//!   path the row carries. Two declarations claiming one path fail the build.
+//!   The contract states the obligation; the machinery enforces it, with an
+//!   exported symbol per path and with the registry it builds. Fixed by
+//!   `nitinol-persistence`'s
+//!   `a_canonical_path_two_declarations_claim_fails_the_build_and_names_both`
+//!   and `nitinol-macros`' `duplicate_canonical_path` compile-fail case.
+//! - **ID-4** — `nitinol` and every name beneath it belong to the framework: a
+//!   domain names neither an event family nor a stream key there
+//!   ([`RESERVED_NAMESPACE`], [`is_within_reserved_namespace`]). The one law
+//!   has two enforcement points, each placed with the side that knows the name:
+//!   a family is refused by [`Family::new`] and [`EventRegistryEntry::new`]
+//!   while the constant holding it is evaluated, here, and a stream key is
+//!   refused by `reject_reserved_id` when the identifier is constructed, in
+//!   `nitinol-persistence`. Fixed by
+//!   `family_new_refuses_a_family_inside_the_reserved_namespace` and
+//!   `event_registry_entry_new_refuses_an_event_type_of_a_reserved_family`
+//!   here, and by `nitinol-persistence`'s
+//!   `aggregate_id_refuses_a_name_inside_the_reserved_namespace`.
+//!
 //! # One home for the contract
 //!
 //! [`Decider`] is the only decision contract in the framework. The effectful
@@ -104,13 +168,48 @@
 //! plausible homes for every future contract.
 
 mod aggregate;
+mod codec;
 mod decider;
 mod decision;
 mod event;
+mod event_registry_entry;
+mod event_type;
+mod materialized_path;
 mod query;
+mod recover;
+
+/// The way the framework's own records carry the names the framework reserved,
+/// and nothing a user writes.
+///
+/// [`Family::new`] and [`EventRegistryEntry::new`] refuse the `nitinol`
+/// namespace, which is the point of reserving it. The framework persists
+/// records under exactly those names, so it needs constructors that waive the
+/// namespace rule — and only that rule. They are here because they build the
+/// identity types with access no other crate has; `nitinol-persistence`
+/// re-exports them beside the registry machinery the framework reaches them
+/// with.
+///
+/// No stability is promised for anything below.
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::event_registry_entry::reserved_event_registry_entry;
+    pub use crate::event_type::reserved_family;
+}
 
 pub use self::aggregate::{Aggregate, Snapshotable};
+pub use self::codec::Codec;
 pub use self::decider::Decider;
 pub use self::decision::{Accepting, Decision};
 pub use self::event::Event;
+pub use self::event_registry_entry::EventRegistryEntry;
+pub use self::event_type::{
+    is_within_reserved_namespace, EventType, Family, ParsedEventType, TypeName, RESERVED_NAMESPACE,
+};
+pub use self::materialized_path::{MaterializedPath, MaterializedPathParseError};
+// The declaration a stored `event_type` is matched against.  Hidden and not
+// re-exported through the umbrella crate: a domain type is covered by
+// declaring `Event`, and the framework's own records declare it by hand.
+#[doc(hidden)]
+pub use self::event::{DeclaresEventType, MatchesEventType};
 pub use self::query::Query;
+pub use self::recover::{Latest, Never, RecoverPolicy, Recovery};

@@ -6,6 +6,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Snapshotable aggregate example showing snapshot save and restore"
+publish = false
+
+[package.metadata.release]
+release = false
 
 [lib]
 name = "eventsource_snapshot"
@@ -25,4 +29,6 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-jiff = "0.2"
+
+[lints]
+workspace = true

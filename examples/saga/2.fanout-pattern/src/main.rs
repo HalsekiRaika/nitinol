@@ -1,28 +1,45 @@
 //! Runnable demonstration of the pattern this crate exists to show:
-//! `ApprovePayrollRun` -> one fact event -> saga manager delivery -> 32
-//! idempotent payslip issues.
+//! `ApprovePayrollRun` -> one fact event -> one saga decision -> a delivery host
+//! -> 32 idempotent payslip issues.
 //!
 //! The wiring mirrors what `tests/common/helpers.rs` builds for the
 //! integration tests; this binary demonstrates it end to end with a
 //! self-verifying assertion, in the same shape as
 //! `examples/saga/1.basic-saga/src/main.rs`.
+//!
+//! Three processes do the work, and it is worth naming them separately because
+//! they fail and restart independently:
+//!
+//! * the **payroll run aggregate**, which records the approval;
+//! * the **saga manager**, which subscribes to that record and has one
+//!   `FanOutSaga` instance persist the fan-out decision;
+//! * the **delivery host**, which polls the saga's decisions, asks
+//!   `FanOutSaga::dispatch` what each one implies, and delivers the 32 commands.
+//!
+//! Only the first two existed in the push-based model; the third is what carries
+//! a decision to its targets now, and what keeps the record of how far it got.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
-use nitinol_saga::SagaDefaultStoreExt;
+use nitinol_saga::{SagaSystemExt, Subscription};
 
-use saga_fanout_pattern::codec::JsonCodec;
-use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun};
+use saga_fanout_pattern::payroll_run::{ApprovePayrollRun, PayrollRun, PayrollRunApproved};
 use saga_fanout_pattern::payslip::{IsIssued, Payslip};
 use saga_fanout_pattern::saga::FanOutSaga;
 
 /// Fan-out width the pattern is built around: one approval covers 32 employees.
 const EMPLOYEE_COUNT: usize = 32;
+
+/// How often the delivery host asks the store what the sagas have decided.
+///
+/// Short, because this binary is waiting on it; a deployment trades latency for
+/// load on the store here and the framework cannot know which way.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 fn employee_ids() -> Vec<String> {
     (0..EMPLOYEE_COUNT)
@@ -34,14 +51,17 @@ fn employee_ids() -> Vec<String> {
 async fn main() {
     let ps = ProcessSystem::new().await;
 
-    // One store for the whole example.  `EventStore` is stream-keyed, so the
+    // One supplier for the whole example.  `EventStore` is stream-keyed, so the
     // payroll run's stream, the 32 payslip streams and the saga's journal are
-    // tenants of this one instance; the manager's subscription below is what
-    // narrows it back down to the run's stream.
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // tenants of the one journal it supplies; the manager's subscription below
+    // is what narrows it back down to the run's stream.
+    //
+    // `InMemoryStore` supplies every slot, the saga-offset one included: that
+    // is where the host records how far it has finished, and a supplier holding
+    // it is what makes `host` below exist at all.  A store without that slot is
+    // a compile error at the wiring rather than a failure at the first save.
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(store)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let run_id = AggregateId::new("payroll-run-april");
@@ -49,23 +69,29 @@ async fn main() {
 
     let payroll_run = system.spawn_aggregate::<PayrollRun>(run_id.clone()).await;
 
-    // The system is itself the shared handle, so the producer and the
-    // crash-restart factory each take a clone of it rather than a shared
-    // wrapper around it.
-    let system_for_producer = system.clone();
-    let system_for_factory = system.clone();
-
-    // The manager, not `spawn_saga`, is what turns a subscription into one saga
-    // instance per correlation key, spawning it on the first event that
-    // correlates to it.
-    let _manager = system
-        .saga_manager_props(system.subscription(&run_id), move || {
-            FanOutSaga::new(system_for_producer.clone())
-        })
-        .with_crash_restart_factory(move |payload: &[u8]| {
-            FanOutSaga::crash_restart_intent(&system_for_factory, payload)
-        })
-        .spawn(system.process_system())
+    // `host` turns a subscription into one saga instance per correlation key,
+    // spawning it on the first event that correlates to it.  One `observing`
+    // call per source the saga's alphabet declares — here the run's stream,
+    // read as `PayrollRunApproved` — and `spawn` exists only once every
+    // declared source has one.
+    //
+    // The factory ignores what it is handed: a saga that only persists its own
+    // decisions needs no reference to anything, since addressing the children is
+    // a pure function of the decision and resolving them is the host's work.
+    //
+    // The same declaration starts the delivery host, because a fan-out nobody
+    // carries out issues no payslip.  That host subscribes across *every*
+    // instance of `FanOutSaga` by the event type the saga declares — not to one
+    // stream — because what it consumes is "the decisions of this saga type",
+    // wherever they were made and whichever incarnation made them.  No store is
+    // named for it either: the journal it reads and the slot it records progress
+    // in both come from the system's own supplier, and only its cadence is this
+    // deployment's to choose.
+    let _host = system
+        .host::<FanOutSaga>(|_components| FanOutSaga)
+        .observing::<PayrollRunApproved>(Subscription::stream(&run_id))
+        .with_delivery_poll_interval(POLL_INTERVAL)
+        .spawn()
         .await;
 
     payroll_run

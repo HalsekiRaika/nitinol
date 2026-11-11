@@ -1,0 +1,5 @@
+error: #[derive(SagaSubscribe)] requires at least one external source variant
+  --> tests/ui/fail/saga_subscribe_no_external_source.rs:11:6
+   |
+11 | enum Observed {
+   |      ^^^^^^^^

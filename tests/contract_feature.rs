@@ -1,28 +1,79 @@
-//! Acceptance scenario "tokio 非依存の契約層 / tokio-free 構成での利用":
+//! Acceptance scenario "a contract layer that does not depend on tokio / use
+//! in a tokio-free configuration":
 //! with `nitinol = { features = ["contract"] }` alone, `#[derive(Event)]`,
 //! `Aggregate`, `Snapshotable`, `Decider` and `Query` must be usable and
 //! behave as specified.
 //!
-//! Everything here is reached through `nitinol::contract` and
-//! `nitinol::persistence` only. Referring to `nitinol::eventsource` or
+//! Everything here is reached through `nitinol::contract` only — the event
+//! identity types included, since they are part of the contract a domain
+//! writes against. Referring to `nitinol::eventsource` or
 //! `nitinol::runtime` would make the file compile only in a Tokio-bearing
 //! configuration and would silently void the scenario.
 //!
 //! Run with: `cargo test -p nitinol --no-default-features --features contract`.
 #![cfg(feature = "contract")]
 
-use nitinol::contract::{Accepting, Aggregate, Decider, Decision, Event, Query, Snapshotable};
-use nitinol::persistence::{EventType, Family, TypeName, Variant};
+use bytes::Bytes;
+use nitinol::contract::{
+    Accepting, Aggregate, Codec, Decider, Decision, Event, EventType, Family, Latest, Query,
+    Snapshotable, TypeName,
+};
 
 #[derive(Clone, Event)]
-#[event(family = "shop.orders")]
+#[event(family = "shop.orders", codec = PlacedCodec)]
 struct Placed;
 
+struct PlacedCodec;
+
+impl Codec<Placed> for PlacedCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &Placed) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<Placed, Self::Error> {
+        Ok(Placed)
+    }
+}
+
 #[derive(Clone, Event)]
-#[event(family = "shop.counter")]
+#[event(family = "shop.counter", codec = CounterEventCodec)]
 enum CounterEvent {
     Incremented,
     Decremented,
+}
+
+struct CounterEventCodec;
+
+impl Codec<CounterEvent> for CounterEventCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(_event: &CounterEvent) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::new())
+    }
+
+    fn decode(_payload: &[u8]) -> Result<CounterEvent, Self::Error> {
+        Ok(CounterEvent::Incremented)
+    }
+}
+
+/// The snapshot value is its own format, named by `Snapshotable::Codec`.
+struct CounterSnapshotCodec;
+
+impl Codec<i64> for CounterSnapshotCodec {
+    type Error = std::convert::Infallible;
+
+    fn encode(value: &i64) -> Result<Bytes, Self::Error> {
+        Ok(Bytes::from(value.to_be_bytes().to_vec()))
+    }
+
+    fn decode(payload: &[u8]) -> Result<i64, Self::Error> {
+        let mut buf = [0u8; 8];
+        let taken = payload.len().min(8);
+        buf[..taken].copy_from_slice(&payload[..taken]);
+        Ok(i64::from_be_bytes(buf))
+    }
 }
 
 #[derive(Default)]
@@ -32,6 +83,7 @@ struct Counter {
 
 impl Aggregate for Counter {
     type Event = CounterEvent;
+    type Recover = Latest;
 
     fn apply(&mut self, event: CounterEvent) {
         match event {
@@ -43,12 +95,13 @@ impl Aggregate for Counter {
 
 impl Snapshotable for Counter {
     type Snapshot = i64;
+    type Codec = CounterSnapshotCodec;
 
     fn capture(&self) -> i64 {
         self.value
     }
 
-    fn restore(snapshot: i64) -> Self {
+    fn recover(snapshot: i64) -> Self {
         Counter { value: snapshot }
     }
 }
@@ -81,38 +134,31 @@ impl Query<CurrentValue> for Counter {
 }
 
 /// Given a struct deriving `Event` in a `contract`-only build, When its
-/// `EVENT_TYPE` is read and `variant()` is called, Then the derive resolves the
-/// trait through the contract path and the value-level identity falls back to
-/// the trait's default (type-level, variant `None`).
+/// `EVENT_TYPE` is read, Then the derive resolved the trait through the
+/// contract path and wrote the identity the attribute named.
 #[test]
 fn derived_struct_event_is_usable_through_the_contract_facade() {
     assert_eq!(
         Placed::EVENT_TYPE,
         EventType::new(Family::new("shop.orders"), TypeName::new("Placed")),
     );
-    assert_eq!(Placed.variant(), Placed::EVENT_TYPE);
-    assert_eq!(Placed.variant().variant(), None);
 }
 
-/// Given an enum deriving `Event` in a `contract`-only build, When `variant()`
-/// is called on an arm, Then the generated match names that arm — proving the
-/// generated `::nitinol::persistence::{EventType, Family, TypeName, Variant}`
+/// Given an enum deriving `Event` in a `contract`-only build, When its
+/// `EVENT_TYPE` is read, Then it is the identity named after the enum — proving
+/// the generated `::nitinol::contract::{EventType, Family, TypeName}`
 /// references resolve without the `eventsource` feature.
 #[test]
-fn derived_enum_event_names_the_active_arm() {
+fn derived_enum_event_is_usable_through_the_contract_facade() {
     assert_eq!(
-        CounterEvent::Incremented.variant(),
-        EventType::with_variant(
-            Family::new("shop.counter"),
-            TypeName::new("CounterEvent"),
-            Variant::new("Incremented"),
-        ),
+        CounterEvent::EVENT_TYPE,
+        EventType::new(Family::new("shop.counter"), TypeName::new("CounterEvent")),
     );
     assert_eq!(
-        CounterEvent::Decremented.variant().variant(),
-        Some(Variant::new("Decremented")),
+        CounterEvent::EVENT_TYPE.to_path().to_string(),
+        "shop.counter.CounterEvent",
+        "every arm of the enum is written down under this one path"
     );
-    assert_eq!(CounterEvent::EVENT_TYPE.variant(), None);
 }
 
 /// Given an aggregate implemented against `nitinol::contract::Aggregate`, When
@@ -142,7 +188,7 @@ fn snapshot_capture_and_restore_round_trips() {
     let snapshot = counter.capture();
     assert_eq!(snapshot, 2);
 
-    let mut restored = Counter::restore(snapshot);
+    let mut restored = Counter::recover(snapshot);
     assert_eq!(restored.value, 2);
 
     restored.apply(CounterEvent::Decremented);
@@ -162,4 +208,34 @@ fn decider_and_query_are_usable_through_the_contract_facade() {
     assert!(matches!(decision, Decision::Accept { output: 1, .. }));
 
     assert_eq!(counter.query(CurrentValue), Ok(0));
+}
+
+/// Given a `contract`-only build, When the rest of the identity contract is
+/// named through the facade, Then it is there: the owned path and its
+/// decomposition, the parse refusal, the entry a declaration tells the
+/// machinery its path with, and the reserved-namespace rule.
+#[test]
+fn the_identity_contract_is_reachable_through_the_contract_facade() {
+    use nitinol::contract::{
+        is_within_reserved_namespace, EventRegistryEntry, MaterializedPath,
+        MaterializedPathParseError, ParsedEventType, RESERVED_NAMESPACE,
+    };
+
+    static DECLARED: &[EventType] = &[EventType::new(
+        Family::new("shop.orders"),
+        TypeName::new("Placed"),
+    )];
+    let entry = EventRegistryEntry::new("contract_feature::Placed", DECLARED);
+    assert_eq!(entry.event_types(), DECLARED);
+
+    let path: MaterializedPath = Placed::EVENT_TYPE.to_path();
+    let parsed = ParsedEventType::from_path(path);
+    assert_eq!(parsed, ParsedEventType::from(Placed::EVENT_TYPE));
+
+    assert!(matches!(
+        "".parse::<MaterializedPath>(),
+        Err(MaterializedPathParseError::Empty)
+    ));
+
+    assert!(is_within_reserved_namespace(RESERVED_NAMESPACE));
 }

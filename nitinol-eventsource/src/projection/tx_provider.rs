@@ -4,12 +4,40 @@ use async_trait::async_trait;
 ///
 /// Wiring a `TxProvider` into a projector via
 /// [`crate::ProjectorProps::with_tx_provider`] fixes the delivery mode to
-/// `ExactlyOnce`. For each event the projector process calls [`begin`] to
-/// get a transaction, runs [`crate::Projector::project`] against that
-/// transaction, saves the checkpoint inside the same transaction, then calls
-/// [`commit`]. If `project` or the checkpoint save fails, the transaction is
-/// handed to [`rollback`] and the checkpoint is not advanced, so the same
-/// event will be redelivered on the next attempt.
+/// `ExactlyOnce`. The projector applies what each read of its journal returned
+/// as one batch: it calls [`begin`] once to get a transaction, runs
+/// [`crate::Projector::project`] for every record of the batch against that
+/// one transaction, saves the offset at the batch's end inside it, then calls
+/// [`commit`] once. If [`begin`], any `project` or the offset save fails, the
+/// whole batch is left unapplied: the transaction is handed to [`rollback`],
+/// the offset is not advanced, and the subscription cursor stays put so the
+/// batch is redelivered from its first record on the next poll. Records after
+/// the failing one are not projected. A batch whose every record is skipped —
+/// already applied, or of a type the projector does not follow — opens no
+/// transaction at all.
+///
+/// How many records a batch holds at most is
+/// [`crate::ProjectorProps::with_batch_limit`], so that is also the most one
+/// transaction carries. While a projector is caught up, records reach it about
+/// as fast as they are appended and a batch is often a single record.
+///
+/// # A failed `commit` is treated as uncommitted
+///
+/// [`commit`] answers with a single `Err`, and it has already consumed the
+/// transaction.  Two different situations therefore arrive here as the same
+/// value: a commit the backend rejected and rolled back, and a commit whose
+/// outcome never came back — a connection lost after the statement was sent,
+/// where the transaction may well have landed.  The framework cannot tell them
+/// apart, and there is nothing left to hand to [`rollback`].
+///
+/// Both are treated as **not committed**: the offset stays where it was and
+/// the batch is redelivered.  The alternative — assuming the commit landed —
+/// loses the batch permanently whenever it did not.  The cost is that an
+/// `ExactlyOnce` projector degrades to at-least-once across an unknown commit:
+/// if the transaction did commit, every record of the redelivered batch is
+/// applied a second time.  Implementations that can tell a rejected commit from an unknown one,
+/// and that can settle the unknown case themselves (by retrying or querying the
+/// backend inside [`commit`]), should do so rather than returning `Err`.
 ///
 /// [`begin`]: TxProvider::begin
 /// [`commit`]: TxProvider::commit

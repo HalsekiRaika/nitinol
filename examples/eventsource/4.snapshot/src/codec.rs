@@ -2,6 +2,10 @@
 //!
 //! - `EventCodec`: pass-through codec for `Incremented` (no payload needed)
 //! - `SnapshotCodec`: big-endian u64 encoding for the counter snapshot
+//!
+//! The two are independent, and each is named where the value it writes is
+//! defined: `Incremented` names `EventCodec` through `#[event(codec = ..)]`,
+//! and `Counter` names `SnapshotCodec` as `Snapshotable::Codec`.
 
 use bytes::Bytes;
 
@@ -10,7 +14,6 @@ use nitinol_eventsource::codec::Codec;
 use crate::counter::Incremented;
 
 /// Pass-through codec: `Incremented` carries no data, so encode/decode are no-ops.
-#[derive(Default)]
 pub struct EventCodec;
 
 impl Codec<Incremented> for EventCodec {
@@ -26,7 +29,6 @@ impl Codec<Incremented> for EventCodec {
 }
 
 /// Big-endian u64 codec for counter snapshots.
-#[derive(Default)]
 pub struct SnapshotCodec;
 
 #[derive(Debug, thiserror::Error)]

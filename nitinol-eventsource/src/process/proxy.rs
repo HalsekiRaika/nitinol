@@ -1,14 +1,13 @@
 use std::sync::{Arc, Mutex};
 
-use nitinol_contract::{Aggregate, Decider, Query};
+use nitinol_contract::{Aggregate, Decider, Latest, Query, Snapshotable};
 use nitinol_persistence::error::AppendError;
 use nitinol_persistence::AggregateId;
-use nitinol_runtime::error::AskError as RuntimeAskError;
 
 use crate::error::{
-    AskError, AskHandlerError, ExecError, ExecHandlerError, PersistError, TellError,
+    AskError, ExecError, MissingSnapshotSlot, PersistError, SnapshotSaveError, TellError,
 };
-use crate::process::aggregate_process::{AskCmd, ExecMsg, TellCmd};
+use crate::process::aggregate_process::{AskCmd, ExecMsg, SnapshotCmd, TellCmd};
 use crate::process::resolve::{AggregateResolver, Incarnation};
 
 /// A reference to an aggregate, addressed by identity rather than by activation.
@@ -31,13 +30,13 @@ use crate::process::resolve::{AggregateResolver, Incarnation};
 /// # One reference type
 ///
 /// This is the only reference type in the framework: there is no second "already
-/// running" handle to choose between.  What varies is how the reference was
-/// obtained, not what it means.
-///
-/// | Origin | Behaviour |
-/// |---|---|
-/// | [`EventSourceSystem`](crate::system::EventSourceSystem) — `spawn_aggregate`, `aggregate_props(..).spawn(..)`, `aggregate_proxy` | Resolves through the node's registry: at most one activation per key on this node, re-resolved after an activation dies |
-/// | [`AggregateProps::spawn`](crate::AggregateProps::spawn) built directly | Pinned to the activation that call started — an explicit lifecycle, not a resolve |
+/// running" handle to choose between, and no second way of reaching one.  Every
+/// entry point — [`EventSourceSystem::spawn_aggregate`](crate::system::EventSourceSystem::spawn_aggregate),
+/// [`aggregate_props(..).spawn()`](crate::system::EventSourceSystem::aggregate_props),
+/// [`aggregate_proxy`](crate::system::EventSourceSystem::aggregate_proxy) and
+/// [`AggregateProps::spawn`](crate::AggregateProps::spawn) on props built
+/// directly — resolves through the node's registry: at most one activation per
+/// key on this node, re-resolved after an activation dies.
 ///
 /// # Duplicate activations are normal
 ///
@@ -50,45 +49,89 @@ pub struct AggregateProxy<A: Aggregate> {
     /// [`AggregateTellTarget::aggregate_id`](crate::AggregateTellTarget::aggregate_id)
     /// can answer without resolving anything.
     aggregate_id: AggregateId,
-    binding: Arc<Binding<A>>,
+    /// The one [`Resolution`] this reference and its clones answer from.
+    ///
+    /// Another name for what it reaches rather than a copy of it, so a
+    /// reference is shared by cloning it.
+    resolution: Resolution<A>,
 }
 
-/// How a reference reaches an activation.
-enum Binding<A: Aggregate> {
-    /// The one activation an explicit `AggregateProps::spawn` started.
+/// One identity's resolver and the activation it last resolved to.
+///
+/// The cache is an optimisation, not the reference's meaning: emptying it costs
+/// a resolve, never a lost dispatch.
+///
+/// Cheap-clone, and a clone names the same resolver and the same cache: the
+/// death one clone of a reference observes is a death every clone is spared
+/// dispatching into, which is the whole of what the cache is for.
+struct Resolution<A: Aggregate> {
+    inner: Arc<ResolutionInner<A>>,
+}
+
+struct ResolutionInner<A: Aggregate> {
+    resolver: AggregateResolver<A>,
+    cached: Mutex<Option<Incarnation<A>>>,
+}
+
+impl<A: Aggregate> Clone for Resolution<A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<A: Aggregate> Resolution<A> {
+    fn new(resolver: AggregateResolver<A>) -> Self {
+        Self {
+            inner: Arc::new(ResolutionInner {
+                resolver,
+                cached: Mutex::new(None),
+            }),
+        }
+    }
+
+    /// The live activation of this identity, resolving one when the cache is
+    /// empty, or why this identity cannot be activated.
     ///
-    /// That call starts a lifecycle rather than resolving an identity, so its
-    /// reference stays with what it started and does not replace it.
-    Pinned(Incarnation<A>),
-    /// An identity, resolved on demand.
-    ///
-    /// The cache is an optimisation, not the reference's meaning: emptying it
-    /// costs a resolve, never a lost dispatch.
-    Resolved {
-        resolver: AggregateResolver<A>,
-        cached: Mutex<Option<Incarnation<A>>>,
-    },
+    /// A refusal is not cached: nothing was resolved, and the resolver answers
+    /// the same refusal on every call.
+    async fn incarnation(&self) -> Result<Incarnation<A>, MissingSnapshotSlot> {
+        let hit = self.inner.cached.lock().expect(CACHE_LOCK).clone();
+        if let Some(incarnation) = hit {
+            return Ok(incarnation);
+        }
+        // Two dispatches racing here both resolve, and the registry's single
+        // flight hands them the same activation.
+        let incarnation = self.inner.resolver.resolve().await?;
+        *self.inner.cached.lock().expect(CACHE_LOCK) = Some(incarnation.clone());
+        Ok(incarnation)
+    }
+
+    /// Report `dead` as gone, emptying the cache only while it is still the
+    /// activation the cache names.
+    fn invalidate(&self, dead: &Incarnation<A>) {
+        {
+            let mut cached = self.inner.cached.lock().expect(CACHE_LOCK);
+            if cached.as_ref().map(|live| live.pid()) == Some(dead.pid()) {
+                *cached = None;
+            }
+        }
+
+        self.inner.resolver.evict(dead.pid());
+    }
 }
 
 impl<A: Aggregate> Clone for AggregateProxy<A> {
     fn clone(&self) -> Self {
         Self {
             aggregate_id: self.aggregate_id.clone(),
-            binding: Arc::clone(&self.binding),
+            resolution: self.resolution.clone(),
         }
     }
 }
 
 impl<A: Aggregate> AggregateProxy<A> {
-    /// A reference bound to the activation `incarnation`, for the explicit
-    /// lifecycle path.
-    pub(crate) fn pinned(aggregate_id: AggregateId, incarnation: Incarnation<A>) -> Self {
-        Self {
-            aggregate_id,
-            binding: Arc::new(Binding::Pinned(incarnation)),
-        }
-    }
-
     /// A reference that resolves `aggregate_id` through the registry.
     ///
     /// Nothing is activated here; the first dispatch — or an explicit
@@ -96,17 +139,18 @@ impl<A: Aggregate> AggregateProxy<A> {
     pub(crate) fn resolved(aggregate_id: AggregateId, resolver: AggregateResolver<A>) -> Self {
         Self {
             aggregate_id,
-            binding: Arc::new(Binding::Resolved {
-                resolver,
-                cached: Mutex::new(None),
-            }),
+            resolution: Resolution::new(resolver),
         }
     }
 
     /// Resolve now, so an entry point that promises a running aggregate returns
     /// with one.
+    ///
+    /// An identity that cannot be activated returns with nothing started. The
+    /// refusal is not lost by being ignored here: the resolver keeps it, and
+    /// every dispatch through this reference answers with it.
     pub(crate) async fn activate(&self) {
-        self.incarnation().await;
+        let _ = self.incarnation().await;
     }
 
     /// The aggregate's stream key.
@@ -134,8 +178,8 @@ impl<A: Aggregate> AggregateProxy<A> {
         <A as Decider<C>>::Output: Send + 'static,
         <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
-        let incarnation = self.incarnation().await;
-        let outcome = incarnation.ask(AskCmd(cmd)).await.map_err(map_ask_error);
+        let incarnation = self.incarnation().await.map_err(AskError::Activation)?;
+        let outcome = incarnation.ask(AskCmd(cmd)).await.map_err(AskError::from);
         if signals_stopped_activation(&outcome) {
             self.invalidate(&incarnation);
         }
@@ -158,7 +202,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         C: Send + Sync + 'static,
         <A as Decider<C>>::Rejection: std::error::Error + Send + Sync + 'static,
     {
-        let incarnation = self.incarnation().await;
+        let incarnation = self.incarnation().await.map_err(TellError::Activation)?;
         let outcome = incarnation
             .tell(TellCmd(cmd))
             .await
@@ -182,30 +226,21 @@ impl<A: Aggregate> AggregateProxy<A> {
         <A as Query<M>>::Response: Send + 'static,
         <A as Query<M>>::Error: std::error::Error + Send + Sync + 'static,
     {
-        let incarnation = self.incarnation().await;
-        let outcome = incarnation.ask(ExecMsg(msg)).await.map_err(map_exec_error);
+        let incarnation = self.incarnation().await.map_err(ExecError::Activation)?;
+        let outcome = incarnation.ask(ExecMsg(msg)).await.map_err(ExecError::from);
         if matches!(outcome, Err(ExecError::Send(_))) {
             self.invalidate(&incarnation);
         }
         outcome
     }
 
-    /// The activation this dispatch goes to.
-    async fn incarnation(&self) -> Incarnation<A> {
-        match &*self.binding {
-            Binding::Pinned(incarnation) => incarnation.clone(),
-            Binding::Resolved { resolver, cached } => {
-                let hit = cached.lock().expect(CACHE_LOCK).clone();
-                if let Some(incarnation) = hit {
-                    return incarnation;
-                }
-                // Two dispatches racing here both resolve, and the registry's
-                // single flight hands them the same activation.
-                let incarnation = resolver.resolve().await;
-                *cached.lock().expect(CACHE_LOCK) = Some(incarnation.clone());
-                incarnation
-            }
-        }
+    /// The activation this dispatch goes to, or why there can be none.
+    ///
+    /// A refusal goes back to the caller without reaching
+    /// [`invalidate`][Self::invalidate]: nothing was activated, so there is no
+    /// activation to report as gone.
+    async fn incarnation(&self) -> Result<Incarnation<A>, MissingSnapshotSlot> {
+        self.resolution.incarnation().await
     }
 
     /// Treat `dead` as gone, so the next dispatch resolves a live activation.
@@ -218,18 +253,46 @@ impl<A: Aggregate> AggregateProxy<A> {
     /// learns the dispatch failed, and [`AskError::retryability`] tells it that
     /// retrying is worthwhile.
     fn invalidate(&self, dead: &Incarnation<A>) {
-        let Binding::Resolved { resolver, cached } = &*self.binding else {
-            return;
-        };
+        self.resolution.invalidate(dead);
+    }
+}
 
-        {
-            let mut cached = cached.lock().expect(CACHE_LOCK);
-            if cached.as_ref().map(|live| live.pid()) == Some(dead.pid()) {
-                *cached = None;
-            }
+impl<A> AggregateProxy<A>
+where
+    A: Aggregate<Recover = Latest> + Snapshotable,
+{
+    /// Capture the activation's state as a snapshot and save it at the
+    /// sequence the activation is at, answering that sequence.
+    ///
+    /// The caller supplies nothing. The activation captures its state with
+    /// [`Snapshotable::capture`], writes it with the codec the aggregate names
+    /// as [`Snapshotable::Codec`], and saves it through the one persistor its
+    /// system distributes — the one
+    /// [`EventSourceSystem::snapshot_persistor`](crate::system::EventSourceSystem::snapshot_persistor)
+    /// returns, and the one a later activation recovers from.
+    ///
+    /// The request goes through the activation's mailbox like any command, so
+    /// every command sent before it — told or asked — has been applied when the
+    /// state is captured, and the payload and the sequence describe the same
+    /// moment. An activation that has appended nothing is saved at sequence 0
+    /// like any other.
+    ///
+    /// Only an aggregate whose `Recover` marker is
+    /// [`Latest`](nitinol_contract::Latest) has this method: one that never
+    /// recovers from a snapshot has nothing that would read the save back.
+    pub async fn snapshot(&self) -> Result<u64, SnapshotSaveError> {
+        let incarnation = self
+            .incarnation()
+            .await
+            .map_err(SnapshotSaveError::Activation)?;
+        let outcome = incarnation
+            .ask(SnapshotCmd)
+            .await
+            .map_err(SnapshotSaveError::from);
+        if matches!(outcome, Err(SnapshotSaveError::Send(_))) {
+            self.invalidate(&incarnation);
         }
-
-        resolver.evict(dead.pid());
+        outcome
     }
 }
 
@@ -266,34 +329,90 @@ where
     )
 }
 
-// Error mappers
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use nitinol_contract::{Codec, Never};
+    use nitinol_persistence::provider::PersistenceProvider;
+    use nitinol_persistence::store::InMemoryStore;
+    use nitinol_persistence::{EventType, Family, TypeName};
+    use nitinol_runtime::ProcessSystem;
 
-fn map_ask_error<R>(e: RuntimeAskError<AskHandlerError<R>>) -> AskError<R>
-where
-    R: std::error::Error + Send + Sync + 'static,
-{
-    match e {
-        RuntimeAskError::Handler(h) => match h {
-            AskHandlerError::Rejection(r) => AskError::Rejection(r),
-            AskHandlerError::AlreadyCreated => AskError::AlreadyCreated,
-            AskHandlerError::Persist(e) => AskError::Persist(e),
-        },
-        RuntimeAskError::DeadLetter { .. }
-        | RuntimeAskError::ReplyDropped
-        | RuntimeAskError::Timeout { .. } => AskError::Send(nitinol_runtime::error::SendError),
+    use super::*;
+    use crate::process::props::AggregateProps;
+    use crate::system::EventSourceSystem;
+
+    struct BumpedCodec;
+
+    impl Codec<Bumped> for BumpedCodec {
+        type Error = std::convert::Infallible;
+
+        fn encode(_event: &Bumped) -> Result<Bytes, Self::Error> {
+            Ok(Bytes::new())
+        }
+
+        fn decode(_payload: &[u8]) -> Result<Bumped, Self::Error> {
+            Ok(Bumped)
+        }
     }
-}
 
-fn map_exec_error<E>(e: RuntimeAskError<ExecHandlerError<E>>) -> ExecError<E>
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    match e {
-        RuntimeAskError::Handler(h) => match h {
-            ExecHandlerError::Domain(e) => ExecError::Domain(e),
-        },
-        RuntimeAskError::DeadLetter { .. }
-        | RuntimeAskError::ReplyDropped
-        | RuntimeAskError::Timeout { .. } => ExecError::Send(nitinol_runtime::error::SendError),
+    #[derive(Clone, Debug, PartialEq)]
+    struct Bumped;
+
+    impl nitinol_contract::Event for Bumped {
+        const EVENT_TYPE: EventType =
+            EventType::new(Family::new("proxy.pid"), TypeName::new("Bumped"));
+        type Codec = BumpedCodec;
+    }
+
+    /// Carries no snapshot policy: this test only exercises which activation a
+    /// reference resolves to, not recovery.
+    #[derive(Default)]
+    struct Counted;
+
+    impl Aggregate for Counted {
+        type Event = Bumped;
+        type Recover = Never;
+
+        fn apply(&mut self, _event: Bumped) {}
+    }
+
+    /// Both entry points reach one activation, restated at the layer that owns
+    /// the pid.
+    ///
+    /// A reference does not expose a pid to its caller (see "Resolution is
+    /// silent about what it did" above), so
+    /// `nitinol-eventsource/tests/props_take_their_stores_from_the_system.rs`
+    /// observes the same clause from outside through the store's optimistic
+    /// concurrency rule. This module is the one place allowed to look past
+    /// that and compare pids directly, because it is where the resolution
+    /// cache they come from is defined.
+    #[tokio::test]
+    async fn both_entry_points_resolve_to_the_same_activation() {
+        let system: EventSourceSystem<InMemoryStore> =
+            EventSourceSystem::builder(ProcessSystem::new().await)
+                .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+                .build();
+        let id = AggregateId::new("proxy-pid-one-activation");
+
+        let via_props = AggregateProps::<Counted>::new(id.clone())
+            .spawn(&system)
+            .await;
+        let via_system = system.aggregate_props::<Counted>(id).spawn().await;
+
+        assert_eq!(
+            via_props
+                .incarnation()
+                .await
+                .expect("a `Never` aggregate is activated on any store")
+                .pid(),
+            via_system
+                .incarnation()
+                .await
+                .expect("a `Never` aggregate is activated on any store")
+                .pid(),
+            "the props-first and system-first entry points must resolve the \
+             same identity to one activation, not two"
+        );
     }
 }

@@ -3,23 +3,21 @@
 //! Demonstrates the minimal setup needed to run an event-sourced aggregate:
 //!
 //! 1. Create a `ProcessSystem`
-//! 2. Create an `InMemoryEventStore` and wrap it in `Arc<dyn EventStore>`
-//! 3. Build an `EventSourceSystem` with a codec and that store as its default
+//! 2. Assemble a `PersistenceProvider` over the in-memory stores
+//! 3. Build an `EventSourceSystem` on that provider
 //! 4. Spawn a `Counter` aggregate and call `ask`, `tell`, `exec`
 //!
 //! Run with:
 //!   cargo run -p eventsource-basic-aggregate
 
-use std::sync::Arc;
-
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
-use eventsource_basic_aggregate::codec::JsonCodec;
 use eventsource_basic_aggregate::counter::{GetCount, Increment};
 
 /// Aggregate type alias for brevity.
@@ -41,15 +39,16 @@ async fn main() {
     // 1. Create the runtime.
     let ps = ProcessSystem::new().await;
 
-    // 2. Create an in-memory event store.
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    // 2. Assemble the provider every store comes from.
+    let persistence = PersistenceProvider::new(InMemoryStore::default());
 
-    // 3. Wire codec and default store into the event-source system.  Every
-    //    aggregate spawned below persists onto that store unless it names
-    //    another one.
+    // 3. Build the event-source system on it.  Every aggregate spawned below
+    //    persists onto the journal that provider supplies — there is no
+    //    per-spawn store to name, and so no way to split the world in two.
+    //    There is no codec to wire either: `Incremented` names the one that
+    //    writes it.
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(store)
+        .with_persistence(persistence)
         .build();
 
     // 4. Spawn the aggregate process.

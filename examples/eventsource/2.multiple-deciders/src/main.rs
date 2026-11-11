@@ -7,16 +7,14 @@
 //! Run with:
 //!   cargo run -p eventsource-multiple-deciders
 
-use std::sync::Arc;
-
 use tracing::info;
 
 use nitinol_eventsource::system::EventSourceSystem;
-use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+use nitinol_persistence::provider::PersistenceProvider;
+use nitinol_persistence::store::InMemoryStore;
 use nitinol_persistence::AggregateId;
 use nitinol_runtime::ProcessSystem;
 
-use eventsource_multiple_deciders::codec::JsonCodec;
 use eventsource_multiple_deciders::wallet::{Deposit, GetBalance, Wallet, Withdraw};
 
 fn init_tracing() {
@@ -33,10 +31,8 @@ async fn main() {
     init_tracing();
 
     let ps = ProcessSystem::new().await;
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
     let system = EventSourceSystem::builder(ps)
-        .with_codec::<JsonCodec>()
-        .with_event_store(store)
+        .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
         .build();
 
     let proxy = system
