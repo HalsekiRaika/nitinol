@@ -25,6 +25,61 @@
 //!
 //! # Getting started
 //!
+//! Running a `Counter` aggregate on an in-memory store and asking it to
+//! `Increment`:
+//!
+//! ```
+//! # use std::convert::Infallible;
+//! # use bytes::Bytes;
+//! # use nitinol_eventsource::codec::Codec;
+//! # use nitinol_eventsource::system::EventSourceSystem;
+//! # use nitinol_eventsource::{Aggregate, AggregateProxy, Decider, Decision, Event, Never};
+//! # use nitinol_persistence::provider::PersistenceProvider;
+//! # use nitinol_persistence::store::InMemoryStore;
+//! # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+//! # use nitinol_runtime::ProcessSystem;
+//! # #[derive(Clone)]
+//! # struct Incremented;
+//! # struct IncrementedCodec;
+//! # impl Codec<Incremented> for IncrementedCodec {
+//! #     type Error = Infallible;
+//! #     fn encode(_: &Incremented) -> Result<Bytes, Infallible> { Ok(Bytes::new()) }
+//! #     fn decode(_: &[u8]) -> Result<Incremented, Infallible> { Ok(Incremented) }
+//! # }
+//! # impl Event for Incremented {
+//! #     const EVENT_TYPE: EventType =
+//! #         EventType::new(Family::new("counter"), TypeName::new("incremented"));
+//! #     type Codec = IncrementedCodec;
+//! # }
+//! # #[derive(Default)]
+//! # struct Counter { value: u64 }
+//! # impl Aggregate for Counter {
+//! #     type Event = Incremented;
+//! #     type Recover = Never;
+//! #     fn apply(&mut self, _: Incremented) { self.value += 1; }
+//! # }
+//! # struct Increment;
+//! # impl Decider<Increment> for Counter {
+//! #     type Output = u64;
+//! #     type Rejection = Infallible;
+//! #     fn decide(&self, _: Increment) -> Decision<Incremented, u64, Infallible> {
+//! #         Decision::persist(vec![Incremented]).output(self.value + 1)
+//! #     }
+//! # }
+//! # #[tokio::main]
+//! # async fn main() {
+//! let ps = ProcessSystem::new().await;
+//! let system = EventSourceSystem::builder(ps)
+//!     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+//!     .build();
+//!
+//! let counter: AggregateProxy<Counter> =
+//!     system.spawn_aggregate(AggregateId::new("counter-1")).await;
+//! let value = counter.ask(Increment).await.expect("ask failed");
+//! assert_eq!(value, 1);
+//! # }
+//! ```
+//!
 //! See the `examples/eventsource` directory for step-by-step examples:
 //!
 //! 1. `eventsource-basic-aggregate` – minimal counter aggregate

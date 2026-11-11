@@ -17,6 +17,34 @@
 //! use in tests and examples, and [`store::InMemoryStore`] is a whole store
 //! over it.  Neither is intended for production use.
 //!
+//! # Getting started
+//!
+//! Appending an event to a stream and loading the stream back:
+//!
+//! ```
+//! use bytes::Bytes;
+//! use futures_util::TryStreamExt;
+//! use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+//! use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let store = InMemoryEventStore::default();
+//!     let id = AggregateId::new("counter-1");
+//!     let event = AppendingEvent {
+//!         sequence: 1,
+//!         event_type: EventType::new(Family::new("counter"), TypeName::new("incremented")),
+//!         payload: Bytes::new(),
+//!         occurred_at: jiff::Timestamp::now(),
+//!     };
+//!
+//!     store.append(id.as_str(), vec![event]).await.expect("append failed");
+//!     let stream = store.load(LoadQuery::by_stream(&id)).await.expect("load failed");
+//!     let events: Vec<_> = stream.try_collect().await.expect("collect failed");
+//!     assert_eq!(events.len(), 1);
+//! }
+//! ```
+//!
 //! # Backends
 //!
 //! A backend implements [`store::EventStore`], [`store::SnapshotStore`] and

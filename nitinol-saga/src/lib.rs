@@ -12,6 +12,71 @@
 //! declares a deadline is started with a third part, its deadline index, which
 //! brings an instance back when one of its deadlines falls due.
 //!
+//! # Getting started
+//!
+//! A saga that observes the `OrderPlaced` events of one order stream, hosted on
+//! an [`EventSourceSystem`](nitinol_eventsource::system::EventSourceSystem):
+//!
+//! ```
+//! # use std::convert::Infallible;
+//! # use async_trait::async_trait;
+//! # use bytes::Bytes;
+//! # use nitinol_eventsource::{codec::Codec, system::EventSourceSystem, Event};
+//! # use nitinol_persistence::{provider::PersistenceProvider, store::InMemoryStore};
+//! # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+//! # use nitinol_runtime::ProcessSystem;
+//! # use nitinol_saga::{Saga, SagaContext, SagaEffect, SagaId, SagaSubscribe};
+//! # use nitinol_saga::{SagaSystemExt, Subscription};
+//! # #[derive(Clone, Default)] struct OrderPlaced;
+//! # #[derive(Clone, Default)] struct ReservationRequested;
+//! # struct EmptyCodec;
+//! # impl<E: Default> Codec<E> for EmptyCodec {
+//! #     type Error = Infallible;
+//! #     fn encode(_: &E) -> Result<Bytes, Infallible> { Ok(Bytes::new()) }
+//! #     fn decode(_: &[u8]) -> Result<E, Infallible> { Ok(E::default()) }
+//! # }
+//! # impl Event for OrderPlaced {
+//! #     const EVENT_TYPE: EventType = EventType::new(Family::new("order"), TypeName::new("placed"));
+//! #     type Codec = EmptyCodec;
+//! # }
+//! # impl Event for ReservationRequested {
+//! #     const EVENT_TYPE: EventType =
+//! #         EventType::new(Family::new("reservation"), TypeName::new("requested"));
+//! #     type Codec = EmptyCodec;
+//! # }
+//! #[derive(SagaSubscribe)]
+//! enum Observed { Order(OrderPlaced) }
+//!
+//! struct ReservationSaga;
+//!
+//! #[async_trait]
+//! impl Saga for ReservationSaga {
+//!     type Subscribe = Observed;
+//!     type Event = ReservationRequested;
+//!     type Error = Infallible;
+//!
+//!     fn correlate(_: &Observed) -> Option<SagaId> {
+//!         Some(SagaId::new("reservation"))
+//!     }
+//!
+//!     async fn handle(&mut self, _: Observed, _: &mut SagaContext)
+//!         -> Result<SagaEffect<ReservationRequested>, Infallible> { Ok(SagaEffect::None) }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() {
+//! # let system = EventSourceSystem::builder(ProcessSystem::new().await)
+//! #     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
+//! #     .build();
+//! # let order_id = AggregateId::new("order-1");
+//! let _saga = system
+//!     .host::<ReservationSaga>(|_| ReservationSaga)
+//!     .observing::<OrderPlaced>(Subscription::stream(&order_id))
+//!     .spawn()
+//!     .await;
+//! # }
+//! ```
+//!
 //! # Mental model
 //!
 //! A saga instance is the sole writer of its one stream, and the parts around

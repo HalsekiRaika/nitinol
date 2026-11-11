@@ -36,6 +36,51 @@
 //! The execution-side abstractions — the aggregate activation, the projection
 //! layer, the error families — are in `nitinol-eventsource`.
 //!
+//! # Getting started
+//!
+//! A counter whose `Increment` command records one event and answers with the
+//! new value:
+//!
+//! ```
+//! use std::convert::Infallible;
+//! use nitinol_contract::{Aggregate, Decider, Decision, Event, EventType, Family, Never, TypeName};
+//! # use bytes::Bytes;
+//! # use nitinol_contract::Codec;
+//! # struct IncrementedCodec;
+//! # impl Codec<Incremented> for IncrementedCodec {
+//! #     type Error = Infallible;
+//! #     fn encode(_: &Incremented) -> Result<Bytes, Infallible> { Ok(Bytes::new()) }
+//! #     fn decode(_: &[u8]) -> Result<Incremented, Infallible> { Ok(Incremented) }
+//! # }
+//!
+//! #[derive(Clone)]
+//! struct Incremented;
+//! impl Event for Incremented {
+//!     const EVENT_TYPE: EventType =
+//!         EventType::new(Family::new("counter"), TypeName::new("incremented"));
+//!     type Codec = IncrementedCodec;
+//! }
+//!
+//! #[derive(Default)]
+//! struct Counter { value: u64 }
+//! impl Aggregate for Counter {
+//!     type Event = Incremented;
+//!     type Recover = Never;
+//!     fn apply(&mut self, _: Incremented) { self.value += 1; }
+//! }
+//!
+//! struct Increment;
+//! impl Decider<Increment> for Counter {
+//!     type Output = u64;
+//!     type Rejection = Infallible;
+//!     fn decide(&self, _: Increment) -> Decision<Incremented, u64, Infallible> {
+//!         Decision::persist(vec![Incremented]).output(self.value + 1)
+//!     }
+//! }
+//!
+//! assert!(matches!(Counter::default().decide(Increment), Decision::Accept { output: 1, .. }));
+//! ```
+//!
 //! # Laws
 //!
 //! A decision says what happened; it does not say who writes it down. Anything
