@@ -23,7 +23,12 @@ pub enum Decision<E, O, R> {
     /// [`Aggregate::apply`](crate::Aggregate::apply) must receive them (L-2).
     /// An empty list is a legitimate acceptance — the command found nothing
     /// left to do, and `output` is still the answer (L-3).
-    Accept { events: Vec<E>, output: O },
+    Accept {
+        /// The facts the command produced.
+        events: Vec<E>,
+        /// The answer to the command.
+        output: O,
+    },
     /// A domain rule refused the command.
     Reject(R),
 }
@@ -35,7 +40,7 @@ impl<E, O, R> Decision<E, O, R> {
     /// Passing an empty `Vec` is how a command that found nothing left to do is
     /// accepted without appending anything (L-3).
     ///
-    /// # The answer cannot be forgotten
+    /// # Examples
     ///
     /// `persist` alone yields an [`Accepting`], which is not a `Decision`.  Only
     /// [`output`][Accepting::output] completes one, so a decider that states
@@ -72,6 +77,8 @@ impl<E, O, R> Decision<E, O, R> {
     ///
     /// There is nothing further to supply: the refusal produces no events to
     /// append (L-4) and no answer to deliver.
+    ///
+    /// # Examples
     ///
     /// ```rust
     /// use nitinol_contract::Decision;

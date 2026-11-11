@@ -12,7 +12,7 @@ use crate::aggregate::Aggregate;
 /// wallet has no label" — not a failure of the machinery that carried the
 /// question.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
 /// use bytes::Bytes;
@@ -71,5 +71,10 @@ pub trait Query<M>: Aggregate {
     /// Why the domain cannot answer it.
     type Error;
 
+    /// Answers `msg` from the current state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Self::Error` when the domain cannot answer `msg`.
     fn query(&self, msg: M) -> Result<Self::Response, Self::Error>;
 }

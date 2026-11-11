@@ -49,6 +49,9 @@ pub struct Never;
 ///
 /// Implemented only where the aggregate is [`Snapshotable`], because recovering
 /// means reading a snapshot value back and that is the trait which says how.
+///
+/// # Examples
+///
 /// Naming it on an aggregate that is not is a **compile error**:
 ///
 /// ```compile_fail

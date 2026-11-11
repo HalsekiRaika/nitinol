@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 //! The contract between the `nitinol` runtime and downstream domain code.
 //!
 //! | Item | Purpose |
