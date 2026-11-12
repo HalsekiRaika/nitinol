@@ -123,6 +123,8 @@
 //! store produce the same refusal, so this is a count of lost races and not a
 //! diagnosis of them.
 
+#![warn(missing_docs)]
+
 mod appending;
 pub mod codec;
 mod durable_stream;

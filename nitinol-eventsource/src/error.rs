@@ -1,3 +1,5 @@
+//! Errors returned by aggregate references and codecs.
+
 use nitinol_persistence::error::{AppendError, SnapshotError};
 
 /// Error produced when decoding a [`crate::SystemEvent`] payload fails.
@@ -22,8 +24,10 @@ impl SystemEventDecodeError {
 /// wire format does not become part of the framework's error family.
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
+    /// The codec could not encode the value.
     #[error("encode error: {0}")]
     Encode(Box<dyn std::error::Error + Send + Sync>),
+    /// The codec could not decode the payload.
     #[error("decode error: {0}")]
     Decode(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -35,8 +39,10 @@ pub enum CodecError {
 /// record it (L-6).
 #[derive(Debug, thiserror::Error)]
 pub enum PersistError {
+    /// The codec could not encode one of the events.
     #[error("codec error: {0}")]
     Codec(#[from] CodecError),
+    /// The event store did not take the append.
     #[error("event store append failed: {0}")]
     Append(nitinol_persistence::error::AppendError),
 }
@@ -81,6 +87,7 @@ pub struct MissingSnapshotSlot;
 /// Error returned by `AggregateProxy::ask`.
 #[derive(Debug, thiserror::Error)]
 pub enum AskError<R: std::error::Error + Send + Sync + 'static> {
+    /// The decider refused the command.
     #[error("command rejected: {0}")]
     Rejection(R),
     /// A creation collided with an aggregate that already exists (L-7).
@@ -91,8 +98,10 @@ pub enum AskError<R: std::error::Error + Send + Sync + 'static> {
     /// caller's judgement to make, not this layer's.
     #[error("the aggregate has already been created")]
     AlreadyCreated,
+    /// The facts of the accepted decision could not be written to the stream.
     #[error("persisting the accepted decision failed: {0}")]
     Persist(PersistError),
+    /// No answer to the command came back from an activation.
     #[error("process send error: {0}")]
     Send(nitinol_runtime::error::SendError),
     /// The aggregate could not be activated, so the command reached nothing.
@@ -143,6 +152,7 @@ impl PersistError {
 /// Error returned by `AggregateProxy::tell`.
 #[derive(Debug, thiserror::Error)]
 pub enum TellError {
+    /// The command could not be delivered to the activation's mailbox.
     #[error("process send error: {0}")]
     Send(#[from] nitinol_runtime::error::SendError),
     /// The aggregate could not be activated, so the command was not accepted
@@ -167,8 +177,10 @@ impl TellError {
 /// Error returned by `AggregateProxy::exec`.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecError<E: std::error::Error + Send + Sync + 'static> {
+    /// The query itself returned an error.
     #[error("domain error: {0}")]
     Domain(E),
+    /// No answer to the query came back from an activation.
     #[error("process send error: {0}")]
     Send(nitinol_runtime::error::SendError),
     /// The aggregate could not be activated, so there is no state to ask.
@@ -206,8 +218,10 @@ pub enum SnapshotSaveError {
 /// Carried to the caller as [`SnapshotSaveError`] by the `From` below.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotHandlerError {
+    /// The codec could not write the captured state.
     #[error("encode: {0}")]
     Encode(CodecError),
+    /// The snapshot persistor reported an error while saving the snapshot.
     #[error("persist: {0}")]
     Persist(SnapshotError),
 }
@@ -219,10 +233,13 @@ pub enum SnapshotHandlerError {
 /// that conversion adds.
 #[derive(Debug, thiserror::Error)]
 pub enum AskHandlerError<R: std::error::Error + Send + Sync + 'static> {
+    /// The decider refused the command.
     #[error("rejection: {0}")]
     Rejection(R),
+    /// A creation collided with an aggregate that already exists.
     #[error("the aggregate has already been created")]
     AlreadyCreated,
+    /// The facts of the accepted decision could not be written to the stream.
     #[error("persist: {0}")]
     Persist(PersistError),
 }
@@ -232,6 +249,7 @@ pub enum AskHandlerError<R: std::error::Error + Send + Sync + 'static> {
 /// Carried to the caller as [`ExecError`] by the `From` below.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecHandlerError<E: std::error::Error + Send + Sync + 'static> {
+    /// The query itself returned an error.
     #[error("domain error: {0}")]
     Domain(E),
 }

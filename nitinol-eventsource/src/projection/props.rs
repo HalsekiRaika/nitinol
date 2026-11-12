@@ -20,9 +20,21 @@ use crate::projection::projector::Projector;
 use crate::projection::tx_provider::{ErasedTxProvider, TxProvider};
 use crate::system::{EventSourceSystem, Hosted, Unhosted};
 
+/// Marker for props on which [`with_event`][ProjectorProps::with_event] has not
+/// been called yet.
 pub struct EventUnset;
+/// Marker for props on which [`with_event`][ProjectorProps::with_event] has
+/// been called.
 pub struct EventSet;
+/// Marker for props on which neither
+/// [`catchup_from_aggregate`][ProjectorProps::catchup_from_aggregate] nor
+/// [`catchup_from_global`][ProjectorProps::catchup_from_global] has been called
+/// yet.
 pub struct OriginUnset;
+/// Marker for props on which
+/// [`catchup_from_aggregate`][ProjectorProps::catchup_from_aggregate] or
+/// [`catchup_from_global`][ProjectorProps::catchup_from_global] has been
+/// called.
 pub struct OriginSet(pub(crate) CatchupOrigin);
 
 /// Wiring for one projection.
@@ -223,7 +235,7 @@ where
 {
     /// Override the delivery mode when no `TxProvider` is configured.
     ///
-    /// This method is intentionally unavailable after `with_tx_provider` is
+    /// This method is unavailable after `with_tx_provider` is
     /// called (`Tx != ()`).  A `TxProvider` always implies `ExactlyOnce`; allowing
     /// the caller to override the mode afterwards would silently break the Tx
     /// wiring (the delivery engine only activates the Tx path when `mode ==
@@ -239,6 +251,7 @@ where
     P: Send + Sync + 'static,
     Tx: Send + 'static,
 {
+    /// Follows only the stream of `agg_id`, in its per-stream sequence order.
     pub fn catchup_from_aggregate(
         self,
         agg_id: AggregateId,
@@ -257,6 +270,7 @@ where
         }
     }
 
+    /// Follows every stream in the journal, in global sequence order.
     pub fn catchup_from_global(self) -> ProjectorProps<P, Tx, E, OriginSet, H> {
         ProjectorProps {
             projection_id: self.projection_id,
@@ -517,6 +531,11 @@ where
     ///     .await;
     /// # }
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the offset store fails to load the position recorded for this
+    /// projection.
     pub async fn spawn<St>(
         self,
         system: &EventSourceSystem<St>,
@@ -542,6 +561,11 @@ where
     /// system are all that system's. The same two completeness requirements
     /// the argument-taking form states hold — `with_event` and one of the
     /// `catchup_from_*` methods — and are compile errors in the same way.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the offset store fails to load the position recorded for this
+    /// projection.
     pub async fn spawn(self) -> ProcessProxy<ProjectorProcess<P, St::ProjectionOffsets, Tx>> {
         let host = self.host.system().clone();
         self.start_on(&host).await

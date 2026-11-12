@@ -168,6 +168,17 @@ impl<A: Aggregate> AggregateProxy<A> {
     ///
     /// [`AskError::retryability`] separates a failure that says something about
     /// the command from one that says something about where it was sent.
+    ///
+    /// # Errors
+    ///
+    /// - [`AskError::Rejection`] if the decider refuses the command.
+    /// - [`AskError::AlreadyCreated`] if a creation collides with an aggregate
+    ///   that already exists.
+    /// - [`AskError::Persist`] if the facts of the accepted decision cannot be
+    ///   encoded or appended to the stream.
+    /// - [`AskError::Send`] if no answer comes back from an activation.
+    /// - [`AskError::Activation`] if the aggregate recovers from its newest
+    ///   snapshot and the system it was resolved on holds no snapshot slot.
     pub async fn ask<C>(
         &self,
         cmd: C,
@@ -196,6 +207,13 @@ impl<A: Aggregate> AggregateProxy<A> {
     /// dropped, so a command that was refused is not mistaken for one that was
     /// carried out (L-5).  `Ok(())` therefore means the command was accepted for
     /// delivery, not that the aggregate accepted it.
+    ///
+    /// # Errors
+    ///
+    /// - [`TellError::Send`] if the command cannot be delivered to the
+    ///   activation's mailbox.
+    /// - [`TellError::Activation`] if the aggregate recovers from its newest
+    ///   snapshot and the system it was resolved on holds no snapshot slot.
     pub async fn tell<C>(&self, cmd: C) -> Result<(), TellError>
     where
         A: Decider<C>,
@@ -216,6 +234,13 @@ impl<A: Aggregate> AggregateProxy<A> {
     /// Send a read-only query and wait for the response.
     ///
     /// `exec` does not mutate aggregate state.
+    ///
+    /// # Errors
+    ///
+    /// - [`ExecError::Domain`] if the query itself returns an error.
+    /// - [`ExecError::Send`] if no answer comes back from an activation.
+    /// - [`ExecError::Activation`] if the aggregate recovers from its newest
+    ///   snapshot and the system it was resolved on holds no snapshot slot.
     pub async fn exec<M>(
         &self,
         msg: M,
@@ -280,6 +305,15 @@ where
     /// Only an aggregate whose `Recover` marker is
     /// [`Latest`](nitinol_contract::Latest) has this method: one that never
     /// recovers from a snapshot has nothing that would read the save back.
+    ///
+    /// # Errors
+    ///
+    /// - [`SnapshotSaveError::Encode`] if the snapshot codec cannot write the
+    ///   captured state.
+    /// - [`SnapshotSaveError::Persist`] if the snapshot store fails to save it.
+    /// - [`SnapshotSaveError::Send`] if no answer comes back from an activation.
+    /// - [`SnapshotSaveError::Activation`] if the system the aggregate was
+    ///   resolved on holds no snapshot slot.
     pub async fn snapshot(&self) -> Result<u64, SnapshotSaveError> {
         let incarnation = self
             .incarnation()

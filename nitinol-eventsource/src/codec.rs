@@ -18,8 +18,11 @@ use crate::error::CodecError;
 
 pub use nitinol_contract::Codec;
 
-/// Encode `value` through `C` — the codec its type named — reporting a failure
-/// of it as [`CodecError::Encode`].
+/// Encode `value` through `C` — the codec its type named.
+///
+/// # Errors
+///
+/// Returns [`CodecError::Encode`] if the codec fails to encode `value`.
 pub fn encode<C, T>(value: &T) -> Result<Bytes, CodecError>
 where
     C: Codec<T>,
@@ -27,8 +30,11 @@ where
     C::encode(value).map_err(|e| CodecError::Encode(Box::new(e)))
 }
 
-/// Decode a value from `payload` through `C` — the codec its type named —
-/// reporting a failure of it as [`CodecError::Decode`].
+/// Decode a value from `payload` through `C` — the codec its type named.
+///
+/// # Errors
+///
+/// Returns [`CodecError::Decode`] if the codec fails to decode `payload`.
 pub fn decode<C, T>(payload: &[u8]) -> Result<T, CodecError>
 where
     C: Codec<T>,

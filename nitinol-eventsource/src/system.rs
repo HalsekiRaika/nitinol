@@ -1,3 +1,5 @@
+//! The system that hosts aggregates, durable streams and projectors.
+
 mod contingent;
 
 use std::sync::Arc;

@@ -52,7 +52,7 @@ use crate::projection::context::ProjectionContext;
 /// once per poll interval. Nothing behind it is applied, and nothing is
 /// silently dropped.
 ///
-/// That is the deliberate price of not skipping failures. A projection stalled
+/// That is the cost of not skipping failures. A projection stalled
 /// this way is visible in the repeated warnings and in an offset that stops
 /// moving; recovering it means making the event succeed — fixing the projector,
 /// or having `project` recognise the record as one it chooses to accept and
@@ -60,8 +60,11 @@ use crate::projection::context::ProjectionContext;
 /// there a failed handler is left behind and the subscription moves on.
 #[async_trait]
 pub trait Projector<E: Event, Tx = ()>: Send + Sync + 'static {
+    /// The error [`project`](Self::project) returns when it cannot apply an
+    /// event.
     type Error: std::error::Error + Send + Sync + 'static;
 
+    /// Applies `event` to the read model.
     async fn project(
         &mut self,
         event: E,

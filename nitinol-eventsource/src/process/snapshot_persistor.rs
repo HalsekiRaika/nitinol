@@ -125,6 +125,13 @@ impl SnapshotPersistorProxy {
     }
 
     /// Save a snapshot via the `SnapshotPersistor` process.
+    ///
+    /// # Errors
+    ///
+    /// - The [`SnapshotError`] the snapshot store returned, unchanged, if it
+    ///   fails to save the snapshot.
+    /// - [`SnapshotError::Backend`] if no answer comes back from the persistor
+    ///   process.
     pub async fn save(&self, snapshot: PersistedSnapshot) -> Result<(), SnapshotError> {
         self.0
             .ask(SaveSnapshot { snapshot })
@@ -136,6 +143,13 @@ impl SnapshotPersistorProxy {
     }
 
     /// Load the latest snapshot via the `SnapshotPersistor` process.
+    ///
+    /// # Errors
+    ///
+    /// - The [`SnapshotError`] the snapshot store returned, unchanged, if it
+    ///   fails to load it.
+    /// - [`SnapshotError::Backend`] if no answer comes back from the persistor
+    ///   process.
     pub async fn load_latest(
         &self,
         aggregate_id: AggregateId,

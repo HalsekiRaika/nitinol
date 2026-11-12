@@ -161,6 +161,11 @@ where
     T: 'static + Send + Sync + Clone,
 {
     /// Start this stream over the journal `system` distributes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError`] if a process is already registered under this
+    /// stream's topic.
     pub async fn spawn<St: Store>(
         self,
         system: &EventSourceSystem<St>,
@@ -175,6 +180,11 @@ where
     St: Store,
 {
     /// Start this stream over the journal the system it came from distributes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError`] if a process is already registered under this
+    /// stream's topic.
     pub async fn spawn(self) -> Result<DurableStreamProxy<T>, SpawnError> {
         let host = self.host.system().clone();
         self.start_on(&host).await

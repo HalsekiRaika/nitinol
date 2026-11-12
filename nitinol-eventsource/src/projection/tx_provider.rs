@@ -44,10 +44,15 @@ use async_trait::async_trait;
 /// [`rollback`]: TxProvider::rollback
 #[async_trait]
 pub trait TxProvider: Send + Sync + 'static {
+    /// The transaction a batch is applied in.
     type Tx: Send + 'static;
+    /// The error [`begin`](Self::begin) and [`commit`](Self::commit) return.
     type Error: std::error::Error + Send + Sync + 'static;
+    /// Opens a transaction for one batch.
     async fn begin(&self) -> Result<Self::Tx, Self::Error>;
+    /// Commits `tx` once every record of the batch and its offset are in it.
     async fn commit(&self, tx: Self::Tx) -> Result<(), Self::Error>;
+    /// Rolls back `tx` after a step of the batch failed.
     async fn rollback(&self, tx: Self::Tx);
 }
 

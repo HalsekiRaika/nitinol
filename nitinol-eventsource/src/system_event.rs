@@ -7,7 +7,7 @@
 //! owns its serialization: there is no user codec involved, so the replay path
 //! can decode the markers without going through `Saga::Event`'s codec.
 //!
-//! The two traits are deliberately independent — neither is a super-trait of
+//! The two traits are independent — neither is a super-trait of
 //! the other — and `SystemEvent` is hidden from documentation so consumers are
 //! not tempted to implement it.  What the two do share is that each states the
 //! one [`EventType`] its rows carry, and that shared statement is what

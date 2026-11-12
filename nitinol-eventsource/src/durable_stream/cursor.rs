@@ -10,10 +10,18 @@ use nitinol_persistence::{LoadQuery, LoadedEvent};
 pub enum SequenceCursor {
     /// Poll a single aggregate stream identified by `key`, ordered by the
     /// per-stream `sequence` number.
-    Stream { key: String, after: u64 },
+    Stream {
+        /// The key of the stream to poll.
+        key: String,
+        /// The last per-stream sequence observed.
+        after: u64,
+    },
     /// Poll across every stream in the event store, ordered by the
     /// `global_sequence` number.
-    Global { after: u64 },
+    Global {
+        /// The last global sequence observed.
+        after: u64,
+    },
 }
 
 impl SequenceCursor {

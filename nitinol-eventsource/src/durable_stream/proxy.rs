@@ -295,10 +295,16 @@ where
         }
     }
 
+    /// Returns the pid of the stream process.
     pub fn pid(&self) -> Pid {
         self.stream_proxy.pid()
     }
 
+    /// Registers `proxy` to receive the records the stream publishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the stream process has stopped.
     pub async fn subscribe<P>(&self, proxy: ProcessProxy<P>) -> Result<(), SendError>
     where
         P: Process + Receive<T, Response = ()>,
@@ -308,6 +314,12 @@ where
         Ok(())
     }
 
+    /// Delivers records to `proxy` from `cursor` onward through a poller of its
+    /// own, replacing the poller an earlier call started for `proxy`.
+    ///
+    /// # Errors
+    ///
+    /// Never returns `Err`.
     pub async fn subscribe_from<P>(
         &self,
         system: &ProcessSystem,
@@ -338,6 +350,12 @@ where
         Ok(())
     }
 
+    /// Stops the poller [`subscribe_from`](Self::subscribe_from) started for
+    /// `pid` and removes `pid` from the stream's subscribers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the stream process has stopped.
     pub async fn unsubscribe(&self, system: &ProcessSystem, pid: Pid) -> Result<(), SendError> {
         if let Some(proxy) = system.lookup_by_name(&direct_poller_name(pid)).await {
             let _ = proxy.stop().await;
