@@ -454,13 +454,33 @@ where
     /// satisfy this bound, so it is a compile error here:
     ///
     /// ```compile_fail
-    /// # use nitinol_eventsource::ProjectorProps;
+    /// # use async_trait::async_trait;
+    /// # use nitinol_eventsource::{Event, Projector, ProjectorProps, ProjectionContext};
+    /// # use nitinol_eventsource::codec::Codec;
     /// # use nitinol_eventsource::ProjectionId;
     /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_persistence::{EventType, Family, TypeName};
     /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
     /// # use nitinol_persistence::store::InMemoryEventStore;
     /// # use nitinol_runtime::ProcessSystem;
+    /// # use bytes::Bytes;
+    /// # #[derive(Clone, PartialEq, Debug)] struct MyEv;
+    /// # struct MyCodec;
+    /// # impl Codec<MyEv> for MyCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &MyEv) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<MyEv, Self::Error> { Ok(MyEv) }
+    /// # }
+    /// # impl Event for MyEv {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new(""), TypeName::new("Ev"));
+    /// #     type Codec = MyCodec;
+    /// # }
     /// # struct ReadModel;
+    /// # #[async_trait]
+    /// # impl Projector<MyEv> for ReadModel {
+    /// #     type Error = std::convert::Infallible;
+    /// #     async fn project(&mut self, _: MyEv, _: &mut ProjectionContext<'_, ()>) -> Result<(), Self::Error> { Ok(()) }
+    /// # }
     /// # async fn bad() {
     /// # let ps = ProcessSystem::new().await;
     /// // no `projection_offsets` — this store has no projection slot
@@ -468,7 +488,9 @@ where
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(store))
     ///     .build();
+    /// // compile error: unsatisfied trait bound — the store is not a `ProjectionOffsetSlot`
     /// ProjectorProps::new(ProjectionId::new("read-model"), || ReadModel)
+    ///     .with_event::<MyEv>()
     ///     .catchup_from_global()
     ///     .spawn(&system)
     ///     .await;
@@ -509,7 +531,7 @@ where
     /// #     type Error = std::convert::Infallible;
     /// #     async fn begin(&self) -> Result<Self::Tx, Self::Error> { Ok(MyTx) }
     /// #     async fn commit(&self, _: Self::Tx) -> Result<(), Self::Error> { Ok(()) }
-    /// #     async fn rollback(&self, _: Self::Tx) -> Result<(), Self::Error> { Ok(()) }
+    /// #     async fn rollback(&self, _: Self::Tx) {}
     /// # }
     /// # struct MyProj;
     /// # #[async_trait]
@@ -523,6 +545,7 @@ where
     /// let system = EventSourceSystem::builder(ps)
     ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
     ///     .build();
+    /// // compile error: type mismatch — `spawn` requires the offset store's `Tx` to be `MyTx`
     /// ProjectorProps::new(ProjectionId::new("p"), || MyProj)
     ///     .with_tx_provider(MyTxProvider)
     ///     .with_event::<MyEv>()
