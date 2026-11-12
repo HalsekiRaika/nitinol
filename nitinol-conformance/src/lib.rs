@@ -70,6 +70,8 @@
 //! This crate depends on no async runtime, so [`verify`] can be awaited on
 //! whichever runtime you choose.
 
+#![warn(missing_docs)]
+
 mod counting_store;
 mod fixture;
 mod interpreter;

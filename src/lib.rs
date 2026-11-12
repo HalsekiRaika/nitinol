@@ -162,6 +162,7 @@
 //!   `saga-basic-saga`, `saga-fanout-pattern`, `saga-idempotent-receive`
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
 // The links above name every layer's module, and a build without all of them
 // has nothing to resolve the missing ones against.
 #![cfg_attr(

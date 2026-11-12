@@ -4,6 +4,7 @@
 /// accepted, so a collision on the stream's genesis is the machinery's to
 /// report and never a refusal the domain reached.
 pub struct Open {
+    /// Who the ledger is opened for.
     pub holder: String,
 }
 
@@ -17,6 +18,8 @@ pub struct Open {
 /// vocabulary: neither means anything without the other, and a fixture that
 /// gained a third command would gain it here.
 pub struct Settle {
+    /// The amount credited to the ledger.
     pub credit: u64,
+    /// The amount charged to the ledger after the credit.
     pub charge: u64,
 }

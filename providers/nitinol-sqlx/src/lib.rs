@@ -126,6 +126,8 @@
 //! being passed over — see `EVENT_REGISTRY` for the one way collection comes up
 //! short, a crate dropped from the link.
 
+#![warn(missing_docs)]
+
 #[cfg(feature = "postgres")]
 mod postgres;
 

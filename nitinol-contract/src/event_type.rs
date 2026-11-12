@@ -259,8 +259,6 @@ impl fmt::Display for EventType {
 /// `ParsedEventType` holds owned [`String`]s so it can be constructed from a
 /// runtime string — for example via [`ParsedEventType::from_path`].
 ///
-/// # Examples
-///
 /// ```text
 /// EventType::new(family, type_name)
 ///   → .to_path().to_string()   ← canonical wire string

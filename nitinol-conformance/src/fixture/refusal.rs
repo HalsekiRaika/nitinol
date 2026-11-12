@@ -6,12 +6,20 @@
 /// make it indistinguishable from a verdict the ledger reached.
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum LedgerRejection {
+    /// An [`Open`](crate::Open) was put to a ledger that is already open.
     #[error("the ledger has already been opened")]
     AlreadyOpen,
+    /// A [`Settle`](crate::Settle) was put to a ledger that has not been opened.
     #[error("the ledger has not been opened")]
     NotOpen,
+    /// A [`Settle`](crate::Settle) charged more than the balance and its credit fund.
     #[error("charging {requested} leaves the ledger short: only {available} is funded")]
-    Underfunded { requested: u64, available: u64 },
+    Underfunded {
+        /// The amount the settlement charged.
+        requested: u64,
+        /// The balance plus the settlement's credit.
+        available: u64,
+    },
 }
 
 /// The ledger has no answer yet, because it has not been opened.

@@ -11,9 +11,21 @@ const TYPE_NAME: TypeName = TypeName::new("fact");
 /// replays into a balance the decider never described.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LedgerEvent {
-    Opened { holder: String },
-    Credited { amount: u64 },
-    Debited { amount: u64 },
+    /// The ledger was opened for a holder.
+    Opened {
+        /// Who the ledger was opened for.
+        holder: String,
+    },
+    /// The ledger was credited.
+    Credited {
+        /// The amount credited.
+        amount: u64,
+    },
+    /// The ledger was charged.
+    Debited {
+        /// The amount charged.
+        amount: u64,
+    },
 }
 
 impl Event for LedgerEvent {
@@ -62,6 +74,12 @@ impl LedgerEvent {
     }
 
     /// The fact `payload` carries, or why it carries none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MalformedLedgerEvent`] if `payload` is empty, if its leading
+    /// byte names no fact, if an amount is not carried in exactly 8 bytes, or
+    /// if a holder name is not valid UTF-8.
     pub fn decode(payload: &[u8]) -> Result<Self, MalformedLedgerEvent> {
         let (kind, body) = payload.split_first().ok_or(Malformation::Untagged)?;
         match *kind {

@@ -50,9 +50,12 @@ impl PostgresEventStore {
     /// framework journals on a saga's own stream. The store refers to the one
     /// the process built rather than building another.
     ///
-    /// Opening the store is where a canonical path two declarations claim is
-    /// refused, rather than at the row that would have been restored as the
-    /// wrong one of them.
+    /// # Errors
+    ///
+    /// Returns [`EventRegistryError`] if two event declarations in this binary
+    /// claim one canonical path. Opening the store is where that is refused,
+    /// rather than at the row that would have been restored as the wrong one of
+    /// them.
     pub fn new(pool: PgPool) -> Result<Self, EventRegistryError> {
         Ok(Self {
             pool,
@@ -67,6 +70,12 @@ impl PostgresEventStore {
     /// [`PostgresSnapshotStore`] and [`PostgresOffsetStore`] keep snapshots and
     /// offsets in are created here too, so a deployment running them has one
     /// migration step and not three that could be applied apart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MigrateError`] if the database cannot be reached or a statement
+    /// against it fails, if a migration fails to apply, or if the migrations
+    /// already recorded there do not match the ones this crate carries.
     pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
         MIGRATOR.run(pool).await
     }

@@ -116,6 +116,8 @@
 //! The suite depends on no async runtime: await these entry points on
 //! whichever runtime you choose, and hand it to the suite as an [`Executor`].
 
+#![warn(missing_docs)]
+
 pub mod offset;
 pub mod provider;
 pub mod snapshot;

@@ -53,6 +53,8 @@
 //! them is evaluated if the family names the reserved namespace — a compile
 //! error of a different shape, not a documentation-only convention.
 
+#![warn(missing_docs)]
+
 mod subscribe;
 
 use proc_macro::TokenStream;

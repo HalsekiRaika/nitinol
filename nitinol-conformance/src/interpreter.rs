@@ -13,8 +13,10 @@ use crate::outcome::{Fault, Interpreted, Unanswered};
 /// machinery to fail.  An interpreter that supplied its own store could answer
 /// the suite's questions out of its own account of what it did.
 pub trait Interpretation: Send + Sync {
+    /// The interpreter this brings up.
     type Interpreter: Interpreter;
 
+    /// Bring an interpreter up for the stream `ledger` over `store`.
     fn interpret(&self, ledger: AggregateId, store: Journal) -> BoxFuture<'_, Self::Interpreter>;
 }
 
