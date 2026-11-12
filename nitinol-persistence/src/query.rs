@@ -28,10 +28,16 @@ pub use read_type::{Typed, Untyped};
 /// written out field by field: the read type is not a field a caller sets.
 #[derive(Debug, Clone)]
 pub struct LoadQuery<T = Untyped> {
+    /// The stream to serve events from, or every stream if `None`.
     pub stream_key: Option<String>,
+    /// The event type path the served events lie within, or every type if
+    /// `None`.
     pub event_type_prefix: Option<MaterializedPath>,
+    /// The lowest global position to serve, inclusive.
     pub from_global_sequence: Option<u64>,
+    /// The lowest stream sequence to serve, inclusive.
     pub from_stream_sequence: Option<u64>,
+    /// The most events to serve, or no bound if `None`.
     pub limit: Option<usize>,
     #[expect(
         dead_code,
@@ -80,6 +86,8 @@ impl<T> LoadQuery<T> {
         self
     }
 
+    /// Sets the most events this query serves, keeping the other conditions it
+    /// carries.
     pub fn with_limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
         self
@@ -115,6 +123,7 @@ impl LoadQuery {
         }
     }
 
+    /// Builds a query for the events whose type path lies within `prefix`.
     pub fn by_event_type_prefix(prefix: MaterializedPath) -> Self {
         Self {
             event_type_prefix: Some(prefix),
@@ -122,6 +131,7 @@ impl LoadQuery {
         }
     }
 
+    /// Builds a query for the events at or after global position `seq`.
     pub fn from_global(seq: u64) -> Self {
         Self {
             from_global_sequence: Some(seq),
@@ -178,8 +188,13 @@ impl<E: Event> LoadQuery<Typed<E>> {
     }
 }
 
+/// What an append assigned.
 #[derive(Debug, Clone)]
 pub struct AppendOutcome {
+    /// The global positions given to the appended events, in the order they
+    /// were appended.
     pub assigned_sequences: Vec<u64>,
+    /// The highest sequence among the appended events, or, for an empty batch,
+    /// the sequence the stream had already reached.
     pub stream_version: u64,
 }

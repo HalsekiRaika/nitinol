@@ -1,3 +1,5 @@
+//! The key an event consumer's position is filed under.
+
 use crate::reserved::{reject_reserved_id, RESERVED_NAMESPACE};
 
 /// The key one event consumer's position is filed under.
@@ -62,11 +64,11 @@ pub struct OffsetScope {
 impl OffsetScope {
     /// The scope a deployment names itself, rendered verbatim.
     ///
-    /// # Invariants
+    /// # Panics
     ///
-    /// The name must lie outside the [reserved namespace](crate::reserved),
-    /// which is where the framework renders its own keys. Violating this
-    /// panics, the same way [`AggregateId::new`](crate::AggregateId::new) does.
+    /// Panics if `name` is within the [reserved namespace](crate::reserved),
+    /// which is where the framework renders its own keys, the same way
+    /// [`AggregateId::new`](crate::AggregateId::new) does.
     pub fn new(name: impl Into<String>) -> Self {
         let rendered = name.into();
         reject_reserved_id("offset scope", &rendered);
@@ -81,12 +83,11 @@ impl OffsetScope {
     /// know what parts there are. `name` is whatever that consumer runs under
     /// and is not constrained. `partition` is which partition of it this is.
     ///
-    /// # Invariants
+    /// # Panics
     ///
-    /// `part` must be non-empty and carry no `.`, because the rendering recovers
-    /// it by splitting at the first one. Violating this panics: a part is a
-    /// literal, so a malformed one is a programming error rather than a runtime
-    /// condition.
+    /// Panics if `part` is empty or contains `.`, because the rendering
+    /// recovers it by splitting at the first one. A part is a literal, so a
+    /// malformed one is a programming error rather than a runtime condition.
     pub fn framework_owned(part: &'static str, name: &str, partition: usize) -> Self {
         assert!(
             !part.is_empty() && !part.contains('.'),

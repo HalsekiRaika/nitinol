@@ -54,6 +54,11 @@ impl Album {
     ///
     /// [`SnapshotStore::save`]'s clauses, unchanged: this hands the call to the
     /// registered store and its answer back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::Backend`] if the registered store fails to save
+    /// the snapshot.
     pub async fn save(&self, snapshot: PersistedSnapshot) -> Result<(), SnapshotError> {
         self.0.save(snapshot).await
     }
@@ -62,6 +67,11 @@ impl Album {
     /// none.
     ///
     /// [`SnapshotStore::load_latest`]'s clauses, unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SnapshotError::Backend`] if the registered store fails to read
+    /// the aggregate's snapshot.
     pub async fn load_latest(
         &self,
         aggregate_id: &AggregateId,

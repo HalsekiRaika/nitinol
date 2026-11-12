@@ -26,10 +26,15 @@ pub type TypedEventStream<'a, E> =
 /// takes its progress from it.
 #[derive(Debug, Clone)]
 pub struct TypedEvent<E> {
+    /// The stream the row was appended to.
     pub stream_key: String,
+    /// The row's position in its stream.
     pub sequence: u64,
+    /// The row's position across the store.
     pub global_sequence: u64,
+    /// When the event occurred.
     pub occurred_at: Timestamp,
+    /// The event the row's payload decodes to.
     pub event: E,
 }
 
@@ -133,6 +138,11 @@ pub trait TypedLoad: sealed::Sealed {
     ///
     /// Fixed by `nitinol-persistence/tests/integration/typed_load.rs` against
     /// the reference implementation.
+    ///
+    /// # Errors
+    ///
+    /// The outer `Err` is the error [`EventStore::load`] returned for
+    /// [`query.erase()`](LoadQuery::erase).
     fn read<E: Event>(
         &self,
         query: LoadQuery<Typed<E>>,

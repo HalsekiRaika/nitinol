@@ -63,7 +63,7 @@ use crate::store::typed_load::{TypedEventStream, TypedLoad};
 /// [`PersistenceProvider`](crate::provider::PersistenceProvider) is distributed
 /// as itself.
 ///
-/// The slots beyond the journal are deliberately absent. A journal has no
+/// A journal implements no slot beyond [`Store`]. A journal has no
 /// snapshot store and no offset store to answer with, so wiring that needs one
 /// is refused while it is compiled rather than at the first save — which is
 /// `PRV-3`.
@@ -74,6 +74,14 @@ impl Journal {
     ///
     /// [`EventStore::append`]'s clauses, unchanged: this hands the call to the
     /// registered store and its answer back.
+    ///
+    /// # Errors
+    ///
+    /// - [`AppendError::SequenceConflict`] if a `sequence` is already taken in
+    ///   the stream or repeated within the batch; see [`EventStore::append`]'s
+    ///   OCC-1.
+    /// - [`AppendError::Backend`] if the backend fails, including once its
+    ///   bounded re-runs are exhausted; see [`EventStore::append`]'s OCC-4.
     pub async fn append(
         &self,
         key: &str,
@@ -85,6 +93,11 @@ impl Journal {
     /// Serves the stored events a [`LoadQuery`] selects.
     ///
     /// [`EventStore::load`]'s clauses, unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::Backend`] if the registered store fails to serve
+    /// the query.
     pub async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.0.load(query).await
     }

@@ -1,3 +1,5 @@
+//! The event store trait and the stream a load serves.
+
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -7,6 +9,7 @@ use crate::error::{AppendError, LoadError};
 use crate::event::{AppendingEvent, LoadedEvent};
 use crate::query::{AppendOutcome, LoadQuery};
 
+/// The events a load serves, each a stored event or the failure reading it.
 pub type EventStream<'a> = Pin<Box<dyn Stream<Item = Result<LoadedEvent, LoadError>> + Send + 'a>>;
 
 /// Append-and-load surface for events.

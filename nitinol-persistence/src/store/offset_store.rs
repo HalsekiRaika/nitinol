@@ -1,3 +1,6 @@
+//! The offset store trait and the delivery modes a projector saves offsets
+//! under.
+
 use async_trait::async_trait;
 
 use crate::error::OffsetError;
@@ -107,7 +110,7 @@ pub enum DeliveryMode {
 /// reference implementation, and `nitinol-store-conformance`'s `offset`
 /// module is the suite any backend is put through, reference implementation
 /// included.  A backend that has not been through it has not been shown to keep
-/// this contract.  Two of the clauses the suite deliberately does not fix, and
+/// this contract.  The suite does not fix two of the clauses, OFS-4 and OFS-6;
 /// each says so below.
 ///
 /// # OFS-1: never started is not the same as at zero
@@ -160,7 +163,7 @@ pub enum DeliveryMode {
 /// them, and what a disagreement costs is redelivery.  It is a liveness event —
 /// more work — rather than a loss.
 ///
-/// **Not fixed by a test**, and the suite deliberately never makes such a save.
+/// **Not fixed by a test**: the suite never makes such a save.
 /// The two permitted answers have no observation in common, and
 /// [`OffsetError`] carries no variant that distinguishes a refusal from a
 /// backend failure, so a suite judging it would have to pick one of the two
@@ -192,10 +195,10 @@ pub enum DeliveryMode {
 ///   verbatim, so a row written when it was the only kind is read back under the
 ///   same text.
 /// * A key inside the [reserved namespace](crate::reserved) is stored like any
-///   other.  A framework-owned consumer renders there on purpose — that is what
-///   keeps its key from meeting a projection's — so a store reading the
-///   namespace as something to validate would keep the framework's own
-///   consumers from recording anything.
+///   other.  A framework-owned consumer renders its key there, which keeps it
+///   from meeting a projection's, so a store reading the namespace as
+///   something to validate would keep the framework's own consumers from
+///   recording anything.
 ///
 /// That the keys *cannot* collide is [`OffsetScope`]'s obligation rather than a
 /// store's: a deployment naming its own is refused a reserved name, and the

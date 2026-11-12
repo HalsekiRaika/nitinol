@@ -53,6 +53,8 @@ pub struct EventRegistry {
 }
 
 impl EventRegistry {
+    /// Returns the event type stored under `path`, or `None` if no linked
+    /// declaration claims it.
     pub fn resolve(&self, path: &str) -> Option<EventType> {
         self.by_path.get(path).copied()
     }

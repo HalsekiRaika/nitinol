@@ -124,6 +124,8 @@
 //! together need not report a duplicate), and an entry placed by hand rather
 //! than derived carries no symbol at all.
 
+#![warn(missing_docs)]
+
 pub mod error;
 pub mod provider;
 pub mod reserved;

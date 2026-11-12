@@ -37,6 +37,11 @@ pub use nitinol_contract::{is_within_reserved_namespace, RESERVED_NAMESPACE};
 /// crates, such as `nitinol_saga::SagaId` — routes its refusal through here, so
 /// all of them reject the same names and say so the same way.
 ///
+/// # Panics
+///
+/// Panics if `id` is within the reserved namespace: `nitinol` itself or any
+/// name beneath it, such as `nitinol.saga`.  `nitinolx` is not within it.
+///
 /// A reserved identifier is a programming error, not a runtime condition: it
 /// can only come from a literal or a configuration value, never from data the
 /// framework itself produced.  It is therefore refused the way
