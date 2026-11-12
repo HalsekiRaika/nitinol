@@ -14,7 +14,12 @@ pub enum SagaDeliveryError {
     #[error(
         "this delivery host has {partitions} partition(s), so there is no partition {partition}"
     )]
-    NoSuchPartition { partition: usize, partitions: usize },
+    NoSuchPartition {
+        /// The partition number that was asked for.
+        partition: usize,
+        /// The number of partitions the host has.
+        partitions: usize,
+    },
     /// The move would not carry the partition's progress forward.
     ///
     /// Moving on is a declaration that the deliveries in the stretch passed
@@ -26,15 +31,21 @@ pub enum SagaDeliveryError {
          not carry its progress forward"
     )]
     NotForward {
+        /// The partition that was asked to move.
         partition: usize,
+        /// The offset it was asked to move to.
         to: u64,
+        /// The offset the partition has already finished with.
         reached: u64,
     },
     /// The store would not take the new offset.
     #[error("recording {to} as partition {partition}'s progress failed: {detail}")]
     NotRecorded {
+        /// The partition that was asked to move.
         partition: usize,
+        /// The offset it was asked to move to.
         to: u64,
+        /// What went wrong reading or recording the partition's progress.
         detail: String,
     },
     /// The partition could not be reached.
@@ -42,5 +53,8 @@ pub enum SagaDeliveryError {
     /// Nothing was asked of the store, because the partition that owns the
     /// decision never heard the request.
     #[error("partition {partition} could not be reached")]
-    Unreachable { partition: usize },
+    Unreachable {
+        /// The partition that could not be reached.
+        partition: usize,
+    },
 }

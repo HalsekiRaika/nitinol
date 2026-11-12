@@ -444,6 +444,8 @@
 //!   the operation id its receiver recognises a repeat by — cannot be carried
 //!   out by a host that keeps no saga resident.
 
+#![warn(missing_docs)]
+
 mod components;
 mod consumed;
 mod context;

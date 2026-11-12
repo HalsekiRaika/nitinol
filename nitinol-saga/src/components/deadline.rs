@@ -142,7 +142,7 @@ impl PendingDeadlines {
 ///
 /// # Why it holds no connection
 ///
-/// There is deliberately no scheduler handle here.  Setting a deadline produces
+/// `Deadline` holds no scheduler handle.  Setting a deadline produces
 /// a [`SagaEffect`] the framework interprets — append the fact, *then* arm the
 /// timer — so "arm a timer without writing the fact" is not a shape this
 /// component can express.  A timer no stream knows about would not survive a

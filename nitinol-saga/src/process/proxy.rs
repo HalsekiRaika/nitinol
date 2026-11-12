@@ -58,6 +58,11 @@ impl<S: Saga> SagaManagerProxy<S> {
     /// Nor is the deadline index, which is a top-level process for the same
     /// reason: it keeps asking this manager for the instances whose deadlines
     /// fall due, and reports that nothing answers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`](nitinol_runtime::error::SendError) if the manager
+    /// has already stopped.
     pub async fn stop(&self) -> Result<(), nitinol_runtime::error::SendError> {
         self.inner.stop().await
     }

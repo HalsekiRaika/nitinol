@@ -58,7 +58,9 @@ pub enum SagaEffect<E> {
     /// `ScheduleEvent::Scheduled` markers in one atomic `store::append` call.
     /// See type-level docs for the full contract.
     Persist {
+        /// The saga's own events to append.
         events: Vec<E>,
+        /// The deadlines to record in the same batch and arm once it lands.
         schedules: Vec<ScheduleSpec>,
     },
     /// Stop the saga process, preventing further `handle` calls.

@@ -74,9 +74,7 @@ pub trait Saga: Send + Sync + 'static {
     ///
     /// Each external variant is observed as a source of its own — its own
     /// subscription, its own cursor — so one source stalling does not stop
-    /// another from progressing.  There is deliberately no total order across
-    /// sources: it is not a promise that can be kept over several upstream
-    /// streams in a distributed system, so it is not made.
+    /// another from progressing.  There is no total order across sources.
     type Subscribe: SagaSubscribe;
 
     /// The saga's own internal events — the stream the delivery host consumes,
@@ -125,8 +123,7 @@ pub trait Saga: Send + Sync + 'static {
     /// else and is ignored silently — it is not a failure and records no dead
     /// letter.
     ///
-    /// There is deliberately no default: correlation has no universal rule, and
-    /// a defaulted `None` would silently discard every observed event.
+    /// `correlate` has no default implementation.
     ///
     /// # A source with no correlation rule is a compile error
     ///

@@ -10,10 +10,12 @@ use crate::id::SagaId;
 pub struct TimerName(String);
 
 impl TimerName {
+    /// Creates a timer name from a string.
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
     }
 
+    /// Returns the name as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -26,7 +28,9 @@ impl TimerName {
 /// sagas may share a [`TimerName`] without colliding.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScheduleToken {
+    /// The saga the timer belongs to.
     pub saga_id: SagaId,
+    /// The timer's name within that saga.
     pub name: TimerName,
 }
 

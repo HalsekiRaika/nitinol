@@ -17,13 +17,6 @@ use nitinol_persistence::reject_reserved_id;
 ///
 /// # Invariants
 ///
-/// A saga id *is* its stream key, so it obeys the framework's
-/// [reserved namespace](nitinol_persistence::reserved) law like every other
-/// identifier: `nitinol` and anything beneath it are the framework's, and
-/// naming one panics.  The law is owned by `nitinol-contract` and enforced on
-/// stream keys by `nitinol-persistence`; this constructor is one of those
-/// enforcement points, not a second definition.
-///
 /// `SagaId` is a distinct newtype — it is **not** interchangeable with
 /// `AggregateId`.  The following must fail to compile:
 ///
@@ -42,12 +35,24 @@ use nitinol_persistence::reject_reserved_id;
 pub struct SagaId(String);
 
 impl SagaId {
+    /// Creates a saga id from a string.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `s` is within the framework's
+    /// [reserved namespace](nitinol_persistence::reserved): `nitinol` itself or
+    /// any name beneath it, such as `nitinol.saga`.  A saga id *is* its stream
+    /// key, so it obeys that law like every other identifier.  The law is owned
+    /// by `nitinol-contract` and enforced on stream keys by
+    /// `nitinol-persistence`; this constructor is one of those enforcement
+    /// points, not a second definition.
     pub fn new(s: impl Into<String>) -> Self {
         let id = s.into();
         reject_reserved_id("saga id", &id);
         Self(id)
     }
 
+    /// Returns the id as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }

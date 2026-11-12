@@ -45,10 +45,12 @@ const SAGA_DELIVERY_PART: &str = "saga-delivery";
 pub struct SagaDeliveryId(String);
 
 impl SagaDeliveryId {
+    /// Creates a delivery-host identifier from a string.
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
     }
 
+    /// Returns the identifier as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
