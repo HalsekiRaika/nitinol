@@ -316,17 +316,12 @@ where
 
     /// Delivers records to `proxy` from `cursor` onward through a poller of its
     /// own, replacing the poller an earlier call started for `proxy`.
-    ///
-    /// # Errors
-    ///
-    /// Never returns `Err`.
     pub async fn subscribe_from<P>(
         &self,
         system: &ProcessSystem,
         proxy: ProcessProxy<P>,
         cursor: SequenceCursor,
-    ) -> Result<(), SendError>
-    where
+    ) where
         P: Process + Receive<T, Response = ()>,
     {
         let pid = proxy.pid();
@@ -346,8 +341,6 @@ where
             Some(direct_poller_name(pid)),
         );
         system.spawn(props).await;
-
-        Ok(())
     }
 
     /// Stops the poller [`subscribe_from`](Self::subscribe_from) started for
