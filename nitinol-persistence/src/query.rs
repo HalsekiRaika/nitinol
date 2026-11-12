@@ -3,7 +3,7 @@
 //! A store receives a [`LoadQuery<Untyped>`](LoadQuery) and serves stored rows.
 //! A [`LoadQuery<Typed<E>>`](LoadQuery) is handed to a typed read instead, or
 //! brought down to the untyped query a store receives with
-//! [`erase`](LoadQuery::erase).
+//! [`into_untyped`](LoadQuery::into_untyped).
 
 use std::borrow::Borrow;
 use std::marker::PhantomData;
@@ -21,8 +21,8 @@ pub use read_type::{Typed, Untyped};
 /// are stored. [`Typed<E>`] is the query
 /// [`TypedLoad::read`](crate::store::TypedLoad::read) receives: the rows of `E`
 /// read back as `E`. It is built by [`LoadQuery::of`] alone, and
-/// [`erase`](LoadQuery::erase) hands a store the same conditions with `E`'s
-/// path as the prefix.
+/// [`into_untyped`](LoadQuery::into_untyped) hands a store the same conditions
+/// with `E`'s path as the prefix.
 ///
 /// A query is built from the constructors and combinators below rather than
 /// written out field by field: the read type is not a field a caller sets.
@@ -168,7 +168,7 @@ impl<E: Event> LoadQuery<Typed<E>> {
     ///
     /// The prefix is `E`'s path whatever the prefix field was left holding, so
     /// what a store is asked for is always the rows `E` names.
-    pub fn erase(self) -> LoadQuery {
+    pub fn into_untyped(self) -> LoadQuery<Untyped> {
         let LoadQuery {
             stream_key,
             event_type_prefix: _,
@@ -185,6 +185,19 @@ impl<E: Event> LoadQuery<Typed<E>> {
             limit,
             read_as: Untyped,
         }
+    }
+
+    /// The former name of [`into_untyped`](LoadQuery::into_untyped).
+    #[deprecated(since = "0.6.1", note = "renamed to `into_untyped`")]
+    pub fn erase(self) -> LoadQuery {
+        self.into_untyped()
+    }
+}
+
+/// The same as [`into_untyped`](LoadQuery::into_untyped).
+impl<E: Event> From<LoadQuery<Typed<E>>> for LoadQuery<Untyped> {
+    fn from(value: LoadQuery<Typed<E>>) -> Self {
+        value.into_untyped()
     }
 }
 

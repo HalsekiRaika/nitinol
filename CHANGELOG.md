@@ -7,10 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- (`nitinol-persistence`): `LoadQuery::into_untyped`, which brings a
+  `LoadQuery<Typed<E>>` down to the `LoadQuery<Untyped>` a store receives: the
+  same conditions, with `E`'s path as the prefix.
+- (`nitinol-persistence`): `From<LoadQuery<Typed<E>>> for LoadQuery<Untyped>`,
+  the same conversion as `LoadQuery::into_untyped`.
+
 ### Changed
 
 - **BREAKING** (`nitinol-eventsource`): `DurableStreamProxy::subscribe_from` no
   longer returns `Result`; it has no failing path.
+
+### Deprecated
+
+- (`nitinol-persistence`): `LoadQuery::erase`, renamed to
+  `LoadQuery::into_untyped`. The old name is kept for this release and is to
+  be removed in the next minor.
 
 ## [0.6.0] - 2026-11-11
 

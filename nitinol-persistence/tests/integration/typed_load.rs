@@ -1,13 +1,15 @@
 //! Reading the rows of one event type back as that type.
 //!
-//! `LOAD-2`: `read(q)` is what `load` answers for `q.erase()`, keeping only
-//! the rows of `E` itself and reading each through `E::Codec`, in the order
-//! and at the positions `load` gives them. A payload the codec cannot read is
-//! an error in that row's place, and the stream goes on past it.
+//! `LOAD-2`: `read(q)` is what `load` answers for `q.into_untyped()`,
+//! keeping only the rows of `E` itself and reading each through `E::Codec`,
+//! in the order and at the positions `load` gives them. A payload the codec
+//! cannot read is an error in that row's place, and the stream goes on past
+//! it.
 //!
 //! The type is part of the query: `LoadQuery::of::<E>()` is the only way to a
-//! `LoadQuery<Typed<E>>`, and `erase` hands the store the same conditions with
-//! `E`'s path as the prefix, whatever the prefix field was left holding.
+//! `LoadQuery<Typed<E>>`, and `into_untyped` hands the store the same
+//! conditions with `E`'s path as the prefix, whatever the prefix field was
+//! left holding.
 //!
 //! ```gherkin
 //!   Scenario: the rows of one type
@@ -220,7 +222,7 @@ fn conditions(query: LoadQuery<Untyped>) -> Conditions {
 #[test]
 fn load_2_a_query_of_a_type_names_its_path_and_no_other_condition() {
     assert_eq!(
-        conditions(LoadQuery::of::<Wanted>().erase()),
+        conditions(LoadQuery::of::<Wanted>().into_untyped()),
         Conditions {
             stream_key: None,
             event_type_prefix: Some(WANTED.to_path()),
@@ -242,7 +244,7 @@ fn load_2_erasing_keeps_every_condition_the_typed_query_was_given() {
         .with_limit(5);
 
     assert_eq!(
-        conditions(query.erase()),
+        conditions(query.into_untyped()),
         Conditions {
             stream_key: Some("stream-a".to_owned()),
             event_type_prefix: Some(WANTED.to_path()),
@@ -253,6 +255,21 @@ fn load_2_erasing_keeps_every_condition_the_typed_query_was_given() {
         "the query the store receives carries the stream, the global position, \
          the stream sequence and the limit the typed query was given, each in \
          its own place, beside the type's path"
+    );
+}
+
+#[test]
+fn load_2_converting_with_from_gives_the_query_into_untyped_gives() {
+    let query = LoadQuery::of::<Wanted>()
+        .with_stream("stream-a")
+        .with_limit(5);
+
+    assert_eq!(
+        conditions(query.clone().into()),
+        conditions(query.into_untyped()),
+        "`From` brings a typed query down to the same query the store receives \
+         from `into_untyped`: the stream, the type's path, both positions and \
+         the limit"
     );
 }
 
@@ -269,7 +286,7 @@ fn load_2_erasing_puts_the_types_own_path_back_whatever_the_prefix_field_holds()
         query.event_type_prefix = overwritten;
 
         assert_eq!(
-            conditions(query.erase()),
+            conditions(query.into_untyped()),
             Conditions {
                 stream_key: Some("stream-a".to_owned()),
                 event_type_prefix: Some(WANTED.to_path()),
@@ -302,7 +319,7 @@ async fn load_2_a_read_serves_its_own_rows_whatever_the_prefix_field_holds() {
 async fn load_2_leaves_out_the_rows_of_a_deeper_declaration_its_path_reaches() {
     let (store, _) = mixed().await;
     let loaded: Vec<LoadedEvent> = store
-        .load(LoadQuery::of::<Wanted>().erase())
+        .load(LoadQuery::of::<Wanted>().into_untyped())
         .await
         .expect("loading from the reference implementation succeeds")
         .try_collect()
@@ -346,7 +363,7 @@ async fn load_2_reads_the_rows_of_its_own_type_and_no_other() {
 async fn load_2_keeps_the_order_and_positions_load_serves_its_rows_at() {
     let (store, positions) = mixed().await;
     let loaded: Vec<LoadedEvent> = store
-        .load(LoadQuery::of::<Wanted>().erase())
+        .load(LoadQuery::of::<Wanted>().into_untyped())
         .await
         .expect("loading from the reference implementation succeeds")
         .try_collect()

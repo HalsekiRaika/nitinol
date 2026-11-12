@@ -119,9 +119,9 @@ pub trait TypedLoad: sealed::Sealed {
     /// # LOAD-2: a typed read is a load of the type's own rows
     ///
     /// `read(q)` is what [`EventStore::load`] serves for
-    /// [`q.erase()`](LoadQuery::erase), keeping the rows whose `event_type` is
-    /// `E::EVENT_TYPE` and reading each through `E::Codec`, in the order and at
-    /// the positions `load` serves them.
+    /// [`q.into_untyped()`](LoadQuery::into_untyped), keeping the rows whose
+    /// `event_type` is `E::EVENT_TYPE` and reading each through `E::Codec`, in
+    /// the order and at the positions `load` serves them.
     ///
     /// It follows from `LOAD-1` and is not something a backend implements:
     ///
@@ -142,7 +142,7 @@ pub trait TypedLoad: sealed::Sealed {
     /// # Errors
     ///
     /// The outer `Err` is the error [`EventStore::load`] returned for
-    /// [`query.erase()`](LoadQuery::erase).
+    /// [`query.into_untyped()`](LoadQuery::into_untyped).
     fn read<E: Event>(
         &self,
         query: LoadQuery<Typed<E>>,
@@ -155,7 +155,7 @@ impl<S: EventStore + ?Sized> TypedLoad for S {
         query: LoadQuery<Typed<E>>,
     ) -> Result<TypedEventStream<'_, E>, LoadError> {
         Ok(Box::pin(TypedRows {
-            rows: self.load(query.erase()).await?,
+            rows: self.load(query.into_untyped()).await?,
             event: PhantomData::<fn() -> E>,
         }))
     }
