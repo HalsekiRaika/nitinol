@@ -111,6 +111,9 @@ impl<P: Process> ProcessContext<P> {
 
     /// Starts `spawnable` as a child of this process.
     ///
+    /// Accepts the same inputs as [`ProcessSystem::spawn`](crate::ProcessSystem::spawn),
+    /// with the same outputs.
+    ///
     /// The child's `ctx.parent()` returns this process's pid. When this process
     /// stops, it stops its children in reverse spawn order and waits for them
     /// to end.
