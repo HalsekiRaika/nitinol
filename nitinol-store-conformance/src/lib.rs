@@ -45,14 +45,14 @@
 //! events replayed above it add up to where that aggregate had got to is not
 //! run here either.
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! # use futures_core::future::BoxFuture;
 //! # use nitinol_persistence::store::Journal;
 //! # use nitinol_store_conformance::{Executor, StoreUnderTest};
 //! # struct MyBackend;
 //! impl StoreUnderTest for MyBackend {
 //!     fn bring_up(&self) -> BoxFuture<'_, Journal> {
-//!         Box::pin(async { /* a store of yours holding nothing */ })
+//!         Box::pin(async { todo!("bring up a store of yours holding nothing") })
 //!     }
 //! }
 //!

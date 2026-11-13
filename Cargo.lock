@@ -1869,6 +1869,7 @@ dependencies = [
  "nitinol-contract",
  "nitinol-persistence",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

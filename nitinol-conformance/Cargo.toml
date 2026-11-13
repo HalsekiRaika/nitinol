@@ -23,5 +23,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 jiff = "0.2"
 thiserror = "2"
 
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
 [lints]
 workspace = true
