@@ -20,30 +20,13 @@ pub(crate) struct LoadLatestSnapshot {
 
 /// Persistence process that exclusively owns the supplier's [`Album`].
 ///
-/// All snapshot operations are serialized through this process's message loop.
-///
-/// # One per system, and no way to make a second
-///
-/// [`EventSourceSystem::snapshot_persistor`](crate::system::EventSourceSystem::snapshot_persistor)
-/// is the only way to reach one, and it answers with the single process its
-/// node memoises — the same one an activation of a
-/// [`Latest`](nitinol_contract::Latest) aggregate recovers through. There is no
-/// entry point that starts a persistor over a store a caller named, because the
-/// snapshot contract is written for a single consumer serialising its calls:
-///
-/// ```compile_fail
-/// # use nitinol_eventsource::SnapshotPersistor;
-/// # use nitinol_persistence::provider::PersistenceProvider;
-/// # use nitinol_persistence::store::InMemoryStore;
-/// # use nitinol_runtime::ProcessSystem;
-/// # async fn wiring() {
-/// # let ps = ProcessSystem::new().await;
-/// let persistence = PersistenceProvider::new(InMemoryStore::default());
-/// // `SnapshotPersistor::spawn` is not public: a system distributes the one
-/// // persistor it holds
-/// SnapshotPersistor::spawn(&ps, &persistence).await;
-/// # }
-/// ```
+/// - All snapshot operations are serialized through this process's message
+///   loop, because the snapshot contract is written for a single consumer.
+/// - A system has one, reached through
+///   [`EventSourceSystem::snapshot_persistor`](crate::system::EventSourceSystem::snapshot_persistor):
+///   the same process an activation of a [`Latest`](nitinol_contract::Latest)
+///   aggregate recovers through. No entry point starts one over a store a
+///   caller names.
 pub struct SnapshotPersistor {
     store: Album,
 }

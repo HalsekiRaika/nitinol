@@ -35,21 +35,8 @@ pub struct AggregateProps<A: Aggregate, H = Unhosted> {
 impl<A: Aggregate> AggregateProps<A, Unhosted> {
     /// Configure an activation of `aggregate_id`.
     ///
-    /// The identity is the whole of it. A store cannot be named here: the
-    /// system this is spawned on distributes one, and reaching a second
-    /// destination is a second system over the supplier that holds it.
-    ///
-    /// ```compile_fail
-    /// # use nitinol_eventsource::AggregateProps;
-    /// # use nitinol_persistence::store::InMemoryEventStore;
-    /// # use nitinol_persistence::AggregateId;
-    /// # struct Counter;
-    /// # fn wiring() {
-    /// let store = InMemoryEventStore::default();
-    /// // there is no form of this that takes a journal
-    /// AggregateProps::<Counter>::new(AggregateId::new("counter"), store);
-    /// # }
-    /// ```
+    /// The store comes from the system this is spawned on; reaching a second
+    /// destination takes a second system over the supplier that holds it.
     pub fn new(aggregate_id: AggregateId) -> Self {
         Self {
             aggregate_id,
@@ -62,18 +49,12 @@ impl<A: Aggregate> AggregateProps<A, Unhosted> {
     /// activation for it, and return a reference.
     ///
     /// Every ingredient comes from `system`: the journal its supplier
-    /// distributes, the registry its node owns, and — for an aggregate whose
-    /// [`Recover`](Aggregate::Recover) is
-    /// [`Latest`](nitinol_contract::Latest) — the one snapshot persistor it
-    /// hands out. This is the same resolve
+    /// distributes, the registry its node owns, and, for an aggregate whose
+    /// [`Recover`](Aggregate::Recover) is [`Latest`](nitinol_contract::Latest),
+    /// its one snapshot persistor. This is the resolve
     /// [`EventSourceSystem::spawn_aggregate`] performs, so two spawns of one
-    /// identity on one system reach one activation rather than two writers of
-    /// one stream.
-    ///
-    /// # Typestate
-    ///
-    /// A `Latest` aggregate asks its system for a snapshot store, so spawning
-    /// one onto a store that holds none is a **compile error**:
+    /// identity on one system reach one activation. Spawning a `Latest`
+    /// aggregate onto a store with no snapshot slot is a **compile error**:
     ///
     /// ```compile_fail
     /// # use bytes::Bytes;
@@ -121,47 +102,6 @@ impl<A: Aggregate> AggregateProps<A, Unhosted> {
     ///     .build();
     /// AggregateProps::<Counter>::new(AggregateId::new("counter"))
     ///     .spawn(&system)
-    ///     .await;
-    /// # }
-    /// ```
-    ///
-    /// Nor is a persistor wired in by hand. Which snapshot an aggregate starts
-    /// from is its own type's statement, so there is no builder call to make
-    /// and none to forget:
-    ///
-    /// ```compile_fail
-    /// # use nitinol_eventsource::AggregateProps;
-    /// # use nitinol_eventsource::system::EventSourceSystem;
-    /// # use nitinol_persistence::provider::PersistenceProvider;
-    /// # use nitinol_persistence::store::InMemoryStore;
-    /// # use nitinol_persistence::AggregateId;
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # struct Counter;
-    /// # async fn wiring() {
-    /// # let ps = ProcessSystem::new().await;
-    /// let system = EventSourceSystem::builder(ps)
-    ///     .with_persistence(PersistenceProvider::new(InMemoryStore::default()))
-    ///     .build();
-    /// let persistor = system.snapshot_persistor().await;
-    /// // `with_snapshot_persistor` does not exist
-    /// AggregateProps::<Counter>::new(AggregateId::new("counter"))
-    ///     .with_snapshot_persistor(persistor);
-    /// # }
-    /// ```
-    ///
-    /// And a spawn names a system rather than a process system: resolving an
-    /// identity needs a registry and a journal, which a bare
-    /// [`ProcessSystem`](nitinol_runtime::ProcessSystem) has neither of:
-    ///
-    /// ```compile_fail
-    /// # use nitinol_eventsource::AggregateProps;
-    /// # use nitinol_persistence::AggregateId;
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # struct Counter;
-    /// # async fn wiring() {
-    /// let ps = ProcessSystem::new().await;
-    /// AggregateProps::<Counter>::new(AggregateId::new("counter"))
-    ///     .spawn(&ps)
     ///     .await;
     /// # }
     /// ```

@@ -9,44 +9,23 @@ use crate::process::props::resolving_reference;
 use crate::process::RecoverOnContingent;
 use crate::AggregateProxy;
 
-/// A view of an [`EventSourceSystem`](super::EventSourceSystem) that no longer
-/// says, in its type, which slots the deployment's store holds.
+/// A view of an [`EventSourceSystem`](super::EventSourceSystem) that does not
+/// say, in its type, which slots the deployment's store holds.
 ///
-/// Wiring whose types are fixed before a deployment's store is known — a saga's
-/// dispatch mapping names the system it delivers through when the mapping is
-/// written — names this one type for every deployment. It is obtained from
-/// [`EventSourceSystem::to_contingent`](super::EventSourceSystem::to_contingent)
-/// and is the same node, not a copy: the same process system, the same
-/// aggregate registry, the same journal and the same snapshot persistor. An
-/// identity resolved here reaches the activation the typed system would.
-///
-/// # What it does not promise
-///
-/// Whether the deployment holds a snapshot slot is carried as a value, read
-/// when the program runs, and [`snapshot_store`][Self::snapshot_store] is the
-/// one place it is answered. So everything the typed system offers on the
-/// strength of a slot's bound — its snapshot persistor, its props, its
-/// supplier — is absent here rather than present and unreliable.
-///
-/// An aggregate whose [`Recover`](Aggregate::Recover) is
-/// [`Latest`](nitinol_contract::Latest) still resolves through this view,
-/// because the slot it asks for is read from that value. Where the deployment
-/// holds the slot, it recovers from the snapshot this node's persistor keeps,
-/// exactly as it would through the typed system. Where the deployment holds
-/// none, the activation fails permanently: nothing is started, the stream is
-/// not replayed in place of the missing snapshot, and every dispatch through
-/// the reference answers [`MissingSnapshotSlot`](crate::error::MissingSnapshotSlot)
-/// — an [`AskError::Activation`](crate::AskError::Activation) that
-/// [`retryability`](crate::AskError::retryability) reads as permanent.
-///
-/// That is a wiring mistake, and the typed system still says so when it is
-/// compiled: spawning the same aggregate there on the same deployment does not
-/// compile.
-///
-/// # Cloning
-///
-/// A clone is another name for the same node and carries the same journal and
-/// the same answer about the snapshot slot.
+/// - For wiring whose types are fixed before the store is known, such as a
+///   saga's dispatch mapping. Obtained from
+///   [`to_contingent`](super::EventSourceSystem::to_contingent), it is the same
+///   node as the typed system, and a clone carries the same journal and the
+///   same snapshot slot.
+/// - The snapshot slot is a value ([`snapshot_store`][Self::snapshot_store]),
+///   so the typed system's snapshot persistor, props and supplier are absent.
+/// - An aggregate whose [`Recover`](Aggregate::Recover) is
+///   [`Latest`](nitinol_contract::Latest) recovers from the snapshot where the
+///   slot exists. Where it does not, nothing is started, the stream is not
+///   replayed instead, and every dispatch answers
+///   [`MissingSnapshotSlot`](crate::error::MissingSnapshotSlot), an
+///   [`AskError::Activation`](crate::AskError::Activation) that
+///   [`retryability`](crate::AskError::retryability) reads as permanent.
 #[derive(Clone)]
 pub struct ContingentSystem {
     node: Node,

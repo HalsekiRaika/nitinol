@@ -68,13 +68,12 @@ impl<St> Hosted<St> {
 ///
 /// Obtained from [`EventSourceSystem::builder`]. Supply the deployment's store
 /// with [`with_persistence`][Self::with_persistence], then
-/// [`build`][EventSourceSystemBuilder::build].
+/// [`build`][EventSourceSystemBuilder::build]. There is no codec stage: every
+/// event type names the codec that writes it, so a system has no format of its
+/// own to bind.
 ///
-/// There is no codec stage. Every event type names the codec that writes it, so
-/// a system has no format of its own to bind and no way to disagree with the
-/// events it spawns aggregates for.
+/// # Examples
 ///
-/// # Builder
 /// ```rust,no_run
 /// # use nitinol_eventsource::system::EventSourceSystem;
 /// # use nitinol_persistence::provider::PersistenceProvider;
@@ -102,28 +101,14 @@ impl EventSourceSystemBuilder<PersistenceUnset> {
 
     /// Supply the store this system's wiring resolves from.
     ///
-    /// # One store, every stream
-    ///
-    /// [`EventStore`](nitinol_persistence::store::EventStore) is stream-keyed —
-    /// `append(key, ..)` and
-    /// [`LoadQuery::by_stream`](nitinol_persistence::LoadQuery::by_stream)
-    /// address one stream at a time — so the single journal a store supplies
-    /// holds every aggregate's stream (and every saga's journal) side by side,
-    /// each owner still reading only its own key. That is what makes *one*
-    /// supplier sufficient rather than a registry of named stores.
-    ///
-    /// Placing one aggregate's stream in a different destination is therefore a
-    /// second supplier, assembled and named as such, and a second system built
-    /// on it. There is no per-spawn override and no props that carry a store of
-    /// their own: every entry point below, and every `spawn` that takes a
-    /// system, resolves the one supplier that system carries — so a deployment
-    /// cannot half-move a stream and leave two activations writing to two
-    /// worlds.
-    ///
-    /// # What a supplier does not promise
-    ///
-    /// Nothing atomic across destinations. One supplier is not one transaction
-    /// — the clauses on [`Store`] state what it does and does not guarantee.
+    /// - The [`EventStore`](nitinol_persistence::store::EventStore) is
+    ///   stream-keyed, so the one journal holds every aggregate's stream (and
+    ///   every saga's journal) side by side, each under its own key.
+    /// - Placing a stream elsewhere takes a second supplier and a second system
+    ///   built on it. There is no per-spawn override: every entry point, and
+    ///   every `spawn` that takes a system, resolves the one supplier it carries.
+    /// - One supplier is not one transaction: nothing is atomic across
+    ///   destinations. The clauses on [`Store`] state what it guarantees.
     pub fn with_persistence<St: Store>(
         self,
         persistence: PersistenceProvider<St>,
@@ -147,89 +132,26 @@ impl<St: Store> EventSourceSystemBuilder<PersistenceProvider<St>> {
     }
 }
 
-/// System-level orchestrator that binds a [`ProcessSystem`] to the store a
-/// deployment's records live in.
+/// Binds a [`ProcessSystem`] to the store a deployment's records live in.
 ///
-/// `St` is that store, and which wiring entry points exist is decided by the
-/// slots it holds — so a store nobody configured cannot be relied on:
-///
-/// | The store holds | Entry points |
-/// |---|---|
-/// | the journal ([`Store`]) | [`spawn_aggregate`][Self::spawn_aggregate] / [`aggregate_props`][Self::aggregate_props] / [`aggregate_proxy`][Self::aggregate_proxy] / [`durable_stream`][Self::durable_stream] |
-/// | a snapshot store ([`SnapshotSlot`]) | [`snapshot_persistor`][Self::snapshot_persistor], and spawning an aggregate whose [`Recover`](Aggregate::Recover) is [`Latest`](nitinol_contract::Latest) |
-/// | projection offsets ([`ProjectionOffsetSlot`]) | [`projector_props`][Self::projector_props] |
-///
-/// A slot the store does not hold is a **compile error** at the wiring that
-/// needs it, rather than a failure at the first save — which is the whole of
-/// why the store is a type parameter here. The one view whose type cannot say
-/// is the [`ContingentSystem`] [`to_contingent`][Self::to_contingent] answers
-/// with, which carries the snapshot slot as a value instead.
-///
-/// # Two ways to say one wiring
-///
-/// Every entry point above has a props-first twin that names no store either —
-/// [`AggregateProps::new`], [`ProjectorProps::new`], [`DurableStream::new`] —
-/// whose `spawn` takes a system and resolves the very same slots. The two forms
-/// meet on one private path per props, so which one a deployment writes is a
-/// matter of where the wiring reads better and nothing else: the registry, the
-/// journal and the activation are the same either way.
-///
-/// The wire format is not among the things a system settles: an aggregate's
-/// events name the codec that writes them, so two aggregates spawned from one
-/// system read and write their own streams in their own formats.
-///
-/// # Resolving, not spawning
-///
-/// Every aggregate entry point below **resolves**: an identifier is mapped to a
-/// reference, and the aggregate is activated only if this node has no activation
-/// for it yet.  Concurrent resolves of one identifier cause at most one
-/// activation and all receive the same reference, and nothing observable says
-/// which call did the activating.
-///
-/// Two things follow that code written against this system must respect.
-///
-/// * **Duplicate activations are possible and normal.**  The at-most-one
-///   guarantee is per node.  Across a cluster, one aggregate may be activated
-///   more than once at the same time — that is a placement goal and a
-///   convergence property, not a safety contract.  Safety belongs to the event
-///   store: an append derived from a state the stream has moved past is
-///   rejected, and the activation that made it stops.  Never write code whose
-///   correctness needs single activation.
-/// * **Store-external side effects are not at-most-once.**  A bare
-///   [`tell`](crate::AggregateProxy::tell) leaves the store's arbitration, so a
-///   duplicate activation can perform it a second time and nothing detects it.
-///   A side effect that must be cluster-safe is expressed as a persisted record
-///   — the events of a [`Decision`](crate::Decision), or a saga's own decision
-///   carried by a delivery host — so that some stream's own OCC decides whether
-///   it happened at all.
-///
-/// There is no second kind of start to reach for: props built directly resolve
-/// through this same registry when they are spawned on a system, so one
-/// identity has one activation however its wiring was written.
-///
-/// # A handle, not an instance
-///
-/// Cloning an `EventSourceSystem` names the same instance rather than creating a
-/// second one: every clone resolves through the same aggregate registry, runs on
-/// the same [`ProcessSystem`], carries the same supplier, and shares the one
-/// snapshot persistor process.  The per-node at-most-one guarantee therefore
-/// holds across clones — two clones resolving one identity reach one activation
-/// — and callers share the system by cloning it rather than by wrapping it in an
-/// `Arc`.
-///
-/// The entry points stay by-reference so that whether to clone remains the
-/// caller's decision.  Configuration is fixed before any handle exists: the
-/// supplier is supplied on [`EventSourceSystemBuilder`], and
-/// [`build`][EventSourceSystemBuilder::build] settles it.
-///
-/// # What holds what
-///
-/// A system holds the one instance behind it: the supplier it was built with
-/// and the node state every handle onto it shares. Nothing on the other side of
-/// those holds a system back. The registry keeps process proxies, a process proxy keeps a pid
-/// and a channel, and a persistor keeps a snapshot store, so there is no strong
-/// cycle to leak: a handle lives as long as the processes holding it, and is
-/// released when they stop.
+/// - `St` is that store. The slots it holds decide which entry points exist,
+///   so a slot the store does not hold is a compile error at the wiring that
+///   needs it rather than a failure at the first save. The [`ContingentSystem`]
+///   from [`to_contingent`][Self::to_contingent] carries the snapshot slot as a
+///   value instead.
+/// - Each entry point has a props-first twin ([`AggregateProps::new`],
+///   [`ProjectorProps::new`], [`DurableStream::new`]) whose `spawn` takes a
+///   system and resolves the same slots, registry and activation.
+/// - Aggregate entry points resolve rather than spawn: a node has at most one
+///   activation per identifier, and concurrent resolves get the same reference.
+///   Across a cluster, duplicate activations are normal and the event store's
+///   OCC keeps them safe, so never write code that needs single activation. A
+///   bare [`tell`](crate::AggregateProxy::tell) is not at-most-once: a side
+///   effect that must be cluster-safe is a persisted record, such as the
+///   events of a [`Decision`](crate::Decision).
+/// - A clone names the same system (registry, [`ProcessSystem`], supplier and
+///   snapshot persistor), so share it by cloning rather than with an `Arc`.
+///   Nothing the system holds holds it back, so there is no strong cycle.
 pub struct EventSourceSystem<St = PersistenceUnset> {
     inner: Arc<Inner<St>>,
 }
@@ -393,15 +315,15 @@ impl<St: Store> EventSourceSystem<St> {
     /// Resolve the aggregate `id`, activating it if this node has no activation
     /// for it, and return a reference to it.
     ///
-    /// The aggregate's stream lives under `id` in the journal the store holds;
-    /// other aggregates, and any saga journalling through this system, are
-    /// tenants of the same instance under their own keys.
+    /// The aggregate's stream lives under `id` in the store's journal; other
+    /// aggregates, and any saga journalling through this system, are tenants of
+    /// the same journal under their own keys. An aggregate whose
+    /// [`Recover`](Aggregate::Recover) is [`Latest`](nitinol_contract::Latest)
+    /// needs a store with a [`SnapshotSlot`]: one without is a compile error here
+    /// rather than an activation that silently replays from the beginning.
     ///
-    /// # Typestate
-    ///
-    /// There is no form of this that names a store, and no system without a
-    /// supplier to resolve one from — a builder that was never handed one has
-    /// no `build`, so the call below is a **compile error**:
+    /// The store always comes from the system's supplier, and a builder never
+    /// handed one has no `build`, so this is a **compile error**:
     ///
     /// ```compile_fail
     /// # use nitinol_eventsource::system::EventSourceSystem;
@@ -410,74 +332,6 @@ impl<St: Store> EventSourceSystem<St> {
     /// # let ps = ProcessSystem::new().await;
     /// // no `with_persistence` — there are no stores to spawn onto
     /// let system = EventSourceSystem::builder(ps).build();
-    /// # }
-    /// ```
-    ///
-    /// Nor is there a per-spawn override to reach a second destination with.
-    /// The entry point that took one is gone:
-    ///
-    /// ```compile_fail
-    /// # use nitinol_eventsource::system::EventSourceSystem;
-    /// # use nitinol_persistence::store::InMemoryEventStore;
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # async fn wiring() {
-    /// # let ps = ProcessSystem::new().await;
-    /// # let store = InMemoryEventStore::default();
-    /// // `with_event_store` does not exist: the stores come from a supplier
-    /// let system = EventSourceSystem::builder(ps).with_event_store(store).build();
-    /// # }
-    /// ```
-    ///
-    /// An aggregate whose type says it recovers from the newest snapshot asks
-    /// this system for a snapshot store, so one whose store holds none is a
-    /// **compile error** here rather than an activation that silently replays
-    /// from the beginning:
-    ///
-    /// ```compile_fail
-    /// # use bytes::Bytes;
-    /// # use nitinol_eventsource::codec::Codec;
-    /// # use nitinol_eventsource::system::EventSourceSystem;
-    /// # use nitinol_eventsource::{Aggregate, Event, Latest, Snapshotable};
-    /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
-    /// # use nitinol_persistence::store::InMemoryEventStore;
-    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # struct DocCodec;
-    /// # #[derive(Clone)] struct Counted;
-    /// # impl Codec<Counted> for DocCodec {
-    /// #     type Error = std::convert::Infallible;
-    /// #     fn encode(_: &Counted) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
-    /// #     fn decode(_: &[u8]) -> Result<Counted, Self::Error> { Ok(Counted) }
-    /// # }
-    /// # impl Codec<u64> for DocCodec {
-    /// #     type Error = std::convert::Infallible;
-    /// #     fn encode(_: &u64) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
-    /// #     fn decode(_: &[u8]) -> Result<u64, Self::Error> { Ok(0) }
-    /// # }
-    /// # impl Event for Counted {
-    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("Counted"));
-    /// #     type Codec = DocCodec;
-    /// # }
-    /// # #[derive(Default)] struct Counter { value: u64 }
-    /// # impl Aggregate for Counter {
-    /// #     type Event = Counted;
-    /// #     type Recover = Latest;
-    /// #     fn apply(&mut self, _: Counted) { self.value += 1; }
-    /// # }
-    /// # impl Snapshotable for Counter {
-    /// #     type Snapshot = u64;
-    /// #     type Codec = DocCodec;
-    /// #     fn capture(&self) -> u64 { self.value }
-    /// #     fn recover(snapshot: u64) -> Self { Self { value: snapshot } }
-    /// # }
-    /// # async fn wiring() {
-    /// # let ps = ProcessSystem::new().await;
-    /// // no `snapshot` — this store has no snapshot slot
-    /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
-    /// let system = EventSourceSystem::builder(ps)
-    ///     .with_persistence(PersistenceProvider::new(store))
-    ///     .build();
-    /// system.spawn_aggregate::<Counter>(AggregateId::new("counter")).await;
     /// # }
     /// ```
     pub async fn spawn_aggregate<A>(&self, id: AggregateId) -> AggregateProxy<A>
@@ -539,21 +393,13 @@ impl<St: Store> EventSourceSystem<St> {
 
     /// A view of this system that names no store type.
     ///
-    /// It is the same node, not a copy: the same process system, the same
-    /// aggregate registry, the same journal and the same snapshot persistor.
-    /// Resolving an identity through it reaches the activation this system
-    /// would.
-    ///
-    /// The store's type is gone; whether it held a snapshot slot is not. The
-    /// view carries the journal, and the snapshot slot as a value — the store's
-    /// own album where it holds one, nothing where it does not — which
-    /// [`ContingentSystem::snapshot_store`] answers with. A clone of the view
-    /// keeps that value.
-    ///
-    /// What a value cannot do is satisfy a bound, so the view offers none of
-    /// the entry points this system offers on the strength of a slot's bound:
-    /// no snapshot persistor, no props and no supplier. The consequence for an
-    /// aggregate whose [`Recover`](Aggregate::Recover) is
+    /// It is the same node, not a copy: the same process system, aggregate
+    /// registry, journal and snapshot persistor, so resolving an identity
+    /// through it reaches the activation this system would. The snapshot slot
+    /// travels as a value (the store's album, or nothing), which
+    /// [`ContingentSystem::snapshot_store`] answers with. A value cannot satisfy
+    /// a bound, so the view has no snapshot persistor, no props and no supplier;
+    /// what that means for an aggregate whose [`Recover`](Aggregate::Recover) is
     /// [`Latest`](nitinol_contract::Latest) is stated on [`ContingentSystem`].
     pub fn to_contingent(&self) -> ContingentSystem {
         ContingentSystem::new(
@@ -569,12 +415,8 @@ impl<St: SnapshotSlot> EventSourceSystem<St> {
     /// first call.
     ///
     /// One process per system, shared by every caller and every clone: the
-    /// snapshot contract is written for a single consumer serialising its calls,
-    /// and two processes over one store would be two consumers.
-    ///
-    /// # Typestate
-    ///
-    /// This exists only where the store holds a snapshot store. One that holds
+    /// snapshot contract is written for a single consumer serialising its calls.
+    /// This exists only where the store holds a snapshot store; one that holds
     /// none is refused here rather than at the first save:
     ///
     /// ```compile_fail
@@ -609,13 +451,10 @@ impl<St: ProjectionOffsetSlot> EventSourceSystem<St> {
     /// Return a [`ProjectorProps`] over the journal and the projection
     /// offsets the store holds, carrying this system as where it starts.
     ///
-    /// Both slots are resolved here, so a projector built from a system follows
-    /// the same journal its aggregates write to and records its position where
-    /// the deployment's other projections record theirs.
-    ///
-    /// # Typestate
-    ///
-    /// This exists only where the store holds projection offsets:
+    /// A projector built from a system follows the same journal its aggregates
+    /// write to and records its position where the deployment's other
+    /// projections record theirs. This exists only where the store holds
+    /// projection offsets:
     ///
     /// ```compile_fail
     /// # use nitinol_eventsource::system::EventSourceSystem;
@@ -650,4 +489,56 @@ impl<St: ProjectionOffsetSlot> EventSourceSystem<St> {
     {
         ProjectorProps::new(projection_id, producer).hosted(self.clone())
     }
+}
+
+#[cfg(doctest)]
+mod compile_fail_fixtures {
+    /// ```compile_fail
+    /// # use bytes::Bytes;
+    /// # use nitinol_eventsource::codec::Codec;
+    /// # use nitinol_eventsource::system::EventSourceSystem;
+    /// # use nitinol_eventsource::{Aggregate, Event, Latest, Snapshotable};
+    /// # use nitinol_persistence::provider::{CustomStore, PersistenceProvider};
+    /// # use nitinol_persistence::store::InMemoryEventStore;
+    /// # use nitinol_persistence::{AggregateId, EventType, Family, TypeName};
+    /// # use nitinol_runtime::ProcessSystem;
+    /// # struct DocCodec;
+    /// # #[derive(Clone)] struct Counted;
+    /// # impl Codec<Counted> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &Counted) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<Counted, Self::Error> { Ok(Counted) }
+    /// # }
+    /// # impl Codec<u64> for DocCodec {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &u64) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
+    /// #     fn decode(_: &[u8]) -> Result<u64, Self::Error> { Ok(0) }
+    /// # }
+    /// # impl Event for Counted {
+    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("doc"), TypeName::new("Counted"));
+    /// #     type Codec = DocCodec;
+    /// # }
+    /// # #[derive(Default)] struct Counter { value: u64 }
+    /// # impl Aggregate for Counter {
+    /// #     type Event = Counted;
+    /// #     type Recover = Latest;
+    /// #     fn apply(&mut self, _: Counted) { self.value += 1; }
+    /// # }
+    /// # impl Snapshotable for Counter {
+    /// #     type Snapshot = u64;
+    /// #     type Codec = DocCodec;
+    /// #     fn capture(&self) -> u64 { self.value }
+    /// #     fn recover(snapshot: u64) -> Self { Self { value: snapshot } }
+    /// # }
+    /// # async fn wiring() {
+    /// # let ps = ProcessSystem::new().await;
+    /// // no `snapshot` — this store has no snapshot slot
+    /// let store = CustomStore::builder().eventstore(InMemoryEventStore::default()).build();
+    /// let system = EventSourceSystem::builder(ps)
+    ///     .with_persistence(PersistenceProvider::new(store))
+    ///     .build();
+    /// system.spawn_aggregate::<Counter>(AggregateId::new("counter")).await;
+    /// # }
+    /// ```
+    fn spawn_aggregate_latest_needs_a_snapshot_slot() {}
 }

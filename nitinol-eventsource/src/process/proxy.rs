@@ -12,38 +12,21 @@ use crate::process::resolve::{AggregateResolver, Incarnation};
 
 /// A reference to an aggregate, addressed by identity rather than by activation.
 ///
-/// The reference names *which aggregate* — its stream key — and finds an
-/// activation to carry each dispatch.  It does not name a process, and it does
-/// not become invalid when one dies: an activation that stops (including one
-/// stopped by losing its stream to another writer — see below) is dropped from
-/// the reference, and the next dispatch resolves the aggregate again.  A
-/// reference is therefore safe to keep for as long as the aggregate is
-/// meaningful, in a saga's captured state or a long-lived router.
-///
-/// # Resolution is silent about what it did
-///
-/// No return value, error variant or observable timing tells a caller whether a
-/// dispatch activated the aggregate or joined a live activation.  The
-/// distinction stops being expressible once activations may be remote, so code
-/// must not be written against it.
-///
-/// # One reference type
-///
-/// This is the only reference type in the framework: there is no second "already
-/// running" handle to choose between, and no second way of reaching one.  Every
-/// entry point — [`EventSourceSystem::spawn_aggregate`](crate::system::EventSourceSystem::spawn_aggregate),
-/// [`aggregate_props(..).spawn()`](crate::system::EventSourceSystem::aggregate_props),
-/// [`aggregate_proxy`](crate::system::EventSourceSystem::aggregate_proxy) and
-/// [`AggregateProps::spawn`](crate::AggregateProps::spawn) on props built
-/// directly — resolves through the node's registry: at most one activation per
-/// key on this node, re-resolved after an activation dies.
-///
-/// # Duplicate activations are normal
-///
-/// The at-most-one guarantee is per node.  Cluster-wide, one aggregate may have
-/// more than one activation at a time; only the event store's OCC decides which
-/// writes count.  See [`EventSourceSystem`](crate::system::EventSourceSystem)
-/// for what that means for side effects.
+/// - It names the aggregate's stream key, not a process, and finds an
+///   activation to carry each dispatch. An activation that stops, including one
+///   that lost its stream to another writer, is dropped and the next dispatch
+///   resolves the aggregate again, so a reference is safe to keep for as long
+///   as the aggregate is meaningful, in a saga's state or a long-lived router.
+/// - Nothing a caller can observe says whether a dispatch activated the
+///   aggregate or joined a live activation, so code must not depend on it.
+/// - It is the only reference type: every entry point, such as
+///   [`EventSourceSystem::spawn_aggregate`](crate::system::EventSourceSystem::spawn_aggregate)
+///   or [`AggregateProps::spawn`](crate::AggregateProps::spawn), resolves
+///   through the node's registry, at most one activation per key on this node.
+/// - Across a cluster one aggregate may have more than one activation, and only
+///   the event store's OCC decides which writes count; see
+///   [`EventSourceSystem`](crate::system::EventSourceSystem) for what that
+///   means for side effects.
 pub struct AggregateProxy<A: Aggregate> {
     /// The aggregate's stream key — kept here so
     /// [`AggregateTellTarget::aggregate_id`](crate::AggregateTellTarget::aggregate_id)
@@ -158,16 +141,7 @@ impl<A: Aggregate> AggregateProxy<A> {
         &self.aggregate_id
     }
 
-    /// Send a command and wait for the answer its decision states.
-    ///
-    /// Returns the decider's `Output` — what the command asked for — rather than
-    /// the events it produced.  The events are the aggregate's own record of
-    /// what happened and are read from the stream by whoever needs them; a
-    /// caller that had to derive its answer from them would be deriving it from
-    /// facts the decider already read to reach the answer.
-    ///
-    /// [`AskError::retryability`] separates a failure that says something about
-    /// the command from one that says something about where it was sent.
+    /// Send a command and wait for the `Output` its decision states.
     ///
     /// # Errors
     ///
@@ -199,14 +173,9 @@ impl<A: Aggregate> AggregateProxy<A> {
 
     /// Send a command without waiting for a response.
     ///
-    /// The command is queued and processed in FIFO order; ordering relative to
-    /// later `exec` calls is guaranteed by the single-threaded process loop.
-    ///
-    /// The decision's output is discarded — nobody is waiting for it — but a
-    /// refusal is reported through the crate's tracing records rather than
-    /// dropped, so a command that was refused is not mistaken for one that was
-    /// carried out (L-5).  `Ok(())` therefore means the command was accepted for
-    /// delivery, not that the aggregate accepted it.
+    /// Commands are processed in FIFO order, ahead of later `exec` calls. The
+    /// output is discarded and a refusal goes to the crate's tracing records, so
+    /// `Ok(())` means the command was accepted for delivery, not by the aggregate.
     ///
     /// # Errors
     ///
@@ -289,28 +258,22 @@ where
     /// Capture the activation's state as a snapshot and save it at the
     /// sequence the activation is at, answering that sequence.
     ///
-    /// The caller supplies nothing. The activation captures its state with
-    /// [`Snapshotable::capture`], writes it with the codec the aggregate names
-    /// as [`Snapshotable::Codec`], and saves it through the one persistor its
-    /// system distributes — the one
-    /// [`EventSourceSystem::snapshot_persistor`](crate::system::EventSourceSystem::snapshot_persistor)
-    /// returns, and the one a later activation recovers from.
-    ///
-    /// The request goes through the activation's mailbox like any command, so
-    /// every command sent before it — told or asked — has been applied when the
-    /// state is captured, and the payload and the sequence describe the same
-    /// moment. An activation that has appended nothing is saved at sequence 0
-    /// like any other.
-    ///
-    /// Only an aggregate whose `Recover` marker is
-    /// [`Latest`](nitinol_contract::Latest) has this method: one that never
-    /// recovers from a snapshot has nothing that would read the save back.
+    /// The state is captured with [`Snapshotable::capture`], encoded with
+    /// [`Snapshotable::Codec`] and saved through the system's one persistor, the
+    /// one a later activation recovers from. The request goes through the
+    /// mailbox like any command, so every command sent before it has been
+    /// applied when the state is captured. An activation that has appended
+    /// nothing is saved at sequence 0. Only a `Recover = Latest` aggregate has
+    /// this method.
     ///
     /// # Errors
     ///
     /// - [`SnapshotSaveError::Encode`] if the snapshot codec cannot write the
     ///   captured state.
-    /// - [`SnapshotSaveError::Persist`] if the snapshot store fails to save it.
+    /// - [`SnapshotSaveError::Persist`] if the snapshot persistor reports an
+    ///   error: the snapshot store failed to save it, or no answer came back from
+    ///   the persistor process
+    ///   ([`SnapshotError::Backend`](nitinol_persistence::error::SnapshotError::Backend)).
     /// - [`SnapshotSaveError::Send`] if no answer comes back from an activation.
     /// - [`SnapshotSaveError::Activation`] if the system the aggregate was
     ///   resolved on holds no snapshot slot.
@@ -414,8 +377,8 @@ mod tests {
     /// Both entry points reach one activation, restated at the layer that owns
     /// the pid.
     ///
-    /// A reference does not expose a pid to its caller (see "Resolution is
-    /// silent about what it did" above), so
+    /// A reference does not expose a pid to its caller (see [`AggregateProxy`]),
+    /// so
     /// `nitinol-eventsource/tests/props_take_their_stores_from_the_system.rs`
     /// observes the same clause from outside through the store's optimistic
     /// concurrency rule. This module is the one place allowed to look past
