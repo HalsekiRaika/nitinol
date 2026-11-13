@@ -384,9 +384,8 @@ where
     /// Spawn the projector on the system these props came from.
     ///
     /// Nothing is named here: the journal, the projection slot and the process
-    /// system are all that system's. The same two completeness requirements
-    /// the argument-taking form states hold — `with_event` and one of the
-    /// `catchup_from_*` methods — and are compile errors in the same way.
+    /// system are all that system's. The requirements the argument-taking form
+    /// states hold here too and are compile errors in the same way.
     ///
     /// # Panics
     ///

@@ -18,9 +18,10 @@ use crate::projection::context::ProjectionContext;
 ///   [`crate::TxProvider`]: a failed batch is rolled back and redelivered from
 ///   its first event rather than partially applied.
 /// - Under `AtLeastOnce` and `ExactlyOnce` a failed event is redelivered on every
-///   poll and holds every event behind it; one that can never succeed stalls the
+///   poll and holds every event behind it; one that can never succeed (a payload
+///   the codec cannot decode, a row the read model always rejects) stalls the
 ///   projection, with a warning per poll interval and an offset that stops
-///   moving, until `project` returns `Ok` for it. `AtMostOnce` skips it instead.
+///   moving, until the projector or codec is fixed. `AtMostOnce` skips it instead.
 #[async_trait]
 pub trait Projector<E: Event, Tx = ()>: Send + Sync + 'static {
     /// The error [`project`](Self::project) returns when it cannot apply an
