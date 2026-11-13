@@ -21,9 +21,8 @@ pub type EventStream<'a> = Pin<Box<dyn Stream<Item = Result<LoadedEvent, LoadErr
 /// the key via `id.borrow()` (or `id.as_str()`) on their newtype —
 /// `AggregateId` and `SagaId` both implement `Borrow<str>`.
 ///
-/// # What an implementor owes beyond the clauses
-///
-/// [`Clone`], through the [`EventStoreClone`] supertrait. A store is
+/// Beyond the clauses, an implementor owes [`Clone`], through the
+/// [`EventStoreClone`] supertrait. A store is
 /// distributed by being cloned rather than by being shared, so deriving
 /// `Clone` over the backend's own handle is what lets the framework hand the
 /// journal to every wiring point. Deriving it is the whole of it — the

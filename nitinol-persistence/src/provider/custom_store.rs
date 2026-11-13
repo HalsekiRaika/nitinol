@@ -27,20 +27,14 @@ pub struct EventStoreUnset;
 
 /// A [`Store`] assembled from named handles.
 ///
-/// Each type parameter records whether its slot was named — [`Unprovided`]
-/// where none was — and nothing fills a slot that was not named, which is
-/// `PRV-3`: a mixture is written down or it does not happen.
-///
-/// There is no parameter for the journal, and the snapshot slot's is
-/// [`Album`] rather than the backend it was named with. Those two are erased
-/// where the handle is named, so the backend's type is written once, in the
-/// builder call, rather than carried through every signature that mentions the
-/// assembled store. The offset slots keep the backend's own type because
-/// [`OffsetStore::Tx`] has to stay visible to a projector settling its update
-/// and its position together.
-///
-/// Cloning this clones each handle it holds, so it reaches the regions those
-/// handles name — never regions of its own.
+/// - Each type parameter records whether its slot was named — [`Unprovided`]
+///   where none was — and nothing fills a slot that was not named (`PRV-3`).
+/// - The journal and the snapshot slot ([`Album`]) are erased where they are
+///   named, so the backend's type is written once, in the builder call. The
+///   offset slots keep the backend's own type, so [`OffsetStore::Tx`] stays
+///   visible to a projector settling its update and its position together.
+/// - Cloning it clones each handle it holds, so it reaches the regions those
+///   handles name and never regions of its own.
 #[derive(Clone)]
 pub struct CustomStore<S = Unprovided, P = Unprovided, Sg = Unprovided> {
     events: Journal,
@@ -75,17 +69,6 @@ impl CustomStore {
 ///     .eventstore(InMemoryEventStore::default())
 ///     .projection_offsets(InMemoryOffsetStore::default())
 ///     .projection_offsets(InMemoryOffsetStore::default())
-///     .build();
-/// ```
-///
-/// And a store with no journal has no `build`:
-///
-/// ```compile_fail
-/// # use nitinol_persistence::provider::CustomStore;
-/// # use nitinol_persistence::store::InMemorySnapshotStore;
-/// // no `eventstore` — there is no event-sourced deployment without events
-/// CustomStore::builder()
-///     .snapshot(InMemorySnapshotStore::default())
 ///     .build();
 /// ```
 pub struct CustomStoreBuilder<E = EventStoreUnset, S = Unprovided, P = Unprovided, Sg = Unprovided>
@@ -286,4 +269,17 @@ where
     fn saga_offsets(&self) -> Sg {
         self.saga_offsets.clone()
     }
+}
+
+#[cfg(doctest)]
+mod compile_fail_fixtures {
+    /// ```compile_fail
+    /// # use nitinol_persistence::provider::CustomStore;
+    /// # use nitinol_persistence::store::InMemorySnapshotStore;
+    /// // no `eventstore` — there is no event-sourced deployment without events
+    /// CustomStore::builder()
+    ///     .snapshot(InMemorySnapshotStore::default())
+    ///     .build();
+    /// ```
+    fn custom_store_builder_without_journal_has_no_build() {}
 }

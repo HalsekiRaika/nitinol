@@ -43,13 +43,7 @@ impl Default for EventStoreState {
 ///
 /// Intended for tests and examples; not for production use.
 ///
-/// # A handle, not a region
-///
-/// Cloning this names the same records: the handle is what is copied, and the
-/// data region behind it is shared. [`Default`] is the other half — it
-/// constructs a destination, so two stores built that way hold nothing of each
-/// other's. That is `PRV-1` as a store owes it, and it is what lets a
-/// deployment hand this store to two wiring points without an `Arc` around it.
+/// Cloning and [`Default`] behave as [`InMemoryStore`](crate::store::InMemoryStore) describes.
 #[derive(Clone)]
 pub struct InMemoryEventStore {
     state: Arc<Mutex<EventStoreState>>,

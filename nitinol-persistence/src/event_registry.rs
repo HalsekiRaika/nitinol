@@ -21,24 +21,15 @@ use nitinol_contract::{EventRegistryEntry, EventType};
 ///     EventRegistryEntry::new(concat!(module_path!(), "::Opened"), &[OPENED]);
 /// ```
 ///
-/// Placing the entry is the whole of it: the [`EventRegistry`] a store serves
-/// its loads out of is built once for the process, out of this slice, with
-/// nothing for a caller to construct or hand over.
-///
-/// # What link-time collection does not reach
-///
-/// The slice is filled by the linker, and the linker keeps what the binary
-/// links. A crate no item of the binary references may be dropped from the
-/// link, and its entries go with it — silently, because nothing at runtime can
-/// tell a crate that was never linked from a crate that declared nothing. A row
-/// carrying one of the dropped paths then fails its load as an unknown event
-/// type rather than being restored. A binary that depends on a crate purely for
-/// its event declarations has to reference something of that crate for those
-/// declarations to be collected.
-///
-/// Collection is native-only (servers, Tauri). It rests on the linker gathering
-/// statics that crates placed into one named region of the binary, which WASM
-/// targets do not provide.
+/// - Placing the entry is the whole of it: the [`EventRegistry`] a store serves
+///   its loads out of is built once for the process, out of this slice.
+/// - The linker fills the slice, so a crate no item of the binary references
+///   may be dropped from the link with its entries, silently. A row carrying
+///   one of the dropped paths then fails its load as an unknown event type; a
+///   binary that depends on a crate only for its event declarations has to
+///   reference something of that crate.
+/// - Collection is native-only (servers, Tauri); WASM targets do not gather
+///   statics into one named region of the binary.
 #[distributed_slice]
 pub static EVENT_REGISTRY: [EventRegistryEntry];
 

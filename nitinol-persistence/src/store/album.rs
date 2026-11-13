@@ -11,18 +11,14 @@ use crate::store::snapshot_store::SnapshotStore;
 /// The snapshot store registered with the framework, with the backend's type
 /// erased.
 ///
-/// [`Journal`](crate::store::Journal)'s counterpart, and the same thing in the
-/// snapshot half: what is inside is the registered store's own clone, and
-/// [`Clone`] here is that backend's clone one level down — through the
-/// [`SnapshotStoreClone`](crate::store::SnapshotStoreClone) supertrait — so
-/// every wiring point handed an album reaches the one set of saves.
+/// - It is [`Journal`](crate::store::Journal)'s counterpart in the snapshot half
+///   and has the same properties, with [`SnapshotStore`] and
+///   [`SnapshotStoreClone`](crate::store::SnapshotStoreClone) in place of the
+///   event-side traits.
+/// - It is not a [`Store`](crate::provider::Store): a snapshot is a shortcut and
+///   never a record, so no deployment's storage is snapshots alone.
 ///
-/// # Why it does not implement `SnapshotStore`
-///
-/// The same two reasons the journal's rustdoc states. `impl<S: SnapshotStore>
-/// From<S> for Album` has room beside `core`'s reflexive conversion only
-/// because an album is not a snapshot store, and erasing an album a second time
-/// is a type error rather than a `Box<Box<_>>`.
+/// An album is a handle onto a snapshot store, not a snapshot store:
 ///
 /// ```compile_fail
 /// use nitinol_persistence::store::{Album, InMemorySnapshotStore, SnapshotStore};
@@ -33,20 +29,6 @@ use crate::store::snapshot_store::SnapshotStore;
 /// // an album is a handle onto a snapshot store, not a snapshot store
 /// takes(&album);
 /// ```
-///
-/// ```compile_fail
-/// use nitinol_persistence::store::{Album, InMemorySnapshotStore};
-///
-/// let album = Album::from(InMemorySnapshotStore::default());
-/// // erasing an erased handle: there is no second box to put it in
-/// let _twice = Album::from(Box::new(album));
-/// ```
-///
-/// # Why it does not implement `Store`
-///
-/// There is no deployment whose storage is snapshots alone — a snapshot is a
-/// shortcut and never a record — so unlike a journal, an album is not a
-/// [`Store`](crate::provider::Store) in its own right.
 pub struct Album(Box<dyn SnapshotStore>);
 
 impl Album {
@@ -103,4 +85,16 @@ impl From<&Album> for Album {
     fn from(album: &Album) -> Self {
         album.clone()
     }
+}
+
+#[cfg(doctest)]
+mod compile_fail_fixtures {
+    /// ```compile_fail
+    /// use nitinol_persistence::store::{Album, InMemorySnapshotStore};
+    ///
+    /// let album = Album::from(InMemorySnapshotStore::default());
+    /// // erasing an erased handle: there is no second box to put it in
+    /// let _twice = Album::from(Box::new(album));
+    /// ```
+    fn album_cannot_be_erased_twice() {}
 }

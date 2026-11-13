@@ -20,8 +20,6 @@
 //! them through `nitinol_persistence::reserved`, and it owns the
 //! runtime-string enforcement point, [`reject_reserved_id`].
 //!
-//! # The framework's own records
-//!
 //! The framework persists records under the names it reserved, so it needs a
 //! way past the refusal.  That way is
 //! `nitinol_persistence::__private::{reserved_family, reserved_event_registry_entry}`,

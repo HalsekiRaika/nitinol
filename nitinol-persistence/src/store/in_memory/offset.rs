@@ -33,11 +33,7 @@ use crate::store::offset_store::OffsetStore;
 ///
 /// Intended for tests and examples; not for production use.
 ///
-/// # A handle, not a region
-///
-/// Cloning this names the same positions, and [`Default`] constructs a
-/// destination of its own — which is what naming one handle into both
-/// offset slots of a store means, and what naming two apart means.
+/// Cloning and [`Default`] behave as [`InMemoryStore`](crate::store::InMemoryStore) describes.
 #[derive(Clone)]
 pub struct InMemoryOffsetStore {
     state: Arc<Mutex<HashMap<String, u64>>>,

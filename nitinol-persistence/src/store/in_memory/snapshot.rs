@@ -29,10 +29,7 @@ use crate::store::snapshot_store::SnapshotStore;
 ///
 /// Intended for tests and examples; not for production use.
 ///
-/// # A handle, not a region
-///
-/// Cloning this names the same saves, and [`Default`] constructs a destination
-/// of its own.
+/// Cloning and [`Default`] behave as [`InMemoryStore`](crate::store::InMemoryStore) describes.
 #[derive(Clone)]
 pub struct InMemorySnapshotStore {
     state: Arc<Mutex<HashMap<AggregateId, PersistedSnapshot>>>,

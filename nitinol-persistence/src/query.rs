@@ -46,9 +46,7 @@ pub struct LoadQuery<T = Untyped> {
     read_as: T,
 }
 
-/// Written out for the untyped query alone rather than derived: a derive would
-/// be generic over `T`, so `LoadQuery::default()` would no longer say which
-/// query it builds, and a typed query is built by [`LoadQuery::of`] alone.
+/// The untyped query with no conditions.
 impl Default for LoadQuery {
     fn default() -> Self {
         Self {

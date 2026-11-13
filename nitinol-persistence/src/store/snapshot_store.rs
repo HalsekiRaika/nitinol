@@ -31,6 +31,18 @@ use crate::snapshot::PersistedSnapshot;
 /// included.  A backend that has not been through it has not been shown to keep
 /// this contract.
 ///
+/// Every clause below is one a backend keeps on its own.  Whether an
+/// aggregate's restored state and the events replayed above it add up to where
+/// that aggregate had got to is a property of this store *and* the process
+/// driving it, and it is fixed there rather than here:
+/// `nitinol-eventsource/tests/e2e_snapshot.rs` runs the restore-then-replay
+/// path.  A store shown to keep SNAP-1 … SNAP-4 has not thereby been shown to
+/// be driven correctly.  Beyond the clauses, an implementor owes [`Clone`],
+/// through the [`SnapshotStoreClone`] supertrait, for the reason
+/// [`EventStore`](crate::store::EventStore) states: the store is distributed by
+/// being cloned, and deriving `Clone` is the whole of what an implementor
+/// writes.
+///
 /// # SNAP-1: nothing saved is a condition, not a failure
 ///
 /// `load_latest` for an aggregate the store holds no snapshot for answers
@@ -85,23 +97,6 @@ use crate::snapshot::PersistedSnapshot;
 /// each load answers with its own.
 ///
 /// Fixed by the suite's `one_aggregates_snapshot_is_never_anothers`.
-///
-/// # What these clauses do not cover
-///
-/// Every clause above is one a backend keeps on its own.  Whether an
-/// aggregate's restored state and the events replayed above it add up to where
-/// that aggregate had got to is a property of this store *and* the process
-/// driving it, and it is fixed there rather than here:
-/// `nitinol-eventsource/tests/e2e_snapshot.rs` runs the restore-then-replay
-/// path.  A store shown to keep SNAP-1 … SNAP-4 has not thereby been shown to
-/// be driven correctly.
-///
-/// # What an implementor owes beyond the clauses
-///
-/// [`Clone`], through the [`SnapshotStoreClone`] supertrait, for the reason
-/// [`EventStore`](crate::store::EventStore) states: the store is distributed by
-/// being cloned, and deriving `Clone` is the whole of what an implementor
-/// writes.
 #[async_trait]
 pub trait SnapshotStore: SnapshotStoreClone + Send + Sync {
     /// Stores `snapshot` as the state of its aggregate at its `sequence`.
