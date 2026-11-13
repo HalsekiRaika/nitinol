@@ -41,10 +41,13 @@ impl<'a, T> SubscriberContext<'a, T> {
         }
     }
 
+    /// Returns the pid of this subscriber process.
     pub fn pid(&self) -> Pid {
         self.pid
     }
 
+    /// Returns the name this subscriber process was spawned with, or `None` if
+    /// it has no name.
     pub fn name(&self) -> Option<&ProcessName> {
         self.name
     }
@@ -73,6 +76,11 @@ impl<'a, T> SubscriberContext<'a, T> {
     }
 
     /// Send a stop signal to this subscriber process.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the process's signal channel is closed, which
+    /// does not happen while its [`recv`](Subscriber::recv) is running.
     pub async fn stop_self(&self) -> Result<(), SendError> {
         wiring::stop_self(self.sys_tx).await
     }
@@ -84,6 +92,8 @@ impl<'a, T> SubscriberContext<'a, T> {
 /// that receives messages without returning a `Result`. Wrap the implementor
 /// with `Props::subscriber` to get spawn-ready `Props`.
 pub trait Subscriber<T>: 'static + Send + Sync {
+    /// Called for each message of type `T` the subscriber receives. Returns
+    /// nothing.
     fn recv(
         &mut self,
         msg: T,

@@ -23,10 +23,16 @@ pub(crate) trait DynProxy: 'static + Sync + Send {
 pub struct AnyProxy(Arc<dyn DynProxy>);
 
 impl AnyProxy {
+    /// Returns a typed proxy if the process is a `P`, or `None` otherwise.
     pub fn downcast<P: Process>(&self) -> Option<ProcessProxy<P>> {
         self.0.as_any().downcast_ref::<ProcessProxy<P>>().cloned()
     }
 
+    /// Requests that the process stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the process has already stopped.
     pub async fn stop(&self) -> Result<(), SendError> {
         self.0.send_sys_sig(SystemSignal::Stop).await
     }

@@ -64,8 +64,8 @@ pub trait Driver<P: Process>: Send + 'static {
     /// Whether the lifecycle loop should arm its idle-timeout timer for this
     /// driver. Message-driven drivers default to `true` so existing
     /// `IdleTimeout::After(_)` semantics are preserved. Tick / poll drivers
-    /// (e.g. a planned `IntervalDriver`) override to `false` because
-    /// "idle" has no meaning for a scheduled source.
+    /// override to `false` because "idle" has no meaning for a scheduled
+    /// source.
     fn supports_idle_timeout(&self) -> bool {
         true
     }
@@ -76,9 +76,7 @@ pub trait Driver<P: Process>: Send + 'static {
     /// `ProcessContext::pipe_to_self`. `PipeDriver` overrides this to return
     /// `Some(_)`, and `Combine<L, R>` propagates the first non-`None` handle
     /// it finds (preferring the left child). The lifecycle loop reads this
-    /// during process startup to wire `ctx.pipe_to_self` — if the resolved
-    /// value is `None`, calling `pipe_to_self` panics with a misuse message
-    /// rather than silently dropping the future.
+    /// during process startup to wire `ctx.pipe_to_self`.
     fn pipe_handle(&self) -> Option<PipeHandle<P>> {
         None
     }

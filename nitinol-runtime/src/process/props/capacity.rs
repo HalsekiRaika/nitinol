@@ -34,9 +34,11 @@ macro_rules! capacity_enum {
         }
 
         impl $name {
-            /// Construct a `Bounded(NonZeroUsize)` from a `usize`, rejecting
-            /// zero with `ConfigError::ZeroCapacity` so no zero-sized buffer
-            /// can leak past the public boundary.
+            /// Returns a bounded capacity of `n`.
+            ///
+            /// # Errors
+            ///
+            /// Returns `ConfigError::ZeroCapacity` if `n` is zero.
             pub fn bounded(n: usize) -> Result<Self, ConfigError> {
                 NonZeroUsize::new(n)
                     .map(Self::Bounded)

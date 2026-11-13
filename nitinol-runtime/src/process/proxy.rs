@@ -43,12 +43,15 @@ impl<P> Clone for ProcessProxy<P> {
 }
 
 impl<P> ProcessProxy<P> {
+    /// Requests that the process stop without waiting. Does nothing if the
+    /// request cannot be sent.
     pub fn signal_stop_nonblocking(&self) {
         let _ = self.sys_tx.try_send(SystemSignal::Stop);
     }
 }
 
 impl<P: Process> ProcessProxy<P> {
+    /// Returns the pid of the process.
     pub fn pid(&self) -> Pid {
         self.pid
     }
@@ -60,6 +63,12 @@ impl<P: Process> ProcessProxy<P> {
         }
     }
 
+    /// Sends `msg` to the process without waiting for a reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the process has stopped and its mailbox is
+    /// closed. The message is sent to the dead letters.
     pub async fn tell<M>(&self, msg: M) -> Result<(), SendError>
     where
         P: Receive<M>,
@@ -76,6 +85,15 @@ impl<P: Process> ProcessProxy<P> {
         }
     }
 
+    /// Sends `msg` to the process and waits for its reply.
+    ///
+    /// # Errors
+    ///
+    /// - [`AskError::DeadLetter`] if the process stopped before the message
+    ///   was delivered.
+    /// - [`AskError::Handler`] if the handler returned `Err`.
+    /// - [`AskError::ReplyDropped`] if the process stopped, restarted or
+    ///   panicked before replying, or its stash was full.
     pub async fn ask<M>(
         &self,
         msg: M,
@@ -103,8 +121,16 @@ impl<P: Process> ProcessProxy<P> {
         }
     }
 
-    /// Send `msg` and wait for a reply, failing with `AskError::Timeout` if no
-    /// reply arrives within `duration`.
+    /// Send `msg` and wait up to `duration` for a reply.
+    ///
+    /// # Errors
+    ///
+    /// - [`AskError::Timeout`] if no reply arrives within `duration`.
+    /// - [`AskError::DeadLetter`] if the process stopped before the message
+    ///   was delivered.
+    /// - [`AskError::Handler`] if the handler returned `Err`.
+    /// - [`AskError::ReplyDropped`] if the process stopped, restarted or
+    ///   panicked before replying, or its stash was full.
     pub async fn ask_with_timeout<M>(
         &self,
         msg: M,
@@ -144,6 +170,12 @@ impl<P: Process> ProcessProxy<P> {
         }
     }
 
+    /// Requests that the process stop. Its [`on_stop`](Process::on_stop) is
+    /// called.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the process has already stopped.
     pub async fn stop(&self) -> Result<(), SendError> {
         self.sys_tx
             .send(SystemSignal::Stop)
@@ -151,6 +183,11 @@ impl<P: Process> ProcessProxy<P> {
             .map_err(|_| SendError)
     }
 
+    /// Stops the process without calling its [`on_stop`](Process::on_stop).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the process has already stopped.
     pub async fn poison(&self) -> Result<(), SendError> {
         self.sys_tx
             .send(SystemSignal::Poison)

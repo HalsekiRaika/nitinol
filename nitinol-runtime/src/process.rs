@@ -110,18 +110,24 @@ use std::future::Future;
 /// `on_terminated` do nothing unless overridden.
 #[allow(unused_variables)]
 pub trait Process: 'static + Sync + Send {
+    /// Called when the process starts and again after each restart, before it
+    /// handles any message. Returns nothing.
     fn on_start(&mut self, ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send
     where
         Self: Sized,
     {
         async {}
     }
+    /// Called when the process stops, and before each restart. Not called when
+    /// the process is poisoned. Returns nothing.
     fn on_stop(&mut self, ctx: &mut ProcessContext<Self>) -> impl Future<Output = ()> + Send
     where
         Self: Sized,
     {
         async {}
     }
+    /// Called with a [`Terminated`] notice when a process this process watches
+    /// ends. Returns nothing.
     fn on_terminated(
         &mut self,
         terminated: Terminated,
@@ -139,8 +145,12 @@ pub trait Process: 'static + Sync + Send {
 /// `Response` is the reply that [`ProcessProxy::ask`] returns. Returning
 /// `Err` hands the error to the process's [`SupervisionStrategy`].
 pub trait Receive<M>: Process {
+    /// The reply to a message of type `M`.
     type Response: 'static + Send;
+    /// The error a handler for `M` returns.
     type Error: std::error::Error + Send + Sync + 'static;
+    /// Called for each message of type `M` the process receives. Returns the
+    /// reply, or an error that is handed to the [`SupervisionStrategy`].
     fn recv(
         &mut self,
         msg: M,

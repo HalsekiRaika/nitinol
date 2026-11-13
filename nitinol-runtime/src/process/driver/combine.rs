@@ -32,6 +32,7 @@ pub struct Combine<L, R> {
 }
 
 impl<L, R> Combine<L, R> {
+    /// Combines `left` and `right` into one driver.
     pub fn new(left: L, right: R) -> Self {
         Self { left, right }
     }

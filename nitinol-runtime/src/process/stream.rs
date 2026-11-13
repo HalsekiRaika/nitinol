@@ -165,6 +165,10 @@ impl ProcessProxy<Stream<BoxedMessage>> {
     /// The value is type-erased into `BoxedMessage` so every subscriber receives
     /// the same zero-copy `Arc` clone. Use [`publish`][ProcessProxy::publish] on a
     /// typed `Stream<T>` instead when the stream message type is known.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the stream process has stopped.
     pub async fn publish_boxed<M: Message>(&self, msg: M) -> Result<(), SendError> {
         self.tell(PublishMsg(BoxedMessage::new(msg))).await
     }
@@ -178,6 +182,10 @@ where
     ///
     /// Symmetric counterpart of [`tell`][ProcessProxy::tell]: both accept a concrete
     /// message type, giving `publish` the same ergonomics as `tell`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the stream process has stopped.
     pub async fn publish(&self, msg: T) -> Result<(), SendError> {
         self.tell(PublishMsg(msg)).await
     }
@@ -190,6 +198,10 @@ where
     /// Register `proxy` as a subscriber to this stream.
     ///
     /// The proxy's process must implement `Receive<T, Response = ()>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the stream process has stopped.
     pub async fn subscribe<P>(&self, proxy: ProcessProxy<P>) -> Result<(), SendError>
     where
         P: Process + Receive<T, Response = ()>,
@@ -200,6 +212,10 @@ where
     /// Remove the subscriber identified by `pid` from this stream.
     ///
     /// No-op if `pid` is not currently subscribed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the stream process has stopped.
     pub async fn unsubscribe(&self, pid: Pid) -> Result<(), SendError> {
         self.tell(UnsubscribeMsg(pid)).await
     }

@@ -56,8 +56,7 @@ pub(crate) type PipeFuture<P> = BoxFuture<'static, PipedTask<P>>;
 /// `PipeDriver::with_capacity(n)` configures the underlying tokio mpsc
 /// channel with capacity `n`. `ctx.pipe_to_self` enqueues via `try_send`:
 /// when the buffer is full or the receiving channel is closed, the future
-/// is dropped silently and the process keeps running. The bounded shape
-/// replaces the pre-spec unbounded channel (Pain-Point P2).
+/// is dropped silently and the process keeps running.
 ///
 /// ## CPU-bound work is unsupported
 ///

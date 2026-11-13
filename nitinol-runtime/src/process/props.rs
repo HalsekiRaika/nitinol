@@ -43,6 +43,8 @@ pub struct Props<P: Process, D = DefaultDriver> {
 }
 
 impl<P: Process> Props<P, DefaultDriver> {
+    /// Creates props that build the process by calling `producer` when it is
+    /// spawned and again on each restart.
     pub fn new(producer: impl Fn() -> P + Send + Sync + 'static) -> Self {
         Self {
             producer: Box::new(producer),
@@ -58,31 +60,37 @@ impl<P: Process> Props<P, DefaultDriver> {
 }
 
 impl<P: Process, D> Props<P, D> {
+    /// Sets what happens when a handler returns an error.
     pub fn with_supervision_strategy(mut self, strategy: SupervisionStrategy) -> Self {
         self.supervision_strategy = strategy;
         self
     }
 
+    /// Sets how long the process may go without a message before it stops.
     pub fn with_idle_timeout(mut self, timeout: IdleTimeout) -> Self {
         self.idle_timeout = timeout;
         self
     }
 
+    /// Sets the capacity of the process's mailbox.
     pub fn with_mailbox_capacity(mut self, capacity: MailboxCapacity) -> Self {
         self.mailbox_capacity = capacity;
         self
     }
 
+    /// Sets the capacity of the process's stash.
     pub fn with_stash_capacity(mut self, capacity: StashCapacity) -> Self {
         self.stash_capacity = capacity;
         self
     }
 
+    /// Sets the capacity of the process's pipe-to-self channel.
     pub fn with_pipe_capacity(mut self, capacity: PipeCapacity) -> Self {
         self.pipe_capacity = capacity;
         self
     }
 
+    /// Sets the name the process is registered under.
     pub fn with_name(mut self, name: ProcessName) -> Self {
         self.name = Some(name);
         self

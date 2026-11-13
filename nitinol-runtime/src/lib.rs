@@ -149,6 +149,8 @@
 //! which re-exports it as `nitinol::runtime` and adds layers for persistence,
 //! event sourcing and sagas on top of it.
 
+#![warn(missing_docs)]
+
 pub mod error;
 pub mod ident;
 pub mod process;

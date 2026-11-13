@@ -74,10 +74,13 @@ impl<P: Process> ProcessContext<P> {
             .expect("explicit watch set lock was poisoned by a panicking holder")
     }
 
+    /// Returns the pid of this process.
     pub fn pid(&self) -> Pid {
         self.pid
     }
 
+    /// Returns the name this process was spawned with, or `None` if it has no
+    /// name.
     pub fn name(&self) -> Option<&ProcessName> {
         self.name.as_ref()
     }
@@ -117,6 +120,12 @@ impl<P: Process> ProcessContext<P> {
     ///
     /// Accepts `Props<C>` (returns `ProcessProxy<C>`) or `StreamProps<T>`
     /// (returns `Result<ProcessProxy<Stream<T>>, SpawnError>`).
+    ///
+    /// # Errors
+    ///
+    /// For a [`StreamProps`](crate::StreamProps), returns
+    /// [`SpawnError`](crate::error::SpawnError) if a stream already exists for
+    /// its topic.
     #[allow(private_bounds)]
     pub async fn spawn_child<S: SpawnDispatch>(&mut self, spawnable: S) -> S::Output {
         let env = SpawnEnv::child(
@@ -184,6 +193,12 @@ impl<P: Process> ProcessContext<P> {
         .await;
     }
 
+    /// Requests that this process stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the process's signal channel is closed, which
+    /// does not happen while one of its handlers is running.
     pub async fn stop_self(&self) -> Result<(), SendError> {
         wiring::stop_self(&self.sys_tx).await
     }

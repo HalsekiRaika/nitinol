@@ -23,10 +23,18 @@ const DEAD_LETTER_PROCESS_NAME: &str = "$dead-letter";
 pub struct DeadLetterStream(ProcessProxy<Stream<BoxedMessage>>);
 
 impl DeadLetterStream {
+    /// Returns the pid of the dead-letter stream.
     pub fn pid(&self) -> Pid {
         self.0.pid()
     }
 
+    /// Subscribes `proxy` to every dead letter. Each
+    /// [`DeadLetter`](crate::DeadLetter) arrives wrapped in a [`BoxedMessage`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the dead-letter stream has stopped. The stream
+    /// is persistent, so this does not happen in practice.
     pub async fn subscribe<P>(&self, proxy: ProcessProxy<P>) -> Result<(), SendError>
     where
         P: Process + Receive<BoxedMessage, Response = ()>,
@@ -34,6 +42,12 @@ impl DeadLetterStream {
         self.0.subscribe(proxy).await
     }
 
+    /// Removes the subscriber identified by `pid`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the dead-letter stream has stopped. The stream
+    /// is persistent, so this does not happen in practice.
     pub async fn unsubscribe(&self, pid: Pid) -> Result<(), SendError> {
         self.0.unsubscribe(pid).await
     }
@@ -84,6 +98,10 @@ impl ProcessSystemBuilder {
     /// This is construction, not just configuration — the dead-letter stream and
     /// process are running by the time it returns, so the first spawn already has
     /// somewhere to route to.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
     pub async fn build(self) -> ProcessSystem {
         let registry = ProcessRegistry::new();
 
@@ -166,6 +184,10 @@ impl ProcessSystem {
     /// Shorthand for `ProcessSystem::builder().build().await`; reach for
     /// [`builder`][Self::builder] when any of the system-wide defaults has to be
     /// set.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
     pub async fn new() -> Self {
         Self::builder().build().await
     }
@@ -256,6 +278,16 @@ impl ProcessSystem {
     /// // compile error: `Spawnable` is not exported — internal dispatch stays crate-private
     /// use nitinol_runtime::process::Spawnable;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// For a [`StreamProps`](crate::StreamProps), returns
+    /// [`SpawnError`](crate::error::SpawnError) if a stream already exists for
+    /// its topic.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
     #[allow(private_bounds)]
     pub async fn spawn<S: SpawnDispatch>(&self, spawnable: S) -> S::Output {
         let env = self.spawn_env();
@@ -281,6 +313,12 @@ impl ProcessSystem {
     ///
     /// The runtime supplies the mechanism only: it knows no resident type by
     /// name, and `P` comes from the crate that declares it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime, or if the task that starts the
+    /// resident dies before handing back its proxy, for example because
+    /// `P::props()` panics.
     pub async fn spawn_resident<P: Resident>(&self) -> ProcessProxy<P> {
         let env = self.spawn_env();
         self.inner.residents.resolve::<P>(&env).await
@@ -299,10 +337,13 @@ impl ProcessSystem {
         )
     }
 
+    /// Returns the running process with `pid`, or `None` if there is none.
     pub async fn lookup(&self, pid: Pid) -> Option<AnyProxy> {
         self.inner.registry.lookup(pid).await
     }
 
+    /// Returns the running process registered under `name`, or `None` if there
+    /// is none.
     pub async fn lookup_by_name(&self, name: &ProcessName) -> Option<AnyProxy> {
         self.inner.registry.lookup_by_name(name).await
     }

@@ -1,7 +1,10 @@
+/// The name given to a process, used to find it with
+/// [`ProcessSystem::lookup_by_name`](crate::ProcessSystem::lookup_by_name).
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct ProcessName(Box<str>);
 
 impl ProcessName {
+    /// Creates a name from `name`.
     pub fn new(name: impl AsRef<str>) -> Self {
         Self(name.as_ref().into())
     }
