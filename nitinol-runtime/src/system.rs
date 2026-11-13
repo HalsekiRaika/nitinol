@@ -194,8 +194,6 @@ impl ProcessSystem {
 
     /// Begin configuring a system.
     ///
-    /// # Configuration is fixed by `build()`
-    ///
     /// The `with_default_*` axes exist on the builder alone.  Reconfiguring a
     /// system after it has been built — and after clones of it may already be in
     /// flight — is a **compile error** rather than a change some handles would
@@ -238,46 +236,11 @@ impl ProcessSystem {
         &self.inner.dead_letter_stream
     }
 
-    /// Spawn `spawnable`. The single unified entry — `Props<P>` returns a
-    /// `ProcessProxy<P>`; `StreamProps<T>` returns `Result<ProcessProxy<Stream<T>>, SpawnError>`.
+    /// Starts a new process from `spawnable`.
     ///
-    /// The legacy `spawn_named`, `spawn_with_driver`, and `spawn_stream` entry
-    /// points have been removed. Attempting to call any of them is a compile error:
-    ///
-    /// ```compile_fail
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # async fn bad() {
-    /// let system = ProcessSystem::new().await;
-    /// // compile error: `spawn_named` was removed — use `props.with_name(name)` instead
-    /// system.spawn_named("x", todo!()).await;
-    /// # }
-    /// ```
-    ///
-    /// ```compile_fail
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # async fn bad() {
-    /// let system = ProcessSystem::new().await;
-    /// // compile error: `spawn_with_driver` was removed — use `props.with_driver(driver)` instead
-    /// system.spawn_with_driver(todo!(), todo!()).await;
-    /// # }
-    /// ```
-    ///
-    /// ```compile_fail
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # async fn bad() {
-    /// let system = ProcessSystem::new().await;
-    /// // compile error: `spawn_stream` was removed — use `system.spawn(StreamProps::<T>::new(topic))` instead
-    /// system.spawn_stream::<u32>(todo!()).await;
-    /// # }
-    /// ```
-    ///
-    /// The internal dispatch trait `Spawnable` is not part of the public API;
-    /// only `Props` and `StreamProps` are accepted:
-    ///
-    /// ```compile_fail
-    /// // compile error: `Spawnable` is not exported — internal dispatch stays crate-private
-    /// use nitinol_runtime::process::Spawnable;
-    /// ```
+    /// A [`Props<P>`](Props) returns a [`ProcessProxy<P>`](ProcessProxy). A
+    /// [`StreamProps<T>`](crate::StreamProps) starts the stream for its topic
+    /// and returns `Result<ProcessProxy<Stream<T>>, SpawnError>`.
     ///
     /// # Errors
     ///
@@ -294,25 +257,12 @@ impl ProcessSystem {
         spawnable.spawn_with(&env).await
     }
 
-    /// Resolve the resident process of type `P`, starting it on the first ask.
+    /// Returns the resident process of type `P`, starting it from
+    /// [`Resident::props`] on the first call.
     ///
-    /// The type is the key. The first call starts the lifecycle `P` declared
-    /// through [`Resident::props`]; every later call through this system — or
-    /// through any clone of it — hands back a proxy to that same process, so at
-    /// most one process of the type exists. This is the opposite of
-    /// [`spawn`][Self::spawn], which starts a lifecycle on every call and never
-    /// resolves a running one.
-    ///
-    /// Callers racing on the first ask converge: one lifecycle is started and
-    /// all of them receive a proxy to it.
-    ///
-    /// A resident is persistent. Neither the system default idle timeout nor an
-    /// [`IdleTimeout`](crate::IdleTimeout) the declaration set for itself will
-    /// reap it, so the proxy handed back stays answerable however long the
-    /// process sits idle.
-    ///
-    /// The runtime supplies the mechanism only: it knows no resident type by
-    /// name, and `P` comes from the crate that declares it.
+    /// Later calls through this system or any clone of it return a proxy to the
+    /// same process, and concurrent first calls start only one. The process is
+    /// never reaped by an idle timeout (see [`Resident`]).
     ///
     /// # Panics
     ///

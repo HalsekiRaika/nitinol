@@ -172,15 +172,6 @@ impl<P: Process, D: Driver<P>> Props<P, D> {
 /// // No drivers — must be a compile error.
 /// type Bad = Props![MyProc];
 /// ```
-///
-/// ```compile_fail
-/// # use nitinol_runtime::Props;
-/// # use nitinol_runtime::process::Process;
-/// # struct MyProc;
-/// # impl Process for MyProc {}
-/// // Empty driver list — must be a compile error.
-/// type Bad = Props![MyProc;];
-/// ```
 #[allow(non_snake_case)]
 #[macro_export]
 macro_rules! Props {
@@ -195,4 +186,17 @@ macro_rules! Props {
     ($p:ty; $($drivers:ident),+ $(,)?) => {
         $crate::process::Props<$p, $crate::Props!(@drivers $p; $($drivers),+)>
     };
+}
+
+#[cfg(doctest)]
+mod compile_fail_fixtures {
+    /// ```compile_fail
+    /// # use nitinol_runtime::Props;
+    /// # use nitinol_runtime::process::Process;
+    /// # struct MyProc;
+    /// # impl Process for MyProc {}
+    /// // Empty driver list — must be a compile error.
+    /// type Bad = Props![MyProc;];
+    /// ```
+    fn props_macro_empty_driver_list() {}
 }

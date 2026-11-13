@@ -121,7 +121,7 @@ impl<P: Process> ProcessProxy<P> {
         }
     }
 
-    /// Send `msg` and wait up to `duration` for a reply.
+    /// Sends `msg` and waits up to `duration` for a reply.
     ///
     /// # Errors
     ///

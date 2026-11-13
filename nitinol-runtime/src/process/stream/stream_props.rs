@@ -16,17 +16,6 @@ use crate::process::ProcessProxy;
 /// The supervision strategy is fixed to `Resume` and has no setter. Users
 /// tune mailbox / stash / pipe capacity through the same `with_*` API they
 /// get on `Props`.
-///
-/// Attempting to call `with_supervision_strategy` (which does not exist on
-/// this type) is a compile error:
-///
-/// ```compile_fail
-/// # use nitinol_runtime::{StreamProps, SupervisionStrategy};
-/// # use nitinol_runtime::ident::ProcessName;
-/// // compile error: no method `with_supervision_strategy` on `StreamProps<u32>`
-/// StreamProps::<u32>::new(ProcessName::new("t"))
-///     .with_supervision_strategy(SupervisionStrategy::Stop);
-/// ```
 pub struct StreamProps<T: 'static + Send + Sync> {
     topic: ProcessName,
     inner: Props<Stream<T>>,

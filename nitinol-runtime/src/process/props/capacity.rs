@@ -38,7 +38,7 @@ macro_rules! capacity_enum {
             ///
             /// # Errors
             ///
-            /// Returns `ConfigError::ZeroCapacity` if `n` is zero.
+            /// Returns [`ConfigError::ZeroCapacity`](crate::error::ConfigError::ZeroCapacity) if `n` is zero.
             pub fn bounded(n: usize) -> Result<Self, ConfigError> {
                 NonZeroUsize::new(n)
                     .map(Self::Bounded)

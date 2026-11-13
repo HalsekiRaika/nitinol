@@ -32,8 +32,6 @@ use crate::process::{Process, ProcessContext};
 /// [`combine_drivers!`](crate::combine_drivers) macro). The lifecycle loop
 /// still drives a single Driver — multiplexing is the Driver tree's job.
 ///
-/// # Implicit Drivers
-///
 /// `ProcessSystem::spawn(props)` automatically composes the following drivers:
 /// - `MessageDriver` — mailbox receive (`tell` / `ask`)
 /// - `PipeDriver`    — backs `ctx.pipe_to_self`

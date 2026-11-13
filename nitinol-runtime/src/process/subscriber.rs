@@ -70,7 +70,7 @@ impl<'a, T> SubscriberContext<'a, T> {
 
     /// Stop watching the process at `target_pid`.
     ///
-    /// No-op if the target is no longer in the registry.
+    /// No-op if the target is not in the registry.
     pub async fn unwatch(&self, target_pid: Pid) {
         wiring::unwatch(self.pid, target_pid, self.registry).await;
     }

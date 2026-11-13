@@ -6,49 +6,6 @@
 //! then send it messages through the [`ProcessProxy`] that is returned. See
 //! [Getting started](crate#getting-started) for a longer walkthrough.
 //!
-//! The following process keeps a running total. [`tell`](ProcessProxy::tell)
-//! sends a message without waiting for a reply, and
-//! [`ask`](ProcessProxy::ask) sends one and returns the handler's reply:
-//!
-//! ```
-//! use std::convert::Infallible;
-//!
-//! use nitinol_runtime::process::{Process, ProcessContext, Receive};
-//! use nitinol_runtime::{ProcessSystem, Props};
-//!
-//! struct Total(u32);
-//!
-//! impl Process for Total {}
-//!
-//! struct Add(u32);
-//!
-//! impl Receive<Add> for Total {
-//!     type Response = u32;
-//!     type Error = Infallible;
-//!
-//!     async fn recv(
-//!         &mut self,
-//!         msg: Add,
-//!         _ctx: &mut ProcessContext<Self>,
-//!     ) -> Result<u32, Infallible> {
-//!         self.0 += msg.0;
-//!         Ok(self.0)
-//!     }
-//! }
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     let system = ProcessSystem::new().await;
-//!     let total = system.spawn(Props::new(|| Total(0))).await;
-//!
-//!     total.tell(Add(2)).await.expect("tell failed");
-//!     let sum = total.ask(Add(3)).await.expect("ask failed");
-//!     assert_eq!(sum, 5);
-//!
-//!     total.stop().await.expect("stop failed");
-//! }
-//! ```
-//!
 //! The main types in this module:
 //!
 //! - [`Process`]: the state of a process and its lifecycle hooks.
