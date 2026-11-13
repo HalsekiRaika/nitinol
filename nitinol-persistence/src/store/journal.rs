@@ -20,10 +20,9 @@ use crate::store::typed_load::{TypedEventStream, TypedLoad};
 ///   [`EventStoreClone`](crate::store::EventStoreClone) supertrait, so every
 ///   wiring point the framework hands a journal to reaches the one set of
 ///   records. That is `PRV-1` as the erasure has to keep it.
-/// - It is not an [`EventStore`]. That leaves room for `Journal::from` to accept
-///   a backend handle *and* a journal, and makes erasing twice a type error
-///   rather than a `Box<Box<_>>`: the only ways from one journal to another are
-///   the reflexive conversion and `From<&Journal>`, both of which clone.
+/// - It is not an [`EventStore`]. Erasing a journal twice is a type error; the
+///   only ways from one journal to another are the reflexive conversion and
+///   `From<&Journal>`, both of which clone.
 /// - It is a [`Store`]: a store holding the journal alone is the journal, so a
 ///   journal handed to a
 ///   [`PersistenceProvider`](crate::provider::PersistenceProvider) is

@@ -48,11 +48,9 @@ pub struct TypedEvent<E> {
 ///   event store they erase or hold.
 /// - [`read`](TypedLoad::read) takes only a `LoadQuery<Typed<E>>`, built by
 ///   [`LoadQuery::of`]; `E` is the type it decodes into.
-/// - Rows of a deeper declaration whose family is `E`'s whole path are left
-///   out, yet a limit the query names counts them, since the store applies it.
-/// - A payload `E::Codec` cannot read is a [`LoadError::Decode`] in that row's
-///   place, and the rows after it are still read, so a consumer that moves its
-///   progress past the rows it was served is told of the row it could not read.
+/// - `read(q)` serves what `load(q.into_untyped())` serves, kept to the rows
+///   of `E` and decoded through `E::Codec`; `LOAD-2` on
+///   [`read`](TypedLoad::read) states it in full.
 ///
 /// It is sealed: it cannot be implemented outside this crate.
 ///
@@ -95,8 +93,7 @@ pub struct TypedEvent<E> {
 /// ```
 pub trait TypedLoad: sealed::Sealed {
     /// Serves the rows of `E` that `query` selects, each read through
-    /// `E::Codec`. [`TypedLoad`] says which rows are left out and how a payload
-    /// that cannot be read is served.
+    /// `E::Codec`.
     ///
     /// # LOAD-2: a typed read is a load of the type's own rows
     ///
