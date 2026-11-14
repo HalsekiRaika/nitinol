@@ -263,16 +263,17 @@ where
     /// one a later activation recovers from. The request goes through the
     /// mailbox like any command, so every command sent before it has been
     /// applied when the state is captured. An activation that has appended
-    /// nothing is saved at sequence 0. Only a `Recover = Latest` aggregate has
-    /// this method.
+    /// nothing is saved at sequence 0. Only a [`Recover = Latest`](Latest)
+    /// aggregate has this method.
     ///
     /// # Errors
     ///
     /// - [`SnapshotSaveError::Encode`] if the snapshot codec cannot write the
     ///   captured state.
-    /// - [`SnapshotSaveError::Persist`] if the snapshot persistor reports an
-    ///   error: the snapshot store failed to save it, or no answer came back from
-    ///   the persistor process
+    /// - [`SnapshotSaveError::Persist`] if the
+    ///   [snapshot persistor](crate::system::EventSourceSystem::snapshot_persistor)
+    ///   reports an error: the snapshot store failed to save it, or no answer
+    ///   came back from the persistor process
     ///   ([`SnapshotError::Backend`](nitinol_persistence::error::SnapshotError::Backend)).
     /// - [`SnapshotSaveError::Send`] if no answer comes back from an activation.
     /// - [`SnapshotSaveError::Activation`] if the system the aggregate was

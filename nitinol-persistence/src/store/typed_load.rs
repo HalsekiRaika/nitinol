@@ -63,7 +63,10 @@ pub struct TypedEvent<E> {
 ///     async fn read<E: nitinol_contract::Event>(
 ///         &self,
 ///         _: nitinol_persistence::LoadQuery<nitinol_persistence::Typed<E>>,
-///     ) -> Result<nitinol_persistence::store::TypedEventStream<'_, E>, nitinol_persistence::error::LoadError> {
+///     ) -> Result<
+///         nitinol_persistence::store::TypedEventStream<'_, E>,
+///         nitinol_persistence::error::LoadError,
+///     > {
 ///         unimplemented!()
 ///     }
 /// }
@@ -80,11 +83,14 @@ pub struct TypedEvent<E> {
 /// # struct Nothing;
 /// # impl nitinol_contract::Codec<Opened> for Nothing {
 /// #     type Error = std::convert::Infallible;
-/// #     fn encode(_: &Opened) -> Result<bytes::Bytes, Self::Error> { Ok(bytes::Bytes::new()) }
+/// #     fn encode(_: &Opened) -> Result<bytes::Bytes, Self::Error> {
+/// #         Ok(bytes::Bytes::new())
+/// #     }
 /// #     fn decode(_: &[u8]) -> Result<Opened, Self::Error> { Ok(Opened) }
 /// # }
 /// # impl Event for Opened {
-/// #     const EVENT_TYPE: EventType = EventType::new(Family::new("shop.order"), TypeName::new("Opened"));
+/// #     const EVENT_TYPE: EventType =
+/// #         EventType::new(Family::new("shop.order"), TypeName::new("Opened"));
 /// #     type Codec = Nothing;
 /// # }
 /// # async fn reads(store: &InMemoryEventStore) {
@@ -207,11 +213,14 @@ mod compile_fail_fixtures {
     /// # struct Nothing;
     /// # impl nitinol_contract::Codec<Opened> for Nothing {
     /// #     type Error = std::convert::Infallible;
-    /// #     fn encode(_: &Opened) -> Result<bytes::Bytes, Self::Error> { Ok(bytes::Bytes::new()) }
+    /// #     fn encode(_: &Opened) -> Result<bytes::Bytes, Self::Error> {
+    /// #         Ok(bytes::Bytes::new())
+    /// #     }
     /// #     fn decode(_: &[u8]) -> Result<Opened, Self::Error> { Ok(Opened) }
     /// # }
     /// # impl Event for Opened {
-    /// #     const EVENT_TYPE: EventType = EventType::new(Family::new("shop.order"), TypeName::new("Opened"));
+    /// #     const EVENT_TYPE: EventType =
+    /// #         EventType::new(Family::new("shop.order"), TypeName::new("Opened"));
     /// #     type Codec = Nothing;
     /// # }
     /// # async fn reads(store: &InMemoryEventStore) {

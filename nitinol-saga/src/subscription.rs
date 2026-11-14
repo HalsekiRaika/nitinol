@@ -45,8 +45,9 @@ impl Subscription {
     /// `key` is the stream key the events are appended under: an
     /// [`AggregateId`](nitinol_persistence::AggregateId) or another saga's
     /// [`SagaId`](crate::SagaId). The stream is read from the system's journal.
-    /// The beginning is the floor; after a restart each partition resumes past
-    /// the offset it recorded, counted in the stream's own sequence.
+    /// The beginning is the floor, raised with [`with_after`](Self::with_after);
+    /// after a restart each partition resumes past the offset it recorded,
+    /// counted in the stream's own sequence.
     pub fn stream<K>(key: &K) -> Self
     where
         K: ?Sized + Borrow<str>,
@@ -64,9 +65,10 @@ impl Subscription {
     /// the store's global sequence.
     ///
     /// For a source that must see several aggregates' events in the order the
-    /// store accepted them. Its offset counts the global sequence; a record read
-    /// again is still dropped by the per-source consumed positions before it
-    /// reaches [`Saga::handle`](crate::Saga::handle).
+    /// store accepted them. Its offset counts the global sequence, and its floor
+    /// is raised with [`with_after`](Self::with_after); a record read again is
+    /// still dropped by the per-source consumed positions before it reaches
+    /// [`Saga::handle`](crate::Saga::handle).
     pub fn global() -> Self {
         Self {
             source: Source::Global,

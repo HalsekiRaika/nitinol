@@ -20,9 +20,9 @@ use crate::process::{Process, ProcessContext};
 
 /// Abstraction over the source that drives a process's lifecycle loop.
 ///
-/// `lifecycle_loop` is generic over `D: Driver<P>` so that any "driving
-/// source" — message channels, timer ticks, external futures — can ride the
-/// same supervision / registry / dead-letter machinery.
+/// The process's lifecycle loop is generic over `D: Driver<P>` so that any
+/// "driving source" — message channels, timer ticks, external futures — can
+/// ride the same supervision / registry / dead-letter machinery.
 ///
 /// `next` does NOT borrow `&mut state`, so it can be awaited inside
 /// `tokio::select!` alongside the system-signal receiver. `apply` borrows
@@ -38,7 +38,8 @@ use crate::process::{Process, ProcessContext};
 /// - `StashDriver`   — backs `ctx.stash` / `ctx.unstash_all`
 ///
 /// The driver installed via [`Props::with_driver`](crate::process::Props::with_driver)
-/// occupies a single slot composed on top of the Core trio. For multi-driver
+/// occupies a single slot composed on top of the three built-in drivers
+/// (`MessageDriver`, `PipeDriver`, `StashDriver`). For multi-driver
 /// composition, build a single combined driver with
 /// [`combine_drivers!`](crate::combine_drivers) and pass it to `with_driver`.
 pub trait Driver<P: Process>: Send + 'static {

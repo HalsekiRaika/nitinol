@@ -55,7 +55,7 @@ impl DeadLetterStream {
 
 /// Configuration for a [`ProcessSystem`], and the only place it can be set.
 ///
-/// Obtained from [`ProcessSystem::builder`].  Each `with_default_*` axis names
+/// Obtained from [`ProcessSystem::builder`]. Each `with_default_*` axis names
 /// the value a `Props` field left at `Inherit` decays to at spawn time;
 /// [`build`][Self::build] then performs the construction and hands back a system
 /// carrying them.
@@ -68,7 +68,7 @@ pub struct ProcessSystemBuilder {
 
 impl ProcessSystemBuilder {
     /// Set a system-wide default idle timeout applied to all user processes whose
-    /// `IdleTimeout` is `Inherit`.  Consumes `self` and returns `Self` for chaining.
+    /// `IdleTimeout` is `Inherit`. Consumes `self` and returns `Self` for chaining.
     pub fn with_default_idle_timeout(mut self, timeout: Duration) -> Self {
         self.default_idle_timeout = Some(timeout);
         self
@@ -151,12 +151,12 @@ impl ProcessSystemBuilder {
 ///
 /// Cloning a `ProcessSystem` names the same instance rather than creating a
 /// second one: every clone observes the same process registry, the same
-/// dead-letter stream, and the same defaults.  Keeping the instance single is
+/// dead-letter stream, and the same defaults. Keeping the instance single is
 /// this type's job, so callers share it by cloning rather than by wrapping it in
 /// an `Arc`, and the entry points below stay by-reference — whether to clone is
 /// the caller's decision, not one this API makes for them.
 ///
-/// Configuration is fixed before any handle exists.  The `with_default_*` axes
+/// Configuration is fixed before any handle exists. The `with_default_*` axes
 /// live on [`ProcessSystemBuilder`], and
 /// [`build`][ProcessSystemBuilder::build] settles them; a built system has no
 /// way to be reconfigured, so no clone can observe defaults that differ from
@@ -194,7 +194,7 @@ impl ProcessSystem {
 
     /// Begin configuring a system.
     ///
-    /// The `with_default_*` axes exist on the builder alone.  Reconfiguring a
+    /// The `with_default_*` axes exist on the builder alone. Reconfiguring a
     /// system after it has been built — and after clones of it may already be in
     /// flight — is a **compile error** rather than a change some handles would
     /// see and others would not:

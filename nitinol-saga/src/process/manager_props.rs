@@ -126,11 +126,8 @@ impl<S: Saga, B, H> SagaManagerProps<S, B, H> {
     /// index over `partitions` independent processes, each saga assigned by
     /// [`partition_of`](crate::partition_of).
     ///
-    /// A source partition's offset covers the instances assigned to it under
-    /// the count it ran with, so a new count is applied only after every
-    /// partition is drained: stop the saga, let nothing be left unsettled, then
-    /// start it with the new count. What a partition bounds and what changing
-    /// the count costs are stated on [`SagaDeliveryProps`].
+    /// A new count is applied only after every partition is drained; the steps
+    /// are stated on [`SagaDeliveryProps`].
     pub fn with_partitions(mut self, partitions: NonZeroUsize) -> Self {
         self.delivery = self.delivery.with_partitions(partitions);
         self

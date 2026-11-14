@@ -5,12 +5,13 @@ use async_trait::async_trait;
 /// - Wired in with [`crate::ProjectorProps::with_tx_provider`], which fixes the
 ///   delivery mode to `ExactlyOnce`. Each batch, at most
 ///   [`crate::ProjectorProps::with_batch_limit`] records, is one transaction:
-///   `begin`, `project` for every record, the offset save, then `commit`. A
-///   batch whose every record is skipped opens no transaction.
+///   [`begin`](TxProvider::begin), `project` for every record, the offset save,
+///   then [`commit`](TxProvider::commit). A batch whose every record is skipped
+///   opens no transaction.
 /// - If `begin`, a `project` or the offset save fails, the batch is left
-///   unapplied: an open transaction goes to `rollback`, the offset stays, and
-///   the batch is redelivered from its first record. Records after the failing
-///   one are not projected.
+///   unapplied: an open transaction goes to [`rollback`](TxProvider::rollback),
+///   the offset stays, and the batch is redelivered from its first record.
+///   Records after the failing one are not projected.
 /// - A failed `commit` is treated as uncommitted, whether the backend rejected
 ///   it or its outcome was lost, and the batch is redelivered; if it did land,
 ///   the batch is applied a second time. An implementation that can settle an

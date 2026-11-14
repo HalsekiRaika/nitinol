@@ -46,7 +46,11 @@ impl SagaDelivery {
     /// host persists no copy of a command. Any aggregate may be a target. One
     /// whose `Recover` is [`Latest`](nitinol_eventsource::Latest) recovers from
     /// the deployment's snapshot slot; where the store holds none, its delivery
-    /// is a permanent failure and the partition holds.
+    /// is a permanent failure and the partition holds. That failure arises only
+    /// through a [`ContingentSystem`], as a delivery is made; spawning the same
+    /// aggregate through the typed
+    /// [`EventSourceSystem::spawn_aggregate`](nitinol_eventsource::system::EventSourceSystem::spawn_aggregate)
+    /// is a compile error.
     pub fn new<A, C>(target: AggregateId, command: C) -> Self
     where
         A: Aggregate + Decider<C>,

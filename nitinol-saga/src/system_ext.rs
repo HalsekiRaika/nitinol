@@ -55,7 +55,10 @@ pub trait SagaSystemExt {
     /// [`SagaManagerProps::new`](SagaManagerProps::new)`(..).spawn(&system)`;
     /// the delivery host's settings are named on the props this returns.
     /// `factory` is called for every instance and whenever the runtime rebuilds
-    /// one, so anything the saga captures must be re-acquirable.
+    /// one, so anything the saga captures must be re-acquirable; a saga that
+    /// holds no state can be produced with `|_| S::default()`. As with
+    /// [`spawn`](SagaManagerProps#method.spawn-1), spawning the returned props
+    /// before every declared source is bound is a compile error.
     ///
     /// This exists only where the store holds the saga-offset slot the delivery
     /// host records its progress in; a store without one is a **compile error**:

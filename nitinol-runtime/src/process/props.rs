@@ -21,8 +21,9 @@ use crate::process::Process;
 /// supervision, idle timeout, and optional name.
 ///
 /// The `D` type parameter (defaulting to [`DefaultDriver`]) holds the single
-/// driver composed on top of the Core trio at spawn time. To install a custom
-/// driver, call [`Props::with_driver`]; the call transitions the type from
+/// driver composed on top of the three built-in drivers (`MessageDriver`,
+/// `PipeDriver`, `StashDriver`) at spawn time. To install a custom driver, call
+/// [`Props::with_driver`]; the call transitions the type from
 /// `Props<P, DefaultDriver>` to `Props<P, D2>`. Multi-driver composition is
 /// done statically via the [`combine_drivers!`](crate::combine_drivers)
 /// macro before passing the result to `with_driver` — there is no runtime
@@ -104,8 +105,8 @@ impl<P: Process, D> Props<P, D> {
     /// drivers in the same process, build a single composite with
     /// [`combine_drivers!`](crate::combine_drivers) and pass it to a single
     /// `with_driver` call. The runtime then composes the user driver on top
-    /// of the Core trio (`MessageDriver` + `PipeDriver` + `StashDriver`)
-    /// via [`Combine`](crate::process::Combine).
+    /// of the three built-in drivers (`MessageDriver`, `PipeDriver`,
+    /// `StashDriver`) via [`Combine`](crate::process::Combine).
     pub fn with_driver<D2>(self, driver: D2) -> Props<P, D2>
     where
         D2: Driver<P>,

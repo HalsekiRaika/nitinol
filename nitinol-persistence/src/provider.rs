@@ -2,11 +2,12 @@
 //!
 //! Three responsibilities, kept apart.
 //!
-//! | Layer | Responsibility |
-//! |---|---|
-//! | [`Store`] | Owns the storage resources and the identity of the regions behind them |
-//! | [`CustomStore`] | Names one handle per slot, which is how a mixture is assembled |
-//! | [`PersistenceProvider`] | Distributes what a store answers with to the framework's wiring |
+//! - [`Store`] owns the storage resources and the identity of the regions
+//!   behind them.
+//! - [`CustomStore`] names one handle per slot, which is how a mixture is
+//!   assembled.
+//! - [`PersistenceProvider`] distributes what a store answers with to the
+//!   framework's wiring.
 //!
 //! A deployment constructs a store — [`InMemoryStore`](crate::store::InMemoryStore),
 //! a backend's own, or a [`CustomStore`] over named handles — and hands it to

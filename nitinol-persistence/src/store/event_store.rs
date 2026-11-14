@@ -22,11 +22,11 @@ pub type EventStream<'a> = Pin<Box<dyn Stream<Item = Result<LoadedEvent, LoadErr
 /// `AggregateId` and `SagaId` both implement `Borrow<str>`.
 ///
 /// Beyond the clauses, an implementor owes [`Clone`], through the
-/// [`EventStoreClone`] supertrait. A store is
-/// distributed by being cloned rather than by being shared, so deriving
-/// `Clone` over the backend's own handle is what lets the framework hand the
-/// journal to every wiring point. Deriving it is the whole of it — the
-/// `clone_box` the erasure needs comes from the blanket implementation.
+/// [`EventStoreClone`] supertrait. A store is distributed by being cloned
+/// rather than by being shared, so deriving `Clone` over the backend's own
+/// handle is what lets the framework hand the journal to every wiring point.
+/// Deriving it is the whole of it — the `clone_box` the erasure needs comes
+/// from the blanket implementation.
 #[async_trait]
 pub trait EventStore: EventStoreClone + Send + Sync {
     /// Appends `events` to the stream identified by `key`.

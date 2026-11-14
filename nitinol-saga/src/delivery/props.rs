@@ -59,10 +59,12 @@ pub(crate) const RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// - Changing the partition count reassigns stream keys to offsets, so records
 ///   are read again and one not yet delivered can fall behind an offset already
 ///   past it. Change it only with every partition drained: stop the host, let
-///   nothing be left unfinished, then start it with the new count.
+///   nothing be left unfinished, then start it with the new count. The deadline
+///   index records no offset, so a new count does not affect it.
 /// - A host is started only by [`SagaManagerProps`](crate::SagaManagerProps),
 ///   which names these settings; the journal and the saga-offset slot are the
-///   system's.
+///   system's, and that slot may share a table with the projection offset slot
+///   because their keys cannot collide.
 pub struct SagaDeliveryProps<S: Saga> {
     delivery_id: Option<SagaDeliveryId>,
     partitions: NonZeroUsize,

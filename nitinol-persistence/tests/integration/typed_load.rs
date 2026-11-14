@@ -236,7 +236,7 @@ fn load_2_a_query_of_a_type_names_its_path_and_no_other_condition() {
 }
 
 #[test]
-fn load_2_erasing_keeps_every_condition_the_typed_query_was_given() {
+fn load_2_into_untyped_keeps_every_condition_the_typed_query_was_given() {
     let query = LoadQuery::of::<Wanted>()
         .with_stream("stream-a")
         .with_from_global(7)
@@ -274,7 +274,7 @@ fn load_2_converting_with_from_gives_the_query_into_untyped_gives() {
 }
 
 #[test]
-fn load_2_erasing_puts_the_types_own_path_back_whatever_the_prefix_field_holds() {
+fn load_2_into_untyped_puts_the_types_own_path_back_whatever_the_prefix_field_holds() {
     for (named, overwritten) in [
         ("no prefix", None),
         ("an ancestor family", Some(path("typed"))),
