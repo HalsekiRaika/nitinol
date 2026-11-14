@@ -13,14 +13,26 @@ pub(crate) trait DynProxy: 'static + Sync + Send {
     async fn send_sys_sig(&self, signal: SystemSignal) -> Result<(), SendError>;
 }
 
+/// A handle to a running process whose type is not known.
+///
+/// [`ProcessSystem::lookup`](crate::ProcessSystem::lookup) and
+/// [`ProcessSystem::lookup_by_name`](crate::ProcessSystem::lookup_by_name)
+/// return one. Turn it back into a [`ProcessProxy`] with
+/// [`downcast`](Self::downcast), or [`stop`](Self::stop) the process directly.
 #[derive(Clone)]
 pub struct AnyProxy(Arc<dyn DynProxy>);
 
 impl AnyProxy {
+    /// Returns a typed proxy if the process is a `P`, or `None` otherwise.
     pub fn downcast<P: Process>(&self) -> Option<ProcessProxy<P>> {
         self.0.as_any().downcast_ref::<ProcessProxy<P>>().cloned()
     }
 
+    /// Requests that the process stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the process has already stopped.
     pub async fn stop(&self) -> Result<(), SendError> {
         self.0.send_sys_sig(SystemSignal::Stop).await
     }

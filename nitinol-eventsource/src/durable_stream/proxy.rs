@@ -24,26 +24,12 @@ const POLLER_RESTART_WITHIN: Duration = Duration::from_secs(60);
 /// Minimal configuration needed to spawn a `DirectPollerProcess` as a
 /// runtime child of any subscriber process via [`Self::spawn_child`].
 ///
-/// Use this instead of holding a full [`DurableStreamProxy`] when the
-/// subscriber only needs its own direct polling path and does not use the
-/// shared [`Stream<T>`] fan-out channel.  Holding a `DurableStreamProxy` as a
-/// process field keeps the shared poller alive for the process's lifetime —
-/// `DurableSubscription` avoids that by carrying only the ingredients for a
-/// direct poller, with no reference to the shared poller.
-///
-/// Every spawn method here delivers one record per `ask`, and the subscriber's
-/// `Ok` is what moves the cursor past that record. A projector does not take
-/// this road: it is fed by a crate-internal poller that hands it what each read
-/// returned as one batch, under the same supervision and interval, so that it
-/// can save its offset — and commit its transaction — once per batch.
-///
-/// # No journal of its own
-///
-/// What this carries is how to read a record and how often to ask, not where to
-/// ask. The journal arrives at each spawn method, from whoever owns the wiring
-/// that is starting the poller — a stream handing out its own store, or a saga
-/// manager handing out the one its system supplied it. A subscription that kept
-/// a journal would be a second place a destination could be named.
+/// - Unlike a [`DurableStreamProxy`] held as a process field, it keeps no shared
+///   poller alive and does not use the shared [`Stream<T>`] fan-out channel.
+/// - Every spawn method delivers one record per `ask`, and the subscriber's
+///   `Ok` is what moves the cursor past that record.
+/// - It carries how to read a record and how often to ask, not where: the
+///   journal is passed to each spawn method by whoever owns the wiring.
 pub struct DurableSubscription<T> {
     pub(crate) transform: TransformFn<T>,
     pub(crate) poll_interval: Duration,
@@ -295,10 +281,16 @@ where
         }
     }
 
+    /// Returns the pid of the stream process.
     pub fn pid(&self) -> Pid {
         self.stream_proxy.pid()
     }
 
+    /// Registers `proxy` to receive the records the stream publishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the stream process has stopped.
     pub async fn subscribe<P>(&self, proxy: ProcessProxy<P>) -> Result<(), SendError>
     where
         P: Process + Receive<T, Response = ()>,
@@ -308,13 +300,14 @@ where
         Ok(())
     }
 
+    /// Delivers records to `proxy` from `cursor` onward through a poller of its
+    /// own, replacing the poller an earlier call started for `proxy`.
     pub async fn subscribe_from<P>(
         &self,
         system: &ProcessSystem,
         proxy: ProcessProxy<P>,
         cursor: SequenceCursor,
-    ) -> Result<(), SendError>
-    where
+    ) where
         P: Process + Receive<T, Response = ()>,
     {
         let pid = proxy.pid();
@@ -334,10 +327,14 @@ where
             Some(direct_poller_name(pid)),
         );
         system.spawn(props).await;
-
-        Ok(())
     }
 
+    /// Stops the poller [`subscribe_from`](Self::subscribe_from) started for
+    /// `pid` and removes `pid` from the stream's subscribers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the stream process has stopped.
     pub async fn unsubscribe(&self, system: &ProcessSystem, pid: Pid) -> Result<(), SendError> {
         if let Some(proxy) = system.lookup_by_name(&direct_poller_name(pid)).await {
             let _ = proxy.stop().await;

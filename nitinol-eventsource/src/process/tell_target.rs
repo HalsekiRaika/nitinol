@@ -14,6 +14,7 @@ use crate::process::proxy::AggregateProxy;
 /// can render.  The contract itself stays free of that requirement, because a
 /// decider tested in isolation owes nobody a report.
 pub trait AggregateTellTarget<A: Aggregate>: Clone + Send + Sync + 'static {
+    /// Sends `cmd` to the aggregate without waiting for its decision.
     fn tell<C>(&'_ self, cmd: C) -> BoxFuture<'_, Result<(), TellError>>
     where
         A: Decider<C>,

@@ -100,32 +100,23 @@ impl<S: Saga> SagaDeliveryProxy<S> {
     /// Declare that partition `partition` will not deliver anything at or
     /// below `to`, and have it resume above it.
     ///
-    /// # What this is for
+    /// The way past a delivery held for good; the framework never calls it on
+    /// its own. The commands passed over **will not be delivered**, now or
+    /// later. Only the named partition moves, and its cursor is at the new
+    /// offset by the time this returns.
     ///
-    /// A delivery the receiver refuses for good is held rather than passed
-    /// over, because a loop cannot tell a command that should never have been
-    /// sent from one whose target has yet to reach the state that would accept
-    /// it. Everything behind the held record waits with it. This is the way
-    /// out, and it is deliberately a person's to take.
+    /// # Errors
     ///
-    /// # What it means
+    /// A refusal changes nothing — see [`SagaDeliveryError`].
     ///
-    /// The offset is a cache of progress and can be rebuilt by
-    /// reading from the beginning — but this is not a rebuild. It says the
-    /// commands the stretch being passed over implied **will not be
-    /// delivered**: whatever the saga decided there does not reach its target,
-    /// now or later. Whether the business can live with that, and whether
-    /// anything has to be put right by hand, is the judgement being made here.
-    /// Nothing in the framework can make it.
-    ///
-    /// The host is not restarted and nothing else pauses: the partition named
-    /// has its cursor at the new offset by the time this returns, and the other
-    /// partitions never stopped.
-    ///
-    /// # What it refuses
-    ///
-    /// A move that is not strictly forward, and a move to a partition this host
-    /// does not have. A refusal changes nothing — see [`SagaDeliveryError`].
+    /// - [`NoSuchPartition`](SagaDeliveryError::NoSuchPartition) if `partition`
+    ///   is not below the host's partition count.
+    /// - [`NotForward`](SagaDeliveryError::NotForward) if `to` is not greater
+    ///   than the offset the partition has already finished with.
+    /// - [`NotRecorded`](SagaDeliveryError::NotRecorded) if the store fails to
+    ///   read the partition's recorded progress or to record `to`.
+    /// - [`Unreachable`](SagaDeliveryError::Unreachable) if the partition does
+    ///   not answer the request.
     pub async fn advance_offset(&self, partition: usize, to: u64) -> Result<(), SagaDeliveryError> {
         let Some(handle) = self.partitions.get(partition) else {
             return Err(SagaDeliveryError::NoSuchPartition {

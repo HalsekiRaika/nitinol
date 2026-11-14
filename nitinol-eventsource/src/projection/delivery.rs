@@ -415,7 +415,7 @@ mod tests {
     use nitinol_persistence::error::OffsetError;
     use nitinol_persistence::store::{InMemoryOffsetStore, OffsetScope};
 
-    /// The position a one-record batch is at. Deliberately non-zero, so a
+    /// The position a one-record batch is at. Non-zero, so a
     /// `Settled` that wrongly reported something other than the record's own
     /// position is visible in the value as well as in the variant.
     const SEQUENCE: u64 = 9;

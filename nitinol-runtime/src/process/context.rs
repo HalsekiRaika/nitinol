@@ -24,6 +24,10 @@ use crate::process::{Process, Receive};
 
 use super::wiring;
 
+/// The running process, as seen from its own handlers and lifecycle hooks.
+///
+/// It gives the process its own pid, name and proxy, and lets it spawn
+/// children, watch other processes, stash messages and stop itself.
 pub struct ProcessContext<P: Process> {
     pub(crate) pid: Pid,
     pub(crate) name: Option<ProcessName>,
@@ -70,10 +74,13 @@ impl<P: Process> ProcessContext<P> {
             .expect("explicit watch set lock was poisoned by a panicking holder")
     }
 
+    /// Returns the pid of this process.
     pub fn pid(&self) -> Pid {
         self.pid
     }
 
+    /// Returns the name this process was spawned with, or `None` if it has no
+    /// name.
     pub fn name(&self) -> Option<&ProcessName> {
         self.name.as_ref()
     }
@@ -102,17 +109,20 @@ impl<P: Process> ProcessContext<P> {
         &self.self_proxy
     }
 
-    /// Spawn `spawnable` as a child of this process.
+    /// Starts `spawnable` as a child of this process.
     ///
-    /// The new process inherits the parent's `ProcessRegistry` (flat
-    /// registry — no path information attached to the Pid) and the system
-    /// default idle timeout used by [`crate::ProcessSystem::spawn`]. Its
-    /// `ctx.parent()` returns this process's Pid. When this process stops,
-    /// the runtime cascade-stops every child (reverse insertion order) and
-    /// waits for their `Terminated` before exiting.
+    /// Accepts the same inputs as [`ProcessSystem::spawn`](crate::ProcessSystem::spawn),
+    /// with the same outputs.
     ///
-    /// Accepts `Props<C>` (returns `ProcessProxy<C>`) or `StreamProps<T>`
-    /// (returns `Result<ProcessProxy<Stream<T>>, SpawnError>`).
+    /// The child's `ctx.parent()` returns this process's pid. When this process
+    /// stops, it stops its children in reverse spawn order and waits for them
+    /// to end.
+    ///
+    /// # Errors
+    ///
+    /// For a [`StreamProps`](crate::StreamProps), returns
+    /// [`SpawnError`](crate::error::SpawnError) if a stream already exists for
+    /// its topic.
     #[allow(private_bounds)]
     pub async fn spawn_child<S: SpawnDispatch>(&mut self, spawnable: S) -> S::Output {
         let env = SpawnEnv::child(
@@ -180,13 +190,19 @@ impl<P: Process> ProcessContext<P> {
         .await;
     }
 
+    /// Requests that this process stop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the process's signal channel is closed, which
+    /// does not happen while one of its handlers is running.
     pub async fn stop_self(&self) -> Result<(), SendError> {
         wiring::stop_self(&self.sys_tx).await
     }
 
     /// Stop watching the process at `target_pid`.
     ///
-    /// No-op if the target is no longer in the registry.
+    /// No-op if the target is not in the registry.
     pub async fn unwatch(&self, target_pid: Pid) {
         self.untrack_explicit_watch(&target_pid);
         wiring::unwatch(self.pid, target_pid, &self.registry).await;
@@ -259,35 +275,15 @@ impl<P: Process> ProcessContext<P> {
         }
     }
 
-    /// Pipe the future `fut`'s result back into this process as a typed message.
+    /// Pipes the result of `fut` back into this process as a message.
     ///
-    /// The future is polled by the owning process's `PipeDriver` inside the
-    /// same lifecycle loop task (single-threaded). When the future resolves
-    /// — successfully or with a panic — `map` is invoked with
-    /// `Ok(value)` / `Err(PipePanic)` to produce the follow-up message `M`,
-    /// which is then delivered via `Receive<M>` just like any other tell.
+    /// When `fut` resolves, `map` turns its result into a message `M`, which is
+    /// delivered through `Receive<M>` like any other tell. This is a
+    /// continuation, not reentrancy: the current handler returns before the
+    /// follow-up message is handled.
     ///
-    /// # Continuation, not reentrancy
-    ///
-    /// The current handler returns BEFORE the piped follow-up is processed;
-    /// the mailbox stays single-threaded.
-    ///
-    /// # Panic capture
-    ///
-    /// A panic during the future's poll is caught and surfaced as
-    /// `Err(PipePanic)` — the process stays alive. CPU-bound or blocking
-    /// futures are NOT supported and will stall the lifecycle loop.
-    ///
-    /// # No abort
-    ///
-    /// Pipe futures cannot be cancelled individually; they are dropped en
-    /// masse when the lifecycle loop terminates.
-    ///
-    /// # Bounded backpressure
-    ///
-    /// Enqueue is `try_send` over the `PipeDriver`'s bounded channel: when
-    /// the buffer is full or the channel is closed, the future is dropped
-    /// silently and the process stays alive.
+    /// See [`PipeDriver`](crate::process::PipeDriver) for capacity, panics,
+    /// blocking work and cancellation.
     pub fn pipe_to_self<F, M, U>(&self, fut: F, map: U)
     where
         F: Future + Send + 'static,

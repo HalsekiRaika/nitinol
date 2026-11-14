@@ -17,17 +17,24 @@ const DEAD_LETTERS_TOPIC: &str = "$dead-letters";
 /// The well-known process name for the dead-letter process.
 const DEAD_LETTER_PROCESS_NAME: &str = "$dead-letter";
 
-/// A handle to the system dead-letter stream with a stable, policy-compliant API.
+/// A handle to the system dead-letter stream.
 ///
-/// Wraps `ProcessProxy<Stream<Boxed>>` so that the internal proxy type is not
-/// exposed in the public API surface.
+/// Obtained from [`ProcessSystem::dead_letter_stream`].
 pub struct DeadLetterStream(ProcessProxy<Stream<BoxedMessage>>);
 
 impl DeadLetterStream {
+    /// Returns the pid of the dead-letter stream.
     pub fn pid(&self) -> Pid {
         self.0.pid()
     }
 
+    /// Subscribes `proxy` to every dead letter. Each
+    /// [`DeadLetter`](crate::DeadLetter) arrives wrapped in a [`BoxedMessage`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the dead-letter stream has stopped. The stream
+    /// is persistent, so this does not happen in practice.
     pub async fn subscribe<P>(&self, proxy: ProcessProxy<P>) -> Result<(), SendError>
     where
         P: Process + Receive<BoxedMessage, Response = ()>,
@@ -35,6 +42,12 @@ impl DeadLetterStream {
         self.0.subscribe(proxy).await
     }
 
+    /// Removes the subscriber identified by `pid`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SendError`] if the dead-letter stream has stopped. The stream
+    /// is persistent, so this does not happen in practice.
     pub async fn unsubscribe(&self, pid: Pid) -> Result<(), SendError> {
         self.0.unsubscribe(pid).await
     }
@@ -42,7 +55,7 @@ impl DeadLetterStream {
 
 /// Configuration for a [`ProcessSystem`], and the only place it can be set.
 ///
-/// Obtained from [`ProcessSystem::builder`].  Each `with_default_*` axis names
+/// Obtained from [`ProcessSystem::builder`]. Each `with_default_*` axis names
 /// the value a `Props` field left at `Inherit` decays to at spawn time;
 /// [`build`][Self::build] then performs the construction and hands back a system
 /// carrying them.
@@ -55,7 +68,7 @@ pub struct ProcessSystemBuilder {
 
 impl ProcessSystemBuilder {
     /// Set a system-wide default idle timeout applied to all user processes whose
-    /// `IdleTimeout` is `Inherit`.  Consumes `self` and returns `Self` for chaining.
+    /// `IdleTimeout` is `Inherit`. Consumes `self` and returns `Self` for chaining.
     pub fn with_default_idle_timeout(mut self, timeout: Duration) -> Self {
         self.default_idle_timeout = Some(timeout);
         self
@@ -85,6 +98,10 @@ impl ProcessSystemBuilder {
     /// This is construction, not just configuration — the dead-letter stream and
     /// process are running by the time it returns, so the first spawn already has
     /// somewhere to route to.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
     pub async fn build(self) -> ProcessSystem {
         let registry = ProcessRegistry::new();
 
@@ -134,12 +151,12 @@ impl ProcessSystemBuilder {
 ///
 /// Cloning a `ProcessSystem` names the same instance rather than creating a
 /// second one: every clone observes the same process registry, the same
-/// dead-letter stream, and the same defaults.  Keeping the instance single is
+/// dead-letter stream, and the same defaults. Keeping the instance single is
 /// this type's job, so callers share it by cloning rather than by wrapping it in
 /// an `Arc`, and the entry points below stay by-reference — whether to clone is
 /// the caller's decision, not one this API makes for them.
 ///
-/// Configuration is fixed before any handle exists.  The `with_default_*` axes
+/// Configuration is fixed before any handle exists. The `with_default_*` axes
 /// live on [`ProcessSystemBuilder`], and
 /// [`build`][ProcessSystemBuilder::build] settles them; a built system has no
 /// way to be reconfigured, so no clone can observe defaults that differ from
@@ -167,15 +184,17 @@ impl ProcessSystem {
     /// Shorthand for `ProcessSystem::builder().build().await`; reach for
     /// [`builder`][Self::builder] when any of the system-wide defaults has to be
     /// set.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
     pub async fn new() -> Self {
         Self::builder().build().await
     }
 
     /// Begin configuring a system.
     ///
-    /// # Configuration is fixed by `build()`
-    ///
-    /// The `with_default_*` axes exist on the builder alone.  Reconfiguring a
+    /// The `with_default_*` axes exist on the builder alone. Reconfiguring a
     /// system after it has been built — and after clones of it may already be in
     /// flight — is a **compile error** rather than a change some handles would
     /// see and others would not:
@@ -217,71 +236,39 @@ impl ProcessSystem {
         &self.inner.dead_letter_stream
     }
 
-    /// Spawn `spawnable`. The single unified entry — `Props<P>` returns a
-    /// `ProcessProxy<P>`; `StreamProps<T>` returns `Result<ProcessProxy<Stream<T>>, SpawnError>`.
+    /// Starts a new process from `spawnable`.
     ///
-    /// The legacy `spawn_named`, `spawn_with_driver`, and `spawn_stream` entry
-    /// points have been removed. Attempting to call any of them is a compile error:
+    /// A [`Props<P>`](Props) returns a [`ProcessProxy<P>`](ProcessProxy). A
+    /// [`StreamProps<T>`](crate::StreamProps) starts the stream for its topic
+    /// and returns `Result<ProcessProxy<Stream<T>>, SpawnError>`.
     ///
-    /// ```compile_fail
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # async fn bad() {
-    /// let system = ProcessSystem::new().await;
-    /// // compile error: `spawn_named` was removed — use `props.with_name(name)` instead
-    /// system.spawn_named("x", todo!()).await;
-    /// # }
-    /// ```
+    /// # Errors
     ///
-    /// ```compile_fail
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # async fn bad() {
-    /// let system = ProcessSystem::new().await;
-    /// // compile error: `spawn_with_driver` was removed — use `props.with_driver(driver)` instead
-    /// system.spawn_with_driver(todo!(), todo!()).await;
-    /// # }
-    /// ```
+    /// For a [`StreamProps`](crate::StreamProps), returns
+    /// [`SpawnError`](crate::error::SpawnError) if a stream already exists for
+    /// its topic.
     ///
-    /// ```compile_fail
-    /// # use nitinol_runtime::ProcessSystem;
-    /// # async fn bad() {
-    /// let system = ProcessSystem::new().await;
-    /// // compile error: `spawn_stream` was removed — use `system.spawn(StreamProps::<T>::new(topic))` instead
-    /// system.spawn_stream::<u32>(todo!()).await;
-    /// # }
-    /// ```
+    /// # Panics
     ///
-    /// The internal dispatch trait `Spawnable` is not part of the public API;
-    /// only `Props` and `StreamProps` are accepted:
-    ///
-    /// ```compile_fail
-    /// // compile error: `Spawnable` is not exported — internal dispatch stays crate-private
-    /// use nitinol_runtime::process::Spawnable;
-    /// ```
+    /// Panics if called outside a Tokio runtime.
     #[allow(private_bounds)]
     pub async fn spawn<S: SpawnDispatch>(&self, spawnable: S) -> S::Output {
         let env = self.spawn_env();
         spawnable.spawn_with(&env).await
     }
 
-    /// Resolve the resident process of type `P`, starting it on the first ask.
+    /// Returns the resident process of type `P`, starting it from
+    /// [`Resident::props`] on the first call.
     ///
-    /// The type is the key. The first call starts the lifecycle `P` declared
-    /// through [`Resident::props`]; every later call through this system — or
-    /// through any clone of it — hands back a proxy to that same process, so at
-    /// most one process of the type exists. This is the opposite of
-    /// [`spawn`][Self::spawn], which starts a lifecycle on every call and never
-    /// resolves a running one.
+    /// Later calls through this system or any clone of it return a proxy to the
+    /// same process, and concurrent first calls start only one. The process is
+    /// never reaped by an idle timeout (see [`Resident`]).
     ///
-    /// Callers racing on the first ask converge: one lifecycle is started and
-    /// all of them receive a proxy to it.
+    /// # Panics
     ///
-    /// A resident is persistent. Neither the system default idle timeout nor an
-    /// [`IdleTimeout`](crate::IdleTimeout) the declaration set for itself will
-    /// reap it, so the proxy handed back stays answerable however long the
-    /// process sits idle.
-    ///
-    /// The runtime supplies the mechanism only: it knows no resident type by
-    /// name, and `P` comes from the crate that declares it.
+    /// Panics if called outside a Tokio runtime, or if the task that starts the
+    /// resident dies before handing back its proxy, for example because
+    /// `P::props()` panics.
     pub async fn spawn_resident<P: Resident>(&self) -> ProcessProxy<P> {
         let env = self.spawn_env();
         self.inner.residents.resolve::<P>(&env).await
@@ -300,10 +287,13 @@ impl ProcessSystem {
         )
     }
 
+    /// Returns the running process with `pid`, or `None` if there is none.
     pub async fn lookup(&self, pid: Pid) -> Option<AnyProxy> {
         self.inner.registry.lookup(pid).await
     }
 
+    /// Returns the running process registered under `name`, or `None` if there
+    /// is none.
     pub async fn lookup_by_name(&self, name: &ProcessName) -> Option<AnyProxy> {
         self.inner.registry.lookup_by_name(name).await
     }

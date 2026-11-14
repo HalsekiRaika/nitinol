@@ -17,15 +17,43 @@
 //! use in tests and examples, and [`store::InMemoryStore`] is a whole store
 //! over it.  Neither is intended for production use.
 //!
-//! # Third-party backends
+//! # Getting started
 //!
-//! Production backends (Postgres, SQLite, DynamoDB, etc.) are intentionally
-//! out of scope for this crate.  Implement [`store::EventStore`],
-//! [`store::SnapshotStore`], and [`store::OffsetStore`] against your
-//! preferred storage engine, then either implement [`provider::Store`] over
-//! them or name your handles in a [`provider::CustomStore`] — and hand the
-//! result to [`provider::PersistenceProvider::new`], which is what every
-//! wiring point in the framework resolves its stores from.
+//! Appending an event to a stream and loading the stream back:
+//!
+//! ```
+//! use bytes::Bytes;
+//! use futures_util::TryStreamExt;
+//! use nitinol_persistence::store::{EventStore, InMemoryEventStore};
+//! use nitinol_persistence::{AggregateId, AppendingEvent, EventType, Family, LoadQuery, TypeName};
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     let store = InMemoryEventStore::default();
+//!     let id = AggregateId::new("counter-1");
+//!     let event = AppendingEvent {
+//!         sequence: 1,
+//!         event_type: EventType::new(Family::new("counter"), TypeName::new("incremented")),
+//!         payload: Bytes::new(),
+//!         occurred_at: jiff::Timestamp::now(),
+//!     };
+//!
+//!     store.append(id.as_str(), vec![event]).await.expect("append failed");
+//!     let stream = store.load(LoadQuery::by_stream(&id)).await.expect("load failed");
+//!     let events: Vec<_> = stream.try_collect().await.expect("collect failed");
+//!     assert_eq!(events.len(), 1);
+//! }
+//! ```
+//!
+//! # Backends
+//!
+//! A backend implements [`store::EventStore`], [`store::SnapshotStore`] and
+//! [`store::OffsetStore`]; the Postgres backend is `nitinol-sqlx`. To write
+//! your own, implement them against your storage engine, then either implement
+//! [`provider::Store`] over them or name your handles in a
+//! [`provider::CustomStore`] — and hand the result to
+//! [`provider::PersistenceProvider::new`], which is what every wiring point in
+//! the framework resolves its stores from.
 //!
 //! All three store traits carry behavioural contracts a backend has to
 //! reproduce, stated as labelled clauses on the trait itself:
@@ -95,6 +123,8 @@
 //! is not a spare: link-time detection has holes (static libraries linked
 //! together need not report a duplicate), and an entry placed by hand rather
 //! than derived carries no symbol at all.
+
+#![warn(missing_docs)]
 
 pub mod error;
 pub mod provider;

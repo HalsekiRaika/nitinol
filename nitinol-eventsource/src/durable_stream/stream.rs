@@ -30,16 +30,16 @@ pub struct CursorSet(SequenceCursor);
 /// Builder + spawn entry-point for an at-least-once event stream backed by an
 /// [`EventStore`](nitinol_persistence::store::EventStore) poller.
 ///
-/// What it carries is the topic to publish on, how to read each record and how
-/// often to ask — never *which* journal. That comes from the system the stream
-/// is spawned on: `H` is whether one has been named yet, with [`Unhosted`]
-/// props taking a system at [`spawn`][DurableStream::spawn] and props from
-/// [`EventSourceSystem::durable_stream`] carrying it already. Both forms meet on
-/// one private path and read the same journal.
+/// It carries the topic to publish on, how to read each record and how often to
+/// ask, never which journal: that comes from the system the stream is spawned
+/// on. `H` is whether one has been named yet: [`Unhosted`] props take a system
+/// at [`spawn`][DurableStream::spawn], and props from
+/// [`EventSourceSystem::durable_stream`] carry it already; both read the same
+/// journal. A stream over a different destination takes a second system over
+/// the supplier that holds it.
 ///
-/// Typestate guarantees that `spawn` is only callable once a `SequenceCursor`
-/// has been supplied via [`cursor`][DurableStream::cursor].  See the
-/// `compile_fail` doctest below.
+/// `spawn` is only callable once a [`SequenceCursor`] has been supplied via
+/// [`cursor`][DurableStream::cursor]:
 ///
 /// ```compile_fail
 /// # use nitinol_eventsource::DurableStream;
@@ -59,20 +59,6 @@ pub struct CursorSet(SequenceCursor);
 ///     .spawn(&system)
 ///     .await
 ///     .unwrap();
-/// # }
-/// ```
-///
-/// Nor is there a form that names a journal. A stream over a different
-/// destination is a second system over the supplier that holds it:
-///
-/// ```compile_fail
-/// # use nitinol_eventsource::DurableStream;
-/// # use nitinol_persistence::store::InMemoryEventStore;
-/// # use nitinol_persistence::LoadedEvent;
-/// # use nitinol_runtime::ident::ProcessName;
-/// # fn bad() {
-/// let store = InMemoryEventStore::default();
-/// DurableStream::<()>::new(ProcessName::new("topic"), store, |_: LoadedEvent| None);
 /// # }
 /// ```
 pub struct DurableStream<T, S = CursorUnset, H = Unhosted> {
@@ -161,6 +147,11 @@ where
     T: 'static + Send + Sync + Clone,
 {
     /// Start this stream over the journal `system` distributes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError`] if a process is already registered under this
+    /// stream's topic.
     pub async fn spawn<St: Store>(
         self,
         system: &EventSourceSystem<St>,
@@ -175,6 +166,11 @@ where
     St: Store,
 {
     /// Start this stream over the journal the system it came from distributes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError`] if a process is already registered under this
+    /// stream's topic.
     pub async fn spawn(self) -> Result<DurableStreamProxy<T>, SpawnError> {
         let host = self.host.system().clone();
         self.start_on(&host).await

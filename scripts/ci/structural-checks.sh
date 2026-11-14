@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Source-tree checks: `mod.rs` placement, review-marker and external-reference
-# comments, and decorative separators. Every violation is printed as
-# `path:line:text`, and the script exits non-zero when there is any.
+# comments, decorative separators, `ignore` doc fences, and maintainer wording
+# in crate docs. Every violation is printed as `path:line:text`, and the
+# script exits non-zero when there is any.
 set -Eeuo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -104,6 +105,23 @@ main() {
   local separator_pattern
   separator_pattern='^[[:space:]]*//[[:space:]]*[-=]{4,}[[:space:]]*$'
 
+  # A doc fence marked `ignore` is neither compiled nor run, so it can go stale
+  # unnoticed. A fence that cannot run uses `no_run`, which still compiles.
+  local ignore_fence_pattern
+  ignore_fence_pattern='^[[:space:]]*//[/!][[:space:]]*```([a-zA-Z0-9_]+,)*ignore(,[a-zA-Z0-9_]+)*[[:space:]]*$'
+
+  # Doc comments in a published crate's `src/` are read by users, who have no
+  # history to weigh a design choice against. State the rule, not the intent.
+  local maintainer_wording_pattern
+  maintainer_wording_pattern='^[[:space:]]*//[/!].*\b([Dd]eliberately|[Ii]ntentionally|[Oo]n purpose|[Ll]egacy|[Pp]re-spec)\b'
+
+  local crate_src_files=()
+  for f in "${rust_files[@]}"; do
+    if [[ "$f" =~ ^\./(nitinol-[a-z-]+|providers/[a-z-]+)/src/ ]]; then
+      crate_src_files+=("$f")
+    fi
+  done
+
   local status
 
   status=0
@@ -138,6 +156,32 @@ main() {
     violations=1
   elif ((status > 1)); then
     exit "$status"
+  fi
+
+  status=0
+  report_structural_matches \
+    "Doc fences marked ignore" \
+    "$ignore_fence_pattern" \
+    "${rust_files[@]}" || status=$?
+  if ((status == 0)); then
+    echo "Use no_run for a doc example that compiles but must not run." >&2
+    violations=1
+  elif ((status > 1)); then
+    exit "$status"
+  fi
+
+  if ((${#crate_src_files[@]} > 0)); then
+    status=0
+    report_structural_matches \
+      "Maintainer wording in crate docs" \
+      "$maintainer_wording_pattern" \
+      "${crate_src_files[@]}" || status=$?
+    if ((status == 0)); then
+      echo "Doc comments state the rule; drop deliberately/intentionally/on purpose/legacy/pre-spec." >&2
+      violations=1
+    elif ((status > 1)); then
+      exit "$status"
+    fi
   fi
 
   ((violations == 0)) || exit 1

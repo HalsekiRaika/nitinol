@@ -32,8 +32,8 @@ const _: () = assert!(
 /// Put an offset store under writers recording at the same time, and check
 /// what each of their keys ends up holding.
 ///
-/// This is the stress half of the offset suite, and it is deliberately a
-/// separate entry point from
+/// This is the stress half of the offset suite, and a separate entry point
+/// from
 /// [`verify_deterministic`](super::verify_deterministic): a pass here says a
 /// run of this shape found nothing, which is a weaker thing than the
 /// constructed evidence the deterministic clauses give, and the two must not be

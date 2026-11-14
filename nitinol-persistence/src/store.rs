@@ -1,3 +1,6 @@
+//! The store traits, the handles the framework holds them by, and an in-memory
+//! implementation.
+
 pub mod album;
 pub mod event_store;
 mod in_memory;

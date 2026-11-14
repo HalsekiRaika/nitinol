@@ -1,3 +1,5 @@
+//! The event store trait and the stream a load serves.
+
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -7,6 +9,7 @@ use crate::error::{AppendError, LoadError};
 use crate::event::{AppendingEvent, LoadedEvent};
 use crate::query::{AppendOutcome, LoadQuery};
 
+/// The events a load serves, each a stored event or the failure reading it.
 pub type EventStream<'a> = Pin<Box<dyn Stream<Item = Result<LoadedEvent, LoadError>> + Send + 'a>>;
 
 /// Append-and-load surface for events.
@@ -18,13 +21,12 @@ pub type EventStream<'a> = Pin<Box<dyn Stream<Item = Result<LoadedEvent, LoadErr
 /// the key via `id.borrow()` (or `id.as_str()`) on their newtype —
 /// `AggregateId` and `SagaId` both implement `Borrow<str>`.
 ///
-/// # What an implementor owes beyond the clauses
-///
-/// [`Clone`], through the [`EventStoreClone`] supertrait. A store is
-/// distributed by being cloned rather than by being shared, so deriving
-/// `Clone` over the backend's own handle is what lets the framework hand the
-/// journal to every wiring point. Deriving it is the whole of it — the
-/// `clone_box` the erasure needs comes from the blanket implementation.
+/// Beyond the clauses, an implementor owes [`Clone`], through the
+/// [`EventStoreClone`] supertrait. A store is distributed by being cloned
+/// rather than by being shared, so deriving `Clone` over the backend's own
+/// handle is what lets the framework hand the journal to every wiring point.
+/// Deriving it is the whole of it — the `clone_box` the erasure needs comes
+/// from the blanket implementation.
 #[async_trait]
 pub trait EventStore: EventStoreClone + Send + Sync {
     /// Appends `events` to the stream identified by `key`.

@@ -3,7 +3,7 @@
 //! A store receives a [`LoadQuery<Untyped>`](LoadQuery) and serves stored rows.
 //! A [`LoadQuery<Typed<E>>`](LoadQuery) is handed to a typed read instead, or
 //! brought down to the untyped query a store receives with
-//! [`erase`](LoadQuery::erase).
+//! [`into_untyped`](LoadQuery::into_untyped).
 
 use std::borrow::Borrow;
 use std::marker::PhantomData;
@@ -21,17 +21,23 @@ pub use read_type::{Typed, Untyped};
 /// are stored. [`Typed<E>`] is the query
 /// [`TypedLoad::read`](crate::store::TypedLoad::read) receives: the rows of `E`
 /// read back as `E`. It is built by [`LoadQuery::of`] alone, and
-/// [`erase`](LoadQuery::erase) hands a store the same conditions with `E`'s
-/// path as the prefix.
+/// [`into_untyped`](LoadQuery::into_untyped) hands a store the same conditions
+/// with `E`'s path as the prefix.
 ///
 /// A query is built from the constructors and combinators below rather than
 /// written out field by field: the read type is not a field a caller sets.
 #[derive(Debug, Clone)]
 pub struct LoadQuery<T = Untyped> {
+    /// The stream to serve events from, or every stream if `None`.
     pub stream_key: Option<String>,
+    /// The event type path the served events lie within, or every type if
+    /// `None`.
     pub event_type_prefix: Option<MaterializedPath>,
+    /// The lowest global position to serve, inclusive.
     pub from_global_sequence: Option<u64>,
+    /// The lowest stream sequence to serve, inclusive.
     pub from_stream_sequence: Option<u64>,
+    /// The most events to serve, or no bound if `None`.
     pub limit: Option<usize>,
     #[expect(
         dead_code,
@@ -40,9 +46,7 @@ pub struct LoadQuery<T = Untyped> {
     read_as: T,
 }
 
-/// Written out for the untyped query alone rather than derived: a derive would
-/// be generic over `T`, so `LoadQuery::default()` would no longer say which
-/// query it builds, and a typed query is built by [`LoadQuery::of`] alone.
+/// The untyped query with no conditions.
 impl Default for LoadQuery {
     fn default() -> Self {
         Self {
@@ -80,6 +84,8 @@ impl<T> LoadQuery<T> {
         self
     }
 
+    /// Sets the most events this query serves, keeping the other conditions it
+    /// carries.
     pub fn with_limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
         self
@@ -115,6 +121,7 @@ impl LoadQuery {
         }
     }
 
+    /// Builds a query for the events whose type path lies within `prefix`.
     pub fn by_event_type_prefix(prefix: MaterializedPath) -> Self {
         Self {
             event_type_prefix: Some(prefix),
@@ -122,6 +129,7 @@ impl LoadQuery {
         }
     }
 
+    /// Builds a query for the events at or after global position `seq`.
     pub fn from_global(seq: u64) -> Self {
         Self {
             from_global_sequence: Some(seq),
@@ -158,7 +166,7 @@ impl<E: Event> LoadQuery<Typed<E>> {
     ///
     /// The prefix is `E`'s path whatever the prefix field was left holding, so
     /// what a store is asked for is always the rows `E` names.
-    pub fn erase(self) -> LoadQuery {
+    pub fn into_untyped(self) -> LoadQuery<Untyped> {
         let LoadQuery {
             stream_key,
             event_type_prefix: _,
@@ -176,10 +184,28 @@ impl<E: Event> LoadQuery<Typed<E>> {
             read_as: Untyped,
         }
     }
+
+    /// The former name of [`into_untyped`](LoadQuery::into_untyped).
+    #[deprecated(since = "0.6.1", note = "renamed to `into_untyped`")]
+    pub fn erase(self) -> LoadQuery {
+        self.into_untyped()
+    }
 }
 
+/// The same as [`into_untyped`](LoadQuery::into_untyped).
+impl<E: Event> From<LoadQuery<Typed<E>>> for LoadQuery<Untyped> {
+    fn from(value: LoadQuery<Typed<E>>) -> Self {
+        value.into_untyped()
+    }
+}
+
+/// What an append assigned.
 #[derive(Debug, Clone)]
 pub struct AppendOutcome {
+    /// The global positions given to the appended events, in the order they
+    /// were appended.
     pub assigned_sequences: Vec<u64>,
+    /// The highest sequence among the appended events, or, for an empty batch,
+    /// the sequence the stream had already reached.
     pub stream_version: u64,
 }

@@ -13,22 +13,9 @@ use crate::process::ProcessProxy;
 
 /// Spawn declaration for a `Stream<T>` process registered under a topic.
 ///
-/// `StreamProps<T>` lifts the pre-spec `ProcessSystem::spawn_stream::<T>`
-/// hard-coded `Supervision::Resume` (`P7`) into the type system: the
-/// supervision strategy is configured at construction and never exposed via
-/// a setter. Users tune mailbox / stash / pipe capacity through the same
-/// `with_*` API they get on `Props`.
-///
-/// Attempting to call `with_supervision_strategy` (which does not exist on
-/// this type) is a compile error:
-///
-/// ```compile_fail
-/// # use nitinol_runtime::{StreamProps, SupervisionStrategy};
-/// # use nitinol_runtime::ident::ProcessName;
-/// // compile error: no method `with_supervision_strategy` on `StreamProps<u32>`
-/// StreamProps::<u32>::new(ProcessName::new("t"))
-///     .with_supervision_strategy(SupervisionStrategy::Stop);
-/// ```
+/// The supervision strategy is fixed to `Resume` and has no setter. Users
+/// tune mailbox / stash / pipe capacity through the same `with_*` API they
+/// get on `Props`.
 pub struct StreamProps<T: 'static + Send + Sync> {
     topic: ProcessName,
     inner: Props<Stream<T>>,
@@ -52,21 +39,25 @@ where
         }
     }
 
+    /// Sets the capacity of the stream's mailbox.
     pub fn with_mailbox_capacity(mut self, capacity: MailboxCapacity) -> Self {
         self.inner = self.inner.with_mailbox_capacity(capacity);
         self
     }
 
+    /// Sets the capacity of the stream's stash.
     pub fn with_stash_capacity(mut self, capacity: StashCapacity) -> Self {
         self.inner = self.inner.with_stash_capacity(capacity);
         self
     }
 
+    /// Sets the capacity of the stream's pipe-to-self channel.
     pub fn with_pipe_capacity(mut self, capacity: PipeCapacity) -> Self {
         self.inner = self.inner.with_pipe_capacity(capacity);
         self
     }
 
+    /// Returns the topic the stream is registered under.
     pub fn topic(&self) -> &ProcessName {
         &self.topic
     }

@@ -15,13 +15,48 @@
 //! and reads the resulting stream back and decodes it itself, so no clause ever
 //! depends on an interpreter agreeing with its own account of what it did.
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! # use futures_core::future::BoxFuture;
-//! # use nitinol_conformance::{Interpretation, Interpreter, Ledger};
+//! # use nitinol_conformance::{
+//! #     Fault, Interpretation, Interpreted, Interpreter, Ledger, LedgerNotOpen, LedgerRejection,
+//! #     Unanswered,
+//! # };
+//! # use nitinol_contract::{Decider, Query};
 //! # use nitinol_persistence::store::Journal;
 //! # use nitinol_persistence::AggregateId;
 //! # struct MyMachinery;
 //! # struct MyInterpreter;
+//! # impl Interpreter for MyInterpreter {
+//! #     fn ask<C>(&self, cmd: C) -> BoxFuture<'_, Interpreted<<Ledger as Decider<C>>::Output>>
+//! #     where
+//! #         Ledger: Decider<C, Rejection = LedgerRejection>,
+//! #         C: Send + Sync + 'static,
+//! #         <Ledger as Decider<C>>::Output: Send + 'static,
+//! #     {
+//! #         unimplemented!()
+//! #     }
+//! #     fn tell<C>(&self, cmd: C) -> BoxFuture<'_, Result<(), Fault>>
+//! #     where
+//! #         Ledger: Decider<C, Rejection = LedgerRejection>,
+//! #         C: Send + Sync + 'static,
+//! #     {
+//! #         unimplemented!()
+//! #     }
+//! #     fn exec<M>(&self, msg: M) -> BoxFuture<'_, Result<<Ledger as Query<M>>::Response, Unanswered>>
+//! #     where
+//! #         Ledger: Query<M, Error = LedgerNotOpen>,
+//! #         M: Send + Sync + 'static,
+//! #         <Ledger as Query<M>>::Response: Send + 'static,
+//! #     {
+//! #         unimplemented!()
+//! #     }
+//! #     fn quiesce(&self) -> BoxFuture<'_, ()> {
+//! #         unimplemented!()
+//! #     }
+//! #     fn surfaced_refusals(&self) -> Vec<String> {
+//! #         unimplemented!()
+//! #     }
+//! # }
 //! impl Interpretation for MyMachinery {
 //!     type Interpreter = MyInterpreter;
 //!
@@ -30,7 +65,7 @@
 //!         ledger: AggregateId,
 //!         store: Journal,
 //!     ) -> BoxFuture<'_, Self::Interpreter> {
-//!         Box::pin(async move { /* bring one `Ledger` up on `store` */ })
+//!         Box::pin(async move { MyInterpreter })
 //!     }
 //! }
 //!
@@ -65,14 +100,12 @@
 //! own ordering guarantees; one that carries every dispatch out inline has
 //! nothing to wait for and returns immediately.
 //!
-//! # What this crate may not depend on
+//! # Async runtime
 //!
-//! No interpreter, and no async runtime. `nitinol-eventsource`,
-//! `nitinol-runtime` and `tokio` are absent from this crate's dependency tree
-//! on purpose: a suite that reached for one interpreter's machinery would be
-//! measuring that machinery instead of the laws every interpreter owes, and
-//! would be out of reach of anyone writing their own. Whichever runtime you
-//! await [`verify`] on is yours to choose.
+//! This crate depends on no async runtime, so [`verify`] can be awaited on
+//! whichever runtime you choose.
+
+#![warn(missing_docs)]
 
 mod counting_store;
 mod fixture;

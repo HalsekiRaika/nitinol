@@ -35,8 +35,8 @@
 
 /// What marks a symbol as nitinol's claim on one canonical path.
 ///
-/// Short on purpose: an over-long symbol is what a linker error and a debugger
-/// both have to show, and the path that follows is the part a reader needs.
+/// Kept short because a linker error and a debugger show the whole symbol, and
+/// the path that follows is the part a reader needs.
 ///
 /// Reachable only through `nitinol_persistence::__private`; it is not a user
 /// surface. `#[derive(Event)]` reads it to name the symbol it writes for a

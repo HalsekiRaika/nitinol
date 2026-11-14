@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use crate::event_type::EventType;
 
+/// The canonical `.`-separated path an [`EventType`] is written down as.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MaterializedPath {
     pub(crate) segments: Vec<String>,
@@ -26,8 +27,15 @@ impl MaterializedPath {
 /// takes on no dependency beyond `bytes`.
 #[derive(Debug)]
 pub enum MaterializedPathParseError {
+    /// The input was empty.
     Empty,
-    EmptySegment { input: String, index: usize },
+    /// The input contained an empty segment.
+    EmptySegment {
+        /// The string that failed to parse.
+        input: String,
+        /// The zero-based position of the empty segment.
+        index: usize,
+    },
 }
 
 impl fmt::Display for MaterializedPathParseError {

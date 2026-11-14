@@ -22,8 +22,16 @@ pub trait Codec<T>: Send + Sync + 'static {
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Encode `value` to raw bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Self::Error` if `value` cannot be encoded.
     fn encode(value: &T) -> Result<Bytes, Self::Error>;
 
     /// Decode a value from raw bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Self::Error` if `payload` is not a valid encoding of `T`.
     fn decode(payload: &[u8]) -> Result<T, Self::Error>;
 }

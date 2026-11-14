@@ -423,8 +423,8 @@ async fn a_prefix_no_stored_event_is_within_selects_nothing<S: StoreUnderTest>(s
 /// Every observable field of everything the store holds, in the order a load
 /// serves it.
 ///
-/// [`LoadedEvent`](nitinol_persistence::LoadedEvent) deliberately does not
-/// derive `PartialEq`, so the comparison OCC-4 needs is spelled out here rather
+/// [`LoadedEvent`](nitinol_persistence::LoadedEvent) does not derive
+/// `PartialEq`, so the comparison OCC-4 needs is spelled out here rather
 /// than by widening the persistence crate's public API.
 #[derive(Debug, PartialEq)]
 struct Stored {

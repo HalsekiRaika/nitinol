@@ -16,11 +16,14 @@ use crate::store::{Album, Journal, TypedEventStream, TypedLoad};
 /// [`CustomStore`](crate::provider::CustomStore) a backend with one table is
 /// assembled as.
 ///
-/// # A handle, not a region
-///
-/// [`Default`] constructs a destination holding nothing, and cloning names it:
-/// a deployment that keeps the handle it built a system on reads back what that
-/// system wrote. That is `PRV-1` as a store owes it.
+/// This store and each in-memory store it holds is a handle, not a region:
+/// [`Default`] constructs a destination holding nothing of any other's, and
+/// cloning names the same records, so a deployment that keeps the handle it
+/// built a system on reads back what that system wrote, with no `Arc` around
+/// it. That is `PRV-1` as a store owes it. One
+/// [`InMemoryOffsetStore`](crate::store::InMemoryOffsetStore) named into both
+/// offset slots of a store therefore shares its positions, and two named apart
+/// do not.
 ///
 /// Intended for tests and examples; the stores it holds are not for production
 /// use.

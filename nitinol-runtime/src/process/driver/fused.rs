@@ -9,8 +9,8 @@ use crate::process::{Process, ProcessContext};
 /// The lifecycle loop interprets `None` from the combined driver tree as
 /// `TerminatedReason::Stopped`.  When a user-supplied driver is installed via
 /// [`Props::with_driver`](crate::process::Props::with_driver) and subsequently
-/// exhausted, `FusedDriver` absorbs the `None` so the Core trio
-/// (`MessageDriver` + `PipeDriver` + `StashDriver`) keeps the process alive.
+/// exhausted, `FusedDriver` absorbs the `None` so the three built-in drivers
+/// (`MessageDriver`, `PipeDriver`, `StashDriver`) keep the process alive.
 ///
 /// This preserves the driver-set contract: exhausting a
 /// user-supplied driver is a non-fatal event. The process continues to handle

@@ -99,20 +99,29 @@ ends by bringing the release commit back to `dev`:
 
 The date written into `CHANGELOG.md` is the UTC date of the release.
 
-The first release publishes every crate at the version already in the
-manifests, so no level is given:
-
-```sh
-cargo release --workspace --execute
-```
-
-The first release has ten new crates, so the limit on new packages is set to
-10 in `release.toml`.
-
-After that, release the crates that changed together with the umbrella crate:
+Release the crates that changed together with the umbrella crate:
 
 ```sh
 cargo release <patch|minor> -p <crate> -p nitinol --execute
+```
+
+### When crates.io refuses a new crate
+
+crates.io accepts five *new* crates (names it has never seen) in a burst, then
+one more every ten minutes; beyond that it answers `429 Too Many Requests`.
+Crates that already exist on crates.io are not subject to this limit, so an
+ordinary release is unaffected. The `new-packages` limit in `release.toml` is
+cargo-release's own check and does not raise the server's limit.
+
+If a release stops with `429` part-way, the release commit is already on
+`master` and some crates are already published. Do not run
+`cargo release --execute` again: it would bump the versions a second time and
+fail on the crates that are already uploaded. Publish the remaining crates one
+at a time, in the publish order above, waiting for the server's retry time
+between them:
+
+```sh
+cargo publish -p <crate>
 ```
 
 ## Checking before a release

@@ -91,7 +91,7 @@ pub struct Family(&'static str);
 impl Family {
     /// Creates a `Family` from a `&'static str`.
     ///
-    /// # Invariants
+    /// # Panics
     ///
     /// The empty string is allowed (no namespace prefix). For non-empty values,
     /// every `.`-separated segment must be non-empty: no leading dot, no
@@ -134,6 +134,7 @@ impl Family {
         Self(s)
     }
 
+    /// Returns the family name.
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -175,7 +176,7 @@ pub struct TypeName(&'static str);
 impl TypeName {
     /// Creates a `TypeName` from a `&'static str`.
     ///
-    /// # Invariants
+    /// # Panics
     ///
     /// The string must be non-empty and must not contain `'.'` (a single
     /// path segment with no sub-segments).  Violating this panics at compile
@@ -200,6 +201,7 @@ impl TypeName {
         Self(s)
     }
 
+    /// Returns the type name.
     pub const fn as_str(&self) -> &'static str {
         self.0
     }
@@ -218,18 +220,22 @@ pub struct EventType {
 }
 
 impl EventType {
+    /// Creates an `EventType` from a family and a type name.
     pub const fn new(family: Family, type_name: TypeName) -> Self {
         Self { family, type_name }
     }
 
+    /// Returns the family.
     pub const fn family(&self) -> Family {
         self.family
     }
 
+    /// Returns the type name.
     pub const fn type_name(&self) -> TypeName {
         self.type_name
     }
 
+    /// Returns the canonical path this event type is written down as.
     pub fn to_path(&self) -> MaterializedPath {
         MaterializedPath::from(self)
     }
@@ -252,8 +258,6 @@ impl fmt::Display for EventType {
 /// Unlike [`EventType`] (which uses `&'static str` and is `Copy` / `const`),
 /// `ParsedEventType` holds owned [`String`]s so it can be constructed from a
 /// runtime string — for example via [`ParsedEventType::from_path`].
-///
-/// # Round-trip contract
 ///
 /// ```text
 /// EventType::new(family, type_name)

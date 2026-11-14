@@ -44,7 +44,11 @@ pub(crate) fn suppress_log<M>() -> bool {
 
 /// A message that could not be delivered to its intended recipient.
 pub struct DeadLetter {
+    /// The pid the message was addressed to.
     pub destination: Pid,
+    /// The message that could not be delivered.
     pub message: BoxedMessage,
+    /// The pid that sent the message, or `None` if the sender is unknown, as
+    /// for a direct `tell`.
     pub sender: Option<Pid>,
 }

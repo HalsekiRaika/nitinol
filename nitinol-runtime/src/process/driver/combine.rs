@@ -15,23 +15,17 @@ use crate::process::{Process, ProcessContext};
 /// 2+ Drivers at the call site; it right-folds into nested `Combine`s
 /// (`combine_drivers!(A, B, C)` → `Combine::new(A, Combine::new(B, C))`).
 ///
-/// ## `supports_idle_timeout`
-///
-/// AND-combined across children: any child opting out (`false`) poisons
-/// the combined result. This preserves the rule that tick / poll drivers
-/// (e.g. `IntervalDriver`) disable the idle timer for the whole loop.
-///
-/// ## `pipe_handle`
-///
-/// Propagates the first non-`None` child handle, preferring the left.
-/// This is how `combine_drivers!(MessageDriver, PipeDriver::new())` (and
-/// deeper trees) surface the pipe handle to the lifecycle loop.
+/// - `supports_idle_timeout` is the AND of both children: one child that
+///   returns `false` disables the idle timer for the whole loop.
+/// - `pipe_handle` returns the first non-`None` child handle, preferring the
+///   left.
 pub struct Combine<L, R> {
     left: L,
     right: R,
 }
 
 impl<L, R> Combine<L, R> {
+    /// Combines `left` and `right` into one driver.
     pub fn new(left: L, right: R) -> Self {
         Self { left, right }
     }

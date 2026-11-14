@@ -1,3 +1,6 @@
+//! The offset store trait and the delivery modes a projector saves offsets
+//! under.
+
 use async_trait::async_trait;
 
 use crate::error::OffsetError;
@@ -20,6 +23,31 @@ use crate::store::offset_scope::OffsetScope;
 /// that one save falls. Records the projector skips — already applied, or of a
 /// type it does not follow — count as delivered, and a batch of nothing but
 /// such records saves nothing.
+///
+/// Under `ExactlyOnce`, a failure is handled this way:
+///
+/// - Without a `TxProvider`, the framework takes the `Result` of `project()` as
+///   the whole account of what happened: `Ok` means processed and the projector
+///   goes on, `Err` means the event was not processed, so the batch stops there
+///   and the subscription holds that event for redelivery, with the events
+///   before it settled. A `project()` that committed its work and then failed
+///   for an unrelated reason will be called again with the same event, so it
+///   must be prepared to recognise what it already wrote.
+/// - With a `TxProvider`, if `begin`, any `project`, the offset save or
+///   `commit` fails, no event of the batch is marked processed: the started
+///   transaction is rolled back and the subscription holds the batch for
+///   redelivery from its first event. A failed `commit` is read as uncommitted
+///   — see the `TxProvider` trait in `nitinol-eventsource` for why that reading
+///   is the safe one and what it costs.
+///
+/// `ExactlyOnce` holds for a single consumer per [`OffsetScope`] — one process,
+/// or one holding an exclusive claim on that projection, driving it. A
+/// projector loads its offset once at startup and judges each event against the
+/// copy it holds in memory from then on, so two projectors starting from the
+/// same stored offset each read the same event as unprocessed and can each
+/// commit: atomicity with its own offset stops neither. Acquiring and
+/// revalidating the right to process a projection, and ordering events between
+/// concurrent projectors sharing a `projection_id`, are not provided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryMode {
     /// Offset is saved, at the batch's end, **before** any handler of the
@@ -40,44 +68,14 @@ pub enum DeliveryMode {
     /// offset save that fails leaves the whole batch unprocessed. An event that
     /// keeps failing therefore keeps everything behind it waiting.
     AtLeastOnce,
-    /// Behavior depends on whether a `TxProvider` is configured on the
+    /// The read-model update and the offset covering it are persisted
+    /// together; how depends on whether a `TxProvider` is configured on the
     /// projector.
     ///
-    /// **Without a `TxProvider`**: the framework does **not** save the
-    /// offset. The user implementation inside `project()` is responsible
-    /// for persisting both the read-model update and the offset atomically.
-    /// Having no offset of its own to compare, the framework takes the
-    /// `Result` of `project()` as the whole account of what happened: `Ok`
-    /// means processed and the projector goes on, `Err` means the event was
-    /// not processed, so the batch stops there and the subscription holds that
-    /// event for redelivery, with the events before it settled. A `project()`
-    /// that committed its work and then failed for an unrelated reason will be
-    /// called again with the same event, so it must be prepared to recognise
-    /// what it already wrote.
-    ///
-    /// **With a `TxProvider` configured**: the framework coordinates the
-    /// offset save inside the transaction, one transaction per batch: it
-    /// calls `begin` once, runs the handler (`project`) for every event of the
-    /// batch inside that transaction, saves the offset at the batch's end
-    /// inside it, then calls `commit` once. If `begin`, any `project`, the
-    /// offset save or `commit` fails, no event of the batch is marked
-    /// processed: the started transaction is rolled back and the subscription
-    /// holds the batch for redelivery from its first event. A failed `commit`
-    /// is read as uncommitted — see the `TxProvider` trait in
-    /// `nitinol-eventsource` for why that reading is the safe one and what it
-    /// costs.
-    ///
-    /// **What this guarantees, and what it does not.** The guarantee above
-    /// holds for a single consumer per [`OffsetScope`] — one process, or one
-    /// holding an exclusive claim on that projection, driving it. A projector
-    /// loads its offset once at startup and judges each event against the
-    /// copy it holds in memory from then on, so two projectors starting from
-    /// the same stored offset each read the same event as unprocessed and
-    /// can each commit: atomicity with its own offset stops neither.
-    /// Acquiring and revalidating the right to process a projection, and
-    /// ordering events between concurrent projectors sharing a
-    /// `projection_id`, are out of scope here and remain a future design
-    /// target.
+    /// - Without one, the framework does **not** save the offset: `project()`
+    ///   persists both the read-model update and the offset atomically.
+    /// - With one, the framework runs one transaction per batch: `begin`, every
+    ///   event's `project`, the offset save at the batch's end, then `commit`.
     ExactlyOnce,
 }
 
@@ -107,8 +105,18 @@ pub enum DeliveryMode {
 /// reference implementation, and `nitinol-store-conformance`'s `offset`
 /// module is the suite any backend is put through, reference implementation
 /// included.  A backend that has not been through it has not been shown to keep
-/// this contract.  Two of the clauses the suite deliberately does not fix, and
+/// this contract.  The suite does not fix two of the clauses, OFS-4 and OFS-6;
 /// each says so below.
+///
+/// Every clause below is one a backend keeps on its own.  Whether a
+/// projection's result and the offset covering it are settled in one
+/// transaction, and whether a conflict takes back both, is a property of this
+/// store *and* the machinery driving it — the projector and its `TxProvider` —
+/// and it is fixed there rather than here:
+/// `providers/nitinol-sqlx/tests/exactly_once_projection.rs` and
+/// `nitinol-eventsource/tests/tx_wiring.rs` run a store and a projector at
+/// once.  A store shown to keep OFS-1 … OFS-6 has not thereby been shown to be
+/// driven correctly.
 ///
 /// # OFS-1: never started is not the same as at zero
 ///
@@ -160,7 +168,7 @@ pub enum DeliveryMode {
 /// them, and what a disagreement costs is redelivery.  It is a liveness event —
 /// more work — rather than a loss.
 ///
-/// **Not fixed by a test**, and the suite deliberately never makes such a save.
+/// **Not fixed by a test**: the suite never makes such a save.
 /// The two permitted answers have no observation in common, and
 /// [`OffsetError`] carries no variant that distinguishes a refusal from a
 /// backend failure, so a suite judging it would have to pick one of the two
@@ -192,10 +200,10 @@ pub enum DeliveryMode {
 ///   verbatim, so a row written when it was the only kind is read back under the
 ///   same text.
 /// * A key inside the [reserved namespace](crate::reserved) is stored like any
-///   other.  A framework-owned consumer renders there on purpose — that is what
-///   keeps its key from meeting a projection's — so a store reading the
-///   namespace as something to validate would keep the framework's own
-///   consumers from recording anything.
+///   other.  A framework-owned consumer renders its key there, which keeps it
+///   from meeting a projection's, so a store reading the namespace as
+///   something to validate would keep the framework's own consumers from
+///   recording anything.
 ///
 /// That the keys *cannot* collide is [`OffsetScope`]'s obligation rather than a
 /// store's: a deployment naming its own is refused a reserved name, and the
@@ -224,18 +232,6 @@ pub enum DeliveryMode {
 /// transaction owes a test of its own:
 /// `providers/nitinol-sqlx/tests/offset_store.rs` fixes it for the Postgres
 /// provider, commit and rollback both.
-///
-/// # What these clauses do not cover
-///
-/// Every clause above is one a backend keeps on its own.  Whether a
-/// projection's result and the offset covering it are settled in one
-/// transaction, and whether a conflict takes back both, is a property of this
-/// store *and* the machinery driving it — the projector and its `TxProvider` —
-/// and it is fixed there rather than here:
-/// `providers/nitinol-sqlx/tests/exactly_once_projection.rs` and
-/// `nitinol-eventsource/tests/tx_wiring.rs` run a store and a projector at
-/// once.  A store shown to keep OFS-1 … OFS-6 has not thereby been shown to be
-/// driven correctly.
 #[async_trait]
 pub trait OffsetStore: Send + Sync {
     /// The backend's own transaction, where it has one.  `()` where it has

@@ -18,10 +18,7 @@
 //! # Why each source is observed on its own
 //!
 //! Observation is per source: each declared external event type carries a
-//! subscription and a cursor of its own.  There is deliberately no total order
-//! across sources — it is not a promise that can be kept across several upstream
-//! streams in a distributed system — and the consequence that matters is the
-//! useful one: a source that stalls does not stop another from progressing.
+//! subscription and a cursor of its own.
 //!
 //! # Why the bindings are a generated struct
 //!
@@ -74,9 +71,15 @@ pub enum ReadDeadlineError {
          deadline variant currently declares `{declared_type}`/`{declared_codec}`"
     )]
     IdentityMismatch {
+        /// The message type the schedule fact names.
         stored_type: String,
+        /// The codec the schedule fact names.
         stored_codec: String,
+        /// The message type the deadline variant declares now
+        /// ([`DeadlineMessage::TYPE_NAME`]).
         declared_type: &'static str,
+        /// The codec the deadline variant declares now
+        /// ([`DeadlineMessage::CODEC_NAME`]).
         declared_codec: &'static str,
     },
     /// The identity matched, but the codec it names failed to decode the
@@ -273,9 +276,7 @@ pub struct SubscriptionSet(#[doc(hidden)] pub SourceBinding);
 /// the bound event type names.  It has no public constructor and no public
 /// field: a user can move one the builder handed out, and cannot invent one.
 ///
-/// The journal is absent on purpose: it is the one the system the saga is
-/// spawned on distributes, and the manager hands it to each source's
-/// partitions at the spawn.
+/// Carries no journal; the manager supplies the system's journal at spawn.
 pub struct SourceBinding {
     pub(crate) cursor: SequenceCursor,
     /// The cadence the binding named, where it named one.

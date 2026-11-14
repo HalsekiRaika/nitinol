@@ -16,7 +16,7 @@ pub struct Untyped;
 /// [`LoadQuery::of`](crate::LoadQuery::of) is the only way to one, so the type a
 /// read decodes into and the path the store selects are named once, by `E`.
 /// It is handed to `read`, or brought down to the [`Untyped`] query a store
-/// receives with [`LoadQuery::erase`](crate::LoadQuery::erase).
+/// receives with [`LoadQuery::into_untyped`](crate::LoadQuery::into_untyped).
 pub struct Typed<E>(pub(super) PhantomData<fn() -> E>);
 
 // Written out rather than derived: a derive would require `E` to be `Clone`,

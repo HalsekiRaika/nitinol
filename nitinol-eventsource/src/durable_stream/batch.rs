@@ -11,7 +11,10 @@
 /// outside this crate is expected to build one.
 #[derive(Debug)]
 pub struct PolledBatch<T> {
+    /// The records the transform kept, each paired with the position it was
+    /// read at.
     pub records: Vec<(u64, T)>,
+    /// The position of the last record read.
     pub last_observed: u64,
 }
 

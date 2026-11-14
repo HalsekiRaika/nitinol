@@ -120,18 +120,22 @@ impl PidSet {
         true
     }
 
+    /// Returns the number of pids in the set.
     pub fn len(&self) -> usize {
         self.nodes.len()
     }
 
+    /// Returns `true` if the set contains no pids.
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 
+    /// Returns `true` if the set contains `pid`.
     pub fn contains(&self, pid: &Pid) -> bool {
         self.nodes.contains_key(pid)
     }
 
+    /// Returns an iterator over the pids in the order they were added.
     pub fn iter(&self) -> impl Iterator<Item = &Pid> {
         PidSetIter {
             nodes: &self.nodes,

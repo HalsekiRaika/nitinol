@@ -30,16 +30,14 @@ pub enum Unanswered {
 
 /// A failure of an interpreter's own machinery.
 ///
-/// Erased on purpose: which store, mailbox or codec failed is the
-/// interpreter's vocabulary, and the suite cannot name it for an interpreter
-/// that does not exist yet.  Telling this apart from a refusal is the whole
-/// point — what it *is* belongs to whoever built the machinery, and travels
+/// It does not say which store, mailbox or codec failed; what failed travels
 /// with the fault as its own rendering.
 #[derive(Debug, thiserror::Error)]
 #[error("the machinery around a decision failed: {0}")]
 pub struct Fault(Box<dyn std::error::Error + Send + Sync>);
 
 impl Fault {
+    /// A fault wrapping `source`, the error the machinery reported.
     pub fn new(source: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self(Box::new(source))
     }

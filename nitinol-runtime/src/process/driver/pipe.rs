@@ -51,34 +51,15 @@ pub(crate) type PipeFuture<P> = BoxFuture<'static, PipedTask<P>>;
 /// single-threaded guarantee is preserved. `PipeDriver` never calls
 /// `tokio::spawn`.
 ///
-/// ## Bounded channel
-///
-/// `PipeDriver::with_capacity(n)` configures the underlying tokio mpsc
-/// channel with capacity `n`. `ctx.pipe_to_self` enqueues via `try_send`:
-/// when the buffer is full or the receiving channel is closed, the future
-/// is dropped silently and the process keeps running. The bounded shape
-/// replaces the pre-spec unbounded channel (Pain-Point P2).
-///
-/// ## CPU-bound work is unsupported
-///
-/// A pipe future that blocks the runtime (long CPU-bound computation,
-/// blocking syscalls) will stall the entire lifecycle loop: messages,
-/// system signals, supervision timers — everything. This is the same
-/// anti-pattern as blocking inside `Receive::recv` and the runtime makes
-/// no attempt to detect or recover from it. Offload such work to
-/// `tokio::task::spawn_blocking` and pipe only the resulting future.
-///
-/// ## Panic capture
-///
-/// Each pipe future is polled inside an `AssertUnwindSafe(...).catch_unwind()`
-/// wrapper (set up by `pipe_to_self`); a panic during poll is converted to
-/// [`PipePanic`] and handed to the mapper as `Err(PipePanic)`. The process
-/// continues running.
-///
-/// ## No abort handle
-///
-/// Pipe futures cannot be cancelled individually. They are dropped
-/// collectively when the lifecycle loop ends.
+/// - The queue is bounded by [`with_capacity`](Self::with_capacity). When it
+///   is full or closed, `pipe_to_self` drops the future silently and the
+///   process keeps running.
+/// - A future that blocks or runs long CPU-bound work stalls the whole
+///   lifecycle loop. Offload such work to `tokio::task::spawn_blocking`.
+/// - A panic while polling a future reaches the mapper as a [`PipePanic`]
+///   error, and the process keeps running.
+/// - Futures cannot be cancelled individually. They are dropped together
+///   when the lifecycle loop ends.
 pub struct PipeDriver<P: Process> {
     // Keep our own clone of the sender so the channel does not close
     // even when no `PipeHandle` is currently alive elsewhere.

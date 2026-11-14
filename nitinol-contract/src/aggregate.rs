@@ -21,7 +21,7 @@ use crate::recover::Recovery;
 /// State mutation only happens inside `apply`; a decider receives `&self` and
 /// must not mutate state.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust,no_run
 /// use bytes::Bytes;
@@ -57,6 +57,7 @@ use crate::recover::Recovery;
 /// }
 /// ```
 pub trait Aggregate: Default + Send + Sync + 'static {
+    /// The event type this aggregate applies.
     type Event: Event;
 
     /// How this aggregate's state is reproduced before it decides anything:
@@ -74,6 +75,7 @@ pub trait Aggregate: Default + Send + Sync + 'static {
     /// implemented.
     type Recover: Recovery<Self>;
 
+    /// Applies `event` to the aggregate's state.
     fn apply(&mut self, event: Self::Event);
 }
 
@@ -112,6 +114,8 @@ pub trait Snapshotable: Sized {
     fn capture(&self) -> Self::Snapshot;
 
     /// Recover aggregate state from a snapshot value.
+    ///
+    /// # Examples
     ///
     /// The name is the vocabulary: an event is *replayed*, a snapshot is
     /// *recovered*. There is no `restore` beside it: a correct implementor

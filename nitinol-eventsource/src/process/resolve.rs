@@ -150,7 +150,7 @@ use crate::process::aggregate_process::AggregateProcess;
 /// A handle to one activation of an aggregate.
 ///
 /// This is what the public [`AggregateProxy`](crate::AggregateProxy) used to be.
-/// It is deliberately not public: a handle to a single activation is invalidated
+/// It is not public: a handle to a single activation is invalidated
 /// by that activation's death, which is exactly the property the identity-based
 /// reference above it exists to hide.
 pub(crate) type Incarnation<A> = ProcessProxy<AggregateProcess<A>>;
@@ -185,8 +185,8 @@ pub(crate) fn activation_props<A: Aggregate>(
 
 /// The identity a reference resolves by: the aggregate type and its stream key.
 ///
-/// Per-activation wiring (which store, which snapshot persistor) is deliberately
-/// absent.  Identity decides *which aggregate*, and the first resolve of a key is
+/// Per-activation wiring (which store, which snapshot persistor) is absent.
+/// Identity decides *which aggregate*, and the first resolve of a key is
 /// what activates it — a later resolve naming different wiring joins the running
 /// activation rather than starting a second one, because two activations of one
 /// stream is the state R-1 exists to prevent.
@@ -208,7 +208,7 @@ impl ResolveKey {
 /// What the table needs of an activation whose aggregate type it has forgotten:
 /// the pid it is evicted by, and the typed handle a resolve is answered with.
 ///
-/// The erasure is this narrow on purpose. [`Any`] is reached only through
+/// [`Any`] is reached only through
 /// [`as_any`][ErasedIncarnation::as_any] and only to recover the one type the
 /// key already names, so the table cannot hold something no key accounts for.
 ///

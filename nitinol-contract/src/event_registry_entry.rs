@@ -29,6 +29,8 @@ pub struct EventRegistryEntry {
 impl EventRegistryEntry {
     /// An entry for declarations outside the `nitinol` reserved namespace.
     ///
+    /// # Panics
+    ///
     /// A declaration reaches the `event_type` column through its entry as much
     /// as through its `EVENT_TYPE`, so the namespace is refused here too —
     /// while the `static` holding the entry is evaluated, which is a compile

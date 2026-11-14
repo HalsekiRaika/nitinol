@@ -16,17 +16,20 @@ use crate::wedged_store::WedgedStore;
 
 /// Who the ledgers under test are opened for.
 ///
-/// A domain fact, deliberately unrelated to any stream key below.
+/// A domain fact unrelated to any stream key below.
 const HOLDER: &str = "acct-under-test";
 
 /// Put an interpreter through every law of the contract.
 ///
 /// Each clause stages its own ledger — its own store, its own stream key — so
-/// no clause can be carried by what another one left behind, and each names the
-/// law it found broken when it panics.
+/// no clause can be carried by what another one left behind.
 ///
 /// The suite reads the stream back and decodes it itself, so an interpreter is
 /// never graded on its own account of what it did.
+///
+/// # Panics
+///
+/// Panics if the interpreter breaks a law, naming the law it found broken.
 pub async fn verify<I: Interpretation>(interpretation: &I) {
     decisions_and_answers_are_reproducible(interpretation).await;
     the_facts_of_an_acceptance_land_together_and_in_order(interpretation).await;

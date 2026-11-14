@@ -3,7 +3,9 @@ use crate::ident::Pid;
 /// Notification delivered to a watcher when the watched process terminates.
 #[derive(Debug, Clone)]
 pub struct Terminated {
+    /// The pid of the process that terminated.
     pub who: Pid,
+    /// Why the process terminated.
     pub why: TerminatedReason,
 }
 

@@ -10,44 +10,40 @@ use std::borrow::Borrow;
 
 use nitinol_persistence::reject_reserved_id;
 
-/// Identifier for a saga instance.
+/// Identifier for a saga instance, and the key of its own stream.
 ///
-/// Constructed with [`SagaId::new`], borrowed as `&str` via the standard
-/// `Borrow<str>` impl for use with `EventStore::append` / `LoadQuery::by_stream`.
-///
-/// # Invariants
-///
-/// A saga id *is* its stream key, so it obeys the framework's
-/// [reserved namespace](nitinol_persistence::reserved) law like every other
-/// identifier: `nitinol` and anything beneath it are the framework's, and
-/// naming one panics.  The law is owned by `nitinol-contract` and enforced on
-/// stream keys by `nitinol-persistence`; this constructor is one of those
-/// enforcement points, not a second definition.
-///
-/// `SagaId` is a distinct newtype — it is **not** interchangeable with
-/// `AggregateId`.  The following must fail to compile:
+/// - Borrowed as `&str` through `Borrow<str>`, for use with `EventStore::append`
+///   and `LoadQuery::by_stream`.
+/// - A distinct newtype: it does not convert to or compare with `AggregateId`,
+///   so saga-owned and aggregate-owned streams stay apart in the type system.
 ///
 /// ```compile_fail
 /// use nitinol_saga::SagaId;
 /// use nitinol_persistence::AggregateId;
 /// let _: SagaId = AggregateId::new("same-text");
 /// ```
-///
-/// ```compile_fail
-/// use nitinol_saga::SagaId;
-/// use nitinol_persistence::AggregateId;
-/// let _ = AggregateId::new("same-text") == SagaId::new("same-text");
-/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SagaId(String);
 
 impl SagaId {
+    /// Creates a saga id from a string.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `s` is within the framework's
+    /// [reserved namespace](nitinol_persistence::reserved): `nitinol` itself or
+    /// any name beneath it, such as `nitinol.saga`.  A saga id *is* its stream
+    /// key, so it obeys that law like every other identifier.  The law is owned
+    /// by `nitinol-contract` and enforced on stream keys by
+    /// `nitinol-persistence`; this constructor is one of those enforcement
+    /// points, not a second definition.
     pub fn new(s: impl Into<String>) -> Self {
         let id = s.into();
         reject_reserved_id("saga id", &id);
         Self(id)
     }
 
+    /// Returns the id as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -57,4 +53,14 @@ impl Borrow<str> for SagaId {
     fn borrow(&self) -> &str {
         &self.0
     }
+}
+
+#[cfg(doctest)]
+mod compile_fail_fixtures {
+    /// ```compile_fail
+    /// use nitinol_saga::SagaId;
+    /// use nitinol_persistence::AggregateId;
+    /// let _ = AggregateId::new("same-text") == SagaId::new("same-text");
+    /// ```
+    fn saga_id_does_not_compare_with_aggregate_id() {}
 }

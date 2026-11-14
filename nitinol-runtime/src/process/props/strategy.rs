@@ -19,10 +19,13 @@ impl RestartConfig {
         }
     }
 
+    /// Returns the number of restarts allowed within the window
+    /// [`within`](Self::within).
     pub fn max_retries(&self) -> u32 {
         self.max_retries
     }
 
+    /// Returns the length of the window over which restarts are counted.
     pub fn within(&self) -> Duration {
         self.within
     }
@@ -32,12 +35,13 @@ impl RestartConfig {
 /// `Err`.
 ///
 /// Constructed via the smart constructors [`Self::stop`], [`Self::resume`],
-/// and [`Self::restart`]. The `Restart` variant carries a [`RestartConfig`]
-/// with private fields so that external code cannot bypass the `restart()`
-/// validation (which rejects `within = Duration::ZERO`).
+/// and [`Self::restart`].
 #[derive(Debug, Clone)]
 pub enum SupervisionStrategy {
+    /// Stop the process.
     Stop,
+    /// Rebuild the process from its producer, or stop it once the restarts
+    /// within the window exceed the limit.
     Restart(RestartConfig),
     /// Ignore the handler error and continue processing later messages.
     Resume,
@@ -56,7 +60,9 @@ impl SupervisionStrategy {
 
     /// Restart up to `max_retries` times within the rolling window `within`.
     ///
-    /// Rejects `Duration::ZERO` for `within` eagerly.
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidRestartWithin`] if `within` is zero.
     pub fn restart(max_retries: u32, within: Duration) -> Result<Self, ConfigError> {
         if within.is_zero() {
             return Err(ConfigError::InvalidRestartWithin);

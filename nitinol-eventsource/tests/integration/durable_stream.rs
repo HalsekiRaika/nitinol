@@ -549,8 +549,7 @@ async fn durable_stream_late_subscriber_catchup_from_own_cursor() {
             after: 0,
         },
     )
-    .await
-    .expect("subscribe_from B must succeed");
+    .await;
 
     wait_for_count(&recorder_b, 3).await;
     tokio::time::sleep(TEST_POLL_INTERVAL * 2).await;
@@ -602,8 +601,7 @@ async fn durable_stream_subscribe_from_ordering_with_concurrent_live_events() {
             after: 0,
         },
     )
-    .await
-    .expect("subscribe_from B must succeed");
+    .await;
 
     wait_for_count(&recorder_b, 4).await;
     tokio::time::sleep(TEST_POLL_INTERVAL * 2).await;
@@ -675,8 +673,7 @@ async fn durable_stream_subscribe_from_does_not_open_shared_gate() {
             after: 0,
         },
     )
-    .await
-    .expect("subscribe_from must succeed");
+    .await;
 
     wait_for_count(&recorder_direct, 3).await;
     tokio::time::sleep(TEST_POLL_INTERVAL * 5).await;
@@ -837,8 +834,7 @@ async fn durable_stream_subscribe_from_poller_stops_when_subscriber_terminates()
             after: 0,
         },
     )
-    .await
-    .expect("subscribe_from must succeed");
+    .await;
 
     append_evt(&store, agg_id.as_str(), 1).await;
     append_evt(&store, agg_id.as_str(), 2).await;
@@ -888,8 +884,7 @@ async fn durable_stream_direct_poller_observable_via_registry_lookup_by_name() {
     let sub_pid = sub.pid();
 
     ds.subscribe_from(ps, sub, SequenceCursor::Global { after: 0 })
-        .await
-        .expect("subscribe_from must succeed");
+        .await;
 
     let poller_name = ProcessName::new(format!("direct-poller-{sub_pid}"));
     let found = ps.lookup_by_name(&poller_name).await;
@@ -958,8 +953,7 @@ async fn durable_stream_drop_proxy_keeps_direct_poller_until_subscriber_stops() 
             after: 0,
         },
     )
-    .await
-    .expect("subscribe_from must succeed");
+    .await;
 
     append_evt(&store, agg_id.as_str(), 1).await;
     wait_for_count(&recorder, 1).await;
@@ -1017,12 +1011,10 @@ async fn durable_stream_subscribe_from_twice_new_poller_stays_in_registry() {
     let poller_name = ProcessName::new(format!("direct-poller-{sub_pid}"));
 
     ds.subscribe_from(ps, sub.clone(), SequenceCursor::Global { after: 0 })
-        .await
-        .expect("first subscribe_from must succeed");
+        .await;
 
     ds.subscribe_from(ps, sub, SequenceCursor::Global { after: 0 })
-        .await
-        .expect("second subscribe_from must succeed");
+        .await;
 
     tokio::time::sleep(TEST_POLL_INTERVAL * 8).await;
 
@@ -1075,8 +1067,7 @@ async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
             after: 0,
         },
     )
-    .await
-    .expect("first subscribe_from must succeed");
+    .await;
 
     // Capture the first direct poller's AnyProxy so we can later verify it
     // is no longer the one registered under the alias.
@@ -1093,8 +1084,7 @@ async fn durable_stream_subscribe_from_twice_stops_old_direct_poller() {
             after: 0,
         },
     )
-    .await
-    .expect("second subscribe_from must succeed");
+    .await;
 
     tokio::time::sleep(TEST_POLL_INTERVAL * 6).await;
 
@@ -1250,8 +1240,7 @@ async fn direct_poller_cursor_not_advanced_when_handler_returns_err() {
             after: 0,
         },
     )
-    .await
-    .expect("subscribe_from must succeed");
+    .await;
 
     // Wait until recv() has been called 3 times:
     //   call 1: seq=1 → Err (cursor not advanced)

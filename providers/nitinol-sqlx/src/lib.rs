@@ -7,7 +7,7 @@
 //!
 //! # Getting one running
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use nitinol_persistence::provider::PersistenceProvider;
 //! use nitinol_sqlx::{sqlx::postgres::PgPoolOptions, PostgresEventStore, PostgresStore};
 //!
@@ -81,7 +81,7 @@
 //! clear it. Both reach a caller as [`OffsetError::Backend`], so which one it
 //! is, is a `downcast_ref` away:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use nitinol_persistence::error::OffsetError;
 //! use nitinol_sqlx::OffsetConflict;
 //!
@@ -125,6 +125,8 @@
 //! path nothing collected fails its load as [`UnknownEventType`] rather than
 //! being passed over — see `EVENT_REGISTRY` for the one way collection comes up
 //! short, a crate dropped from the link.
+
+#![warn(missing_docs)]
 
 #[cfg(feature = "postgres")]
 mod postgres;

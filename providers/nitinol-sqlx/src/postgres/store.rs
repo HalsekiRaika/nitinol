@@ -48,10 +48,12 @@ pub struct PostgresStore {
 impl PostgresStore {
     /// Assemble this backend's store over `pool`.
     ///
-    /// Fails where two event declarations in this binary claim one canonical
-    /// path, which is what [`PostgresEventStore::new`] reports — the one
-    /// failure that belongs at assembly rather than at the row it would have
-    /// restored wrongly.
+    /// # Errors
+    ///
+    /// Returns [`EventRegistryError`] if two event declarations in this binary
+    /// claim one canonical path, which is what [`PostgresEventStore::new`]
+    /// reports — the one failure that belongs at assembly rather than at the
+    /// row it would have restored wrongly.
     pub fn new(pool: PgPool) -> Result<Self, EventRegistryError> {
         Ok(Self {
             events: Journal::from(PostgresEventStore::new(pool.clone())?),

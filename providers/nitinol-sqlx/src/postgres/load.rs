@@ -30,6 +30,7 @@ use super::timestamp::Instant;
 #[derive(Debug, thiserror::Error)]
 #[error("no event type was collected under the path {path:?}")]
 pub struct UnknownEventType {
+    /// The path the stored row carried.
     pub path: String,
 }
 

@@ -1,3 +1,5 @@
+//! Test doubles for code that sends commands to aggregates.
+
 use std::any::Any;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
@@ -14,6 +16,9 @@ use crate::process::AggregateTellTarget;
 /// require a target they could report a failure against.
 const MOCK_AGGREGATE_ID: &str = "mock-aggregate-target";
 
+/// An [`AggregateTellTarget`] that records the commands told to it instead of
+/// dispatching them, so a test can read them back with
+/// [`drain_captured`](Self::drain_captured).
 pub struct MockAggregateProxy<A: Aggregate> {
     captured: Arc<Mutex<Vec<Box<dyn Any + Send>>>>,
     aggregate_id: AggregateId,
@@ -21,6 +26,7 @@ pub struct MockAggregateProxy<A: Aggregate> {
 }
 
 impl<A: Aggregate> MockAggregateProxy<A> {
+    /// Creates a mock that has recorded nothing yet.
     pub fn new() -> Self {
         Self {
             captured: Arc::new(Mutex::new(Vec::new())),
@@ -29,6 +35,11 @@ impl<A: Aggregate> MockAggregateProxy<A> {
         }
     }
 
+    /// Records `cmd` without dispatching it.
+    ///
+    /// # Errors
+    ///
+    /// Never returns `Err`.
     pub async fn tell<C>(&self, cmd: C) -> Result<(), TellError>
     where
         A: Decider<C>,
@@ -42,6 +53,8 @@ impl<A: Aggregate> MockAggregateProxy<A> {
         Ok(())
     }
 
+    /// Removes and returns the recorded commands of type `C`, in the order
+    /// they were told, leaving commands of other types recorded.
     pub fn drain_captured<C: 'static>(&self) -> Vec<C> {
         let mut buffer = self
             .captured

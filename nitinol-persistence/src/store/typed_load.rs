@@ -26,25 +26,33 @@ pub type TypedEventStream<'a, E> =
 /// takes its progress from it.
 #[derive(Debug, Clone)]
 pub struct TypedEvent<E> {
+    /// The stream the row was appended to.
     pub stream_key: String,
+    /// The row's position in its stream.
     pub sequence: u64,
+    /// The row's position across the store.
     pub global_sequence: u64,
+    /// When the event occurred.
     pub occurred_at: Timestamp,
+    /// The event the row's payload decodes to.
     pub event: E,
 }
 
 /// Reads the rows of one event type out of an event store, as that type.
 ///
-/// nitinol has no search API: searching is the work of a projection's read
-/// model. This reads the rows of a single type under the conditions the store
-/// itself serves, once — it does not follow the journal as rows are appended.
+/// - It reads once, under the conditions the store itself serves; it does not
+///   follow the journal as rows are appended.
+/// - Every [`EventStore`] has it, `dyn EventStore` included, and so do a
+///   [`Journal`](crate::store::Journal) and the
+///   [`InMemoryStore`](crate::store::InMemoryStore), which hand the read to the
+///   event store they erase or hold.
+/// - [`read`](TypedLoad::read) takes only a `LoadQuery<Typed<E>>`, built by
+///   [`LoadQuery::of`]; `E` is the type it decodes into.
+/// - `read(q)` serves what `load(q.into_untyped())` serves, kept to the rows
+///   of `E` and decoded through `E::Codec`; `LOAD-2` on
+///   [`read`](TypedLoad::read) states it in full.
 ///
-/// Every [`EventStore`] has it, `dyn EventStore` included, and so do a
-/// [`Journal`](crate::store::Journal) and the
-/// [`InMemoryStore`](crate::store::InMemoryStore) that holds one: neither is an
-/// event store, so each hands the read to the one it erases or holds. It is
-/// derived from what a store already promises rather than something a backend
-/// implements, and it cannot be implemented outside this crate:
+/// It is sealed: it cannot be implemented outside this crate.
 ///
 /// ```compile_fail
 /// use nitinol_persistence::store::TypedLoad;
@@ -55,14 +63,16 @@ pub struct TypedEvent<E> {
 ///     async fn read<E: nitinol_contract::Event>(
 ///         &self,
 ///         _: nitinol_persistence::LoadQuery<nitinol_persistence::Typed<E>>,
-///     ) -> Result<nitinol_persistence::store::TypedEventStream<'_, E>, nitinol_persistence::error::LoadError> {
+///     ) -> Result<
+///         nitinol_persistence::store::TypedEventStream<'_, E>,
+///         nitinol_persistence::error::LoadError,
+///     > {
 ///         unimplemented!()
 ///     }
 /// }
 /// ```
 ///
-/// The type a read decodes into is the one its query was built for, so a read
-/// is handed a query from [`LoadQuery::of`]:
+/// A read is handed a query from [`LoadQuery::of`]:
 ///
 /// ```
 /// # use nitinol_contract::{Event, EventType, Family, TypeName};
@@ -73,38 +83,18 @@ pub struct TypedEvent<E> {
 /// # struct Nothing;
 /// # impl nitinol_contract::Codec<Opened> for Nothing {
 /// #     type Error = std::convert::Infallible;
-/// #     fn encode(_: &Opened) -> Result<bytes::Bytes, Self::Error> { Ok(bytes::Bytes::new()) }
+/// #     fn encode(_: &Opened) -> Result<bytes::Bytes, Self::Error> {
+/// #         Ok(bytes::Bytes::new())
+/// #     }
 /// #     fn decode(_: &[u8]) -> Result<Opened, Self::Error> { Ok(Opened) }
 /// # }
 /// # impl Event for Opened {
-/// #     const EVENT_TYPE: EventType = EventType::new(Family::new("shop.order"), TypeName::new("Opened"));
+/// #     const EVENT_TYPE: EventType =
+/// #         EventType::new(Family::new("shop.order"), TypeName::new("Opened"));
 /// #     type Codec = Nothing;
 /// # }
 /// # async fn reads(store: &InMemoryEventStore) {
 /// let opened = store.read(LoadQuery::of::<Opened>().with_stream("order-1")).await;
-/// # }
-/// ```
-///
-/// and a query built for no type is not one it reads:
-///
-/// ```compile_fail
-/// # use nitinol_contract::{Event, EventType, Family, TypeName};
-/// # use nitinol_persistence::store::{InMemoryEventStore, TypedLoad};
-/// # use nitinol_persistence::LoadQuery;
-/// # #[derive(Clone)]
-/// # struct Opened;
-/// # struct Nothing;
-/// # impl nitinol_contract::Codec<Opened> for Nothing {
-/// #     type Error = std::convert::Infallible;
-/// #     fn encode(_: &Opened) -> Result<bytes::Bytes, Self::Error> { Ok(bytes::Bytes::new()) }
-/// #     fn decode(_: &[u8]) -> Result<Opened, Self::Error> { Ok(Opened) }
-/// # }
-/// # impl Event for Opened {
-/// #     const EVENT_TYPE: EventType = EventType::new(Family::new("shop.order"), TypeName::new("Opened"));
-/// #     type Codec = Nothing;
-/// # }
-/// # async fn reads(store: &InMemoryEventStore) {
-/// let opened = store.read(LoadQuery::by_stream("order-1")).await;
 /// # }
 /// ```
 pub trait TypedLoad: sealed::Sealed {
@@ -114,9 +104,9 @@ pub trait TypedLoad: sealed::Sealed {
     /// # LOAD-2: a typed read is a load of the type's own rows
     ///
     /// `read(q)` is what [`EventStore::load`] serves for
-    /// [`q.erase()`](LoadQuery::erase), keeping the rows whose `event_type` is
-    /// `E::EVENT_TYPE` and reading each through `E::Codec`, in the order and at
-    /// the positions `load` serves them.
+    /// [`q.into_untyped()`](LoadQuery::into_untyped), keeping the rows whose
+    /// `event_type` is `E::EVENT_TYPE` and reading each through `E::Codec`, in
+    /// the order and at the positions `load` serves them.
     ///
     /// It follows from `LOAD-1` and is not something a backend implements:
     ///
@@ -133,6 +123,11 @@ pub trait TypedLoad: sealed::Sealed {
     ///
     /// Fixed by `nitinol-persistence/tests/integration/typed_load.rs` against
     /// the reference implementation.
+    ///
+    /// # Errors
+    ///
+    /// The outer `Err` is the error [`EventStore::load`] returned for
+    /// [`query.into_untyped()`](LoadQuery::into_untyped).
     fn read<E: Event>(
         &self,
         query: LoadQuery<Typed<E>>,
@@ -145,7 +140,7 @@ impl<S: EventStore + ?Sized> TypedLoad for S {
         query: LoadQuery<Typed<E>>,
     ) -> Result<TypedEventStream<'_, E>, LoadError> {
         Ok(Box::pin(TypedRows {
-            rows: self.load(query.erase()).await?,
+            rows: self.load(query.into_untyped()).await?,
             event: PhantomData::<fn() -> E>,
         }))
     }
@@ -205,4 +200,32 @@ mod sealed {
     impl Sealed for Journal {}
 
     impl Sealed for InMemoryStore {}
+}
+
+#[cfg(doctest)]
+mod compile_fail_fixtures {
+    /// ```compile_fail
+    /// # use nitinol_contract::{Event, EventType, Family, TypeName};
+    /// # use nitinol_persistence::store::{InMemoryEventStore, TypedLoad};
+    /// # use nitinol_persistence::LoadQuery;
+    /// # #[derive(Clone)]
+    /// # struct Opened;
+    /// # struct Nothing;
+    /// # impl nitinol_contract::Codec<Opened> for Nothing {
+    /// #     type Error = std::convert::Infallible;
+    /// #     fn encode(_: &Opened) -> Result<bytes::Bytes, Self::Error> {
+    /// #         Ok(bytes::Bytes::new())
+    /// #     }
+    /// #     fn decode(_: &[u8]) -> Result<Opened, Self::Error> { Ok(Opened) }
+    /// # }
+    /// # impl Event for Opened {
+    /// #     const EVENT_TYPE: EventType =
+    /// #         EventType::new(Family::new("shop.order"), TypeName::new("Opened"));
+    /// #     type Codec = Nothing;
+    /// # }
+    /// # async fn reads(store: &InMemoryEventStore) {
+    /// let opened = store.read(LoadQuery::by_stream("order-1")).await;
+    /// # }
+    /// ```
+    fn typed_load_reads_no_untyped_query() {}
 }

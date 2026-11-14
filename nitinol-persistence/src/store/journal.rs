@@ -14,29 +14,24 @@ use crate::store::typed_load::{TypedEventStream, TypedLoad};
 
 /// The journal registered with the framework, with the backend's type erased.
 ///
-/// What is inside is the registered store's own clone and nothing else: erasing
-/// a type does not copy a store's shape or construct a destination, so a fact
-/// appended through a journal is a fact in the backend a deployment named. Its
-/// own [`Clone`] is that backend's clone one level down — the
-/// [`EventStoreClone`](crate::store::EventStoreClone) supertrait is what carries
-/// it — so every wiring point the framework hands a journal to reaches the one
-/// set of records. That is `PRV-1` as the erasure has to keep it.
+/// - It holds the registered store's own clone and nothing else, so a fact
+///   appended through a journal is a fact in the backend a deployment named.
+/// - Its [`Clone`] is that backend's clone, carried by the
+///   [`EventStoreClone`](crate::store::EventStoreClone) supertrait, so every
+///   wiring point the framework hands a journal to reaches the one set of
+///   records. That is `PRV-1` as the erasure has to keep it.
+/// - It is not an [`EventStore`]. Erasing a journal twice is a type error; the
+///   only ways from one journal to another are the reflexive conversion and
+///   `From<&Journal>`, both of which clone.
+/// - It is a [`Store`]: a store holding the journal alone is the journal, so a
+///   journal handed to a
+///   [`PersistenceProvider`](crate::provider::PersistenceProvider) is
+///   distributed as itself.
+/// - A journal implements none of the slot traits. It has no snapshot store and
+///   no offset store to answer with, so wiring that needs one is refused while
+///   it is compiled rather than at the first save — which is `PRV-3`.
 ///
-/// # Why it does not implement `EventStore`
-///
-/// The delegation below is inherent rather than an [`EventStore`]
-/// implementation, which is what makes two things true at once.
-///
-/// [`From`] has room for the conversion. `impl<E: EventStore> From<E> for
-/// Journal` would overlap `core`'s reflexive `impl<T> From<T> for T` at
-/// `E = Journal` if a journal were an event store; because it is not, both
-/// implementations stand, and `Journal::from` accepts a backend handle *and* a
-/// journal.
-///
-/// And erasing twice is a type error rather than a `Box<Box<_>>`. A journal is
-/// not something `From<E: EventStore>` accepts, so the only ways to reach one
-/// from another are the reflexive conversion and `From<&Journal>` — both of
-/// which are the clone.
+/// A journal is a handle onto an event store, not an event store:
 ///
 /// ```compile_fail
 /// use nitinol_persistence::store::{EventStore, InMemoryEventStore, Journal};
@@ -47,26 +42,6 @@ use crate::store::typed_load::{TypedEventStream, TypedLoad};
 /// // a journal is a handle onto an event store, not an event store
 /// takes(&journal);
 /// ```
-///
-/// ```compile_fail
-/// use nitinol_persistence::store::{InMemoryEventStore, Journal};
-///
-/// let journal = Journal::from(InMemoryEventStore::default());
-/// // erasing an erased handle: there is no second box to put it in
-/// let _twice = Journal::from(Box::new(journal));
-/// ```
-///
-/// # Why it implements `Store`
-///
-/// A store holding the journal alone *is* the journal, so there is no separate
-/// journal-only store type beside this one: a journal handed to a
-/// [`PersistenceProvider`](crate::provider::PersistenceProvider) is distributed
-/// as itself.
-///
-/// The slots beyond the journal are deliberately absent. A journal has no
-/// snapshot store and no offset store to answer with, so wiring that needs one
-/// is refused while it is compiled rather than at the first save — which is
-/// `PRV-3`.
 pub struct Journal(Box<dyn EventStore>);
 
 impl Journal {
@@ -74,6 +49,14 @@ impl Journal {
     ///
     /// [`EventStore::append`]'s clauses, unchanged: this hands the call to the
     /// registered store and its answer back.
+    ///
+    /// # Errors
+    ///
+    /// - [`AppendError::SequenceConflict`] if a `sequence` is already taken in
+    ///   the stream or repeated within the batch; see [`EventStore::append`]'s
+    ///   OCC-1.
+    /// - [`AppendError::Backend`] if the backend fails, including once its
+    ///   bounded re-runs are exhausted; see [`EventStore::append`]'s OCC-4.
     pub async fn append(
         &self,
         key: &str,
@@ -85,6 +68,11 @@ impl Journal {
     /// Serves the stored events a [`LoadQuery`] selects.
     ///
     /// [`EventStore::load`]'s clauses, unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoadError::Backend`] if the registered store fails to serve
+    /// the query.
     pub async fn load(&self, query: LoadQuery) -> Result<EventStream<'_>, LoadError> {
         self.0.load(query).await
     }
@@ -133,4 +121,16 @@ impl Store for Journal {
     fn events(&self) -> Journal {
         self.clone()
     }
+}
+
+#[cfg(doctest)]
+mod compile_fail_fixtures {
+    /// ```compile_fail
+    /// use nitinol_persistence::store::{InMemoryEventStore, Journal};
+    ///
+    /// let journal = Journal::from(InMemoryEventStore::default());
+    /// // erasing an erased handle: there is no second box to put it in
+    /// let _twice = Journal::from(Box::new(journal));
+    /// ```
+    fn journal_cannot_be_erased_twice() {}
 }

@@ -5,8 +5,8 @@ use crate::error::ConfigError;
 /// Default mailbox capacity used when a `MailboxCapacity::Inherit` value is
 /// spawned outside any `ProcessSystem` (e.g. detached temp-ask processes).
 ///
-/// Kept at the pre-spec hardcoded value (32) so that detached spawn paths do
-/// not pick up surprise back-pressure from a process-system-level default.
+/// Fixed at 32 so that detached spawn paths do not pick up back-pressure from
+/// a process-system-level default.
 pub(crate) const DETACHED_MAILBOX_CAPACITY: usize = 32;
 
 /// Default pipe capacity for detached spawns. Same rationale as
@@ -34,9 +34,11 @@ macro_rules! capacity_enum {
         }
 
         impl $name {
-            /// Construct a `Bounded(NonZeroUsize)` from a `usize`, rejecting
-            /// zero with `ConfigError::ZeroCapacity` so no zero-sized buffer
-            /// can leak past the public boundary.
+            /// Returns a bounded capacity of `n`.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`ConfigError::ZeroCapacity`](crate::error::ConfigError::ZeroCapacity) if `n` is zero.
             pub fn bounded(n: usize) -> Result<Self, ConfigError> {
                 NonZeroUsize::new(n)
                     .map(Self::Bounded)
@@ -57,8 +59,9 @@ capacity_enum!(
 capacity_enum!(
     /// Capacity declaration for a process's stash buffer.
     ///
-    /// The stash machinery itself is implemented in a follow-up issue; this
-    /// enum reserves the API surface so call sites can compile today.
+    /// When the stash is full,
+    /// [`ProcessContext::stash`](crate::process::ProcessContext::stash) returns
+    /// [`StashError::Full`](crate::error::StashError::Full).
     StashCapacity
 );
 

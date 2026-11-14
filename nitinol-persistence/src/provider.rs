@@ -2,11 +2,12 @@
 //!
 //! Three responsibilities, kept apart.
 //!
-//! | Layer | Responsibility |
-//! |---|---|
-//! | [`Store`] | Owns the storage resources and the identity of the regions behind them |
-//! | [`CustomStore`] | Names one handle per slot, which is how a mixture is assembled |
-//! | [`PersistenceProvider`] | Distributes what a store answers with to the framework's wiring |
+//! - [`Store`] owns the storage resources and the identity of the regions
+//!   behind them.
+//! - [`CustomStore`] names one handle per slot, which is how a mixture is
+//!   assembled.
+//! - [`PersistenceProvider`] distributes what a store answers with to the
+//!   framework's wiring.
 //!
 //! A deployment constructs a store — [`InMemoryStore`](crate::store::InMemoryStore),
 //! a backend's own, or a [`CustomStore`] over named handles — and hands it to
@@ -32,21 +33,15 @@ pub use self::custom_store::{CustomStore, CustomStoreBuilder, EventStoreUnset, U
 /// journal are the sub-traits below, and a store that supplies none of them
 /// implements this trait alone.
 ///
-/// # Why the journal is not a slot of its own
-///
-/// There is no event-sourced deployment without events, so every store owes
-/// one. Making it optional would put a store that supplies nothing at all in
-/// the type system with nothing to do.
-///
-/// # Why the handle is `Clone`
-///
-/// A store is distributed by being cloned: into a
-/// [`PersistenceProvider`], into whatever wiring holds one, and into every slot
-/// handle it answers with. Identity is therefore the store's own obligation
-/// rather than something a caller establishes by wrapping it in an `Arc` —
-/// which is what `PRV-1` below says. How the sharing is done inside is the
-/// backend's: in-memory state behind an `Arc`, a connection pool and a schema
-/// copied, a client handle cloned.
+/// - The journal is not an optional slot: there is no event-sourced deployment
+///   without events, so every store owes one.
+/// - A store is distributed by being cloned: into a [`PersistenceProvider`],
+///   into whatever wiring holds one, and into every slot handle it answers
+///   with. Identity is therefore the store's own obligation rather than
+///   something a caller establishes by wrapping it in an `Arc` — which is what
+///   `PRV-1` below says. How the sharing is done inside is the backend's:
+///   in-memory state behind an `Arc`, a connection pool and a schema copied, a
+///   client handle cloned.
 ///
 /// The clauses below are the contract every store must reproduce. They are what
 /// wiring and a third-party assembly may rely on, and each carries a stable
@@ -205,19 +200,13 @@ pub trait ProjectionOffsetSlot: Store {
 /// A store that also holds somewhere to keep how far the framework's own saga
 /// attachments have got.
 ///
-/// This is the slot for **every** attachment a saga runs with, not the delivery
-/// host's alone: the host records what it has delivered here, and so does the
-/// manager as it is written. The deadline index reads the journal in global
-/// order too, but records no position here: it is a cache of the schedule
-/// facts, rebuilt from the start of the journal whenever it starts. What the
-/// attachments that record have in common is that the framework owns them, so
-/// their offsets belong wherever an operator put the journal — which is the
-/// axis `PRV-4` states.
-///
-/// A distinct associated type name from
-/// [`ProjectionOffsetSlot::ProjectionOffsets`] so that a store
-/// supplying both slots can be named in a `where` clause without the two
-/// projections of it becoming ambiguous.
+/// - Every saga attachment that records a position — the delivery host and
+///   the manager — records it here. The framework owns them, so their offsets
+///   belong wherever an operator put the journal (`PRV-4`). The deadline index
+///   records none: it is rebuilt from the start of the journal on each start.
+/// - Its associated type is named apart from
+///   [`ProjectionOffsetSlot::ProjectionOffsets`], so a store supplying both
+///   slots can be named in a `where` clause without ambiguity.
 pub trait SagaOffsetSlot: Store {
     /// The backend's own offset store, as the saga slot is named with it.
     type SagaOffsets: OffsetStore + Clone + 'static;
@@ -228,23 +217,14 @@ pub trait SagaOffsetSlot: Store {
 
 /// The supplier every event-sourced deployment has one of.
 ///
-/// It distributes what the [`Store`] it was constructed over answers with, in
-/// the shape the framework's wiring takes: the journal as a [`Journal`] and the
-/// snapshot store as an [`Album`] — the erased handles the wiring is written
-/// against — and each offset slot as the backend's own type so a transaction
-/// stays visible.
-///
-/// Every one of them is the store's own handle, answered by value. Nothing here
-/// shares a handle on a caller's behalf: identity is the store's obligation
-/// (`PRV-1`), and a supplier that wrapped a handle anyway would be proving the
-/// same property a second time.
-///
-/// What it does not do is decide anything. The identity of a slot, and whether
-/// a slot exists at all, belong to the store — which is why a supplier adds no
-/// clause of its own and the contract is stated on [`Store`].
-///
-/// Cloning a supplier names the same store, so every consumer wired from one
-/// clone and every consumer wired from another reach one set of records.
+/// - It hands out what the [`Store`] it was constructed over answers with: the
+///   journal as a [`Journal`], the snapshot store as an [`Album`], and each
+///   offset slot as the backend's own type so a transaction stays visible.
+/// - Every handle is the store's own, answered by value. Identity and whether a
+///   slot exists belong to the store (`PRV-1`, `PRV-3`), so a supplier adds no
+///   clause of its own.
+/// - Cloning a supplier names the same store, so consumers wired from either
+///   clone reach one set of records.
 #[derive(Clone)]
 pub struct PersistenceProvider<S> {
     store: S,

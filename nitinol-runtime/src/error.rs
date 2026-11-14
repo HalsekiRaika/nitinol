@@ -1,27 +1,68 @@
+//! Errors returned by the runtime's operations.
+//!
+//! - [`SendError`] is returned when
+//!   [`tell`](crate::process::ProcessProxy::tell) or
+//!   [`stop`](crate::process::ProcessProxy::stop) finds the process already
+//!   stopped.
+//! - [`AskError`] is returned when [`ask`](crate::process::ProcessProxy::ask)
+//!   cannot deliver the message or gets no reply, or when the handler returns
+//!   an error.
+//! - [`SpawnError`] is returned when a [`StreamProps`](crate::StreamProps) is
+//!   spawned for a topic that already has a stream.
+//! - [`StashError`] is returned when
+//!   [`ProcessContext::stash`](crate::process::ProcessContext::stash) finds the
+//!   stash full.
+//! - [`ConfigError`] is returned when a configuration value such as
+//!   [`MailboxCapacity::bounded`](crate::MailboxCapacity::bounded) or
+//!   [`SupervisionStrategy::restart`](crate::SupervisionStrategy::restart) is
+//!   given an invalid argument.
+
 use crate::ident::Pid;
 
+/// The error returned when a message or signal cannot be sent because the
+/// process has already stopped.
 #[derive(Debug, thiserror::Error)]
 #[error("process already stopped")]
 pub struct SendError;
 
+/// The error returned by [`ask`](crate::process::ProcessProxy::ask) and
+/// [`ask_with_timeout`](crate::process::ProcessProxy::ask_with_timeout) when
+/// no successful reply arrives.
 #[derive(Debug, thiserror::Error)]
 pub enum AskError<E: std::error::Error> {
+    /// The process stopped before the message was delivered; the message was
+    /// sent to the dead letters.
     #[error("dead letter: no process at pid {destination}")]
-    DeadLetter { destination: Pid },
+    DeadLetter {
+        /// The pid the message was addressed to.
+        destination: Pid,
+    },
+    /// The process dropped the message without replying.
     #[error("process dropped reply")]
     ReplyDropped,
+    /// No reply arrived within the time limit given to
+    /// [`ask_with_timeout`](crate::process::ProcessProxy::ask_with_timeout).
     #[error("ask timed out: no reply from pid {destination}")]
-    Timeout { destination: Pid },
+    Timeout {
+        /// The pid the message was addressed to.
+        destination: Pid,
+    },
+    /// The handler returned an error.
     #[error(transparent)]
     Handler(E),
 }
 
+/// The error returned when a [`StreamProps`](crate::StreamProps) is spawned
+/// for a topic that already has a stream.
 #[derive(Debug, thiserror::Error)]
 #[error("stream topic '{topic}' already registered")]
 pub struct SpawnError {
+    /// The topic that already has a stream.
     pub topic: String,
 }
 
+/// The error a [`Driver::apply`](crate::process::Driver::apply) returns when
+/// handling an event fails. It carries no details.
 #[derive(Debug, thiserror::Error)]
 #[error("handler returned an error")]
 pub struct HandlerError;

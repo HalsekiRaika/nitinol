@@ -1,3 +1,5 @@
+//! Projectors that build read models from stored events.
+
 mod context;
 mod delivery;
 mod envelope;

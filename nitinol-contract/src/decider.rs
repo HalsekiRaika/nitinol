@@ -17,7 +17,7 @@ use crate::decision::Decision;
 /// `Output` and `Rejection` are fixed per command type rather than per
 /// aggregate, because the answer to "how much is left?" and the answer to "who
 /// now owns this?" have no reason to be the same type. A command that asks
-/// nothing declares `type Output = ()`. That is deliberately not an `Option`:
+/// nothing declares `type Output = ()`. That is not an `Option`:
 /// the decider says once, on the impl, that the command has no answer, instead
 /// of every decision restating it.
 ///
@@ -25,7 +25,7 @@ use crate::decision::Decision;
 /// machinery around the decision — the store, the mailbox, concurrency control
 /// — are not decisions and are reported by the interpreter's own error type.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```rust
 /// use bytes::Bytes;
@@ -90,5 +90,6 @@ pub trait Decider<C>: Aggregate {
     /// The domain-rule violations that can refuse this command.
     type Rejection;
 
+    /// Decides what `cmd` means for the current state.
     fn decide(&self, cmd: C) -> Decision<Self::Event, Self::Output, Self::Rejection>;
 }

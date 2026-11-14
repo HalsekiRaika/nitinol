@@ -4,10 +4,14 @@
 //! writes, and it names them from a single root: `nitinol`.  That claim covers
 //! **both** name spaces a nitinol deployment has:
 //!
-//! | space | what carries the name | how the law is enforced |
-//! |---|---|---|
-//! | stream keys | [`AggregateId`](crate::AggregateId), [`store::OffsetScope`](crate::store::OffsetScope), `nitinol_eventsource::ProjectionId`, `nitinol_saga::SagaId` — runtime strings | [`reject_reserved_id`] panics |
-//! | event types | the `family` of an [`EventType`](crate::EventType) — a compile-time literal | [`Family::new`](crate::Family::new) panics while the constant holding it is evaluated |
+//! - Stream keys. What carries the name: [`AggregateId`](crate::AggregateId),
+//!   [`store::OffsetScope`](crate::store::OffsetScope),
+//!   `nitinol_eventsource::ProjectionId`, `nitinol_saga::SagaId` — runtime
+//!   strings. How the law is enforced: [`reject_reserved_id`] panics.
+//! - Event types. What carries the name: the `family` of an
+//!   [`EventType`](crate::EventType) — a compile-time literal. How the law is
+//!   enforced: [`Family::new`](crate::Family::new) panics while the constant
+//!   holding it is evaluated.
 //!
 //! The two differ only in *when* the name is known, and therefore in what a
 //! rejection can be, and each enforcement point sits with the side that knows
@@ -19,8 +23,6 @@
 //! [`is_within_reserved_namespace`] from there so callers can keep reaching
 //! them through `nitinol_persistence::reserved`, and it owns the
 //! runtime-string enforcement point, [`reject_reserved_id`].
-//!
-//! # The framework's own records
 //!
 //! The framework persists records under the names it reserved, so it needs a
 //! way past the refusal.  That way is
@@ -36,6 +38,11 @@ pub use nitinol_contract::{is_within_reserved_namespace, RESERVED_NAMESPACE};
 /// Every identifier constructor in the framework — including the ones in other
 /// crates, such as `nitinol_saga::SagaId` — routes its refusal through here, so
 /// all of them reject the same names and say so the same way.
+///
+/// # Panics
+///
+/// Panics if `id` is within the reserved namespace: `nitinol` itself or any
+/// name beneath it, such as `nitinol.saga`.  `nitinolx` is not within it.
 ///
 /// A reserved identifier is a programming error, not a runtime condition: it
 /// can only come from a literal or a configuration value, never from data the

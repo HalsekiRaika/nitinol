@@ -22,8 +22,8 @@ use crate::process::{Process, ProcessContext, ProcessProxy};
 
 /// Resolved parameters every spawn needs to wire into the lifecycle loop.
 ///
-/// Collapses the pre-spec 11-arg `lifecycle_loop` signature (`P8`) into a
-/// single named struct so adding a new resource axis touches one place.
+/// One named struct instead of a long `lifecycle_loop` argument list, so
+/// adding a resource axis touches one place.
 pub(crate) struct LifecycleConfig<P: Process, D: Driver<P>> {
     pub(crate) process: P,
     pub(crate) process_name: Option<ProcessName>,
@@ -422,10 +422,9 @@ struct RestartDeferred {
 ///   only; removed from `ctx.children` but not replayed.
 /// - `Terminated` for an external death-watch (not a child) → collected for replay.
 ///
-/// `on_stop` is intentionally **not** called here; the caller must invoke it
-/// **before** calling this function (spec order: `on_stop` → stop children →
-/// await `Terminated`).  The caller tracks whether `on_stop` was already called
-/// so the post-loop cleanup does not call it a second time.
+/// This function does not call `on_stop`; the caller calls it first.  The
+/// caller tracks whether `on_stop` was already called so the post-loop
+/// cleanup does not call it a second time.
 async fn stop_children_for_restart<P: Process>(
     ctx: &mut ProcessContext<P>,
     sys_rx: &mut mpsc::Receiver<SystemSignal>,

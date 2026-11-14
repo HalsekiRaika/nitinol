@@ -1,6 +1,8 @@
 use crate::projection::ProjectionId;
 use nitinol_persistence::store::DeliveryMode;
 
+/// The context a [`Projector`](crate::Projector) is handed with each event it
+/// projects.
 pub struct ProjectionContext<'a, Tx> {
     projection_id: &'a ProjectionId,
     current_sequence: u64,
@@ -41,6 +43,8 @@ impl<'a, Tx> ProjectionContext<'a, Tx> {
         self.delivery_mode
     }
 
+    /// Returns the transaction the event is being projected in, or `None` if
+    /// the projector has no [`TxProvider`](crate::TxProvider).
     pub fn tx(&mut self) -> Option<&mut Tx> {
         self.tx.as_mut()
     }

@@ -25,8 +25,8 @@
 //!
 //! The store contracts are independent: a backend implementing one of the
 //! traits runs that contract's entry points and owes the others nothing.  Two
-//! clauses of the offset contract are deliberately not fixed here — the
-//! trait's documentation says which, and why, next to each.
+//! clauses of the offset contract are not fixed here — the trait's
+//! documentation says which, and why, next to each.
 //!
 //! The [`provider`] module is the layer above them: it judges the supplier that
 //! hands those stores out, slot by slot, and puts each slot's store through the
@@ -40,23 +40,19 @@
 //! answered, what it refused.  A contract that only holds for a store
 //! *together with* the machinery driving it — that a projection's result and
 //! the offset covering it are settled in one transaction, and that a
-//! conflict takes back both — is not stated here and is not run here.  Those
-//! are fixed by `providers/nitinol-sqlx/tests/exactly_once_projection.rs` and
-//! `nitinol-eventsource/tests/tx_wiring.rs`, against a provider and a projector
-//! at once.  The same holds on the snapshot side: that an aggregate's restored
-//! state and the events replayed above it add up to where that aggregate had
-//! got to is fixed by `nitinol-eventsource/tests/e2e_snapshot.rs`, against a
-//! store and an activating aggregate at once.  A green run of this suite is not
-//! a green run of those.
+//! conflict takes back both — is not stated here and is not run here.  The
+//! same holds on the snapshot side: that an aggregate's restored state and the
+//! events replayed above it add up to where that aggregate had got to is not
+//! run here either.
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! # use futures_core::future::BoxFuture;
 //! # use nitinol_persistence::store::Journal;
 //! # use nitinol_store_conformance::{Executor, StoreUnderTest};
 //! # struct MyBackend;
 //! impl StoreUnderTest for MyBackend {
 //!     fn bring_up(&self) -> BoxFuture<'_, Journal> {
-//!         Box::pin(async { /* a store of yours holding nothing */ })
+//!         Box::pin(async { todo!("bring up a store of yours holding nothing") })
 //!     }
 //! }
 //!
@@ -115,11 +111,12 @@
 //! connection, the run is sequential and proves nothing about concurrency.  A
 //! green run of that shape is not evidence.
 //!
-//! # What this crate may not depend on
+//! # Async runtime
 //!
-//! No async runtime.  A kit that reached for one would be out of reach of every
-//! provider built on another, so whichever runtime you await these entry points
-//! on stays yours to choose, and [`Executor`] is how the suite borrows it.
+//! The suite depends on no async runtime: await these entry points on
+//! whichever runtime you choose, and hand it to the suite as an [`Executor`].
+
+#![warn(missing_docs)]
 
 pub mod offset;
 pub mod provider;

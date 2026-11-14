@@ -20,9 +20,9 @@ use crate::process::{Process, ProcessContext};
 
 /// Abstraction over the source that drives a process's lifecycle loop.
 ///
-/// `lifecycle_loop` is generic over `D: Driver<P>` so that any "driving
-/// source" — message channels, timer ticks, external futures — can ride the
-/// same supervision / registry / dead-letter machinery.
+/// The process's lifecycle loop is generic over `D: Driver<P>` so that any
+/// "driving source" — message channels, timer ticks, external futures — can
+/// ride the same supervision / registry / dead-letter machinery.
 ///
 /// `next` does NOT borrow `&mut state`, so it can be awaited inside
 /// `tokio::select!` alongside the system-signal receiver. `apply` borrows
@@ -32,15 +32,14 @@ use crate::process::{Process, ProcessContext};
 /// [`combine_drivers!`](crate::combine_drivers) macro). The lifecycle loop
 /// still drives a single Driver — multiplexing is the Driver tree's job.
 ///
-/// # Implicit Drivers
-///
 /// `ProcessSystem::spawn(props)` automatically composes the following drivers:
 /// - `MessageDriver` — mailbox receive (`tell` / `ask`)
 /// - `PipeDriver`    — backs `ctx.pipe_to_self`
 /// - `StashDriver`   — backs `ctx.stash` / `ctx.unstash_all`
 ///
 /// The driver installed via [`Props::with_driver`](crate::process::Props::with_driver)
-/// occupies a single slot composed on top of the Core trio. For multi-driver
+/// occupies a single slot composed on top of the three built-in drivers
+/// (`MessageDriver`, `PipeDriver`, `StashDriver`). For multi-driver
 /// composition, build a single combined driver with
 /// [`combine_drivers!`](crate::combine_drivers) and pass it to `with_driver`.
 pub trait Driver<P: Process>: Send + 'static {
@@ -64,8 +63,8 @@ pub trait Driver<P: Process>: Send + 'static {
     /// Whether the lifecycle loop should arm its idle-timeout timer for this
     /// driver. Message-driven drivers default to `true` so existing
     /// `IdleTimeout::After(_)` semantics are preserved. Tick / poll drivers
-    /// (e.g. a planned `IntervalDriver`) override to `false` because
-    /// "idle" has no meaning for a scheduled source.
+    /// override to `false` because "idle" has no meaning for a scheduled
+    /// source.
     fn supports_idle_timeout(&self) -> bool {
         true
     }
@@ -76,9 +75,7 @@ pub trait Driver<P: Process>: Send + 'static {
     /// `ProcessContext::pipe_to_self`. `PipeDriver` overrides this to return
     /// `Some(_)`, and `Combine<L, R>` propagates the first non-`None` handle
     /// it finds (preferring the left child). The lifecycle loop reads this
-    /// during process startup to wire `ctx.pipe_to_self` — if the resolved
-    /// value is `None`, calling `pipe_to_self` panics with a misuse message
-    /// rather than silently dropping the future.
+    /// during process startup to wire `ctx.pipe_to_self`.
     fn pipe_handle(&self) -> Option<PipeHandle<P>> {
         None
     }

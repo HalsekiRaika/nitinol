@@ -21,8 +21,9 @@ use crate::process::Process;
 /// supervision, idle timeout, and optional name.
 ///
 /// The `D` type parameter (defaulting to [`DefaultDriver`]) holds the single
-/// driver composed on top of the Core trio at spawn time. To install a custom
-/// driver, call [`Props::with_driver`]; the call transitions the type from
+/// driver composed on top of the three built-in drivers (`MessageDriver`,
+/// `PipeDriver`, `StashDriver`) at spawn time. To install a custom driver, call
+/// [`Props::with_driver`]; the call transitions the type from
 /// `Props<P, DefaultDriver>` to `Props<P, D2>`. Multi-driver composition is
 /// done statically via the [`combine_drivers!`](crate::combine_drivers)
 /// macro before passing the result to `with_driver` — there is no runtime
@@ -43,6 +44,8 @@ pub struct Props<P: Process, D = DefaultDriver> {
 }
 
 impl<P: Process> Props<P, DefaultDriver> {
+    /// Creates props that build the process by calling `producer` when it is
+    /// spawned and again on each restart.
     pub fn new(producer: impl Fn() -> P + Send + Sync + 'static) -> Self {
         Self {
             producer: Box::new(producer),
@@ -58,31 +61,37 @@ impl<P: Process> Props<P, DefaultDriver> {
 }
 
 impl<P: Process, D> Props<P, D> {
+    /// Sets what happens when a handler returns an error.
     pub fn with_supervision_strategy(mut self, strategy: SupervisionStrategy) -> Self {
         self.supervision_strategy = strategy;
         self
     }
 
+    /// Sets how long the process may go without a message before it stops.
     pub fn with_idle_timeout(mut self, timeout: IdleTimeout) -> Self {
         self.idle_timeout = timeout;
         self
     }
 
+    /// Sets the capacity of the process's mailbox.
     pub fn with_mailbox_capacity(mut self, capacity: MailboxCapacity) -> Self {
         self.mailbox_capacity = capacity;
         self
     }
 
+    /// Sets the capacity of the process's stash.
     pub fn with_stash_capacity(mut self, capacity: StashCapacity) -> Self {
         self.stash_capacity = capacity;
         self
     }
 
+    /// Sets the capacity of the process's pipe-to-self channel.
     pub fn with_pipe_capacity(mut self, capacity: PipeCapacity) -> Self {
         self.pipe_capacity = capacity;
         self
     }
 
+    /// Sets the name the process is registered under.
     pub fn with_name(mut self, name: ProcessName) -> Self {
         self.name = Some(name);
         self
@@ -96,8 +105,8 @@ impl<P: Process, D> Props<P, D> {
     /// drivers in the same process, build a single composite with
     /// [`combine_drivers!`](crate::combine_drivers) and pass it to a single
     /// `with_driver` call. The runtime then composes the user driver on top
-    /// of the Core trio (`MessageDriver` + `PipeDriver` + `StashDriver`)
-    /// via [`Combine`](crate::process::Combine).
+    /// of the three built-in drivers (`MessageDriver`, `PipeDriver`,
+    /// `StashDriver`) via [`Combine`](crate::process::Combine).
     pub fn with_driver<D2>(self, driver: D2) -> Props<P, D2>
     where
         D2: Driver<P>,
@@ -164,15 +173,6 @@ impl<P: Process, D: Driver<P>> Props<P, D> {
 /// // No drivers — must be a compile error.
 /// type Bad = Props![MyProc];
 /// ```
-///
-/// ```compile_fail
-/// # use nitinol_runtime::Props;
-/// # use nitinol_runtime::process::Process;
-/// # struct MyProc;
-/// # impl Process for MyProc {}
-/// // Empty driver list — must be a compile error.
-/// type Bad = Props![MyProc;];
-/// ```
 #[allow(non_snake_case)]
 #[macro_export]
 macro_rules! Props {
@@ -187,4 +187,17 @@ macro_rules! Props {
     ($p:ty; $($drivers:ident),+ $(,)?) => {
         $crate::process::Props<$p, $crate::Props!(@drivers $p; $($drivers),+)>
     };
+}
+
+#[cfg(doctest)]
+mod compile_fail_fixtures {
+    /// ```compile_fail
+    /// # use nitinol_runtime::Props;
+    /// # use nitinol_runtime::process::Process;
+    /// # struct MyProc;
+    /// # impl Process for MyProc {}
+    /// // Empty driver list — must be a compile error.
+    /// type Bad = Props![MyProc;];
+    /// ```
+    fn props_macro_empty_driver_list() {}
 }

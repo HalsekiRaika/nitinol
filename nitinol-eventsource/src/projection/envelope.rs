@@ -8,10 +8,12 @@ use nitinol_persistence::AggregateId;
 /// `Stream<EventEnvelope<E>>` that carries typed events to subscribers.
 #[derive(Clone)]
 pub struct EventEnvelope<E> {
+    /// The aggregate the event belongs to.
     pub aggregate_id: AggregateId,
     /// Aggregate-scoped sequence number.
     pub sequence: u64,
     /// Global (cross-aggregate) sequence number assigned by the event store.
     pub global_sequence: u64,
+    /// The decoded event.
     pub event: E,
 }

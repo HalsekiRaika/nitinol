@@ -18,7 +18,7 @@ pub trait StoreUnderTest: Send + Sync {
 /// The caller's runtime, lent to the suite for the clause that needs writers
 /// making progress while a reader reads.
 ///
-/// The kit has no runtime of its own on purpose: one that reached for a
+/// The kit has no runtime of its own: one that reached for a
 /// particular runtime would be out of reach of every provider built on another.
 pub trait Executor: Send + Sync {
     /// Start `task`, and return a future that completes when it does.

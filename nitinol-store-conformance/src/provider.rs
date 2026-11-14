@@ -1,8 +1,7 @@
 //! The contract every [`Store`] owes, made executable for any assembly.
 //!
 //! [`Store`] states it as clauses `PRV-1` … `PRV-5`; this module is the ones a
-//! suite can fix as something to run. Two of them it deliberately does not fix
-//! — `PRV-2`'s connection half, which a suite cannot see, and `PRV-5`, the
+//! suite can fix as something to run. Two of them it does not fix — `PRV-2`'s connection half, which a suite cannot see, and `PRV-5`, the
 //! absence of atomicity across destinations — and [`Store`] says so next to
 //! each.
 //!

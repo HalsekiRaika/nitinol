@@ -24,9 +24,8 @@
 //! would still let this binary build.  See the test report for the residual
 //! check.
 //!
-//! "No public constructor" is not residual: it is pinned by the `compile_fail`
-//! doctests on `Deadline` itself, which is also why nothing here is called.
-//! See: nitinol-saga/src/components/deadline.rs
+//! "No public constructor" is not residual: `Deadline<M>` has no public
+//! constructor, which is also why nothing here is called.
 //!
 //! ## API contract assumed by this file
 //!
