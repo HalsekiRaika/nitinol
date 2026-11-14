@@ -27,19 +27,10 @@ impl<E> SagaEffect<E> {
     /// Persist multiple events to the saga's event store and apply them in
     /// order.
     ///
-    /// An empty vector still produces a `Persist` variant, so the value remains
-    /// a receiver that [`SagaEffect::combine`] folds schedules into.
-    /// The interpreter, however, does not see an "intent to persist zero
-    /// events": a `Persist` whose `events` **and** `schedules` are both
-    /// empty takes the same no-op path as [`SagaEffect::None`] and persists no
-    /// batch of its own — though the interpreter still writes a
-    /// consumed-position-only append when the input this was decided from has
-    /// a position not yet durable, so a no-op decision is not redelivered.
-    ///
-    /// Emptiness of `events` alone is not enough to make a branch a no-op — a
-    /// `Persist` carrying a schedule but no user event is exactly what
-    /// [`Deadline::set`](crate::Deadline::set) builds, and it is always
-    /// interpreted.
+    /// An empty vector still yields a `Persist`, which [`SagaEffect::combine`]
+    /// can fold schedules into. With no events and no schedules it is
+    /// interpreted as [`SagaEffect::None`]: no batch of its own, only the
+    /// consumed-position append the input still needs.
     pub fn persist_all(events: Vec<E>) -> Self {
         Self::Persist {
             events,
@@ -55,26 +46,12 @@ impl<E> SagaEffect<E> {
         self.combine(Self::End)
     }
 
-    /// Associative binary operation of the Monoid.
+    /// Associative binary operation of the monoid, keeping `Sequence` flat.
     ///
-    /// Combines `self` and `other` into a single `SagaEffect` while keeping
-    /// the internal `Sequence` flat — no nesting is introduced.
-    ///
-    /// When the two effects meeting at the junction are both `Persist`
-    /// branches, they are concatenated into one `Persist` so the interpreter
-    /// writes them as a single atomic `store::append` batch.  Without this,
-    /// `persist(e).combine(deadline.set(..))` would split the domain event and
-    /// the schedule fact across two appends, and a crash in between would arm a
-    /// timer against a decision no store holds.  Only the junction pair merges:
-    /// a `Persist` sitting behind an `End` or a `CancelSchedule` is never
-    /// pulled across that leaf.  `None` is not such a leaf — as the identity it
-    /// carries no interpretation of its own, so a `None` left on the junction by
-    /// a hand-built `Sequence` is dropped rather than blocking the merge.
-    ///
-    /// Each of `events` and `schedules` keeps its own left-to-right
-    /// order, but the two categories do not interleave: a merged branch is
-    /// always written as all events, then all schedules — the fixed layout every
-    /// `Persist` batch already has.
+    /// Two `Persist` branches meeting at the junction are merged into one, so
+    /// `persist(e).combine(deadline.set(..))` is written as one atomic batch:
+    /// all events, then all schedules. A `Persist` is never pulled across an
+    /// `End` or a `CancelSchedule`; a `None` at the junction is dropped.
     ///
     /// Identity law:  `None.combine(a) == a` and `a.combine(None) == a`.
     /// Associativity: `(a.combine(b)).combine(c) == a.combine(b.combine(c))`.

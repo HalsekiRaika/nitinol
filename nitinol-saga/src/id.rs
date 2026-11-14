@@ -10,26 +10,17 @@ use std::borrow::Borrow;
 
 use nitinol_persistence::reject_reserved_id;
 
-/// Identifier for a saga instance.
+/// Identifier for a saga instance, and the key of its own stream.
 ///
-/// Constructed with [`SagaId::new`], borrowed as `&str` via the standard
-/// `Borrow<str>` impl for use with `EventStore::append` / `LoadQuery::by_stream`.
-///
-/// # Invariants
-///
-/// `SagaId` is a distinct newtype — it is **not** interchangeable with
-/// `AggregateId`.  The following must fail to compile:
+/// - Borrowed as `&str` through `Borrow<str>`, for use with `EventStore::append`
+///   and `LoadQuery::by_stream`.
+/// - A distinct newtype: it does not convert to or compare with `AggregateId`,
+///   so saga-owned and aggregate-owned streams stay apart in the type system.
 ///
 /// ```compile_fail
 /// use nitinol_saga::SagaId;
 /// use nitinol_persistence::AggregateId;
 /// let _: SagaId = AggregateId::new("same-text");
-/// ```
-///
-/// ```compile_fail
-/// use nitinol_saga::SagaId;
-/// use nitinol_persistence::AggregateId;
-/// let _ = AggregateId::new("same-text") == SagaId::new("same-text");
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SagaId(String);
@@ -62,4 +53,14 @@ impl Borrow<str> for SagaId {
     fn borrow(&self) -> &str {
         &self.0
     }
+}
+
+#[cfg(doctest)]
+mod compile_fail_fixtures {
+    /// ```compile_fail
+    /// use nitinol_saga::SagaId;
+    /// use nitinol_persistence::AggregateId;
+    /// let _ = AggregateId::new("same-text") == SagaId::new("same-text");
+    /// ```
+    fn saga_id_does_not_compare_with_aggregate_id() {}
 }

@@ -42,28 +42,11 @@ pub struct SagaDelivery {
 impl SagaDelivery {
     /// Deliver `command` to the `A` identified by `target`.
     ///
-    /// The bounds are the ones sending a command and waiting for its answer
-    /// already asks for, and nothing beyond them: a delivery host persists no
-    /// copy of a command, so it adds no encoding or cloning requirement of its
-    /// own.
-    ///
-    /// # What a target may be
-    ///
-    /// Any aggregate. A mapping is written once and names one system type for
-    /// every deployment, so a host addresses its targets through the
-    /// [`ContingentSystem`] its system is viewed as, and that view carries
-    /// whether the deployment holds a snapshot slot as a value. The
-    /// `RecoverOnContingent` bound below is therefore one every aggregate
-    /// meets, whichever
-    /// [`Recover`](Aggregate::Recover) it names.
-    ///
-    /// An aggregate whose `Recover` is [`Latest`](nitinol_eventsource::Latest)
-    /// recovers from the deployment's snapshot slot. If the store of the
-    /// deployment the saga was started on holds none, that delivery is a
-    /// permanent failure and its partition holds, the way it does for any
-    /// verdict. That is a wiring mistake rather than a condition to wait out:
-    /// spawning the same aggregate on the same deployment through the typed
-    /// system is a compile error.
+    /// The bounds are those of sending a command and awaiting its answer; a
+    /// host persists no copy of a command. Any aggregate may be a target. One
+    /// whose `Recover` is [`Latest`](nitinol_eventsource::Latest) recovers from
+    /// the deployment's snapshot slot; where the store holds none, its delivery
+    /// is a permanent failure and the partition holds.
     pub fn new<A, C>(target: AggregateId, command: C) -> Self
     where
         A: Aggregate + Decider<C>,

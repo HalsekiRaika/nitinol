@@ -38,124 +38,31 @@ pub(crate) const RESTART_WITHIN: Duration = Duration::from_secs(60);
 
 /// Wiring for a delivery host over the saga type `S`.
 ///
-/// The delivery host is a reader of the saga type's streams, and what it keeps
-/// is an offset — see the crate's [mental model](crate#mental-model).
+/// A delivery host reads the decisions every instance of `S` has persisted,
+/// turns each into the commands [`Saga::dispatch`] says it implies, and
+/// delivers them to the aggregates they are addressed to. See the crate's
+/// [mental model](crate#mental-model).
 ///
-/// A delivery host subscribes to the decisions every instance of `S` has
-/// persisted, turns each into the commands [`Saga::dispatch`] says it implies,
-/// and delivers them to the aggregates they are addressed to. Polling, the
-/// cursor, the offset, holding on a failure and backing off are all the
-/// host's; what the saga author writes is the mapping.
-///
-/// This type is where the delivery guarantee is written down. Everything else
-/// in the crate that needs it links here rather than restating it.
-///
-/// # Delivery is at-least-once, and the offset is where that comes from
-///
-/// A host is a pull consumer of the saga's own stream, and the only thing it
-/// keeps is how far it has finished: the offset. Delivering and recording
-/// are two writes to two stores, and nothing makes them one — so the order is
-/// fixed and the window is the consequence. A record's deliveries are carried
-/// out first and the offset moves past it only once every one of them has
-/// landed. A host that died in between resumes from the offset it last
-/// recorded and carries the same deliveries again.
-///
-/// That window is the whole of why delivery is at-least-once, and it is why
-/// there is no mode to pick: at-most-once would mean moving the offset
-/// before the command is sent, which loses a delivery to the same crash
-/// instead of repeating one; exactly-once would need the receiver's write and
-/// the offset in one transaction across two stores, which nitinol does not
-/// offer and does not pretend to. Receivers are therefore written to recognise
-/// a repeat, from the operation id the domain put on the command — the saga
-/// author's own data, since the framework attaches no envelope of its own.
-///
-/// A repeat is not only a crash's doing. Changing the partition count
-/// reassigns stream keys across offsets (below), and
-/// [`SagaDeliveryProxy::advance_offset`](crate::SagaDeliveryProxy) is an
-/// operator moving one by hand.
-///
-/// # Holding, and what it means
-///
-/// A delivery the receiver did not carry out is not passed over. The partition
-/// holds: it stops advancing its offset, retries the same record, and says
-/// so through `tracing`. Nothing is skipped for failing, however permanently —
-/// a command silently dropped because its target refused it is a decision the
-/// saga made and nobody carried out, with nothing left to say so.
-///
-/// What a hold costs is the records behind it on the same partition: they wait.
-/// [`with_partitions`](Self::with_partitions) is how far that reaches — a hold
-/// is confined to the instances of one partition, each with its own
-/// offset — and
-/// [`advance_offset`](crate::SagaDeliveryProxy::advance_offset) is the
-/// operator's way past one, which is a decision to abandon that delivery and is
-/// written down as such.
-///
-/// A hold is not a failure of the saga: the instance that decided has long
-/// since moved on, and its own stream already holds the decision. Stopping the
-/// saga for it would strip every other decision of its delivery.
-///
-/// # Two layers of failure, and only one of them is the host's
-///
-/// *Transport* failure is the host's: the target could not be reached, its
-/// mailbox was closed, the ask timed out, the receiver answered an error. The
-/// host retries it, holds while it persists, and reports it. A saga is not
-/// notified, and there is no hook to register for one — a saga that reacted to
-/// transport would be reacting to the framework's own plumbing.
-///
-/// *Business* failure is the domain's, and reaches the saga the only way a
-/// domain fact can: as an input. The addressed aggregate records what it
-/// decided, the saga observes that event through the source it declared for it,
-/// and "the answer never came" is the saga's own deadline firing — see
-/// [`Deadline`](crate::Deadline). So a compensation is written in the one
-/// `match` of [`Saga::handle`](crate::Saga::handle), beside the reaction to the
-/// answer that did arrive.
-///
-/// The two are kept apart because conflating them makes both unreadable: a
-/// refused command and an unreachable node are the same signal to a saga that
-/// hears about transport, and neither can be acted on correctly from there.
-///
-/// # Changing the partition count
-///
-/// The partition a stream key falls in is derived from the count, so changing
-/// the count reassigns keys. A partition's offset covers the set of streams that
-/// used to map to it, and after the change it covers a different set: records
-/// already delivered under the old assignment are read again under the new
-/// one, and records not yet delivered may move to a partition whose offset is
-/// already past them.
-///
-/// What that costs is redelivery, which the receivers' idempotency absorbs —
-/// the same thing a crash costs. What it is **not** safe against is delivery
-/// being skipped, so a count is changed with every partition drained: stop the
-/// host, let nothing be left unfinished, then start it with the new count.
-/// Changing it under a running host, or restarting with a new count while a
-/// partition is held, can carry an offset past records nothing then delivers.
-///
-/// # Where it starts
-///
-/// Nowhere on its own. A delivery host is started by the saga whose decisions
-/// it carries — [`SagaManagerProps`](crate::SagaManagerProps) starts both
-/// halves, from either entry point — and the settings below are named on that
-/// same builder. A saga whose decisions nobody carries out is not a half-wired
-/// saga but a system that runs, looks alive and does nothing, so there is no
-/// public way to start one half without the other:
-///
-/// ```compile_fail
-/// # use nitinol_saga::SagaDeliveryProps;
-/// # use nitinol_persistence::provider::PersistenceProvider;
-/// # use nitinol_persistence::store::InMemoryStore;
-/// # struct ReservationSaga;
-/// # fn wiring() {
-/// let persistence = PersistenceProvider::new(InMemoryStore::default());
-/// // neither `new` nor `spawn` is public: a host is started with its manager
-/// SagaDeliveryProps::<ReservationSaga, _>::new(&persistence);
-/// # }
-/// ```
-///
-/// The journal it reads and the saga-offset slot it records in are the system's,
-/// resolved at that spawn. A supplier may have configured the saga slot with the
-/// same store a projection records to: the keys cannot collide, so the table is
-/// shared — and replacing the store the projection slot is configured with still
-/// leaves this one alone.
+/// - Delivery is at-least-once: a record's offset moves past it only once every
+///   delivery it implied has landed, so a host that dies in between delivers
+///   them again. Receivers recognise a repeat from the operation id the domain
+///   put on the command.
+/// - A delivery the receiver did not carry out holds its partition: the same
+///   record is retried and reported through `tracing`, and the records behind
+///   it on that partition wait. Nothing is skipped for failing, and the saga
+///   keeps running; [`advance_offset`](crate::SagaDeliveryProxy::advance_offset)
+///   is the operator's way past a hold.
+/// - A *transport* failure is the host's to retry, hold and report; the saga is
+///   not notified. A *business* failure reaches the saga as an input: the event
+///   the addressed aggregate recorded, or its own [`Deadline`](crate::Deadline)
+///   firing when no answer came.
+/// - Changing the partition count reassigns stream keys to offsets, so records
+///   are read again and one not yet delivered can fall behind an offset already
+///   past it. Change it only with every partition drained: stop the host, let
+///   nothing be left unfinished, then start it with the new count.
+/// - A host is started only by [`SagaManagerProps`](crate::SagaManagerProps),
+///   which names these settings; the journal and the saga-offset slot are the
+///   system's.
 pub struct SagaDeliveryProps<S: Saga> {
     delivery_id: Option<SagaDeliveryId>,
     partitions: NonZeroUsize,

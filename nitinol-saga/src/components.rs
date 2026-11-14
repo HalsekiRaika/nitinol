@@ -63,52 +63,26 @@ impl<S: Saga> SagaComponents<S> {
         }
     }
 
-    /// The system hosting this saga.
+    /// The system hosting this saga, whichever entry point started it.
     ///
-    /// Not an `Option`: every saga is started on a system — whether its wiring
-    /// was written props-first as
-    /// [`SagaManagerProps::new`](crate::SagaManagerProps::new)`(..).spawn(&system)`
-    /// or system-first as
-    /// [`SagaSystemExt::host`](crate::SagaSystemExt::host) — so there is always
-    /// one to answer with.
-    ///
-    /// The contingent system reaches the host's process system, its aggregate
-    /// registry and the journal its supplier distributes — so a saga that has to tell an
-    /// aggregate resolves the reference from here rather than from a clone of
-    /// the system captured outside the spawn.
-    ///
-    /// That includes an aggregate whose [`Recover`](nitinol_eventsource::Aggregate::Recover)
-    /// is [`Latest`](nitinol_eventsource::Latest): the contingent system carries
-    /// the host's snapshot slot as a value, so such an aggregate recovers from the
-    /// snapshots its typed system keeps. Where the host's store holds no
-    /// snapshot slot, every dispatch to it fails with
-    /// [`AskError::Activation`](nitinol_eventsource::AskError::Activation) —
-    /// [`TellError::Activation`](nitinol_eventsource::TellError::Activation) for
-    /// a `tell` — which `retryability` reads as permanent.
+    /// A saga that has to tell an aggregate resolves the reference from here
+    /// rather than from a clone of the system captured outside the spawn. That
+    /// includes an aggregate whose [`Recover`](nitinol_eventsource::Aggregate::Recover)
+    /// is [`Latest`](nitinol_eventsource::Latest), which recovers from the host's
+    /// snapshot slot; where the store holds none, every dispatch to it fails with
+    /// [`AskError::Activation`](nitinol_eventsource::AskError::Activation)
+    /// ([`TellError::Activation`](nitinol_eventsource::TellError::Activation) for
+    /// a `tell`), which `retryability` reads as permanent.
     pub fn system(&self) -> &ContingentSystem {
         &self.host
     }
 
-    /// Ask for this saga's own time.
+    /// Ask for this saga's own time, with deadlines carrying the message `M`.
     ///
-    /// `M` is the message a deadline carries — the saga's promise to its future
-    /// self — and it names the [`Codec`](nitinol_eventsource::codec::Codec) that
-    /// writes it into the schedule fact.
-    ///
-    /// Asking is the declaration: a saga whose producer calls this is one the
-    /// host resolves the resident timer core for.  The `where` clause is what
-    /// makes that true rather than merely documented: `S::Subscribe:
-    /// SagaSubscribe<Deadline = HasDeadline<M>>` holds only when the alphabet
-    /// has a `#[subscribe(deadline)]` variant naming `M`, and the spawn
-    /// boundary resolves the resident timer core from that exact same
-    /// associated type — not from a separately-settable fact that could
-    /// disagree with it.  A `Saga` whose alphabet does not declare that
-    /// variant has no `deadline::<M>()` to call, so it cannot persist a
-    /// schedule fact with no timer core to arm it.
-    ///
-    /// Asking for `M` when the alphabet declares no `#[subscribe(deadline)]`
-    /// variant naming it is a **compile error** — the `where` clause has no
-    /// impl to resolve to:
+    /// Asking is the declaration: the host resolves the resident timer core for
+    /// a saga whose alphabet has a `#[subscribe(deadline)]` variant naming `M`,
+    /// and only such a saga can call this. Asking for `M` otherwise is a
+    /// **compile error**:
     ///
     /// ```compile_fail
     /// # use async_trait::async_trait;

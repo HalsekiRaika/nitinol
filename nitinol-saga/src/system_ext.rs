@@ -47,60 +47,18 @@ pub trait SagaSystemExt {
     /// the props-first form.
     type Store: SagaOffsetSlot;
 
-    /// Host the saga `S` on the stores the supplier distributes — the manager,
+    /// Host the saga `S` on the stores the supplier distributes: the manager,
     /// the delivery host that carries out what it decides, and, when `S`'s
     /// alphabet declares a deadline, the deadline index.
     ///
-    /// The system-first form of the one verb a saga is started with; the
-    /// props-first form is
-    /// [`SagaManagerProps::new`](SagaManagerProps::new)`(..).spawn(&system)`,
-    /// and the two reach the same private path.  It always starts a manager,
-    /// and a saga whose [`Saga::correlate`] always answers the same
-    /// [`SagaId`](crate::SagaId) is that manager with a single instance — the
-    /// degenerate case rather than a second mechanism, so there is nothing
-    /// else to reach for and nothing to choose between.
+    /// The system-first form of
+    /// [`SagaManagerProps::new`](SagaManagerProps::new)`(..).spawn(&system)`;
+    /// the delivery host's settings are named on the props this returns.
+    /// `factory` is called for every instance and whenever the runtime rebuilds
+    /// one, so anything the saga captures must be re-acquirable.
     ///
-    /// # Why one verb starts both
-    ///
-    /// A manager journals what it decided and nothing more: the commands a
-    /// decision implies reach their targets only because a delivery host reads
-    /// that journal ([`SagaDeliveryProps`](crate::SagaDeliveryProps) is where
-    /// that contract is written down).  A saga whose decisions nobody carries
-    /// out is not a half-wired saga but a system that runs, looks alive and
-    /// does nothing — which neither the type system nor the runtime could
-    /// report while the two were declared separately.  So there is one
-    /// declaration, and the delivery host's settings are named on the builder
-    /// it hands back:
-    /// [`with_delivery_id`](SagaManagerProps::with_delivery_id),
-    /// [`with_partitions`](SagaManagerProps::with_partitions) and
-    /// [`with_delivery_poll_interval`](SagaManagerProps::with_delivery_poll_interval).
-    /// The handle [`spawn`](SagaManagerProps::spawn) answers with reaches every
-    /// part — see [`SagaHostProxy`](crate::SagaHostProxy).
-    ///
-    /// The same holds for a saga's own time. A deadline lives on the saga's
-    /// own stream, as the schedule fact it wrote, and is armed again only when
-    /// its instance is next activated; after a restart nothing upstream need
-    /// ever name that instance again. So a saga type whose alphabet declares a
-    /// deadline is hosted with its deadline index too: it reads every
-    /// instance's schedule facts and asks the manager for an instance when one
-    /// of its deadlines falls due. The saga writes its own stream; the delivery
-    /// host and the index are readers of it — the delivery host from an offset
-    /// it records, the index from cursors it rebuilds from the start of the
-    /// journal whenever it starts. The manager is a reader as well, of the
-    /// sources the saga observes, and it records an offset too: a restart
-    /// resumes each source from the offset each partition recorded, which is
-    /// why an instance with a pending deadline and nothing new upstream is the
-    /// index's to bring back.
-    ///
-    /// # Typestate
-    ///
-    /// Because a hosted saga always starts a host, the props this hands back
-    /// spawn only where the store supplies the saga-offset slot that host
-    /// records its progress in.  A store that supplies none is refused while
-    /// the wiring is compiled, rather than when the host first tries to record
-    /// where it got to — and rather than by quietly keeping the progress
-    /// somewhere a restart cannot find it, which would weaken the at-least-once
-    /// guarantee without saying so:
+    /// This exists only where the store holds the saga-offset slot the delivery
+    /// host records its progress in; a store without one is a **compile error**:
     ///
     /// ```compile_fail
     /// # use async_trait::async_trait;
@@ -157,15 +115,7 @@ pub trait SagaSystemExt {
     /// # }
     /// ```
     ///
-    /// `factory` builds a saga instance from the capabilities the framework
-    /// resolved for it, and is called again for every instance the correlation
-    /// fans out to and whenever the runtime rebuilds one, so anything the saga
-    /// captures (a reference it reads the world through, say) must be
-    /// re-acquirable.  A saga that needs no capability is built by
-    /// `|_| S::default()`.
-    ///
-    /// What is left to say at the wiring site is the binding of each declared
-    /// source and the instances' residency — one builder's worth:
+    /// The wiring site binds each declared source, then spawns:
     ///
     /// ```rust,no_run
     /// # use async_trait::async_trait;
@@ -224,10 +174,6 @@ pub trait SagaSystemExt {
     ///     .await;
     /// # }
     /// ```
-    ///
-    /// Leaving a declared source unbound is a compile error, which is stated
-    /// where the requirement lives — on
-    /// [`SagaManagerProps::spawn`](SagaManagerProps::spawn).
     fn host<S: Saga>(
         &self,
         factory: impl Fn(SagaComponents<S>) -> S + Send + Sync + 'static,

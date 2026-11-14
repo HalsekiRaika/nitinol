@@ -12,27 +12,12 @@ use crate::scheduler::TimerName;
 
 /// A value a saga promises to its future self.
 ///
-/// A deadline message is not an [`Event`](nitinol_eventsource::Event): it is
-/// never a row of the saga's own stream, only a value persisted *inside* a
-/// schedule fact.  So it names the format that writes it down without claiming
-/// an event type or a registry entry — the same shape
-/// [`Snapshotable`](nitinol_eventsource::Snapshotable) has for a value that is
-/// persisted but is not an event.
-///
-/// Naming a [`Codec`] rather than a serde bound is what keeps the rule "anything
-/// persisted describes its own format" whole: the framework picks no format for
-/// a value the domain owns.
-///
-/// Unlike [`Snapshotable`](nitinol_eventsource::Snapshotable), a deadline
-/// message also names itself: [`TYPE_NAME`](Self::TYPE_NAME) and
-/// [`CODEC_NAME`](Self::CODEC_NAME) are written beside the bytes `Codec`
-/// produces, inside the schedule fact. A schedule outlives the incarnation
-/// that set it — it is read back by whichever binary happens to be linked in
-/// when the timer fires, possibly long after `set` ran — so the fact itself
-/// has to say what its payload is rather than leaving that to the reader's
-/// compiled-in alphabet. [`Deadline::set`] writes the pair down, and a firing
-/// is refused rather than guessed at when they no longer match what the
-/// current declaration says.
+/// - Not an [`Event`](nitinol_eventsource::Event): it is never a row of the
+///   saga's stream, only a value persisted inside a schedule fact, so it names
+///   its [`Codec`] without claiming an event type.
+/// - [`TYPE_NAME`](Self::TYPE_NAME) and [`CODEC_NAME`](Self::CODEC_NAME) are
+///   written beside the payload, so the fact says what it holds. A firing whose
+///   names do not match the current declaration is refused, not guessed at.
 pub trait DeadlineMessage: Sized + Send + Sync + 'static {
     /// The name this message type claims on the wire.
     ///
@@ -135,99 +120,19 @@ impl PendingDeadlines {
     }
 }
 
-/// A saga's own time.
+/// A saga's own time: constructors for the effects that set and cancel a
+/// deadline, and a read-only view of what the journal says is pending.
 ///
-/// It carries exactly two things: constructors for the effects that set and
-/// cancel a deadline, and a read-only view of what the journal says is pending.
-///
-/// # Why it holds no connection
-///
-/// `Deadline` holds no scheduler handle.  Setting a deadline produces
-/// a [`SagaEffect`] the framework interprets — append the fact, *then* arm the
-/// timer — so "arm a timer without writing the fact" is not a shape this
-/// component can express.  A timer no stream knows about would not survive a
-/// restart, and the restart would have no way to notice it was lost.  Keeping
-/// the proxy with the hosting machinery is what leaves effect → append → arm as
-/// the only path.
-///
-/// # How a firing is settled
-///
-/// A deadline that comes due reaches the deadline arm of
-/// [`Saga::handle`](crate::Saga::handle), and the `fired` fact that closes it
-/// out is written onto the saga's own stream only once what the firing decided
-/// is durable.  That is the discipline every other input settles by — an
-/// observed record's consumed position rides the append its decision lands in —
-/// and a firing carries no position, so this fact is the row that plays the same
-/// part.  A decision no store holds therefore leaves the deadline pending, and
-/// the next activation re-arms it from the schedule fact still on the stream and
-/// delivers the firing again: a deadline is not lost to a failed append.
-///
-/// Firing is at-least-once, which is the other side of that order: a stop
-/// between the decision landing and the `fired` fact landing repeats the firing,
-/// so a deadline arm has to tolerate seeing the same one twice.  Nothing is
-/// retried while the incarnation that failed is still alive — the retry is a
-/// later activation, which is the one place the journal is read again.
-///
-/// A firing that decides nothing is settled all the same, by the `fired` fact
-/// alone: whether the arm refused it, answered [`SagaEffect::None`], or the
-/// schedule fact names a message identity the current declaration disagrees with
-/// and nothing could be read back.  Two firings leave no `fired` fact at all —
-/// one the saga terminated on, since the `Ended` fact closes every deadline out,
-/// and one whose arm re-set the same [`TimerName`] and had that fact land, since
-/// replacing a schedule by name is itself what closes the old deadline.
-///
-/// # How one is obtained
-///
-/// From [`SagaComponents::deadline`](crate::SagaComponents::deadline), inside
-/// the producer the spawn builder calls, and nowhere else: there is no public
-/// constructor and no `Default`.  Minting one is a compile error, which is what
-/// makes "asking for the component" the declaration the host can act on:
-///
-/// ```compile_fail
-/// # use std::time::Duration;
-/// # use bytes::Bytes;
-/// # use nitinol_eventsource::codec::Codec;
-/// # use nitinol_saga::{Deadline, DeadlineMessage, SagaEffect, TimerName};
-/// # struct Reminder;
-/// # struct ReminderCodec;
-/// # impl Codec<Reminder> for ReminderCodec {
-/// #     type Error = std::convert::Infallible;
-/// #     fn encode(_: &Reminder) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
-/// #     fn decode(_: &[u8]) -> Result<Reminder, Self::Error> { Ok(Reminder) }
-/// # }
-/// # impl DeadlineMessage for Reminder {
-/// #     const TYPE_NAME: &'static str = "reminder";
-/// #     const CODEC_NAME: &'static str = "reminder-codec";
-/// #     type Codec = ReminderCodec;
-/// # }
-/// // There is no constructor to call: `Deadline::new` is the framework's own.
-/// let deadline: Deadline<Reminder> = Deadline::new(Default::default());
-/// let _: SagaEffect<u32> =
-///     deadline.set(TimerName::new("reminder"), Duration::from_secs(1), Reminder);
-/// ```
-///
-/// ```compile_fail
-/// # use std::time::Duration;
-/// # use bytes::Bytes;
-/// # use nitinol_eventsource::codec::Codec;
-/// # use nitinol_saga::{Deadline, DeadlineMessage, SagaEffect, TimerName};
-/// # struct Reminder;
-/// # struct ReminderCodec;
-/// # impl Codec<Reminder> for ReminderCodec {
-/// #     type Error = std::convert::Infallible;
-/// #     fn encode(_: &Reminder) -> Result<Bytes, Self::Error> { Ok(Bytes::new()) }
-/// #     fn decode(_: &[u8]) -> Result<Reminder, Self::Error> { Ok(Reminder) }
-/// # }
-/// # impl DeadlineMessage for Reminder {
-/// #     const TYPE_NAME: &'static str = "reminder";
-/// #     const CODEC_NAME: &'static str = "reminder-codec";
-/// #     type Codec = ReminderCodec;
-/// # }
-/// // Nor is there a `Default`: a saga cannot default its way into its own time.
-/// let deadline: Deadline<Reminder> = Deadline::default();
-/// let _: SagaEffect<u32> =
-///     deadline.set(TimerName::new("reminder"), Duration::from_secs(1), Reminder);
-/// ```
+/// - Obtained only from [`SagaComponents::deadline`](crate::SagaComponents::deadline),
+///   inside the producer the spawn builder calls.
+/// - It holds no scheduler handle: a deadline is set by a [`SagaEffect`] that
+///   appends the schedule fact before the timer is armed.
+/// - A firing reaches the deadline arm of [`Saga::handle`](crate::Saga::handle)
+///   and is settled by a `fired` fact once what it decided is durable; until
+///   then it stays pending and fires again on a later activation, so an arm
+///   must tolerate a repeat. A firing that decides nothing is settled the same
+///   way; one the saga ends on, or whose arm re-sets the same [`TimerName`], is
+///   closed by the `Ended` fact or the new schedule fact instead.
 pub struct Deadline<M> {
     pending: PendingDeadlines,
     /// `fn() -> M` rather than `M`, so the component is `Send + Sync` whatever
@@ -247,14 +152,7 @@ impl<M> Deadline<M> {
 impl<M: DeadlineMessage> Deadline<M> {
     /// Set a deadline `after` from now, keyed by `name`, carrying `message`.
     ///
-    /// Re-using `name` supersedes the earlier deadline — single-shot timer
-    /// semantics — so a saga that re-sets a deadline does not have to cancel the
-    /// old one first.
-    ///
-    /// The returned effect is the saga's decision to make: combined with the
-    /// rest of what `handle` returns, the schedule fact shares the decision's
-    /// atomic batch, so no crash can leave a timer armed against a decision no
-    /// store holds.
+    /// Re-using `name` replaces the earlier deadline, with no cancel needed.
     ///
     /// # Panics
     ///

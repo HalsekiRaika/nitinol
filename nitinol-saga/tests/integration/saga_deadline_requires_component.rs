@@ -20,15 +20,13 @@
 //! rests on two things this file cannot assert by itself: `Deadline<M>` has no
 //! public constructor, so the component is unobtainable outside the producer;
 //! and no effect constructor builds a schedule fact without one, so there is no
-//! second route.  Rust cannot express "this does not compile" from an
-//! integration test — this workspace has no `trybuild` harness for them — so
-//! both are pinned by `compile_fail` doctests instead: minting a `Deadline` or
-//! defaulting one, and writing a `ScheduleSpec` down or reaching for the
-//! effect constructor that used to build one.
-//! See: nitinol-saga/src/components/deadline.rs, nitinol-saga/src/effect/core.rs
+//! second route.  Both hold by the type system: `Deadline<M>` has neither a
+//! public constructor nor a `Default`, and `ScheduleSpec` has no public
+//! constructor and no public fields.
 //!
-//! Asking the components for a deadline the alphabet never declared is pinned
-//! the same way.
+//! Asking the components for a deadline the alphabet never declared is a
+//! compile error, pinned by the `compile_fail` doctest on
+//! `SagaComponents::deadline`.
 //! See: nitinol-saga/src/components.rs
 //!
 //! What *is* observed here is the consequence: a saga with the variant and

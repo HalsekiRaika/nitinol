@@ -100,27 +100,10 @@ impl<S: Saga> SagaDeliveryProxy<S> {
     /// Declare that partition `partition` will not deliver anything at or
     /// below `to`, and have it resume above it.
     ///
-    /// # What this is for
-    ///
-    /// A delivery the receiver refuses for good is held rather than passed
-    /// over, because a loop cannot tell a command that should never have been
-    /// sent from one whose target has yet to reach the state that would accept
-    /// it. Everything behind the held record waits with it. This is the way
-    /// out; the framework never calls it on its own.
-    ///
-    /// # What it means
-    ///
-    /// The offset is a cache of progress and can be rebuilt by
-    /// reading from the beginning — but this is not a rebuild. It says the
-    /// commands the stretch being passed over implied **will not be
-    /// delivered**: whatever the saga decided there does not reach its target,
-    /// now or later. Whether the business can live with that, and whether
-    /// anything has to be put right by hand, is the judgement being made here.
-    /// Nothing in the framework can make it.
-    ///
-    /// The host is not restarted and nothing else pauses: the partition named
-    /// has its cursor at the new offset by the time this returns, and the other
-    /// partitions never stopped.
+    /// The way past a delivery held for good; the framework never calls it on
+    /// its own. The commands passed over **will not be delivered**, now or
+    /// later. Only the named partition moves, and its cursor is at the new
+    /// offset by the time this returns.
     ///
     /// # Errors
     ///

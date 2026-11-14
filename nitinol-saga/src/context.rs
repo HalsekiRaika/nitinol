@@ -33,11 +33,10 @@ impl SagaContext {
     }
 
     /// Creates a context for calling [`Saga::handle`](crate::Saga::handle)
-    /// outside a running saga, such as in a unit test.
-    ///
-    /// Its upstream record is the empty id at sequence `0` and its
-    /// [`now`](Self::now) is the Unix epoch; set them with
-    /// [`with_upstream`](Self::with_upstream) and [`with_now`](Self::with_now).
+    /// outside a running saga, such as in a unit test. Its upstream record is
+    /// the empty id at sequence `0` and its [`now`](Self::now) is the Unix
+    /// epoch; set them with [`with_upstream`](Self::with_upstream) and
+    /// [`with_now`](Self::with_now).
     pub fn test_context(saga_id: SagaId, sequence: u64) -> Self {
         Self {
             saga_id,

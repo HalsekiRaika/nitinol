@@ -43,21 +43,11 @@ impl<S: Saga> SagaManagerProxy<S> {
         self.inner.pid()
     }
 
-    /// Stops the manager, cascade-stopping every source partition — one per
-    /// declared source and partition — and every saga instance it currently
-    /// holds. Each partition's recorded offset stays where its last turn put
-    /// it, so the next manager over the same store resumes from there.
-    ///
-    /// The delivery host a hosted saga was started with is **not** stopped:
-    /// it is a top-level process of the system rather than a child of the
-    /// manager, and what it carries is already journalled. A decision that was
-    /// recorded is owed to its target whether or not the instance that made it
-    /// is still resident, so stopping the deciding half leaves the delivering
-    /// half to finish.
-    ///
-    /// Nor is the deadline index, which is a top-level process for the same
-    /// reason: it keeps asking this manager for the instances whose deadlines
-    /// fall due, and reports that nothing answers.
+    /// Stops the manager and, with it, every source partition and saga instance
+    /// it holds; each partition's offset stays where it was, so the next
+    /// manager resumes from there. The delivery host and the deadline index are
+    /// not stopped: they are top-level processes, and a recorded decision is
+    /// still owed to its target.
     ///
     /// # Errors
     ///
@@ -69,29 +59,13 @@ impl<S: Saga> SagaManagerProxy<S> {
 }
 
 /// The handle one hosted saga declaration hands back: the manager, the
-/// delivery host that carries out what it decided, and — for a saga type that
-/// declares a deadline — the deadline index that brings an instance back when
-/// one of its deadlines falls due.
+/// delivery host that carries out what it decided, and, for a saga type that
+/// declares a deadline, the deadline index.
 ///
-/// The saga writes its own stream; the delivery host and the index each read
-/// it in global order, the delivery host from an offset it records and the
-/// index from cursors it rebuilds whenever it starts. All of them are reached
-/// through this rather than returned as a tuple, because one declaration
-/// started them and there is no wiring in which a deployment holds one without
-/// the others.
-///
-/// Dropping this stops nothing — the manager's fan-out, the host's partitions
-/// and the index's partitions are processes of the system, exactly as each
-/// part's own handle says.  Stopping is asked for part by part:
-/// `manager().stop()` takes the deciding side down and leaves the delivering
-/// side and the index running (stated on [`SagaManagerProxy::stop`]), and
-/// neither a delivery host nor an index has a stop at all, which is the
-/// contract [`SagaDeliveryProxy`] already carries.
-///
-/// Shared by cloning rather than by being wrapped: a clone reaches the same
-/// manager process and the same running partitions, so `manager().stop()`
-/// through any clone stops the one manager, and an offset moved through one
-/// clone's `delivery()` is the offset the others read.
+/// - Dropping this stops nothing. Only the manager has a stop
+///   ([`SagaManagerProxy::stop`]); the delivery host and the index keep running.
+/// - A clone reaches the same processes, so an offset moved through one clone's
+///   `delivery()` is the one the others read.
 pub struct SagaHostProxy<S: Saga> {
     manager: SagaManagerProxy<S>,
     delivery: SagaDeliveryProxy<S>,
