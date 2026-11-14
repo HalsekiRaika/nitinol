@@ -130,8 +130,9 @@ impl PendingDeadlines {
 /// - A firing reaches the deadline arm of [`Saga::handle`](crate::Saga::handle)
 ///   and is settled by a `fired` fact once what it decided is durable; until
 ///   then it stays pending and fires again on a later activation, so an arm
-///   must tolerate a repeat. A firing that decides nothing is settled the same
-///   way; one the saga ends on, or whose arm re-sets the same [`TimerName`], is
+///   must tolerate a repeat. A firing that decides nothing or returns `Err`, and
+///   one whose schedule fact names a message the alphabet does not declare, is
+///   settled the same way; one the saga ends on, or whose arm re-sets the same [`TimerName`], is
 ///   closed by the `Ended` fact or the new schedule fact instead.
 pub struct Deadline<M> {
     pending: PendingDeadlines,

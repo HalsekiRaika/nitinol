@@ -22,7 +22,8 @@ use crate::subscribe::SagaSubscribe;
 /// - `handle` answers a [`SagaEffect`]: persist the saga's own events, set or
 ///   cancel a deadline, terminate, or do nothing.
 /// - [`Saga::apply`] folds the saga's own events into `self`, during replay and
-///   after each append; the implementing type is the whole of the state.
+///   after each append. It is synchronous and does no I/O, so replay is
+///   deterministic; the implementing type is the whole of the state.
 /// - [`Saga::dispatch`] maps each persisted decision to the commands a delivery
 ///   host carries out.
 /// - `correlate` and `dispatch` are associated functions because they are
@@ -58,8 +59,8 @@ pub trait Saga: Send + Sync + 'static {
     ///
     /// Answered from the input alone, before any instance exists to ask. The
     /// input reaches [`Saga::handle`] only on the instance whose [`SagaId`] this
-    /// returns; `None`, or another instance's id, means the input is ignored,
-    /// which is not a failure and records no dead letter.
+    /// returns; `None` means the input is ignored, which is not a failure and
+    /// records no dead letter.
     ///
     /// The `#[subscribe(deadline)]` arm returns `None`: a firing is addressed to
     /// the instance that set it and never asks this question.
@@ -170,21 +171,24 @@ pub trait Saga: Send + Sync + 'static {
     ///
     /// - The returned effect is persisted together with the input's position, by
     ///   the last append the effect needs, so the position is never durable
-    ///   before the decision. A record at or below its source's recorded
-    ///   position is dropped before it reaches here.
-    /// - An `Err` writes the input's position alone, and the record does not
-    ///   come back. An effect that writes nothing else still appends the
+    ///   before the decision. A record at or below the position the saga's own
+    ///   stream records for its source is dropped before it reaches here.
+    /// - An `Err` on an observed record writes its position alone, and the record
+    ///   does not come back. An effect that writes nothing else still appends the
     ///   position, so a no-op decision is not redelivered either.
     /// - A record whose bytes fail to decode never reaches here: it is reported
     ///   and skipped, and nothing is written on the saga's stream for it.
-    /// - Until the settling append lands, the `Ended` fact included, the record
-    ///   is not consumed and comes back on the next poll. For a decision the saga
+    /// - Until the settling append lands, the record is not consumed and comes
+    ///   back on the next poll. The `Ended` fact is withheld the same way when an
+    ///   earlier append the effect needed did not land, so the saga is never
+    ///   terminated around a decision no store holds. For a decision the saga
     ///   also stays running, so the redelivery retries it, `End` included, and a
     ///   later manager reads the record again from the source's offset.
     /// - A position names both its stream and its declared source, so progress
     ///   on one never covers a record of another.
     /// - A firing has no position, so nothing it decides records one; it is
-    ///   settled by its `fired` fact, as stated on [`Deadline`](crate::Deadline).
+    ///   settled by its `fired` fact, an `Err` included, as stated on
+    ///   [`Deadline`](crate::Deadline).
     ///
     /// What a delivery host carries, and how often, is stated on
     /// [`SagaDeliveryProps`](crate::SagaDeliveryProps). Match the whole
